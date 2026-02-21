@@ -1,0 +1,17 @@
+[project]
+name = "python-ubel"
+version = "0.1.0"
+description = "Supply chain dependency firewall for: Python, Node, PHP, Ubuntu, Debian, Red Hat, and Almalinux."
+requires-python = ">=3.8"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "cvss",
+    "reportlab",
+    "distro"
+]
+
+[project.scripts]
+ubel-pip = "ubel.cli:pip_mode"
+ubel-npm = "ubel.cli:npm_mode"
+ubel = "ubel.cli:linux_mode"
