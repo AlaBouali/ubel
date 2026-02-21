@@ -14,9 +14,11 @@ Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing
 - Full dependency resolution across ecosystems
 - OSV.dev vulnerability scanning (batch API)
 - Policy engine (block/allow by severity & infection)
+- Checking linux-package or node/python dependency or entire project (`check` mode)
 - Install‑time enforcement (`install` mode)
-- Project‑level/Host-level scanning (`check` mode)
-- Full-system audit (`health` mode)
+- Project‑level/Host-level scanning (`health` mode)
+- Catches Non-CVEs
+- It is a supply-chain protection tool
 - Automatic report generation (JSON + PDF)
 - Extremely fast (seconds per scan)
 
@@ -71,7 +73,7 @@ If no extra arguments are passed, Ubel will:
 
 #### npm example:
 ```bash
-ubel-npm check
+ubel-npm check flask==3.1.0
 ```
 If no args are passed, it will detect `package.json` automatically.
 
@@ -82,7 +84,7 @@ Same as `check`, but enforces policies and either **blocks or allows** installat
 
 #### Python example:
 ```bash
-ubel-pip install fastapi==0.110.0
+ubel-pip install flask==3.1.0
 ```
 Or auto-detect project requirements:
 ```bash
@@ -148,9 +150,11 @@ severity:
 ### **allow / block**
 Override Ubel's decision from CI/CD or scripted pipelines.
 
+The arguments can be: "low", "medium", "high", "critical".
+
 Example:
 ```bash
-ubel allow
+ubel block high critical
 ```
 ---
 

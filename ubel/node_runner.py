@@ -341,25 +341,27 @@ class Node_Manager:
 
         with open("package-lock.json", "r", encoding="utf-8") as lockfile:
             new_data = json.load(lockfile)
-
-
-        with open("package-lock.json", "w", encoding="utf-8") as lock_file:
-            json.dump(old_data, lock_file, indent=2)
-            lock_file.close()
+        """os.remove("package-lock.json")
+        if old_data :
+            with open("package-lock.json", "w", encoding="utf-8") as lock_file:
+                json.dump(old_data, lock_file, indent=2)
+                lock_file.close()"""
         
-
-        old_components = Node_Manager.scan_package_lock(old_data)
-        new_components = Node_Manager.scan_package_lock(new_data)
-        Node_Manager.current_lock_file_content = new_data
-        components=[]
-        for new_c in new_components:
-            found = False
-            for old_c in old_components:
-                if new_c["id"]==old_c["id"]:
-                    found = True
-                    break
-            if not found:
-                components.append(new_c)
+        if old_data and new_data:
+            old_components = Node_Manager.scan_package_lock(old_data)
+            new_components = Node_Manager.scan_package_lock(new_data)
+            Node_Manager.current_lock_file_content = new_data
+            components=[]
+            for new_c in new_components:
+                found = False
+                for old_c in old_components:
+                    if new_c["id"]==old_c["id"]:
+                        found = True
+                        break
+                if not found:
+                    components.append(new_c)
+        else:
+            components=Node_Manager.scan_package_lock(new_data)
         return [comp["id"] for comp in components]
     
     @staticmethod
@@ -378,7 +380,7 @@ class Node_Manager:
 
                 #if result.returncode != 0:
                     #raise RuntimeError(f"npm list failed:\nCMD: {' '.join(cmd)}\nOutput:{result.stdout}\nError:{result.stderr}")
-            
+
             with open("package-lock.json", "r", encoding="utf-8") as lockfile: 
                 data = json.load(lockfile)
         else:

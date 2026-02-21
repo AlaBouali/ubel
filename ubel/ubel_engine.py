@@ -188,8 +188,8 @@ class Ubel_Engine:
         dependency=vuln["affected_dependency"]
         for item in affected_info:
             package=item.get("package",{})
-            ranges=item["ranges"]
-            versions=item["versions"]
+            ranges=item.get("ranges",[])
+            versions=item.get("versions",[])
             if package.get("name").lower()==dependency.lower():
                 ecosystem=package.get("ecosystem")
                 remediations.append(Ubel_Engine.generate_fix(ranges,versions,package["name"],ecosystem))
