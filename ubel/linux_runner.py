@@ -36,6 +36,7 @@ class Linux_Manager:
             "id": distro.id().replace(" ",""),
             "name": distro.name(),
             "version": distro.version(),
+            "like": distro.like(),
             "package_manager":Linux_Manager.get_pkg_manager(),
             "info": distro.info()
         }
@@ -136,16 +137,16 @@ class Linux_Manager:
 
     @staticmethod
     def package_to_purl(os_info,package, version):
-        os_id=os_info["id"]
+        os_id=os_info["id"].replace(" ","")
         pkg_manager=os_info["package_manager"]
         if pkg_manager in ["apt","apt-get"]:
              if "ubuntu" in os_id.lower():
                 return f'pkg:deb/ubuntu/{package}@{version}' 
              else:
                 return f'pkg:deb/debian/{package}@{version}'
-        if os_id=="almalinux":
+        if "almalinux" in os_id.lower():
             return f'pkg:rpm/almalinux/{package}@{version}'
-        if os_id=="redhat":
+        if "redhat" in os_id.lower():
             return f'pkg:rpm/redhat/{package}@{version}'
         raise Exception("Unsupported Linux distribution.")
 
