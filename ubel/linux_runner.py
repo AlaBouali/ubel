@@ -140,7 +140,7 @@ class Linux_Manager:
         os_id=os_info["id"].replace(" ","")
         pkg_manager=os_info["package_manager"]
         if pkg_manager in ["apt","apt-get"]:
-             if "ubuntu" in os_id.lower():
+             if "ubuntu" in os_id.lower() or "ubuntu" in os_info.get("like","").lower():
                 return f'pkg:deb/ubuntu/{package}@{version}' 
              else:
                 return f'pkg:deb/debian/{package}@{version}'
