@@ -1,10 +1,10 @@
 # UBEL ( Unified Bill / Enforced Law ) – Multi‑Ecosystem Security & Policy Enforcement CLI
 
-Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, generates PURLs, scans them through OSV.dev, and enforces security policies during installation. It works with:
+Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, generates PURLs, scans them through OSV.dev, and enforces security policies during installation to prevent supply-chain attacks. It works with:
 
 - **PyPI** (via `ubel-pip`)
 - **npm** (via `ubel-npm`)
-- **Linux distributions** (Ubuntu, Debian, RHEL, AlmaLinux)
+- **Linux distributions** (Ubuntu-based, Debian-based, RHEL, AlmaLinux)
 
 Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing clean **JSON** and **PDF** reports.
 
@@ -31,7 +31,7 @@ pip install ubel
 
 Ubel exposes three binaries:
 
-- `ubel` (Linux package scanning and OS-level operations: Ubuntu , Debian, Red Hat, Almalinux )
+- `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux )
 - `ubel-pip` (Python ecosystem)
 - `ubel-npm` (Node.js ecosystem)
 
@@ -107,7 +107,7 @@ ubel-npm install
 Scan the **entire machine** or **running project**, including:
 - Installed PyPI packages
 - Installed npm global packages
-- OS-level packages (Ubuntu/Debian/RHEL/AlmaLinux)
+- OS-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux)
 
 Example:
 ( for linux )

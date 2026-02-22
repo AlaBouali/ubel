@@ -135,11 +135,14 @@ class Linux_Manager:
         raise RuntimeError("Unsupported Linux distribution or unknown package manager")
 
     @staticmethod
-    def package_to_purl(os_id,package, version):
-        if os_id=="ubuntu":
-            return f'pkg:deb/ubuntu/{package}@{version}' 
-        if os_id=="debian":
-            return f'pkg:deb/debian/{package}@{version}'
+    def package_to_purl(os_info,package, version):
+        os_id=os_info["id"]
+        pkg_manager=os_info["package_manager"]
+        if pkg_manager in ["apt","apt-get"]:
+             if "ubuntu" in os_id.lower():
+                return f'pkg:deb/ubuntu/{package}@{version}' 
+             else:
+                return f'pkg:deb/debian/{package}@{version}'
         if os_id=="almalinux":
             return f'pkg:rpm/almalinux/{package}@{version}'
         if os_id=="redhat":
@@ -150,7 +153,7 @@ class Linux_Manager:
     def get_linux_packages():
         packages=Linux_Manager.detect_and_list_packages()
         system_info=Linux_Manager.get_os_info()
-        return [Linux_Manager.package_to_purl(system_info["id"],pkg["name"],pkg["version"]) for pkg in packages]
+        return [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
 
     @staticmethod
     def resolve_packages(packages):
@@ -274,7 +277,7 @@ class Linux_Manager:
     def get_packages_purls(packages):
         packages=Linux_Manager.resolve_packages(packages)
         system_info=Linux_Manager.get_os_info()
-        return [Linux_Manager.package_to_purl(system_info["id"],pkg["name"],pkg["version"]) for pkg in packages]
+        return [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
 
 
 
