@@ -9,7 +9,15 @@ from pathlib import Path
 from .utils import load_environment, create_output_dir, download_file
 from .policy import evaluate_policy
 from .info import banner
+import pip
+from packaging.version import Version
 
+def ensure_pip_supports_dry_run():
+    if Version(pip.__version__) < Version("24.1"):
+        raise RuntimeError(
+            f"pip {pip.__version__} does not support --dry-run. "
+            f"Please upgrade pip: pip install --upgrade pip"
+        )
 
 def print_banner():
 
@@ -78,6 +86,9 @@ def non_linux_mode(pkg_manager,ecosystem,description):
     if Ubel_Engine.check_mode in ["allow","block"]:
         set_policy_rules(args.mode,args.extra_args)
         sys.exit(0)
+
+    if Ubel_Engine.engine=="pip":
+        ensure_pip_supports_dry_run()
 
     if not api_key and not asset_id:
         Ubel_Engine.scan(pkgs)

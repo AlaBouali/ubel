@@ -176,9 +176,9 @@ class Ubel_Engine:
         if still_vulnerable_versions==[]:
             still_vulnerable_versions=versions
         if fixed_versions!=[]:
-            return f"Upgrade {package} ( {ecosystem} ) to: {" or ".join(fixed_versions)}"
+            return f"Upgrade {package} ( {ecosystem} ) to: {' or '.join(fixed_versions)}"
         elif still_vulnerable_versions!=[]:
-            return f"Upgrade {package} ( {ecosystem} ) to a version higher than: {" or ".join(still_vulnerable_versions)}"
+            return f"Upgrade {package} ( {ecosystem} ) to a version higher than: {' or '.join(still_vulnerable_versions)}"
         return f"No fix available for {package}"
 
     @staticmethod
