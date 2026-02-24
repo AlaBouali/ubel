@@ -379,6 +379,10 @@ class Ubel_Engine:
         # ----------------------------------
         final_json = {
             "generated_at": timestamp_date.isoformat() + "Z",
+            "tool_info": {
+                "name": __tool_name__,
+                "version": __version__
+            },
             "stats": stats,
             "vulnerabilities": vulnerabilities,
             "inventory": inventory,
