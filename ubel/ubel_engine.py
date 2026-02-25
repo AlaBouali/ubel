@@ -18,7 +18,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
-import json,sys
+import json,sys,re
 from .policy import evaluate_policy
 from .python_runner import Pypi_Manager
 from .linux_runner import Linux_Manager
@@ -55,6 +55,11 @@ class Ubel_Engine:
 
     policy_dir="./.ubel/local/policy/"
     policy_filename="config.json"
+
+    @staticmethod
+    def remove_html_tags_regex(text):
+        clean = re.compile('<.*?>')
+        return clean.sub('', text).strip()
 
     @staticmethod
     def generate_requirements_file(purls):
@@ -510,13 +515,14 @@ class Ubel_Engine:
                     else:
                         elements.append(
                             Paragraph(
-                                f"{indent_space}- {str(item)}",
+                                f"{indent_space}- {Ubel_Engine.remove_html_tags_regex(str(item))}",
                                 normal_style
                             )
                         )
                 elements.append(Spacer(1, 0.1 * inch))
 
             else:
+                value = Ubel_Engine.remove_html_tags_regex(str(value))
                 safe_value = str(value).replace("\n", "<br/>")
                 elements.append(
                     Paragraph(
