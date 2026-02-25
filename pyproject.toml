@@ -9,7 +9,8 @@ dependencies = [
     "python-dotenv",
     "cvss",
     "reportlab",
-    "distro"
+    "distro",
+    "packaging"
 ]
 
 [project.scripts]
