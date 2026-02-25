@@ -1,6 +1,6 @@
 [project]
 name = "ubel"
-version = "0.3.1"
+version = "0.3.2"
 description = "Supply-chain dependency firewall for: Python, Node, PHP, Ubuntu, Debian, Red Hat, and Almalinux."
 readme = "README.md"
 requires-python = ">=3.8"
