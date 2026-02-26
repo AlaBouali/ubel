@@ -18,7 +18,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
-import json,sys,re
+import json,sys,re,html,os
 from .policy import evaluate_policy
 from .python_runner import Pypi_Manager
 from .linux_runner import Linux_Manager
@@ -57,9 +57,10 @@ class Ubel_Engine:
     policy_filename="config.json"
 
     @staticmethod
-    def remove_html_tags_regex(text):
-        clean = re.compile('<.*?>')
-        return clean.sub('', text).strip()
+    def escape_html_tags(text):
+        if not isinstance(text, str):
+            text=json.dumps(text, indent=2)
+        return html.escape(text).strip()
 
     @staticmethod
     def generate_requirements_file(purls):
@@ -199,6 +200,12 @@ class Ubel_Engine:
                 ecosystem=package.get("ecosystem")
                 remediations.append(Ubel_Engine.generate_fix(ranges,versions,package["name"],ecosystem))
         vuln["fixes"]=remediations
+        vuln["has_fix"]=len(remediations)>0
+        vuln["description"]=vuln.get("description",vuln.get("details",vuln.get("summary","")))
+        if "details" in vuln:
+            del vuln["details"]
+        if "summary" in vuln:
+            del vuln["summary"]
 
     
     @staticmethod
@@ -515,14 +522,14 @@ class Ubel_Engine:
                     else:
                         elements.append(
                             Paragraph(
-                                f"{indent_space}- {Ubel_Engine.remove_html_tags_regex(str(item))}",
+                                f"{indent_space}- {Ubel_Engine.escape_html_tags(str(item))}",
                                 normal_style
                             )
                         )
                 elements.append(Spacer(1, 0.1 * inch))
 
             else:
-                value = Ubel_Engine.remove_html_tags_regex(str(value))
+                value = Ubel_Engine.escape_html_tags(str(value))
                 safe_value = str(value).replace("\n", "<br/>")
                 elements.append(
                     Paragraph(
