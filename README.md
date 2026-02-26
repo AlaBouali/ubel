@@ -16,7 +16,7 @@ Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing
 - Policy engine (block/allow by severity & infection)
 - Checking linux-package or node/python dependency or entire project (`check` mode)
 - Install‑time enforcement (`install` mode)
-- Project‑level/Host-level scanning (`health` mode)
+- Project‑level/Host-level/kernal-level scanning (`health` mode)
 - Catches Non-CVEs
 - It is a supply-chain protection tool
 - Automatic report generation (JSON + PDF)
