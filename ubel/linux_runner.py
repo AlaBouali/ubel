@@ -3,7 +3,7 @@
 import subprocess
 import shutil
 import distro
-import json
+import json,os
 import sys
 
 class Linux_Manager:
@@ -154,7 +154,12 @@ class Linux_Manager:
     def get_linux_packages():
         packages=Linux_Manager.detect_and_list_packages()
         system_info=Linux_Manager.get_os_info()
-        return [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
+        purls = [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
+        kernal_version=os.uname().release
+        pkg_manager=system_info["package_manager"]
+        if pkg_manager in ["apt","apt-get"]:
+            purls.append(Linux_Manager.package_to_purl(system_info,"linux",kernal_version))
+        return purls
 
     @staticmethod
     def resolve_packages(packages):
