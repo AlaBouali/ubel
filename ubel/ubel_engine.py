@@ -114,7 +114,10 @@ class Ubel_Engine:
     
     @staticmethod
     def get_dependency_from_purl(purl:str):
-        info=purl.split(f"{Ubel_Engine.system_type}/")[1]
+        if purl.startswith("pkg:pypi/") or purl.startswith("pkg:npm/"):
+            info=purl.split(f"{Ubel_Engine.system_type}/")[1]
+        else:
+                info=purl.split("/")[-1]
         if info.count("@")!=1:
             info_version=info.split("@")[-1] 
             info_name=info.split(f"@{info_version}")[0]
