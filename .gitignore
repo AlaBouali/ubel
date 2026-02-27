@@ -7,6 +7,7 @@ __pycache__/
 *.so
 .ubel/*
 
+*.pyz
 # Distribution / packaging
 .Python
 build/

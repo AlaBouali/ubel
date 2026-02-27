@@ -22,6 +22,7 @@ import json,sys,re,html,os
 from .policy import evaluate_policy
 from .python_runner import Pypi_Manager
 from .linux_runner import Linux_Manager
+from .docker_runner import DockerLinuxInspector
 from .node_runner import Node_Manager
 from .cvss_parser import CVSS_Parser
 from .info import __version__ , __tool_name__
@@ -308,6 +309,10 @@ class Ubel_Engine:
                     with open("package-lock.json","r",encoding="utf-8") as af:
                         report_content=json.load(af)
                         af.close()
+        elif Ubel_Engine.system_type=="docker":
+            report_content = DockerLinuxInspector.inspect(pip_args[0])
+            purls = report_content.get("purls",[])
+            packages = report_content.get("packages",[]) 
         else:
             if Ubel_Engine.check_mode in ["check","install"]:
                 packages=Linux_Manager.resolve_packages(pip_args)
