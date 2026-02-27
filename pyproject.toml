@@ -16,4 +16,5 @@ dependencies = [
 [project.scripts]
 ubel-pip = "ubel.cli:pip_mode"
 ubel-npm = "ubel.cli:npm_mode"
+ubel-docker = "ubel.cli:docker_mode"
 ubel = "ubel.cli:linux_mode"
