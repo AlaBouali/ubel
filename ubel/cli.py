@@ -152,4 +152,49 @@ def npm_mode():
     non_linux_mode("npm","npm","Safe Node.js policy-driven supply-chain firewall")
 
 def docker_mode():
-    linux_mode("docker","docker","Safe Docker policy-driven supply-chain firewall")
+    parser = argparse.ArgumentParser(
+        description="Safe Docker policy-driven supply-chain firewall"
+    )
+    Ubel_Engine.initiate_local_policy()
+
+    Ubel_Engine.system_type="docker"
+    Ubel_Engine.reports_location=f'./{Ubel_Engine.reports_location}'
+    Ubel_Engine.policy_dir=f'./{Ubel_Engine.policy_dir}'
+
+    print(banner)
+    print()
+    print(f"Reports location: {Ubel_Engine.reports_location}")
+    print()
+
+    print(f"Policy location: {Ubel_Engine.policy_dir}")
+    print()
+
+    parser.add_argument(
+        "mode",
+        choices=["health", "init","allow","block"],
+        help="Execution mode"
+    )
+
+    parser.add_argument(
+        "extra_args",
+        nargs="*",
+        help="Arguments passed after mode"
+    )
+
+    args = parser.parse_args()
+    Ubel_Engine.initiate_local_policy()
+    if args.mode:
+        Ubel_Engine.check_mode=args.mode
+    else:
+        Ubel_Engine.check_mode="init"
+    if Ubel_Engine.check_mode=="init":
+        sys.exit(0)
+    
+    if Ubel_Engine.check_mode in ["allow","block"]:
+        set_policy_rules(args.mode,args.extra_args)
+        sys.exit(0)
+
+    api_key, asset_id, endpoint = load_environment()
+    if not api_key and not asset_id:
+        Ubel_Engine.scan(args.extra_args)
+        sys.exit(0)
