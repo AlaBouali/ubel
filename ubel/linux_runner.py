@@ -148,6 +148,12 @@ class Linux_Manager:
             return f'pkg:rpm/almalinux/{package}@{version}'
         if "redhat" in os_id.lower():
             return f'pkg:rpm/redhat/{package}@{version}'
+        if "alpaquita" in os_id.lower():
+            return f'pkg:apk/alpaquita/{package}@{version}'
+        if "rocky" in os_id.lower():
+            return f'pkg:rpm/rocky-linux/{package}@{version}'
+        if "alpine" in os_id.lower():
+            return f'pkg:apk/alpine/{package}@{version}'
         raise Exception("Unsupported Linux distribution.")
 
     @staticmethod

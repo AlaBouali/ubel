@@ -152,4 +152,4 @@ def npm_mode():
     non_linux_mode("npm","npm","Safe Node.js policy-driven supply-chain firewall")
 
 def docker_mode():
-    non_linux_mode("docker","docker","Safe Docker policy-driven supply-chain firewall")
+    linux_mode("docker","docker","Safe Docker policy-driven supply-chain firewall")

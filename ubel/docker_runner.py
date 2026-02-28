@@ -197,9 +197,10 @@ class DockerLinuxInspector:
             return f"pkg:rpm/almalinux/{pkg}@{version}"
         if "redhat" in os_id:
             return f"pkg:rpm/redhat/{pkg}@{version}"
-        if "centos" in os_id or "fedora" in os_id:
-            return f"pkg:rpm/{os_id}/{pkg}@{version}"
-
+        if "alpaquita" in os_id.lower():
+            return f'pkg:apk/alpaquita/{pkg}@{version}'
+        if "rocky" in os_id.lower():
+            return f'pkg:rpm/rocky-linux/{pkg}@{version}'
         # Alpine
         if os_info["package_manager"] == "apk":
             return f"pkg:apk/alpine/{pkg}@{version}"

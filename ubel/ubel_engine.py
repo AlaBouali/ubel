@@ -134,8 +134,8 @@ class Ubel_Engine:
                 "id":purl,
                 "name":dep_info[0],
                 "version":dep_info[1],
-                "ecosystem":Ubel_Engine.system_type if Ubel_Engine.system_type!="linux" else os_info["id"],
-                "type":"library" if Ubel_Engine.system_type!="linux" else "application",
+                "ecosystem":Ubel_Engine.system_type if Ubel_Engine.system_type not in ["linux","docker"] else os_info["id"],
+                "type":"library" if Ubel_Engine.system_type not in ["linux","docker"] else "application",
                 "state":"undetermined"
             }
             inventory.append(item)
