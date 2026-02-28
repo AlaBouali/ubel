@@ -158,8 +158,8 @@ def docker_mode():
     Ubel_Engine.initiate_local_policy()
 
     Ubel_Engine.system_type="docker"
-    Ubel_Engine.reports_location=f'./{Ubel_Engine.reports_location}'
-    Ubel_Engine.policy_dir=f'./{Ubel_Engine.policy_dir}'
+    Ubel_Engine.reports_location=f'{Ubel_Engine.reports_location}'
+    Ubel_Engine.policy_dir=f'{Ubel_Engine.policy_dir}'
 
     print(banner)
     print()
