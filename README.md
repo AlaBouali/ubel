@@ -30,8 +30,8 @@ pip install ubel
 ```
 
 If you are on Linux, you need to:
-- setup a virtual envirenment
-- run enable the virtual envirenment
+- setup a virtual envirenment: `python3 -m venv venv`
+- run enable the virtual envirenment `source venv/bin/activate`
 - then run: `pip install ubel`
 
 Ubel exposes three binaries:
