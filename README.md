@@ -29,6 +29,11 @@ Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing
 pip install ubel
 ```
 
+If you are on Linux, you need to:
+- setup a virtual envirenment
+- run enable the virtual envirenment
+- then run: `pip install ubel`
+
 Ubel exposes three binaries:
 
 - `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux )

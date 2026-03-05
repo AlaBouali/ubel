@@ -1,23 +1,7 @@
 import requests,datetime,json,os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    ListFlowable,
-    ListItem,
-    Table,
-    TableStyle,
-    PageBreak,
-)
-from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch
-from reportlab.lib import colors
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase import pdfmetrics
+from .pdf_report_generator import PDF_Report_Generator
 import json,sys,re,html,os
 from .policy import evaluate_policy
 from .python_runner import Pypi_Manager
@@ -56,12 +40,6 @@ class Ubel_Engine:
 
     policy_dir="./.ubel/local/policy/"
     policy_filename="config.json"
-
-    @staticmethod
-    def escape_html_tags(text):
-        if not isinstance(text, str):
-            text=json.dumps(text, indent=2)
-        return html.escape(text).strip()
 
     @staticmethod
     def generate_requirements_file(purls):
@@ -427,208 +405,19 @@ class Ubel_Engine:
         # ----------------------------------
         # Generate PDF
         # ----------------------------------
-        doc = SimpleDocTemplate(str(pdf_path), pagesize=A4)
-        elements = []
-
-        styles = getSampleStyleSheet()
-        title_style = styles["Heading1"]
-        section_style = styles["Heading2"]
-        normal_style = styles["Normal"]
-
-        elements.append(Paragraph(f"Local Vulnerability Report by: {__tool_name__} v{__version__}", title_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        elements.append(Paragraph(f"Date: {timestamp_date.strftime('%Y-%m-%d %H:%M:%S')}", title_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        elements.append(Paragraph(f"Scan Type: {Ubel_Engine.check_mode}", title_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        elements.append(Paragraph(f"Scanned Ecosystem: {Ubel_Engine.system_type} ( {Ubel_Engine.engine} )", section_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        elements.append(Paragraph(f"Scan Decision: {'ALLOWED' if allowed else 'BLOCKED'} - {reason}", section_style))
-        elements.append(Spacer(1, 0.2 * inch))
-        elements.append(Paragraph("Policy Details", section_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        for k, v in policy.items():
-            if isinstance(v, dict):
-                elements.append(Paragraph(f"<b>{k.capitalize()}:</b>", normal_style))
-                sub_list = [
-                    ListItem(Paragraph(f"{sk.capitalize()}: {sv}", normal_style))
-                    for sk, sv in v.items()
-                ]
-                elements.append(ListFlowable(sub_list, bulletType="bullet"))
-            else:
-                elements.append(Paragraph(f"<b>{k.capitalize()}:</b> {v}", normal_style))
-            elements.append(Spacer(1, 0.2 * inch))
-        # ---------- Stats Section ----------
-        elements.append(Paragraph("Statistics Summary", section_style))
-        elements.append(Spacer(1, 0.2 * inch))
-
-        elements.append(Paragraph(
-            f"<b>Inventory Size:</b> {stats['inventory_size']}",
-            normal_style
-        ))
-        elements.append(Spacer(1, 0.2 * inch))
-        inventory_list = [
-            ListItem(Paragraph(f"{k.capitalize()}: {v}", normal_style))
-            for k, v in stats['inventory_stats'].items()
-        ]
-        elements.append(ListFlowable(inventory_list, bulletType="bullet"))
-        elements.append(Spacer(1, 0.5 * inch))
-        elements.append(Paragraph(
-            f"<b>Infections:</b> {stats['total_infections']}",
-            normal_style
-        ))
-        elements.append(Spacer(1, 0.2 * inch))
-        elements.append(Paragraph(
-            f"<b>Total Vulnerabilities:</b> {stats['total_vulnerabilities']}",
-            normal_style
-        ))
-
-        severity_list = [
-            ListItem(Paragraph(f"{k.capitalize()}: {v}", normal_style))
-            for k, v in severity_buckets.items()
-        ]
-        elements.append(ListFlowable(severity_list, bulletType="bullet"))
-        elements.append(Spacer(1, 0.5 * inch))
-
-        #elements.append(PageBreak())
-        
-
-        # ---------- FULL JSON RENDER ----------
-        elements.append(Paragraph("Vulnerability Details", section_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-
-        def render_value(key, value, indent_level=0):
-            indent_space = "&nbsp;" * (indent_level * 4)
-
-            if isinstance(value, dict):
-                elements.append(
-                    Paragraph(f"{indent_space}<b>{key}:</b>", normal_style)
-                )
-                elements.append(Spacer(1, 0.1 * inch))
-                for k, v in value.items():
-                    render_value(k, v, indent_level + 1)
-
-            elif isinstance(value, list):
-                elements.append(
-                    Paragraph(f"{indent_space}<b>{key}:</b>", normal_style)
-                )
-                elements.append(Spacer(1, 0.1 * inch))
-
-                for item in value:
-                    if isinstance(item, dict):
-                        elements.append(
-                            Paragraph(f"{indent_space}-", normal_style)
-                        )
-                        for k, v in item.items():
-                            render_value(k, v, indent_level + 2)
-                    else:
-                        elements.append(
-                            Paragraph(
-                                f"{indent_space}- {Ubel_Engine.escape_html_tags(str(item))}",
-                                normal_style
-                            )
-                        )
-                elements.append(Spacer(1, 0.1 * inch))
-
-            else:
-                value = Ubel_Engine.escape_html_tags(str(value))
-                safe_value = str(value).replace("\n", "<br/>")
-                elements.append(
-                    Paragraph(
-                        f"{indent_space}<b>{key}:</b> {safe_value}",
-                        normal_style
-                    )
-                )
-                elements.append(Spacer(1, 0.1 * inch))
-
-
-        for v in vulnerabilities:
-            elements.append(Spacer(1, 0.4 * inch))
-            elements.append(
-                Paragraph(
-                    f"<b>{v.get('affected_dependency')} "
-                    f"{v.get('affected_dependency_version')}</b>",
-                    section_style
-                )
-            )
-            elements.append(Spacer(1, 0.2 * inch))
-
-            for key, value in v.items():
-                render_value(key, value)
-
-            elements.append(Spacer(1, 0.5 * inch))
-        
-        # ----------------------------------
-        # Inventory Table Section
-        # ----------------------------------
-
-        elements.append(PageBreak())
-        elements.append(Paragraph("Inventory Table", section_style))
-        elements.append(Spacer(1, 0.3 * inch))
-
-        # Paragraph style for wrapped and centered text
-        cell_style = ParagraphStyle(
-            "cell_style",
-            fontName="Helvetica",
-            fontSize=8,
-            leading=10,
-            alignment=TA_CENTER,    # horizontal center
+        PDF_Report_Generator.generate_report(
+            system_type=Ubel_Engine.system_type,
+            check_mode=Ubel_Engine.check_mode,
+            output_path=pdf_path,
+            timestamp_date=timestamp_date,
+            allowed=allowed,
+            reason=reason,
+            policy=policy,
+            stats=stats,
+            severity_buckets=severity_buckets,
+            vulnerabilities=vulnerabilities,
+            inventory=inventory
         )
-
-        # Header row
-        inventory_data = [
-            [
-                Paragraph("ID", cell_style),
-                Paragraph("Name", cell_style),
-                Paragraph("Version", cell_style),
-                Paragraph("Ecosystem", cell_style),
-                Paragraph("Type", cell_style),
-                Paragraph("State", cell_style),
-            ]
-        ]
-
-        # Convert each field into a wrapped centered Paragraph
-        for v in inventory:
-            inventory_data.append([
-                Paragraph(str(v.get("id", "")), cell_style),
-                Paragraph(str(v.get("name", "")), cell_style),
-                Paragraph(str(v.get("version", "")), cell_style),
-                Paragraph(str(v.get("ecosystem", "")), cell_style),
-                Paragraph(str(v.get("type", "")), cell_style),
-                Paragraph(str(v.get("state", "")), cell_style),
-            ])
-
-        # Set column widths — prevents overflow + enforces clean layout
-        col_widths = [50, 120, 60, 80, 70, 60]
-
-        table = Table(inventory_data, colWidths=col_widths, repeatRows=1)
-
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6e6e6")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-
-            # Center vertically
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-
-            # Center alignment (Paragraph handles internal text centering)
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ]))
-
-        elements.append(table)
-        elements.append(Spacer(1, 0.5 * inch))
-
-        doc.build(elements)
         print()
         print("Policy:")
         print()
