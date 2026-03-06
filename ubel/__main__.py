@@ -101,7 +101,7 @@ def linux_mode():
     )
     Ubel_Engine.initiate_local_policy()
 
-    Ubel_Engine.system_type=Linux_Manager.get_os_info()["id"]
+    Ubel_Engine.system_type="linux"
     Ubel_Engine.reports_location=f'{Path.home()}/{Ubel_Engine.reports_location}'
     Ubel_Engine.policy_dir=f'{Path.home()}/{Ubel_Engine.policy_dir}'
 

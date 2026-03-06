@@ -103,16 +103,40 @@ class Ubel_Engine:
         return info.split("@")
     
     @staticmethod
+    def get_ecosystem_from_purl(purl:str):
+        if purl.startswith("pkg:pypi/"):
+            return "pypi"
+        elif purl.startswith("pkg:npm/"):
+            return "npm"
+        elif purl.startswith("pkg:composer/") :
+            return "composer"
+        elif purl.startswith("pkg:deb/ubuntu/") :
+            return "ubuntu"
+        elif purl.startswith("pkg:deb/debian/"):
+            return "debian"
+        elif purl.startswith("pkg:rpm/redhat/") :
+            return "redhat"
+        elif purl.startswith("pkg:rpm/almalinux/") :
+            return "almalinux"
+        elif purl.startswith("pkg:apk/alpine/") :
+            return "alpine"
+        elif purl.startswith("pkg:apk/alpaquita/") :
+            return "alpaquita"
+        elif purl.startswith("pkg:rpm/rocky-linux/") :
+            return "rocky-linux"
+        else:
+            return "unknown"
+    
+    @staticmethod
     def get_inventory_from_purls(purls):
-        os_info=Linux_Manager.get_os_info()
         inventory=[]
         for purl in purls:
             dep_info=Ubel_Engine.get_dependency_from_purl(purl)
             item={
                 "id":purl,
                 "name":dep_info[0],
-                "version":dep_info[1],
-                "ecosystem":Ubel_Engine.system_type if Ubel_Engine.system_type not in ["linux","docker"] else os_info["id"],
+                "version":purl.split("@")[-1],
+                "ecosystem":Ubel_Engine.get_ecosystem_from_purl(purl),
                 "type":"library" if Ubel_Engine.system_type not in ["linux","docker"] else "application",
                 "state":"undetermined"
             }
@@ -380,6 +404,11 @@ class Ubel_Engine:
             "tool_info": {
                 "name": __tool_name__,
                 "version": __version__
+            },
+            "scan_info": {
+                "type": Ubel_Engine.check_mode,
+                "ecosystem": Ubel_Engine.system_type,
+                "engine": Ubel_Engine.engine,
             },
             "stats": stats,
             "vulnerabilities": vulnerabilities,
