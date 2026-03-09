@@ -325,9 +325,13 @@ class Node_Manager:
     def run_dry_run(initial_args):
 
         old_data=None
+        old_pkgs=None
         if os.path.exists("package-lock.json"):
             with open("package-lock.json", "r", encoding="utf-8") as f:
                 old_data = json.load(f)
+        if os.path.exists("package.json"):
+            with open("package.json", "r", encoding="utf-8") as f:
+                old_pkgs = json.load(f)
         cmd = [
             "npm",
             "install",
@@ -362,6 +366,14 @@ class Node_Manager:
                     components.append(new_c)
         else:
             components=Node_Manager.scan_package_lock(new_data)
+        if old_data:
+            with open("package-lock.json", "w", encoding="utf-8") as lock_file:
+                json.dump(old_data, lock_file, indent=2)
+                lock_file.close()
+        if old_pkgs:
+            with open("package.json", "w", encoding="utf-8") as pkg_file:
+                json.dump(old_pkgs, pkg_file, indent=2)
+                pkg_file.close()
         return [comp["id"] for comp in components]
     
     @staticmethod
