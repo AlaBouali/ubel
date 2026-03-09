@@ -190,7 +190,7 @@ class Ubel_Engine:
         if fixed_versions!=[]:
             return f"Upgrade {package} ( {ecosystem} ) to: {' or '.join(fixed_versions)}"
         elif still_vulnerable_versions!=[]:
-            return f"Upgrade {package} ( {ecosystem} ) to a version higher than: {' or '.join(still_vulnerable_versions)}"
+            return f"Upgrade {package} ( {ecosystem} ) to a version other than: {' or '.join(still_vulnerable_versions)}"
         return f"No fix available for {package}"
 
     @staticmethod
@@ -271,6 +271,84 @@ class Ubel_Engine:
             elif item.get("id") in vulnerable_purls:
                 state="vulnerable"
             item["state"] = state
+    
+    @staticmethod
+    def summarize_vulnerabilities(vulnerabilities: list) -> dict:
+        severity_order = {
+            "critical": 0,
+            "high": 1,
+            "medium": 2,
+            "low": 3,
+            "unknown": 4
+        }
+
+        packages = {}
+
+        for v in vulnerabilities:
+            pkg = v.get("affected_dependency")
+            version = v.get("affected_dependency_version")
+            purl = v.get("affected_purl", "")
+
+            ecosystem = None
+            try:
+                ecosystem = purl.split("/")[1]
+            except Exception:
+                ecosystem = None
+
+            if pkg not in packages:
+                packages[pkg] = {
+                    "name": pkg,
+                    "version": version,
+                    "ecosystem": ecosystem,
+                    "vulnerabilities": []
+                }
+
+            vuln_obj = {
+                "id": v.get("id"),
+                "is_infection": v.get("is_infection"),
+                "severity": v.get("severity"),
+                "severity_score": float(v["severity_score"]) if v.get("severity_score") else None,
+                "fixes": v.get("fixes", [])
+            }
+
+            packages[pkg]["vulnerabilities"].append(vuln_obj)
+
+        # sorting vulnerabilities
+        for pkg in packages.values():
+            pkg["vulnerabilities"].sort(
+                key=lambda x: (
+                    severity_order.get(x["severity"], 5),
+                    float("inf") if x["severity_score"] is None else -x["severity_score"]
+                )
+            )
+
+        return packages
+    
+    @staticmethod
+    def sort_vulnerabilities(vulns: list) -> list:
+        severity_order = {
+            "critical": 0,
+            "high": 1,
+            "medium": 2,
+            "low": 3,
+            "unknown": 4
+        }
+
+        def sort_key(v):
+            severity = (v.get("severity") or "unknown").lower()
+            score = v.get("severity_score")
+
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                score = None
+
+            return (
+                severity_order.get(severity, 5),
+                float("inf") if score is None else -score
+            )
+
+        return sorted(vulns, key=sort_key)
 
     
     @staticmethod
@@ -411,7 +489,8 @@ class Ubel_Engine:
                 "engine": Ubel_Engine.engine,
             },
             "stats": stats,
-            "vulnerabilities": vulnerabilities,
+            "findings_summary": Ubel_Engine.summarize_vulnerabilities(vulnerabilities),
+            "vulnerabilities": Ubel_Engine.sort_vulnerabilities(vulnerabilities),
             "inventory": inventory,
             "policy":policy,
         }
