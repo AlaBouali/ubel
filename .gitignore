@@ -7,6 +7,12 @@ __pycache__/
 *.so
 .ubel/*
 
+*.pypi
+*.npm
+*.linux
+*.docker
+*.composer
+
 *.pyz
 # Distribution / packaging
 .Python
