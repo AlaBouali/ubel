@@ -31,9 +31,15 @@ class PDF_Report_Generator:
         return html.escape(text).strip()
 
     @staticmethod
-    def generate_report(system_type:str,check_mode:str,output_path:str,timestamp_date,allowed:bool,reason:str,policy:dict,stats:dict,severity_buckets:dict,vulnerabilities:list,inventory:list):
+    def generate_report(system_type:str,check_mode:str,output_path:str,timestamp_date,allowed:bool,reason:str,policy:dict,stats:dict,severity_buckets:dict,vulnerabilities:list,inventory:list,findings_summary:dict):
         doc = SimpleDocTemplate(str(output_path), pagesize=A4)
         elements = []
+        cell_style = ParagraphStyle(
+            "cell",
+            fontName="Helvetica",
+            fontSize=8,
+            leading=10
+        )
 
         styles = getSampleStyleSheet()
         title_style = styles["Heading1"]
@@ -99,6 +105,82 @@ class PDF_Report_Generator:
         ]
         elements.append(ListFlowable(severity_list, bulletType="bullet"))
         elements.append(Spacer(1, 0.5 * inch))
+
+        # -------------------------
+        # Findings Summary
+        # -------------------------
+
+        elements.append(Paragraph("Findings Summary", section_style))
+        elements.append(Spacer(1, 0.3 * inch))
+
+        for pkg_name, pkg in findings_summary.items():
+
+            elements.append(Paragraph(
+                f"<b>{pkg['name']} {pkg['version']}</b>",
+                section_style
+            ))
+            pkg_stats = [
+                ListItem(Paragraph(f"{k.capitalize()}: {v}", normal_style))
+                for k, v in pkg.get("stats", {}).items()
+            ]
+
+            elements.append(Paragraph(
+                f"<b>Ecosystem:</b> {pkg['ecosystem']}<br/><b>Vulnerabilities stats:</b>",
+                normal_style
+            ))
+
+            if pkg_stats:
+                elements.append(ListFlowable(pkg_stats, bulletType="bullet"))
+            else:
+                elements.append(Paragraph("None", normal_style))
+
+            elements.append(Spacer(1, 0.2 * inch))
+
+            table_data = [[
+                Paragraph("ID", cell_style),
+                Paragraph("Severity", cell_style),
+                Paragraph("Score", cell_style),
+                Paragraph("Is Infection", cell_style),
+                #Paragraph("Fixes", cell_style)
+            ]]
+
+            for v in pkg["vulnerabilities"]:
+
+                fixes = v.get("fixes", [])
+
+                if fixes:
+                    fixes_text = "<br/>".join(
+                        f"• {PDF_Report_Generator.escape_html_tags(f)}"
+                        for f in fixes
+                    )
+                else:
+                    fixes_text = "—"
+
+                table_data.append([
+                    Paragraph(v["id"], cell_style),
+                    Paragraph(v["severity"], cell_style),
+                    Paragraph(str(v["severity_score"]), cell_style),
+                    Paragraph(str(v["is_infection"]), cell_style),
+                    #Paragraph(fixes_text, cell_style)
+                ])
+
+            table = Table(
+                table_data,
+                colWidths=[110, 60, 40, 55, 170],
+                repeatRows=1,
+                splitByRow=1
+            )
+
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6e6e6")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+
+            elements.append(table)
+            elements.append(Spacer(1, 0.4 * inch))
+            elements.append(PageBreak())
 
         #elements.append(PageBreak())
         

@@ -275,6 +275,7 @@ class Ubel_Engine:
     @staticmethod
     def summarize_vulnerabilities(vulnerabilities: list) -> dict:
         severity_order = {
+            "infection": -1,  # infections are the most severe
             "critical": 0,
             "high": 1,
             "medium": 2,
@@ -300,20 +301,37 @@ class Ubel_Engine:
                     "name": pkg,
                     "version": version,
                     "ecosystem": ecosystem,
-                    "vulnerabilities": []
+                    "vulnerabilities": [],
+                    "_severity_counts": {
+                        "infection": 0,
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 0,
+                        "low": 0,
+                        "unknown": 0
+                    }
                 }
+
+            severity = (v.get("severity") or "unknown").lower()
 
             vuln_obj = {
                 "id": v.get("id"),
                 "is_infection": v.get("is_infection"),
-                "severity": v.get("severity"),
+                "severity": severity,
                 "severity_score": float(v["severity_score"]) if v.get("severity_score") else None,
                 "fixes": v.get("fixes", [])
             }
 
             packages[pkg]["vulnerabilities"].append(vuln_obj)
 
-        # sorting vulnerabilities
+            if severity not in packages[pkg]["_severity_counts"]:
+                severity = "unknown"
+            if vuln_obj["is_infection"]:
+                severity = "infection"
+
+            packages[pkg]["_severity_counts"][severity] += 1
+
+        # sort vulnerabilities inside each package
         for pkg in packages.values():
             pkg["vulnerabilities"].sort(
                 key=lambda x: (
@@ -322,11 +340,31 @@ class Ubel_Engine:
                 )
             )
 
-        return packages
+        # sort packages by severity counts
+        sorted_packages = sorted(
+            packages.values(),
+            key=lambda p: (
+                -p["_severity_counts"]["infection"],
+                -p["_severity_counts"]["critical"],
+                -p["_severity_counts"]["high"],
+                -p["_severity_counts"]["medium"],
+                -p["_severity_counts"]["low"],
+                -p["_severity_counts"]["unknown"],
+                p["name"]  # deterministic fallback
+            )
+        )
+
+        # remove helper field
+        for p in sorted_packages:
+            p["stats"] = p["_severity_counts"]
+            p.pop("_severity_counts", None)
+
+        return {p["name"]: p for p in sorted_packages}
     
     @staticmethod
     def sort_vulnerabilities(vulns: list) -> list:
         severity_order = {
+            "infection": -1,  # infections are the most severe
             "critical": 0,
             "high": 1,
             "medium": 2,
@@ -335,8 +373,12 @@ class Ubel_Engine:
         }
 
         def sort_key(v):
-            severity = (v.get("severity") or "unknown").lower()
-            score = v.get("severity_score")
+            if v.get("is_infection"):
+                severity = "infection"
+                score = 10.1  # infections should appear above all even criticals, so we give them a score higher than 10
+            else:
+                severity = (v.get("severity") or "unknown").lower()
+                score = v.get("severity_score")
 
             try:
                 score = float(score)
@@ -524,7 +566,8 @@ class Ubel_Engine:
             stats=stats,
             severity_buckets=severity_buckets,
             vulnerabilities=vulnerabilities,
-            inventory=inventory
+            inventory=inventory,
+            findings_summary=final_json["findings_summary"]
         )
         print()
         print("Policy:")
