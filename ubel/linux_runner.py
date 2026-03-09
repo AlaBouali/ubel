@@ -105,7 +105,7 @@ class Linux_Manager:
         for line in output.splitlines():
             # example: musl-1.2.4-r1
             if "-" in line:
-                name, version = line.rsplit("-", 1)
+                name, version = line.split("-")[0], "-".join(line.split("-")[1:])
                 packages.append({
                     "name": name, 
                     "version": version,

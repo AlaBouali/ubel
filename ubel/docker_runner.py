@@ -133,7 +133,7 @@ class DockerLinuxInspector:
         for line in output.splitlines():
             if "-" not in line:
                 continue
-            name, version = line.rsplit("-", 1)
+            name, version = line.split("-")[0], "-".join(line.split("-")[1:])
             pkgs.append({
                 "name": name,
                 "version": version,
