@@ -4,7 +4,8 @@ Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, ge
 
 - **PyPI** (via `ubel-pip`)
 - **npm** (via `ubel-npm`)
-- **Linux distributions** (Ubuntu-based, Debian-based, RHEL, AlmaLinux)
+- **Linux distributions** (Ubuntu-based, Debian-based, RHEL, AlmaLinux, Rocky-Linux, and Alpine)
+- **Docker** (if the image is based on one the mentioned Linux distros above)
 
 Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing clean **JSON** and **PDF** reports.
 
@@ -16,7 +17,7 @@ Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing
 - Policy engine (block/allow by severity & infection)
 - Checking linux-package or node/python dependency or entire project (`check` mode)
 - Install‑time enforcement (`install` mode)
-- Project‑level/Host-level/kernal-level scanning (`health` mode)
+- Project‑level/Host-level/kernal-level/Docker-level scanning (`health` mode)
 - Catches Non-CVEs
 - It is a supply-chain protection tool
 - Automatic report generation (JSON + PDF)
@@ -34,11 +35,12 @@ If you are on Linux, you need to:
 - run enable the virtual envirenment `source venv/bin/activate`
 - then run: `pip install ubel`
 
-Ubel exposes three binaries:
+Ubel exposes binaries:
 
-- `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux )
+- `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux, Rocky-Linux, and Alpine )
 - `ubel-pip` (Python ecosystem)
 - `ubel-npm` (Node.js ecosystem)
+- `ubel-docker` (Docker)
 
 ---
 
@@ -57,6 +59,11 @@ usage: ubel-pip [-h] {check,install,health,init,allow,block} [extra_args ...]
 ## npm CLI
 ```
 usage: ubel-npm [-h] {check,install,health,init,allow,block} [extra_args ...]
+```
+
+## docker CLI
+```
+usage: ubel-docker [-h] {health} <docker_image>
 ```
 
 ---
