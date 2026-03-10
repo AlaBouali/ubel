@@ -1,5 +1,5 @@
 import json,os
-import re,subprocess
+import re,subprocess,uuid
 from pathlib import Path
 
 class Node_Manager:
@@ -335,7 +335,10 @@ class Node_Manager:
         cmd = [
             "npm",
             "install",
-            "--package-lock-only"
+            "--package-lock-only",
+            "--ignore-scripts",
+             "--no-audit", 
+             "--no-fund"
             ] + initial_args
 
         result = subprocess.run(cmd,capture_output=True, shell=True)
@@ -377,6 +380,127 @@ class Node_Manager:
         return [comp["id"] for comp in components]
     
     @staticmethod
+    def ensure_arborist(project_path):
+        subprocess.run(
+            ["npm", "install", "@npmcli/arborist", "--no-save"],
+            cwd=project_path,
+            check=True,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+    @staticmethod
+    def export_npm_dependencies(project_path):
+        NODE_SCRIPT = r"""
+import fs from "fs"
+
+async function loadArborist() {
+    try {
+        const mod = await import("@npmcli/arborist")
+        return mod.default || mod
+    } catch (e) {
+        const mod = await import(await import.meta.resolve("@npmcli/arborist"))
+        return mod.default || mod
+    }
+}
+
+function buildTree(node) {
+    let name = node.name || ""
+
+    if (name.startsWith(".")) {
+        name = name.slice(1)
+    }
+
+    const children = [...node.children.values()]
+
+    // PNPM virtual store flattening
+    const deps = []
+    for (const child of children) {
+        if (child.name === ".pnpm") {
+            //deps.push(...[...child.children.values()].map(buildTree))
+        } else {
+            deps.push(buildTree(child))
+        }
+    }
+    return {
+        name: name,
+        version: node.version,
+        path: node.path,
+        dependencies: deps,
+        license: node.package && node.package.license ? node.package.license : null,
+        dev: node.dev || false,
+        optional: node.optional || false,
+        peer: node.peer || false,
+    }
+}
+
+async function run() {
+    const Arborist = await loadArborist()
+
+    const arb = new Arborist({
+        path: process.cwd()
+    })
+
+    const tree = await arb.loadActual()
+
+    const result = buildTree(tree)
+
+    fs.writeFileSync(
+        "dependencies.json",
+        JSON.stringify(result, null, 2)
+    )
+}
+
+run()
+"""
+        script_path = os.path.join(project_path, f"_arb_{uuid.uuid4().hex}.mjs")
+
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(NODE_SCRIPT)
+
+        try:
+            subprocess.run(
+                ["node", script_path],
+                cwd=project_path,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+
+    @staticmethod
+    def get_installed():
+        if not os.path.exists("node_modules"):
+            raise FileNotFoundError("node_modules directory not found. Please run 'install' first.")
+        Node_Manager.ensure_arborist(os.getcwd())
+        Node_Manager.export_npm_dependencies(os.getcwd())
+        with open("dependencies.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        components = Node_Manager.get_installed_from_tree(data)
+        return [comp["id"] for comp in components]
+    
+    @staticmethod
+    def get_installed_from_tree(tree):
+        components = []
+        def walk(node):
+            if node["name"] and node["version"]:
+                purl = f"pkg:npm/{node['name']}@{node['version']}"
+                components.append({
+                    "id": purl,
+                    "name": node["name"],
+                    "version": node["version"],
+                    "type": "library",
+                    "ecosystem": "npm",
+                })
+            for child in node.get("dependencies", []):
+                walk(child)
+        walk(tree)
+        return components
+
+    """@staticmethod
     def get_installed(engine):
         if engine=="npm":
             if not os.path.exists("package-lock.json"):
@@ -400,12 +524,27 @@ class Node_Manager:
         purls = [comp["id"] for comp in Node_Manager.scan_package_lock(data)]
         if not purls:
             raise RuntimeError(f"Failed to retrieve installed npm packages. Please ensure you have a valid package-lock.json or try running with elevated permissions.")
-        return purls
+        return purls"""
     
     @staticmethod
     def run_real_install(engine,components):
         if engine=="npm":
             cmd = ["npm", "install"]
+            for c in components:
+                cmd.append(f"{c['name']}@{c['version']}")
+            return subprocess.run(cmd,shell=True)
+        elif engine=="yarn":
+            cmd = ["yarn", "add"]
+            for c in components:
+                cmd.append(f"{c['name']}@{c['version']}")
+            return subprocess.run(cmd,shell=True)
+        elif engine=="pnpm":
+            cmd = ["pnpm", "add"]
+            for c in components:
+                cmd.append(f"{c['name']}@{c['version']}")
+            return subprocess.run(cmd,shell=True)
+        elif engine=="bun":
+            cmd = ["bun", "add"]
             for c in components:
                 cmd.append(f"{c['name']}@{c['version']}")
             return subprocess.run(cmd,shell=True)

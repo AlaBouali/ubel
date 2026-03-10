@@ -428,12 +428,13 @@ class Ubel_Engine:
                 report_content = Node_Manager.current_lock_file_content
                 packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
             else:
-                purls=Node_Manager.get_installed(Ubel_Engine.engine)
+                purls=Node_Manager.get_installed()
                 packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
-                if Ubel_Engine.engine=="npm":
-                    with open("package-lock.json","r",encoding="utf-8") as af:
-                        report_content=json.load(af)
-                        af.close()
+                with open("dependencies.json","r",encoding="utf-8") as af:
+                    report_content=json.load(af)
+                    af.close()
+                    os.remove("dependencies.json")
+                    
         elif Ubel_Engine.system_type=="docker":
             report_content = DockerLinuxInspector.inspect(pip_args[0])
             purls = report_content.get("purls",[])
