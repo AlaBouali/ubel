@@ -1,4 +1,4 @@
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __tool_name__="Ubel"
 __tool_name_ascii__="""
 

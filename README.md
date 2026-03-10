@@ -2,10 +2,10 @@
 
 Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, generates PURLs, scans them through OSV.dev, and enforces security policies during installation to prevent supply-chain attacks. It works with:
 
-- **PyPI** (via `ubel-pip`)
-- **npm** (via `ubel-npm`)
-- **Linux distributions** (Ubuntu-based, Debian-based, RHEL, AlmaLinux, Rocky-Linux, and Alpine)
-- **Docker** (if the image is based on one the mentioned Linux distros above)
+- **PyPI** via: `ubel-pip`
+- **npm** via:  `ubel-npm` or `ubel-pnpm` or `ubel-bun` or `ubel-yarn`
+- **Linux distributions** via: `ubel` (Ubuntu-based, Debian-based, RHEL, AlmaLinux, Rocky-Linux, and Alpine)
+- **Docker** via: `ubel-docker` (if the image is based on one the mentioned Linux distros above)
 
 Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing clean **JSON** and **PDF** reports.
 
@@ -40,6 +40,9 @@ Ubel exposes binaries:
 - `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux, Rocky-Linux, and Alpine )
 - `ubel-pip` (Python ecosystem)
 - `ubel-npm` (Node.js ecosystem)
+- `ubel-pnpm` (Node.js ecosystem)
+- `ubel-bun` (Node.js ecosystem)
+- `ubel-yarn` (Node.js ecosystem)
 - `ubel-docker` (Docker)
 
 ---
@@ -59,6 +62,15 @@ usage: ubel-pip [-h] {check,install,health,init,allow,block} [extra_args ...]
 ## npm CLI
 ```
 usage: ubel-npm [-h] {check,install,health,init,allow,block} [extra_args ...]
+```
+```
+usage: ubel-pnpm [-h] {check,install,health,init,allow,block} [extra_args ...]
+```
+```
+usage: ubel-bun [-h] {check,install,health,init,allow,block} [extra_args ...]
+```
+```
+usage: ubel-yarn [-h] {check,install,health,init,allow,block} [extra_args ...]
 ```
 
 ## docker CLI
@@ -118,8 +130,9 @@ ubel-npm install
 ### **health**
 Scan the **entire machine** or **running project**, including:
 - Installed PyPI packages
-- Installed npm global packages
-- OS-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux)
+- Installed NPM packages
+- OS-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
+- Docker-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
 
 Example:
 ( for linux )
@@ -215,6 +228,10 @@ Human‑readable, includes:
 - `ubel` → system packages, Linux distros
 - `ubel-pip` → PyPI projects, virtual environments\
 - `ubel-npm` → Node.js, npm, package.json projects
+- `ubel-pnpm` → Node.js, npm, package.json projects
+- `ubel-bun` → Node.js, npm, package.json projects
+- `ubel-yarn` → Node.js, npm, package.json projects
+- `ubel-docker` → Docker
 
 
 ---
