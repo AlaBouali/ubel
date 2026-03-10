@@ -151,6 +151,15 @@ def pip_mode():
 def npm_mode():
     non_linux_mode("npm","npm","Safe Node.js policy-driven supply-chain firewall")
 
+def pnpm_mode():
+    non_linux_mode("pnpm","npm","Safe Node.js policy-driven supply-chain firewall")
+
+def bun_mode():
+    non_linux_mode("bun","npm","Safe Node.js policy-driven supply-chain firewall")
+
+def yarn_mode():
+    non_linux_mode("yarn","npm","Safe Node.js policy-driven supply-chain firewall")
+
 def docker_mode():
     parser = argparse.ArgumentParser(
         description="Safe Docker policy-driven supply-chain firewall"
