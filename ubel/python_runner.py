@@ -8,6 +8,8 @@ from importlib.metadata import distributions
 
 class Pypi_Manager:
 
+    inventory_data = []
+
     @staticmethod
     def get_installed():
         return  [

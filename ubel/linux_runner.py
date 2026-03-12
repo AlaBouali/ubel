@@ -8,6 +8,8 @@ import sys
 
 class Linux_Manager:
 
+    inventory_data = []
+
     @staticmethod
     def command_exists(cmd):
         return shutil.which(cmd) is not None
@@ -64,6 +66,8 @@ class Linux_Manager:
                 "name": name,
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]})
         return packages
 
@@ -79,6 +83,8 @@ class Linux_Manager:
                 "name": name, 
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]})
         return packages
 
@@ -94,6 +100,8 @@ class Linux_Manager:
                 "name": name, 
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]})
         return packages
 
@@ -110,6 +118,8 @@ class Linux_Manager:
                     "name": name, 
                     "version": version,
                     "type": "application",
+                    "license": "unknown",
+                    "locations": [],
                     "ecosystem": Linux_Manager.get_os_info()["id"]})
         return packages
 

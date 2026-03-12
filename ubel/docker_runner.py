@@ -7,6 +7,8 @@ import copy
 
 class DockerLinuxInspector:
 
+    inventory_data = []
+
     @staticmethod
     def run_docker(image, cmd):
         """
@@ -103,6 +105,8 @@ class DockerLinuxInspector:
                 "name": name,
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]
             })
         return pkgs
@@ -122,6 +126,8 @@ class DockerLinuxInspector:
                 "name": name,
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]
             })
         return pkgs
@@ -138,6 +144,8 @@ class DockerLinuxInspector:
                 "name": name,
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]
             })
         return pkgs
@@ -154,6 +162,8 @@ class DockerLinuxInspector:
                 "name": name,
                 "version": version,
                 "type": "application",
+                "license": "unknown",
+                "locations": [],
                 "ecosystem": os_info["id"]
             })
         return pkgs

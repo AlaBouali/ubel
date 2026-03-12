@@ -142,6 +142,19 @@ class Ubel_Engine:
             }
             inventory.append(item)
         return inventory
+
+    @staticmethod
+    def match_dependencies_with_inventory(inventory):
+        purls = [comp["id"] for comp in inventory]
+        for item in inventory:
+            deps_keys=item.get("dependencies", [])
+            full_dependencies=[]
+            for dep_key in deps_keys:
+                for purl in purls:
+                    if purl.startswith(dep_key):
+                        full_dependencies.append(purl)
+                        break
+            item["dependencies"]=full_dependencies
     
     @staticmethod
     def submit_to_osv(purls_list):
@@ -453,7 +466,13 @@ class Ubel_Engine:
         vuln_ids = Ubel_Engine.submit_to_osv(purls)
 
         purls=list(set(purls))
-        inventory=Ubel_Engine.get_inventory_from_purls(purls)
+        inventory=[]
+        inventory+=Node_Manager.inventory_data
+        inventory+=Pypi_Manager.inventory_data
+        inventory+=Linux_Manager.inventory_data
+        inventory+=DockerLinuxInspector.inventory_data
+
+        Ubel_Engine.match_dependencies_with_inventory(inventory)
 
         vulnerabilities = []
         max_workers = min(40, len(vuln_ids))
