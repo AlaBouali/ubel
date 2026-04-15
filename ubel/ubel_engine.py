@@ -7,7 +7,6 @@ from .policy import evaluate_policy
 from .python_runner import Pypi_Manager
 from .linux_runner import Linux_Manager
 from .docker_runner import DockerLinuxInspector
-from .node_runner import Node_Manager
 from .cvss_parser import CVSS_Parser
 from .info import __version__ , __tool_name__
 
@@ -435,23 +434,6 @@ class Ubel_Engine:
                 purls=Pypi_Manager.get_installed()
                 packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
                 report_content=Pypi_Manager.get_installed_inventory()
-        elif Ubel_Engine.system_type=="npm":
-            if Ubel_Engine.check_mode in ["check","install"]:
-                purls = Node_Manager.run_dry_run(pip_args)
-                report_content = Node_Manager.current_lock_file_content
-                packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
-            else:
-                purls=Node_Manager.get_installed()
-                packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
-                with open("dependencies.json","r",encoding="utf-8") as af:
-                    report_content=json.load(af)
-                    af.close()
-                    os.remove("dependencies.json")
-                    
-        elif Ubel_Engine.system_type=="docker":
-            report_content = DockerLinuxInspector.inspect(pip_args[0])
-            purls = report_content.get("purls",[])
-            packages = report_content.get("packages",[]) 
         else:
             if Ubel_Engine.check_mode in ["check","install"]:
                 packages=Linux_Manager.resolve_packages(pip_args)
@@ -467,7 +449,6 @@ class Ubel_Engine:
 
         purls=list(set(purls))
         inventory=[]
-        inventory+=Node_Manager.inventory_data
         inventory+=Pypi_Manager.inventory_data
         inventory+=Linux_Manager.inventory_data
         inventory+=DockerLinuxInspector.inventory_data
@@ -617,9 +598,6 @@ class Ubel_Engine:
         if Ubel_Engine.system_type=="pypi":
             file_path=Ubel_Engine.generate_requirements_file(purls)
             Pypi_Manager.run_real_install(file_path,Ubel_Engine.engine)
-        elif Ubel_Engine.system_type=="npm":
-            packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
-            Node_Manager.run_real_install(packages,Ubel_Engine.engine)
         else:
             packages=[Ubel_Engine.get_dependency_from_purl(purl) for purl in purls]
             Linux_Manager.run_real_install(packages)

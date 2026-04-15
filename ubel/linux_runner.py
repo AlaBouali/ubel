@@ -5,10 +5,70 @@ import shutil
 import distro
 import json,os
 import sys
+from .os_health import scan_host
 
 class Linux_Manager:
 
     inventory_data = []
+
+
+    @staticmethod
+    def build_dependency_sequences(inventory):
+
+        by_id = {c["id"]: c for c in inventory}
+
+        depended = set()
+
+        for comp in inventory:
+            for dep in comp.get("dependencies", []):
+                depended.add(dep)
+
+        roots = [c["id"] for c in inventory if c["id"] not in depended]
+
+        sequences = {}
+
+        def dfs(node, path):
+
+            next_path = path + [node]
+
+            sequences.setdefault(node, []).append(next_path)
+
+            deps = by_id.get(node, {}).get("dependencies", [])
+
+            for dep in deps:
+                if dep not in path and dep in by_id:
+                    dfs(dep, next_path)
+
+        for root in roots:
+            dfs(root, [])
+
+        for comp in inventory:
+            comp["dependency_sequences"] = sequences.get(comp["id"], [])
+
+        return inventory
+
+    @staticmethod
+    def merge_inventory_by_purl(components):
+
+        merged = {}
+
+        for comp in components:
+
+            cid = comp["id"]
+
+            if cid not in merged:
+                clone = dict(comp)
+                clone["paths"] = clone.get("paths", [])
+                merged[cid] = clone
+                continue
+
+            existing = merged[cid]
+
+            for p in comp.get("paths", []):
+                if p and p not in existing["paths"]:
+                    existing["paths"].append(p)
+
+        return list(merged.values())
 
     @staticmethod
     def command_exists(cmd):
@@ -168,13 +228,65 @@ class Linux_Manager:
 
     @staticmethod
     def get_linux_packages():
-        packages=Linux_Manager.detect_and_list_packages()
-        system_info=Linux_Manager.get_os_info()
-        purls = [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
-        kernal_version=os.uname().release
-        pkg_manager=system_info["package_manager"]
-        if pkg_manager in ["apt","apt-get"]:
-            purls.append(Linux_Manager.package_to_purl(system_info,"linux",kernal_version))
+
+        system_info = Linux_Manager.get_os_info()
+
+        raw_packages = scan_host()
+
+        components = []
+
+        for pkg in raw_packages:
+
+            component = {
+                "id": pkg["id"],
+                "name": pkg["name"],
+                "version": pkg["version"],
+                "type": "application",
+                "license": pkg.get("license") or pkg.get("licence") or "unknown",
+                "dependencies": pkg.get("dependencies", []),
+                "paths": pkg.get("paths", []),
+                "ecosystem": pkg["ecosystem"],
+                "state": "undetermined"
+            }
+
+            components.append(component)
+
+        # merge duplicate packages
+        components = Linux_Manager.merge_inventory_by_purl(components)
+
+        # compute dependency sequences
+        components = Linux_Manager.build_dependency_sequences(components)
+
+        Linux_Manager.inventory_data = components
+
+        purls = [pkg["id"] for pkg in components]
+
+        # kernel component
+        kernel_version = os.uname().release
+        pkg_manager = system_info["package_manager"]
+
+        if pkg_manager in ["apt", "apt-get"]:
+
+            kernel_purl = Linux_Manager.package_to_purl(
+                system_info, "linux", kernel_version
+            )
+
+            kernel_component = {
+                "id": kernel_purl,
+                "name": "linux",
+                "version": kernel_version,
+                "type": "application",
+                "license": "unknown",
+                "paths": [],
+                "dependencies": [],
+                "ecosystem": system_info["id"],
+                "state": "undetermined",
+                "dependency_sequences": []
+            }
+
+            components.append(kernel_component)
+            purls.append(kernel_purl)
+
         return purls
 
     @staticmethod
@@ -215,7 +327,10 @@ class Linux_Manager:
                         "name": match.group(1),
                         "version": match.group(2),
                         "type": "application",
-                        "ecosystem": os_info["id"] 
+                        "ecosystem": os_info["id"],
+                        "license": "unknown",
+                        "paths": [],
+                        "dependencies": [],
                     })
 
             return resolved
@@ -253,6 +368,9 @@ class Linux_Manager:
                             "name": name,
                             "version": version,
                             "type": "application",
+                            "license": "unknown",
+                            "paths": [],
+                            "dependencies": [],
                             "ecosystem": os_info["id"]
                         })
 
@@ -289,7 +407,10 @@ class Linux_Manager:
                             "name": name,
                             "version": version,
                             "type": "application",
-                            "ecosystem": os_info["id"]
+                            "ecosystem": os_info["id"],
+                            "license": "unknown",
+                            "paths": [],
+                            "dependencies": [],
                         })
             return resolved
 
@@ -299,8 +420,8 @@ class Linux_Manager:
     def get_packages_purls(packages):
         packages=Linux_Manager.resolve_packages(packages)
         system_info=Linux_Manager.get_os_info()
-        return [Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"]) for pkg in packages]
-
+        Linux_Manager.inventory_data=identified_packages = [({"id":Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"])}) for pkg in packages]
+        return [pkg["id"] for pkg in identified_packages]
 
 
     @staticmethod
