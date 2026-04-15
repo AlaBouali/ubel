@@ -1,0 +1,21 @@
+{
+  "name": "ubel-node",
+  "version": "1.0.0",
+  "description": "Safe Node.js policy-driven supply-chain firewall",
+  "type": "module",
+  "bin": {
+    "ubel-npm": "bin/npm.js",
+    "ubel-pnpm": "bin/pnpm.js",
+    "ubel-bun": "bin/bun.js"
+  },
+  "scripts": {
+    "test": "node src/main.js npm health"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "main": "main.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
