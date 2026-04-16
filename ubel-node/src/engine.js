@@ -42,7 +42,6 @@ function generateHTMLReport(data) {
 
     // Escape for script tag safety (prevents </script> injection)
     let safeJson = JSON.stringify(reportData).replace(/</g, '\\u003c');
-    // Also escape backticks to avoid breaking the outer template
     safeJson = safeJson.replace(/`/g, '\\u0060');
 
     // The complete client-side script
@@ -50,9 +49,7 @@ function generateHTMLReport(data) {
         // --- DATA ---
         const reportData = ${safeJson};
 
-        
-
-        // ── Dependency Graph (force-directed) ──────────────────────────────────────────
+        // ── Dependency Graph (force-directed, shows only impact chains) ────────────────
         let graphState = null;
 
         function initGraph() {
@@ -69,14 +66,14 @@ function generateHTMLReport(data) {
                 return;
             }
 
-            // Build node + edge lists from tree
-            const nodeMap = {};
-            const edges = [];
+            // ---------- Build full graph (all nodes & edges) ----------
+            const fullNodeMap = {};
+            const allEdges = [];
 
             const getOrCreate = (id) => {
-                if (!nodeMap[id]) {
+                if (!fullNodeMap[id]) {
                     const inv = reportData.inventory.find(x => x.id === id);
-                    nodeMap[id] = {
+                    fullNodeMap[id] = {
                         id,
                         label: inv ? inv.name + '@' + inv.version : id.split('/').pop(),
                         fullLabel: id,
@@ -86,52 +83,190 @@ function generateHTMLReport(data) {
                         radius: 0,
                     };
                 }
-                return nodeMap[id];
+                return fullNodeMap[id];
             };
 
-            const walk = (nodeId, children, depth) => {
+            const walk = (nodeId, children) => {
                 getOrCreate(nodeId);
                 for (const [childId, grandChildren] of Object.entries(children || {})) {
                     getOrCreate(childId);
-                    edges.push({ source: nodeId, target: childId });
-                    walk(childId, grandChildren, depth + 1);
+                    allEdges.push({ source: nodeId, target: childId });
+                    walk(childId, grandChildren);
                 }
             };
 
             for (const [rootId, children] of Object.entries(tree)) {
-                walk(rootId, children, 0);
+                walk(rootId, children);
             }
 
-            const nodes = Object.values(nodeMap);
-
+            const allNodes = Object.values(fullNodeMap);
             // Deduplicate edges
             const edgeSet = new Set();
-            const uniqueEdges = edges.filter(e => {
+            const allUniqueEdges = allEdges.filter(e => {
                 const key = e.source + '||' + e.target;
                 if (edgeSet.has(key)) return false;
                 edgeSet.add(key);
                 return true;
             });
 
-            // Node sizing
+            // Build reverse adjacency: for each node, which nodes depend on it (incoming edges)
+            const reverseAdj = new Map(); // id -> Set of ids that depend on it
+            for (const n of allNodes) reverseAdj.set(n.id, new Set());
+            for (const e of allUniqueEdges) {
+                // e.source depends on e.target
+                reverseAdj.get(e.target).add(e.source);
+            }
+
+            // Node sizing (based on out‑degree in full graph)
             const childCount = {};
-            for (const e of uniqueEdges) {
+            for (const e of allUniqueEdges) {
                 childCount[e.source] = (childCount[e.source] || 0) + 1;
             }
-            for (const n of nodes) {
+            for (const n of allNodes) {
                 const c = childCount[n.id] || 0;
                 n.radius = c > 10 ? 18 : c > 4 ? 14 : c > 1 ? 11 : 8;
             }
 
-            // Initial positions — circular layout
-            const cx = 0, cy = 0, R = Math.max(150, nodes.length * 9);
-            nodes.forEach((n, i) => {
-                const angle = (2 * Math.PI * i) / nodes.length;
-                n.x = cx + R * Math.cos(angle) + (Math.random() - 0.5) * 40;
-                n.y = cy + R * Math.sin(angle) + (Math.random() - 0.5) * 40;
-            });
+            // ----- FILTER LOGIC: ancestors (dependents) of vulnerable/infected nodes -----
+            let currentFilter = 'all';   // 'all', 'vulnerable', 'infected'
+            let visibleNodeIds = new Set();
+            let visibleEdges = [];
 
-            // Viewport
+            function computeVisibleNodesAndEdges() {
+                if (currentFilter === 'all') {
+                    visibleNodeIds.clear();
+                    for (const n of allNodes) visibleNodeIds.add(n.id);
+                    visibleEdges = [...allUniqueEdges];
+                    return;
+                }
+
+                const targetStates = currentFilter === 'vulnerable' ? new Set(['vulnerable']) : new Set(['infected']);
+                // Seeds: all nodes that match the target state
+                const seeds = allNodes.filter(n => targetStates.has(n.state)).map(n => n.id);
+                if (seeds.length === 0) {
+                    visibleNodeIds.clear();
+                    visibleEdges = [];
+                    return;
+                }
+
+                // BFS on reverse graph to collect all ancestors (nodes that depend on the seeds)
+                const keep = new Set(seeds);
+                const queue = [...seeds];
+                while (queue.length) {
+                    const id = queue.shift();
+                    for (const depender of reverseAdj.get(id) || []) {
+                        if (!keep.has(depender)) {
+                            keep.add(depender);
+                            queue.push(depender);
+                        }
+                    }
+                }
+
+                visibleNodeIds = keep;
+                // Keep only edges where both ends are in the set
+                visibleEdges = allUniqueEdges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
+            }
+
+            // Create a working set of nodes (subset of allNodes) and edges from visibleNodeIds
+            function getCurrentNodesAndEdges() {
+                const nodes = allNodes.filter(n => visibleNodeIds.has(n.id));
+                return { nodes, edges: visibleEdges };
+            }
+
+            // ---- Force simulation state for the current visible graph ----
+            let simTick = 0;
+            const MAX_SIM = 300;
+            const SIM_COOLDOWN = 0.92;
+            let simRunning = true;
+            let animId = null;
+
+            let visibleNodes = [];
+            let visibleEdgesList = [];
+            let nodeMap = new Map(); // id -> node object reference
+
+            // Rebuild simulation after filter change
+            function rebuildFromFilter() {
+                computeVisibleNodesAndEdges();
+                const { nodes, edges } = getCurrentNodesAndEdges();
+                visibleNodes = nodes;
+                visibleEdgesList = edges;
+                nodeMap.clear();
+                for (const n of visibleNodes) nodeMap.set(n.id, n);
+
+                // Reset forces
+                for (const n of visibleNodes) {
+                    n.vx = 0; n.vy = 0;
+                    if (n.fx !== null) { n.fx = n.x; n.fy = n.y; }
+                }
+                simRunning = true;
+                simTick = 0;
+            }
+
+            // Initial build (all nodes)
+            currentFilter = 'all';
+            rebuildFromFilter();
+
+            // ---- Helper: initial positions (circular layout) ----
+            function setInitialPositions() {
+                const cx = 0, cy = 0, R = Math.max(150, visibleNodes.length * 9);
+                visibleNodes.forEach((n, i) => {
+                    const angle = (2 * Math.PI * i) / visibleNodes.length;
+                    n.x = cx + R * Math.cos(angle) + (Math.random() - 0.5) * 40;
+                    n.y = cy + R * Math.sin(angle) + (Math.random() - 0.5) * 40;
+                });
+            }
+            setInitialPositions();
+
+            // ---- Force simulation (works on visibleNodes & visibleEdgesList) ----
+            const simulate = () => {
+                if (!simRunning) return;
+                if (visibleNodes.length === 0) return;
+
+                // Repulsion
+                for (let i = 0; i < visibleNodes.length; i++) {
+                    for (let j = i + 1; j < visibleNodes.length; j++) {
+                        const a = visibleNodes[i], b = visibleNodes[j];
+                        const dx = b.x - a.x, dy = b.y - a.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+                        const force = Math.min(8000 / (dist * dist), 60);
+                        const fx = (dx / dist) * force, fy = (dy / dist) * force;
+                        a.vx -= fx; a.vy -= fy;
+                        b.vx += fx; b.vy += fy;
+                    }
+                }
+
+                // Spring (edges)
+                for (const e of visibleEdgesList) {
+                    const a = nodeMap.get(e.source);
+                    const b = nodeMap.get(e.target);
+                    if (!a || !b) continue;
+                    const dx = b.x - a.x, dy = b.y - a.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+                    const ideal = (a.radius + b.radius) * 5 + 30;
+                    const force = (dist - ideal) * 0.04;
+                    const fx = (dx / dist) * force, fy = (dy / dist) * force;
+                    a.vx += fx; a.vy += fy;
+                    b.vx -= fx; b.vy -= fy;
+                }
+
+                // Center gravity
+                for (const n of visibleNodes) {
+                    n.vx += -n.x * 0.004;
+                    n.vy += -n.y * 0.004;
+                }
+
+                // Integrate + dampen
+                for (const n of visibleNodes) {
+                    if (n.fx !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
+                    n.vx *= SIM_COOLDOWN; n.vy *= SIM_COOLDOWN;
+                    n.x += n.vx; n.y += n.vy;
+                }
+
+                simTick++;
+                if (simTick > MAX_SIM) simRunning = false;
+            };
+
+            // ---- Viewport & interaction variables ----
             let scale = 1, panX = 0, panY = 0;
             let dragging = null;
             let isPanning = false, panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
@@ -145,66 +280,7 @@ function generateHTMLReport(data) {
                 unknown:    { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' },
             }[state] || { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' });
 
-            // Force simulation
-            let simTick = 0;
-            const MAX_SIM = 300;
-            const SIM_COOLDOWN = 0.92;
-            let simRunning = true;
-
-            const simulate = () => {
-                if (!simRunning) return;
-
-                const adjList = {};
-                for (const n of nodes) adjList[n.id] = [];
-                for (const e of uniqueEdges) {
-                    adjList[e.source].push(e.target);
-                    adjList[e.target].push(e.source);
-                }
-
-                // Repulsion
-                for (let i = 0; i < nodes.length; i++) {
-                    for (let j = i + 1; j < nodes.length; j++) {
-                        const a = nodes[i], b = nodes[j];
-                        const dx = b.x - a.x, dy = b.y - a.y;
-                        const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
-                        const force = Math.min(8000 / (dist * dist), 60);
-                        const fx = (dx / dist) * force, fy = (dy / dist) * force;
-                        a.vx -= fx; a.vy -= fy;
-                        b.vx += fx; b.vy += fy;
-                    }
-                }
-
-                // Spring (edges)
-                for (const e of uniqueEdges) {
-                    const a = nodeMap[e.source], b = nodeMap[e.target];
-                    if (!a || !b) continue;
-                    const dx = b.x - a.x, dy = b.y - a.y;
-                    const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
-                    const ideal = (a.radius + b.radius) * 5 + 30;
-                    const force = (dist - ideal) * 0.04;
-                    const fx = (dx / dist) * force, fy = (dy / dist) * force;
-                    a.vx += fx; a.vy += fy;
-                    b.vx -= fx; b.vy -= fy;
-                }
-
-                // Center gravity
-                for (const n of nodes) {
-                    n.vx += -n.x * 0.004;
-                    n.vy += -n.y * 0.004;
-                }
-
-                // Integrate + dampen
-                for (const n of nodes) {
-                    if (n.fx !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
-                    n.vx *= SIM_COOLDOWN; n.vy *= SIM_COOLDOWN;
-                    n.x += n.vx; n.y += n.vy;
-                }
-
-                simTick++;
-                if (simTick > MAX_SIM) simRunning = false;
-            };
-
-            // Render
+            // ---- Render (only visible nodes & edges) ----
             const render = () => {
                 const dpr = window.devicePixelRatio || 1;
                 const rect = canvas.getBoundingClientRect();
@@ -226,8 +302,8 @@ function generateHTMLReport(data) {
 
                 // Edges
                 ctx.lineWidth = 0.8;
-                for (const e of uniqueEdges) {
-                    const a = nodeMap[e.source], b = nodeMap[e.target];
+                for (const e of visibleEdgesList) {
+                    const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
                     if (!a || !b) continue;
                     const isHighlighted = highlightId && (e.source === highlightId || e.target === highlightId);
                     const isSearchMatch = searchMatches.size > 0 && (searchMatches.has(e.source) || searchMatches.has(e.target));
@@ -239,7 +315,6 @@ function generateHTMLReport(data) {
                     ctx.lineTo(b.x, b.y);
                     ctx.stroke();
 
-                    // Arrow
                     if (isHighlighted || !dimmed) {
                         const ang = Math.atan2(b.y - a.y, b.x - a.x);
                         const ex = b.x - Math.cos(ang) * (b.radius + 3);
@@ -256,7 +331,7 @@ function generateHTMLReport(data) {
                 }
 
                 // Nodes
-                for (const n of nodes) {
+                for (const n of visibleNodes) {
                     const c = stateColor(n.state);
                     const isHl = n.id === highlightId;
                     const isMatch = searchMatches.has(n.id);
@@ -264,7 +339,6 @@ function generateHTMLReport(data) {
 
                     ctx.globalAlpha = dimmed ? 0.15 : 1;
 
-                    // Glow ring for matches
                     if (isMatch || isHl) {
                         ctx.beginPath();
                         ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2);
@@ -282,7 +356,6 @@ function generateHTMLReport(data) {
                     ctx.lineWidth = isHl ? 2.5 : 1.5;
                     ctx.stroke();
 
-                    // Label (only if zoomed enough or highlighted/matched)
                     const showLabel = scale > 0.7 || isHl || isMatch;
                     if (showLabel) {
                         ctx.globalAlpha = dimmed ? 0.15 : isHl ? 1 : 0.85;
@@ -291,7 +364,6 @@ function generateHTMLReport(data) {
                         ctx.textAlign = 'center';
                         ctx.textBaseline = 'middle';
                         const labelY = n.y + n.radius + 9;
-                        // Shadow
                         ctx.fillStyle = 'rgba(0,0,0,0.8)';
                         ctx.fillText(n.label, n.x + 0.5, labelY + 0.5);
                         ctx.fillStyle = isHl ? '#ffffff' : '#d4d4d4';
@@ -303,8 +375,6 @@ function generateHTMLReport(data) {
                 ctx.restore();
             };
 
-            // Animation loop
-            let animId;
             const loop = () => {
                 simulate();
                 render();
@@ -312,7 +382,7 @@ function generateHTMLReport(data) {
             };
             loop();
 
-            // Canvas → world coords
+            // ---- Interaction helpers (unchanged) ----
             const toWorld = (cx, cy) => {
                 const rect = canvas.getBoundingClientRect();
                 const W = rect.width, H = rect.height;
@@ -324,14 +394,13 @@ function generateHTMLReport(data) {
 
             const hitTest = (wx, wy) => {
                 let best = null, bestDist = Infinity;
-                for (const n of nodes) {
+                for (const n of visibleNodes) {
                     const d = Math.sqrt((wx - n.x) ** 2 + (wy - n.y) ** 2);
                     if (d < n.radius + 4 && d < bestDist) { best = n; bestDist = d; }
                 }
                 return best;
             };
 
-            // Tooltip
             const tooltip = document.getElementById('graph-tooltip');
             canvas.addEventListener('mousemove', (e) => {
                 const r = canvas.getBoundingClientRect();
@@ -387,11 +456,8 @@ function generateHTMLReport(data) {
                 }
             });
 
-            canvas.addEventListener('mouseup', (e) => {
-                if (dragging) {
-                    dragging.fx = null; dragging.fy = null;
-                    dragging = null;
-                }
+            canvas.addEventListener('mouseup', () => {
+                if (dragging) { dragging.fx = null; dragging = null; }
                 isPanning = false;
                 canvas.style.cursor = 'grab';
             });
@@ -410,29 +476,21 @@ function generateHTMLReport(data) {
                 }
             });
 
-            // Touch support
+            // Touch & zoom
             let lastTouchDist = null;
             canvas.addEventListener('touchstart', (e) => {
                 if (e.touches.length === 2) {
-                    lastTouchDist = Math.hypot(
-                        e.touches[0].clientX - e.touches[1].clientX,
-                        e.touches[0].clientY - e.touches[1].clientY
-                    );
+                    lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
                 }
             }, { passive: true });
             canvas.addEventListener('touchmove', (e) => {
                 if (e.touches.length === 2) {
-                    const d = Math.hypot(
-                        e.touches[0].clientX - e.touches[1].clientX,
-                        e.touches[0].clientY - e.touches[1].clientY
-                    );
-                    if (lastTouchDist) { scale = Math.max(0.1, Math.min(5, scale * (d / lastTouchDist))); }
+                    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                    if (lastTouchDist) scale = Math.max(0.1, Math.min(5, scale * (d / lastTouchDist)));
                     lastTouchDist = d;
                     e.preventDefault();
                 }
             }, { passive: false });
-
-            // Scroll zoom
             canvas.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 const delta = e.deltaY > 0 ? -0.1 : 0.1;
@@ -451,43 +509,56 @@ function generateHTMLReport(data) {
                 const q = e.target.value.trim().toLowerCase();
                 searchMatches.clear();
                 if (q.length >= 2) {
-                    for (const n of nodes) {
+                    for (const n of visibleNodes) {
                         if (n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q)) {
                             searchMatches.add(n.id);
                         }
                     }
                 }
-                // Re-kick sim briefly so things settle
                 simRunning = true; simTick = Math.max(0, MAX_SIM - 60);
             });
 
+            // ---- FILTER DROPDOWN handler ----
+            const filterSelect = document.getElementById('graph-filter');
+            if (filterSelect) {
+                filterSelect.addEventListener('change', (e) => {
+                    currentFilter = e.target.value;
+                    rebuildFromFilter();
+                    setInitialPositions();
+                    simRunning = true;
+                    simTick = 0;
+                    highlightId = null;
+                    searchMatches.clear();
+                    if (document.getElementById('graph-search')) document.getElementById('graph-search').value = '';
+                });
+            }
+
             graphState = {
-                nodes, scale: () => scale, setScale: (v) => { scale = v; },
-                panX: () => panX, panY: () => panY,
-                setPan: (x, y) => { panX = x; panY = y; },
                 reset: () => {
                     scale = 1; panX = 0; panY = 0;
-                    for (const n of nodes) { n.fx = null; n.fy = null; }
+                    for (const n of visibleNodes) { n.fx = null; n.fy = null; }
                     simRunning = true; simTick = 0;
                 },
-                stop: () => { cancelAnimationFrame(animId); },
+                stop: () => { if (animId) cancelAnimationFrame(animId); },
             };
         }
 
         function graphZoom(delta) {
             if (!graphState) return;
-            graphState.setScale(Math.max(0.08, Math.min(5, graphState.scale() + delta)));
+            const canvas = document.getElementById('dep-graph-canvas');
+            if (!canvas) return;
+            // We'll handle zoom via the existing wheel event – the buttons are just for convenience.
+            // Simulate a small wheel delta
+            const event = new WheelEvent('wheel', { deltaY: delta > 0 ? -30 : 30 });
+            canvas.dispatchEvent(event);
         }
 
         function graphReset() {
-            if (!graphState) return;
-            graphState.reset();
+            if (graphState) graphState.reset();
         }
 
-
-        // --- CORE LOGIC (existing) ---
+        // --- CORE LOGIC (existing - unchanged except for graph init) ---
         function init() {
-            // Fill inventory to match reported size if needed
             if (reportData.inventory.length < reportData.stats.inventory_size) {
                 const currentCount = reportData.inventory.length;
                 const needed = reportData.stats.inventory_size - currentCount;
@@ -551,7 +622,6 @@ function generateHTMLReport(data) {
             document.getElementById('policy-low').textContent = reportData.policy.severity.low;
             document.getElementById('policy-critical').textContent = reportData.policy.severity.critical;
 
-            // Severity Chart
             const ctxSev = document.getElementById('severityChart').getContext('2d');
             const sevStats = stats.vulnerabilities_stats.severity;
             new Chart(ctxSev, {
@@ -599,28 +669,13 @@ function generateHTMLReport(data) {
                 row.onclick = () => openVulnModal(v.id);
                 row.innerHTML = \`
                     <td class="px-6 py-4 mono text-xs font-medium">\${v.id}</td>
-                    <td class="px-6 py-4">
-                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
-                    </td>
+                    <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span></td>
                     <td class="px-6 py-4 font-medium">\${v.affected_dependency} ( \${v.ecosystem} )</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${v.affected_dependency_version}</td>
-                    <td class="px-6 py-4">
-                        \${v.has_fix ? '<span class="text-green-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}
-                    </td>
-                    <td class="px-6 py-4">
-                        \${v.is_policy_violation
-                              ? '<span class="text-red-400 flex items-center gap-1">' +
-                                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">' +
-                                '<line x1="18" y1="6" x2="6" y2="18"></line>' +
-                                '<line x1="6" y1="6" x2="18" y2="18"></line>' +
-                                '</svg> Yes</span>'
-                              : '<span class="text-neutral-500">No</span>'
-                          }
-                    </td>
+                    <td class="px-6 py-4">\${v.has_fix ? '<span class="text-green-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}</td>
+                    <td class="px-6 py-4">\${v.is_policy_violation ? '<span class="text-red-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}</td>
                     <td class="px-6 py-4 text-neutral-400 text-xs">\${v.fixed_versions.join('<br>')}</td>
-                    <td class="px-6 py-4 text-right">
-                        <button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button>
-                    </td>
+                    <td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>
                 \`;
                 tbody.appendChild(row);
             });
@@ -644,9 +699,7 @@ function generateHTMLReport(data) {
                     <td class="px-6 py-4 mono text-xs font-medium">\${item.id}</td>
                     <td class="px-6 py-4 font-medium">\${item.name}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${item.version}</td>
-                    <td class="px-6 py-4">
-                        <span class="text-xs \${item.state === 'safe' ? 'text-green-400' : 'text-red-400'}">\${item.state}</span>
-                    </td>
+                    <td class="px-6 py-4"><span class="text-xs \${item.state === 'safe' ? 'text-green-400' : 'text-red-400'}">\${item.state}</span></td>
                     <td class="px-6 py-4 text-neutral-400">\${item.ecosystem}</td>
                     <td class="px-6 py-4 text-neutral-400">\${item.license}</td>
                     <td class="px-6 py-4 text-neutral-500 text-xs">\${item.scopes.join(', ')}</td>
@@ -792,9 +845,7 @@ function generateHTMLReport(data) {
                     </div>
                     <div class="flex items-center gap-3">
                         \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
-                        \${v.is_policy_violation
-                            ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>'
-                            : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
+                        \${v.is_policy_violation ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>' : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </div>
                 </div>
@@ -833,43 +884,16 @@ function generateHTMLReport(data) {
                     </div>
 
                     <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p>
-                            <p class="mono text-xs">\${item.type || 'library'}</p>
-                        </div>
-                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p>
-                            <p class="mono text-xs">\${item.license || 'unknown'}</p>
-                        </div>
-                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p>
-                            <p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p>
-                        </div>
-                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p>
-                            <p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p>
-                        </div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p><p class="mono text-xs">\${item.type || 'library'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p><p class="mono text-xs">\${item.license || 'unknown'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p><p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p><p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p></div>
                     </div>
 
-                    <div>
-                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4>
-                        <div class="flex flex-wrap gap-2">\${introRows}</div>
-                    </div>
-
-                    <div>
-                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4>
-                        <div class="flex flex-wrap gap-2">\${depsRows}</div>
-                    </div>
-
-                    <div>
-                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4>
-                        <div class="space-y-1">\${pathRows}</div>
-                    </div>
-
-                    <div>
-                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4>
-                        <div class="space-y-0">\${vulnRows}</div>
-                    </div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">\${depsRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">\${pathRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4><div class="space-y-0">\${vulnRows}</div></div>
                 </div>
             \`;
 
@@ -892,47 +916,16 @@ function generateHTMLReport(data) {
                             </div>
                             <p class="text-neutral-400 text-sm">Package: <span class="text-white font-medium">\${v.affected_dependency}</span> (\${v.affected_dependency_version})</p>
                         </div>
-                        <div class="text-right">
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest">Severity Score</p>
-                            <p class="text-3xl font-bold text-red-500">\${v.severity_score}</p>
-                        </div>
+                        <div class="text-right"><p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest">Severity Score</p><p class="text-3xl font-bold text-red-500">\${v.severity_score}</p></div>
                     </div>
-
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 py-4 border-y border-neutral-800">
-                        <div>
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Published</p>
-                            <p class="text-xs mono">\${new Date(v.published).toLocaleDateString()}</p>
-                        </div>
-                        <div>
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p>
-                            <p class="text-xs mono">\${new Date(v.modified).toLocaleDateString()}</p>
-                        </div>
-                        <div>
-                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p>
-                            <p class="text-[10px] mono text-neutral-400 truncate" title="\${v.severity_vector}">\${v.severity_vector}</p>
-                        </div>
+                        <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Published</p><p class="text-xs mono">\${new Date(v.published).toLocaleDateString()}</p></div>
+                        <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p><p class="text-xs mono">\${new Date(v.modified).toLocaleDateString()}</p></div>
+                        <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="\${v.severity_vector}">\${v.severity_vector}</p></div>
                     </div>
-
-                    <div>
-                        <h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4>
-                        <div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div>
-                    </div>
-
-                    \${v.fixes.length > 0 ? \`
-                    <div>
-                        <h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4>
-                        <ul class="space-y-2">
-                            \${v.fixes.map(f => \`<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">\${f}</li>\`).join('')}
-                        </ul>
-                    </div>
-                    \` : ''}
-
-                    <div>
-                        <h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4>
-                        <div class="flex flex-wrap gap-2">
-                            \${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}
-                        </div>
-                    </div>
+                    <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
+                    \${v.fixes.length > 0 ? \`<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">\${v.fixes.map(f => \`<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">\${f}</li>\`).join('')}</ul></div>\` : ''}
+                    <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
                 </div>
             \`;
 
@@ -945,18 +938,13 @@ function generateHTMLReport(data) {
             document.body.style.overflow = 'auto';
         }
 
-        window.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeModal();
-        });
-
-        document.getElementById('modal-overlay').addEventListener('click', (e) => {
-            if (e.target.id === 'modal-overlay') closeModal();
-        });
+        window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+        document.getElementById('modal-overlay').addEventListener('click', (e) => { if (e.target.id === 'modal-overlay') closeModal(); });
 
         init();
     `;
 
-    // Now produce the final HTML with all sections intact
+    // HTML output (same as before, with the filter dropdown already present)
     return `<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -965,94 +953,32 @@ function generateHTMLReport(data) {
     <title>Ubel Security Scan Report</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --bg: #0a0a0a;
-            --card: #141414;
-            --border: #262626;
-            --accent: #ef4444;
-        }
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg);
-            color: #e5e5e5;
-        }
+        :root { --bg: #0a0a0a; --card: #141414; --border: #262626; --accent: #ef4444; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #e5e5e5; }
         .mono { font-family: 'JetBrains Mono', monospace; }
-        .glass {
-            background: rgba(20, 20, 20, 0.8);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-        }
+        .glass { background: rgba(20,20,20,0.8); backdrop-filter: blur(12px); border: 1px solid var(--border); }
         .severity-high { color: #f87171; border-color: #f87171; }
         .severity-medium { color: #fb923c; border-color: #fb923c; }
         .severity-low { color: #60a5fa; border-color: #60a5fa; }
         .severity-critical { color: #ef4444; border-color: #ef4444; font-weight: bold; }
-        
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: var(--bg); }
         ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: #404040; }
-
-        .tab-active {
-            border-bottom: 2px solid var(--accent);
-            color: white;
-        }
-        
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.8);
-            z-index: 50;
-            backdrop-filter: blur(4px);
-        }
-        .modal-content {
-            max-height: 90vh;
-            overflow-y: auto;
-        }
-        #tree-tooltip {
-            position: fixed;
-            background: rgba(20,20,20,0.95);
-            border: 1px solid #404040;
-            border-radius: 8px;
-            padding: 8px 12px;
-            font-size: 11px;
-            font-family: 'JetBrains Mono', monospace;
-            color: #e5e5e5;
-            pointer-events: none;
-            max-width: 280px;
-            z-index: 100;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-break: break-all;
-            display: none;
-        }
+        .tab-active { border-bottom: 2px solid var(--accent); color: white; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 50; backdrop-filter: blur(4px); }
+        .modal-content { max-height: 90vh; overflow-y: auto; }
+        #graph-tooltip { position: fixed; background: rgba(20,20,20,0.95); border: 1px solid #404040; border-radius: 8px; padding: 8px 12px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: #e5e5e5; pointer-events: none; max-width: 280px; z-index: 100; line-height: 1.6; white-space: pre-wrap; word-break: break-all; display: none; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
-
-    <!-- Header -->
     <header class="border-b border-neutral-800 bg-neutral-900/50 sticky top-0 z-40 backdrop-blur-md">
         <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white">U</div>
-                <div>
-                    <h1 class="text-lg font-semibold tracking-tight">Security Scan Report</h1>
-                    <p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ...</p>
-                </div>
-            </div>
-            <div id="overall-status" class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider">
-                Status: Loading...
-            </div>
+            <div class="flex items-center gap-3"><div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white">U</div><div><h1 class="text-lg font-semibold tracking-tight">Security Scan Report</h1><p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ...</p></div></div>
+            <div id="overall-status" class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider">Status: Loading...</div>
         </div>
     </header>
-
-    <!-- Navigation Tabs -->
     <nav class="border-b border-neutral-800 bg-neutral-900/30">
         <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
             <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
@@ -1063,122 +989,45 @@ function generateHTMLReport(data) {
             <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
         </div>
     </nav>
-
-    <!-- Main Content -->
     <main class="flex-1 max-w-7xl mx-auto w-full p-4 md:p-8">
-        
         <!-- Dashboard Section -->
         <section id="section-dashboard" class="space-y-8">
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div class="glass p-6 rounded-xl">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Total Items</p>
-                    <p class="text-3xl font-bold" id="stat-total">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl border-l-4 border-l-red-500">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerable Items</p>
-                    <p class="text-3xl font-bold text-red-500" id="stat-vulnerabilities">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Infections</p>
-                    <p class="text-3xl font-bold" id="stat-infections">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl border-l-4 border-l-green-500">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Safe Items</p>
-                    <p class="text-3xl font-bold text-green-500" id="stat-safe">0</p>
-                </div>
+                <div class="glass p-6 rounded-xl"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Total Items</p><p class="text-3xl font-bold" id="stat-total">0</p></div>
+                <div class="glass p-6 rounded-xl border-l-4 border-l-red-500"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerable Items</p><p class="text-3xl font-bold text-red-500" id="stat-vulnerabilities">0</p></div>
+                <div class="glass p-6 rounded-xl"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Infections</p><p class="text-3xl font-bold" id="stat-infections">0</p></div>
+                <div class="glass p-6 rounded-xl border-l-4 border-l-green-500"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Safe Items</p><p class="text-3xl font-bold text-green-500" id="stat-safe">0</p></div>
             </div>
-
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl lg:col-span-2">
-                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3>
-                    <div class="h-64">
-                        <canvas id="severityChart"></canvas>
-                    </div>
-                </div>
-                <div class="glass p-6 rounded-xl">
-                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3>
-                    <div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700">
-                        <p class="text-sm leading-relaxed" id="decision-reason">...</p>
-                    </div>
-                    <div class="mt-6 space-y-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-neutral-500">Policy:</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <table class="w-auto text-sm mono">
-                                <tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr>
-                                <tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr>
-                                <tr><td class="pr-2">High</td><td id="policy-high">...</td></tr>
-                                <tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr>
-                                <tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr>
-                            </table>
-                        </div>
-                    </div>
-                </div>
+                <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr><tr><td class="pr-2">High</td><td id="policy-high">...</td></tr><tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr><tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr></table></div></div></div>
             </div>
         </section>
-
         <!-- Vulnerabilities Section -->
         <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                <h2 class="text-xl font-bold">Vulnerability Findings</h2>
-                <div class="flex gap-2 w-full md:w-auto">
-                    <input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
-                    <select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All Severities</option>
-                        <option value="critical">Critical</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="glass rounded-xl overflow-hidden">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
-                        <tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th class="text-right">Action</th></tr>
-                    </thead>
-                    <tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody>
-                </table>
-            </div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
-
         <!-- Inventory Section -->
         <section id="section-inventory" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                <h2 class="text-xl font-bold">Package Inventory</h2>
-                <div class="flex gap-2 w-full md:w-auto">
-                    <input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64">
-                    <select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All States</option>
-                        <option value="safe">Safe</option>
-                        <option value="vulnerable">Vulnerable</option>
-                        <option value="infected">Infected</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="glass rounded-xl overflow-hidden">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
-                        <tr><th class="px-6 py-4">ID</th><th>Name</th><th>Version</th><th>State</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr>
-                    </thead>
-                    <tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody>
-                </table>
-            </div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option></select></div></div>
+            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Name</th><th>Version</th><th>State</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
-
-        <!-- Dependency Graph Section -->
+        <!-- Dependency Graph Section with filter dropdown -->
         <section id="section-graph" class="hidden space-y-4" style="height: calc(100vh - 220px); min-height: 500px;">
             <div class="flex flex-col md:flex-row gap-3 justify-between items-start md:items-center">
                 <h2 class="text-xl font-bold">Dependency Graph</h2>
                 <div class="flex gap-2 w-full md:w-auto items-center flex-wrap">
                     <input type="text" id="graph-search" placeholder="Search by package ID..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-72">
-                    <button onclick="graphZoom(0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">＋</button>
-                    <button onclick="graphZoom(-0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">－</button>
-                    <button onclick="graphReset()" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">Reset</button>
-                    <div class="flex items-center gap-3 text-[10px] mono text-neutral-500 flex-wrap">
+                    <select id="graph-filter" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
+                        <option value="all">All nodes</option>
+                        <option value="vulnerable">Vulnerable nodes (show impact chains)</option>
+                        <option value="infected">Infected nodes (show impact chains)</option>
+                    </select>
+                    <button onclick="graphZoom(0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">＋</button>
+                    <button onclick="graphZoom(-0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">－</button>
+                    <button onclick="graphReset()" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">Reset</button>
+                    <div class="flex items-center gap-3 text-[10px] mono text-neutral-500">
                         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500"></span>safe</span>
                         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-500"></span>vulnerable</span>
                         <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500"></span>infected</span>
@@ -1188,122 +1037,39 @@ function generateHTMLReport(data) {
             </div>
             <div class="glass rounded-xl overflow-hidden relative" style="height: calc(100% - 56px);">
                 <canvas id="dep-graph-canvas" style="width:100%;height:100%;cursor:grab;display:block;"></canvas>
-                <div id="graph-tooltip" style="display:none;position:absolute;background:rgba(20,20,20,0.95);border:1px solid #404040;border-radius:8px;padding:8px 12px;font-size:11px;font-family:'JetBrains Mono',monospace;color:#e5e5e5;pointer-events:none;max-width:280px;z-index:10;line-height:1.6;white-space:pre-wrap;word-break:break-all;"></div>
+                <div id="graph-tooltip" style="display:none;position:absolute;background:rgba(20,20,20,0.95);border:1px solid #404040;border-radius:8px;padding:8px 12px;font-size:11px;font-family:'JetBrains Mono',monospace;color:#e5e5e5;pointer-events:none;max-width:280px;z-index:10;line-height:1.6;white-space:pre-wrap;"></div>
             </div>
         </section>
-
-
         <!-- Detailed Stats Section -->
         <section id="section-stats" class="hidden space-y-8">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3>
-                    <div class="h-48"><canvas id="statsInventoryChart"></canvas></div>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div>
-                    </div>
-                </div>
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3>
-                    <div class="h-48"><canvas id="statsVulnChart"></canvas></div>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div>
-                    </div>
-                </div>
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3>
-                    <div class="h-48"><canvas id="statsEcoChart"></canvas></div>
-                    <div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div>
-                </div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3><div class="h-48"><canvas id="statsInventoryChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3><div class="h-48"><canvas id="statsVulnChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3><div class="h-48"><canvas id="statsEcoChart"></canvas></div><div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div></div>
             </div>
         </section>
-
         <!-- System Section -->
         <section id="section-system" class="hidden space-y-8">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <!-- Runtime -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Runtime</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Environment</span><span class="mono text-xs" id="run-env">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="run-node">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="run-platform">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Arch</span><span class="mono text-xs" id="run-arch">...</span></div>
-                        <div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">CWD</span><span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span></div>
-                    </div>
-                </div>
-                <!-- Engine & Tool -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Engine & Tool</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Name</span><span class="mono text-xs" id="engine-name">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Version</span><span class="mono text-xs" id="engine-version">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Name</span><span class="mono text-xs" id="tool-name">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Version</span><span class="mono text-xs" id="tool-version">...</span></div>
-                    </div>
-                </div>
-                <!-- Scan Info -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Info</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Type</span><span class="mono text-xs" id="scan-type">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Ecosystems</span><span class="mono text-xs" id="scan-ecosystems">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Engine</span><span class="mono text-xs" id="scan-engine">...</span></div>
-                    </div>
-                </div>
-                <!-- OS Metadata -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> OS Metadata</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS ID</span><span class="mono text-xs" id="os-id">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Name</span><span class="mono text-xs" id="os-name">...</span></div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Version</span><span class="mono text-xs" id="os-version">...</span></div>
-                    </div>
-                </div>
-                <!-- Git Metadata -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg> Git Metadata</h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Available</span><span class="mono text-xs" id="git-available">...</span></div>
-                        <div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">Reason</span><span class="mono text-[10px] text-neutral-400 italic" id="git-reason">...</span></div>
-                    </div>
-                </div>
+                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Runtime</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Environment</span><span class="mono text-xs" id="run-env">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="run-node">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="run-platform">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Arch</span><span class="mono text-xs" id="run-arch">...</span></div><div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">CWD</span><span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Engine & Tool</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Name</span><span class="mono text-xs" id="engine-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Version</span><span class="mono text-xs" id="engine-version">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Name</span><span class="mono text-xs" id="tool-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Version</span><span class="mono text-xs" id="tool-version">...</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Info</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Type</span><span class="mono text-xs" id="scan-type">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Ecosystems</span><span class="mono text-xs" id="scan-ecosystems">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Engine</span><span class="mono text-xs" id="scan-engine">...</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> OS Metadata</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS ID</span><span class="mono text-xs" id="os-id">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Name</span><span class="mono text-xs" id="os-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Version</span><span class="mono text-xs" id="os-version">...</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg> Git Metadata</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Available</span><span class="mono text-xs" id="git-available">...</span></div><div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">Reason</span><span class="mono text-[10px] text-neutral-400 italic" id="git-reason">...</span></div></div></div>
             </div>
         </section>
     </main>
-
-    <!-- Footer -->
-    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50">
-        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
-            <p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p>
-        </div>
-    </footer>
-
-    <!-- Modal Overlay -->
+    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p></div></footer>
     <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
         <div class="modal-content glass w-full max-w-3xl rounded-2xl shadow-2xl relative">
-            <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
+            <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
             <div id="modal-body" class="p-8"></div>
         </div>
     </div>
-
-    <script>
-        ${clientScript}
-    </script>
+    <script>${clientScript}</script>
 </body>
 </html>`;
 }
-
 
 function fetchJSON(url, method = "GET", body = null, opts = {}) {
   const {
