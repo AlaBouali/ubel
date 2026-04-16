@@ -170,12 +170,17 @@ function generateHTMLReport(data) {
                     </div>
                     <div class="mt-6 space-y-4">
                         <div class="flex justify-between items-center text-sm">
-                            <span class="text-neutral-500">Policy: Infections</span>
-                            <span class="mono" id="policy-infections">...</span>
+                            <span class="text-neutral-500">Policy:</span>
                         </div>
                         <div class="flex justify-between items-center text-sm">
-                            <span class="text-neutral-500">Policy: High Severity</span>
-                            <span class="mono text-red-400" id="policy-high">...</span>
+                            <span class="text-neutral-500">Severity policy:</span>
+                            <table class="w-auto text-sm mono">
+                                <tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr>
+                                <tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr>
+                                <tr><td class="pr-2">High</td><td id="policy-high">...</td></tr>
+                                <tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr>
+                                <tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -208,6 +213,7 @@ function generateHTMLReport(data) {
                             <th class="px-6 py-4 font-semibold">Version</th>
                             <th class="px-6 py-4 font-semibold">Fix Available</th>
                             <th class="px-6 py-4 font-semibold">Policy Violation</th>
+                            <th class="px-6 py-4 font-semibold">Fixed Versions</th>
                             <th class="px-6 py-4 font-semibold text-right">Action</th>
                         </tr>
                     </thead>
@@ -237,6 +243,7 @@ function generateHTMLReport(data) {
                 <table class="w-full text-left text-sm">
                     <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
                         <tr>
+                            <th class="px-6 py-4 font-semibold">ID</th>
                             <th class="px-6 py-4 font-semibold">Name</th>
                             <th class="px-6 py-4 font-semibold">Version</th>
                             <th class="px-6 py-4 font-semibold">State</th>
@@ -365,8 +372,8 @@ function generateHTMLReport(data) {
                             <span class="mono text-xs" id="scan-type">...</span>
                         </div>
                         <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Ecosystem</span>
-                            <span class="mono text-xs" id="scan-ecosystem">...</span>
+                            <span class="text-neutral-500 text-xs">Ecosystems</span>
+                            <span class="mono text-xs" id="scan-ecosystems">...</span>
                         </div>
                         <div class="flex justify-between border-b border-neutral-800 pb-2">
                             <span class="text-neutral-500 text-xs">Scan Engine</span>
@@ -507,8 +514,11 @@ function generateHTMLReport(data) {
             }
 
             document.getElementById('decision-reason').textContent = reportData.decision.reason;
-            document.getElementById('policy-infections').textContent = reportData.policy.infections;
+            document.getElementById('policy-infection').textContent = reportData.policy.infections;
             document.getElementById('policy-high').textContent = reportData.policy.severity.high;
+            document.getElementById('policy-medium').textContent = reportData.policy.severity.medium;
+            document.getElementById('policy-low').textContent = reportData.policy.severity.low;
+            document.getElementById('policy-critical').textContent = reportData.policy.severity.critical;
 
             // Severity Chart
             const ctxSev = document.getElementById('severityChart').getContext('2d');
@@ -561,7 +571,7 @@ function generateHTMLReport(data) {
                     <td class="px-6 py-4">
                         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
                     </td>
-                    <td class="px-6 py-4 font-medium">\${v.affected_dependency}</td>
+                    <td class="px-6 py-4 font-medium">\${v.affected_dependency} ( \${v.ecosystem} )</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${v.affected_dependency_version}</td>
                     <td class="px-6 py-4">
                         \${v.has_fix ? '<span class="text-green-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}
@@ -576,6 +586,7 @@ function generateHTMLReport(data) {
                               : '<span class="text-neutral-500">No</span>'
                           }
                     </td>
+                    <td class="px-6 py-4 text-neutral-400 text-xs">\${v.fixed_versions.join('<br>')}</td>
                     <td class="px-6 py-4 text-right">
                         <button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button>
                     </td>
@@ -597,7 +608,9 @@ function generateHTMLReport(data) {
             filtered.forEach(item => {
                 const row = document.createElement('tr');
                 row.className = 'hover:bg-neutral-800/30 transition-colors';
+                row.onclick = () => openInvModal(item.id);
                 row.innerHTML = \`
+                    <td class="px-6 py-4 mono text-xs font-medium">\${item.id}</td>
                     <td class="px-6 py-4 font-medium">\${item.name}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${item.version}</td>
                     <td class="px-6 py-4">
@@ -666,22 +679,17 @@ function generateHTMLReport(data) {
             const ecoValues = Object.values(ecoData);
             
             new Chart(document.getElementById('statsEcoChart'), {
-                type: 'polarArea',
+                type: 'pie',
                 data: {
                     labels: ecoLabels,
                     datasets: [{
                         data: ecoValues,
                         backgroundColor: ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'],
                         borderWidth: 1,
-                        borderColor: '#262626'
+                        // borderColor: '#262626'
                     }]
                 },
-                options: { 
-                    responsive: true, 
-                    maintainAspectRatio: false, 
-                    plugins: { legend: { display: false } },
-                    scales: { r: { grid: { color: '#262626' }, ticks: { display: false } } }
-                }
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
 
             const legend = document.getElementById('eco-legend');
@@ -716,7 +724,7 @@ function generateHTMLReport(data) {
 
             // Scan Info
             document.getElementById('scan-type').textContent = scan.type;
-            document.getElementById('scan-ecosystem').textContent = scan.ecosystem;
+            document.getElementById('scan-ecosystems').textContent = scan.ecosystems.join(', ');
             document.getElementById('scan-engine').textContent = scan.engine;
 
             // OS Info
@@ -744,6 +752,108 @@ function generateHTMLReport(data) {
             });
         }
 
+        function openInvModal(id) {
+    const item = reportData.inventory.find(x => x.id === id);
+    if (!item) return;
+
+    const itemVulns = reportData.vulnerabilities.filter(v => v.affected_purl === item.id);
+    const stateColor = item.state === 'safe' ? 'text-green-400'
+                     : item.state === 'infected' ? 'text-red-400'
+                     : 'text-yellow-400';
+
+    const vulnRows = itemVulns.length ? itemVulns.map(v => \`
+        <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openVulnModal('\${v.id}'), 50)">
+            <div class="flex items-center gap-3">
+                <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
+                <span class="mono text-xs text-white">\${v.id}</span>
+            </div>
+            <div class="flex items-center gap-3">
+                \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
+                \${v.is_policy_violation
+                    ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>'
+                    : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </div>
+        </div>
+    \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
+
+    const introRows = (item.introduced_by || []).length
+        ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700">\${ib}</span>\`).join('')
+        : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
+
+    const pathRows = (item.paths || []).length
+        ? item.paths.map(p => \`<div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all">\${p}</div>\`).join('')
+        : '<span class="text-neutral-500 text-xs italic">No path info</span>';
+
+    const depsRows = (item.dependencies || []).length
+        ? item.dependencies.map(d => {
+            const dep = reportData.inventory.find(x => x.id === d);
+            return \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${d}'), 50)">\${dep ? dep.name + '@' + dep.version : d}</span>\`;
+          }).join('')
+        : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
+
+    document.getElementById('modal-body').innerHTML = \`
+        <div class="space-y-6">
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                    <div class="flex items-center gap-3 mb-1 flex-wrap">
+                        <span class="text-[10px] uppercase font-bold \${stateColor} border border-current px-2 py-0.5 rounded">\${item.state}</span>
+                        <h2 class="text-xl font-bold">\${item.name}</h2>
+                        <span class="mono text-neutral-400 text-sm">v\${item.version}</span>
+                    </div>
+                    <p class="mono text-[11px] text-neutral-500 break-all">\${item.id}</p>
+                </div>
+                <div class="text-right shrink-0">
+                    <p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest mb-1">Ecosystem</p>
+                    <p class="mono text-sm">\${item.ecosystem}</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p>
+                    <p class="mono text-xs">\${item.type || 'library'}</p>
+                </div>
+                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p>
+                    <p class="mono text-xs">\${item.license || 'unknown'}</p>
+                </div>
+                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p>
+                    <p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p>
+                </div>
+                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p>
+                    <p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p>
+                </div>
+            </div>
+
+            <div>
+                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4>
+                <div class="flex flex-wrap gap-2">\${introRows}</div>
+            </div>
+
+            <div>
+                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4>
+                <div class="flex flex-wrap gap-2">\${depsRows}</div>
+            </div>
+
+            <div>
+                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4>
+                <div class="space-y-1">\${pathRows}</div>
+            </div>
+
+            <div>
+                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4>
+                <div class="space-y-0">\${vulnRows}</div>
+            </div>
+        </div>
+    \`;
+
+    document.getElementById('modal-overlay').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+}
+
         function openVulnModal(id) {
             const v = reportData.vulnerabilities.find(x => x.id === id);
             if (!v) return;
@@ -755,7 +865,7 @@ function generateHTMLReport(data) {
                         <div>
                             <div class="flex items-center gap-3 mb-2">
                                 <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
-                                <h2 class="text-2xl font-bold mono">\${v.id}</h2>
+                                <h2 class="text-2xl font-bold mono"><a href="\${v.url}" target="_blank" class="text-white hover:text-blue-400">\${v.id}</a></h2>
                             </div>
                             <p class="text-neutral-400 text-sm">Package: <span class="text-white font-medium">\${v.affected_dependency}</span> (\${v.affected_dependency_version})</p>
                         </div>
@@ -947,6 +1057,8 @@ function getDependencyFromPurl(purl) {
 
 function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:npm/"))          return "npm";
+  if (purl.startsWith("pkg:maven/"))        return "maven";
+  if (purl.startsWith("pkg:composer/"))       return "composer";
   if (purl.startsWith("pkg:pypi/"))         return "pypi";
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
   if (purl.startsWith("pkg:deb/debian/"))   return "debian";
@@ -1052,6 +1164,7 @@ async function getVulnById({ vulnerability_id, purl, dependency, affected_versio
   data.affected_purl              = purl;
   data.affected_dependency        = dependency;
   data.affected_dependency_version = affected_version;
+  data.ecosystem                = getEcosystemFromPurl(purl);
   data.url                        = `https://osv.dev/vulnerability/${vulnerability_id}`;
   data.is_infection               = (data.id || "").startsWith("MAL-");
 
@@ -1092,6 +1205,7 @@ function summarizeVulnerabilities(vulnerabilities,inventory) {
     const pkg      = v.affected_dependency;
     const version  = v.affected_dependency_version;
     const purl     = v.affected_purl || "";
+    const ecosystem = getEcosystemFromPurl(purl);
     const introducedBy = inventory.find((item) => item.id === purl)?.introduced_by || [];
     let affected_dep= inventory.find((item) => item.id === purl);
     
@@ -1099,7 +1213,7 @@ function summarizeVulnerabilities(vulnerabilities,inventory) {
       packages[pkg] = {
         name: pkg,
         version,
-        ecosystem: "npm",
+        ecosystem: ecosystem,
         introduced_by: introducedBy,
         paths: affected_dep ? affected_dep.paths : [],
         affected_dependency_sequences: affected_dep ? affected_dep.dependency_sequences : [],
@@ -1259,8 +1373,14 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args) {
-    NodeManager._captureEngineVersion(UbelEngine.engine);
+  static async scan(args, options = {is_script: false}) {
+    const ecosystems = new Set();
+    if (!options.is_script) {
+      NodeManager._captureEngineVersion(UbelEngine.engine);
+    }else{
+      UbelEngine.engine=TOOL_NAME;
+      NodeManager.engineVersion=TOOL_VERSION;
+    }
     const now       = new Date();
     const pad       = (n) => String(n).padStart(2, "0");
     const timestamp = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}__`
@@ -1383,6 +1503,7 @@ export class UbelEngine {
           for (const depPurl of (comp.dependencies || [])) {
             const dep = byId.get(depPurl);
             if (!dep) continue;
+            ecosystems.add(dep.ecosystem);
             // Propagate all non-env scopes from parent to child.
             let changed = false;
             for (const s of comp.scopes) {
@@ -1446,7 +1567,7 @@ export class UbelEngine {
         os_metadata: getOSMetadata(),
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: VERSION },
-        scan_info:    { type: UbelEngine.checkMode, ecosystem: UbelEngine.systemType, engine: UbelEngine.engine },
+        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
         findings_summary: findingsSummary,

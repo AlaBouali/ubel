@@ -5,6 +5,8 @@ import { fileURLToPath } from "url";
 
 import { LockfileParser } from "./lockfiles_parser.js";
 import { TOOL_NAME, VERSION} from "./info.js";
+import { PythonVenvScanner } from "./python_runner.js";
+import {PhpComposerScanner} from "./php_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -781,6 +783,11 @@ export class NodeManager {
 
     const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);
     NodeManager.inventoryData = merged;
+
+    await PythonVenvScanner.getInstalled();
+    await PhpComposerScanner.getInstalled();
+    NodeManager.inventoryData.push(...PythonVenvScanner.inventoryData);
+    NodeManager.inventoryData.push(...PhpComposerScanner.inventoryData);
 
     // Assign pro/dev/env scopes from the project's package.json.
     const pkgJsonPath = path.join(startDir, 'package.json');
