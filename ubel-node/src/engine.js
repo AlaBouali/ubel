@@ -41,420 +41,453 @@ function generateHTMLReport(data) {
     }
 
     // Escape for script tag safety (prevents </script> injection)
-    const safeJson = JSON.stringify(reportData).replace(/</g, '\\u003c');
+    let safeJson = JSON.stringify(reportData).replace(/</g, '\\u003c');
+    // Also escape backticks to avoid breaking the outer template
+    safeJson = safeJson.replace(/`/g, '\\u0060');
 
-    return `<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ubel Security Scan Report</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg: #0a0a0a;
-            --card: #141414;
-            --border: #262626;
-            --accent: #ef4444;
-        }
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg);
-            color: #e5e5e5;
-        }
-        .mono { font-family: 'JetBrains Mono', monospace; }
-        .glass {
-            background: rgba(20, 20, 20, 0.8);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-        }
-        .severity-high { color: #f87171; border-color: #f87171; }
-        .severity-medium { color: #fb923c; border-color: #fb923c; }
-        .severity-low { color: #60a5fa; border-color: #60a5fa; }
-        .severity-critical { color: #ef4444; border-color: #ef4444; font-weight: bold; }
-        
-        /* Custom Scrollbar */
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: var(--bg); }
-        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
-        ::-webkit-scrollbar-thumb:hover { background: #404040; }
-
-        .tab-active {
-            border-bottom: 2px solid var(--accent);
-            color: white;
-        }
-        
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.8);
-            z-index: 50;
-            backdrop-filter: blur(4px);
-        }
-        .modal-content {
-            max-height: 90vh;
-            overflow-y: auto;
-        }
-    </style>
-</head>
-<body class="min-h-screen flex flex-col">
-
-    <!-- Header -->
-    <header class="border-b border-neutral-800 bg-neutral-900/50 sticky top-0 z-40 backdrop-blur-md">
-        <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white">U</div>
-                <div>
-                    <h1 class="text-lg font-semibold tracking-tight">Security Scan Report</h1>
-                    <p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ...</p>
-                </div>
-            </div>
-            <div id="overall-status" class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider">
-                Status: Loading...
-            </div>
-        </div>
-    </header>
-
-    <!-- Navigation Tabs -->
-    <nav class="border-b border-neutral-800 bg-neutral-900/30">
-        <div class="max-w-7xl mx-auto px-4 flex gap-8">
-            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
-            <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities</button>
-            <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory</button>
-            <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
-            <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
-        </div>
-    </nav>
-
-    <!-- Main Content -->
-    <main class="flex-1 max-w-7xl mx-auto w-full p-4 md:p-8">
-        
-        <!-- Dashboard Section -->
-        <section id="section-dashboard" class="space-y-8">
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div class="glass p-6 rounded-xl">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Total Items</p>
-                    <p class="text-3xl font-bold" id="stat-total">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl border-l-4 border-l-red-500">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerable Items</p>
-                    <p class="text-3xl font-bold text-red-500" id="stat-vulnerabilities">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Infections</p>
-                    <p class="text-3xl font-bold" id="stat-infections">0</p>
-                </div>
-                <div class="glass p-6 rounded-xl border-l-4 border-l-green-500">
-                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Safe Items</p>
-                    <p class="text-3xl font-bold text-green-500" id="stat-safe">0</p>
-                </div>
-            </div>
-
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl lg:col-span-2">
-                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3>
-                    <div class="h-64">
-                        <canvas id="severityChart"></canvas>
-                    </div>
-                </div>
-                <div class="glass p-6 rounded-xl">
-                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3>
-                    <div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700">
-                        <p class="text-sm leading-relaxed" id="decision-reason">...</p>
-                    </div>
-                    <div class="mt-6 space-y-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-neutral-500">Policy:</span>
-                        </div>
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-neutral-500">Severity policy:</span>
-                            <table class="w-auto text-sm mono">
-                                <tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr>
-                                <tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr>
-                                <tr><td class="pr-2">High</td><td id="policy-high">...</td></tr>
-                                <tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr>
-                                <tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Vulnerabilities Section -->
-        <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                <h2 class="text-xl font-bold">Vulnerability Findings</h2>
-                <div class="flex gap-2 w-full md:w-auto">
-                    <input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
-                    <select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All Severities</option>
-                        <option value="critical">Critical</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="glass rounded-xl overflow-hidden">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
-                        <tr>
-                            <th class="px-6 py-4 font-semibold">ID</th>
-                            <th class="px-6 py-4 font-semibold">Severity</th>
-                            <th class="px-6 py-4 font-semibold">Package</th>
-                            <th class="px-6 py-4 font-semibold">Version</th>
-                            <th class="px-6 py-4 font-semibold">Fix Available</th>
-                            <th class="px-6 py-4 font-semibold">Policy Violation</th>
-                            <th class="px-6 py-4 font-semibold">Fixed Versions</th>
-                            <th class="px-6 py-4 font-semibold text-right">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody id="vuln-table-body" class="divide-y divide-neutral-800">
-                        <!-- Rows injected by JS -->
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- Inventory Section -->
-        <section id="section-inventory" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                <h2 class="text-xl font-bold">Package Inventory</h2>
-                <div class="flex gap-2 w-full md:w-auto">
-                    <input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64">
-                    <select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All States</option>
-                        <option value="safe">Safe</option>
-                        <option value="vulnerable">Vulnerable</option>
-                        <option value="infected">Infected</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="glass rounded-xl overflow-hidden">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
-                        <tr>
-                            <th class="px-6 py-4 font-semibold">ID</th>
-                            <th class="px-6 py-4 font-semibold">Name</th>
-                            <th class="px-6 py-4 font-semibold">Version</th>
-                            <th class="px-6 py-4 font-semibold">State</th>
-                            <th class="px-6 py-4 font-semibold">Ecosystem</th>
-                            <th class="px-6 py-4 font-semibold">License</th>
-                            <th class="px-6 py-4 font-semibold">Scopes</th>
-                        </tr>
-                    </thead>
-                    <tbody id="inv-table-body" class="divide-y divide-neutral-800">
-                        <!-- Rows injected by JS -->
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- Detailed Stats Section -->
-        <section id="section-stats" class="hidden space-y-8">
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3>
-                    <div class="h-48">
-                        <canvas id="statsInventoryChart"></canvas>
-                    </div>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div>
-                    </div>
-                </div>
-
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3>
-                    <div class="h-48">
-                        <canvas id="statsVulnChart"></canvas>
-                    </div>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div>
-                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div>
-                    </div>
-                </div>
-
-                <div class="glass p-6 rounded-xl space-y-6">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3>
-                    <div class="h-48">
-                        <canvas id="statsEcoChart"></canvas>
-                    </div>
-                    <div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500">
-                        <!-- Legend injected by JS -->
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- System Section -->
-        <section id="section-system" class="hidden space-y-8">
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <!-- Runtime -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                        Runtime
-                    </h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Environment</span>
-                            <span class="mono text-xs" id="run-env">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Version</span>
-                            <span class="mono text-xs" id="run-node">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Platform</span>
-                            <span class="mono text-xs" id="run-platform">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Arch</span>
-                            <span class="mono text-xs" id="run-arch">...</span>
-                        </div>
-                        <div class="flex flex-col gap-1">
-                            <span class="text-neutral-500 text-xs">CWD</span>
-                            <span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Engine & Tool -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                        Engine & Tool
-                    </h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Engine Name</span>
-                            <span class="mono text-xs" id="engine-name">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Engine Version</span>
-                            <span class="mono text-xs" id="engine-version">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Tool Name</span>
-                            <span class="mono text-xs" id="tool-name">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Tool Version</span>
-                            <span class="mono text-xs" id="tool-version">...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Scan Info -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                        Scan Info
-                    </h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Scan Type</span>
-                            <span class="mono text-xs" id="scan-type">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Ecosystems</span>
-                            <span class="mono text-xs" id="scan-ecosystems">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Scan Engine</span>
-                            <span class="mono text-xs" id="scan-engine">...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- OS Metadata -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                        OS Metadata
-                    </h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">OS ID</span>
-                            <span class="mono text-xs" id="os-id">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">OS Name</span>
-                            <span class="mono text-xs" id="os-name">...</span>
-                        </div>
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">OS Version</span>
-                            <span class="mono text-xs" id="os-version">...</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Git Metadata -->
-                <div class="glass p-6 rounded-xl space-y-4">
-                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg>
-                        Git Metadata
-                    </h3>
-                    <div class="space-y-3">
-                        <div class="flex justify-between border-b border-neutral-800 pb-2">
-                            <span class="text-neutral-500 text-xs">Available</span>
-                            <span class="mono text-xs" id="git-available">...</span>
-                        </div>
-                        <div class="flex flex-col gap-1">
-                            <span class="text-neutral-500 text-xs">Reason</span>
-                            <span class="mono text-[10px] text-neutral-400 italic" id="git-reason">...</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-    </main>
-
-    <!-- Footer -->
-    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50">
-        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
-            <p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p>
-            <div class="flex gap-6">
-                
-            </div>
-        </div>
-    </footer>
-
-    <!-- Modal Overlay -->
-    <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
-        <div class="modal-content glass w-full max-w-3xl rounded-2xl shadow-2xl relative">
-            <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
-            <div id="modal-body" class="p-8">
-                <!-- Content injected by JS -->
-            </div>
-        </div>
-    </div>
-
-    <script>
+    // The complete client-side script
+    const clientScript = `
         // --- DATA ---
         const reportData = ${safeJson};
 
-        // --- CORE LOGIC ---
+        
+
+        // ── Dependency Graph (force-directed) ──────────────────────────────────────────
+        let graphState = null;
+
+        function initGraph() {
+            const canvas = document.getElementById('dep-graph-canvas');
+            if (!canvas) return;
+
+            const tree = reportData.dependencies_tree || {};
+            if (!Object.keys(tree).length) {
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#737373';
+                ctx.font = '14px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No dependency tree data available.', canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // Build node + edge lists from tree
+            const nodeMap = {};
+            const edges = [];
+
+            const getOrCreate = (id) => {
+                if (!nodeMap[id]) {
+                    const inv = reportData.inventory.find(x => x.id === id);
+                    nodeMap[id] = {
+                        id,
+                        label: inv ? inv.name + '@' + inv.version : id.split('/').pop(),
+                        fullLabel: id,
+                        state: inv ? (inv.state || 'unknown') : 'unknown',
+                        x: 0, y: 0, vx: 0, vy: 0,
+                        fx: null, fy: null,
+                        radius: 0,
+                    };
+                }
+                return nodeMap[id];
+            };
+
+            const walk = (nodeId, children, depth) => {
+                getOrCreate(nodeId);
+                for (const [childId, grandChildren] of Object.entries(children || {})) {
+                    getOrCreate(childId);
+                    edges.push({ source: nodeId, target: childId });
+                    walk(childId, grandChildren, depth + 1);
+                }
+            };
+
+            for (const [rootId, children] of Object.entries(tree)) {
+                walk(rootId, children, 0);
+            }
+
+            const nodes = Object.values(nodeMap);
+
+            // Deduplicate edges
+            const edgeSet = new Set();
+            const uniqueEdges = edges.filter(e => {
+                const key = e.source + '||' + e.target;
+                if (edgeSet.has(key)) return false;
+                edgeSet.add(key);
+                return true;
+            });
+
+            // Node sizing
+            const childCount = {};
+            for (const e of uniqueEdges) {
+                childCount[e.source] = (childCount[e.source] || 0) + 1;
+            }
+            for (const n of nodes) {
+                const c = childCount[n.id] || 0;
+                n.radius = c > 10 ? 18 : c > 4 ? 14 : c > 1 ? 11 : 8;
+            }
+
+            // Initial positions — circular layout
+            const cx = 0, cy = 0, R = Math.max(150, nodes.length * 9);
+            nodes.forEach((n, i) => {
+                const angle = (2 * Math.PI * i) / nodes.length;
+                n.x = cx + R * Math.cos(angle) + (Math.random() - 0.5) * 40;
+                n.y = cy + R * Math.sin(angle) + (Math.random() - 0.5) * 40;
+            });
+
+            // Viewport
+            let scale = 1, panX = 0, panY = 0;
+            let dragging = null;
+            let isPanning = false, panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
+            let highlightId = null;
+            let searchMatches = new Set();
+
+            const stateColor = (state) => ({
+                safe:       { fill: '#16a34a', stroke: '#4ade80', text: '#f0fdf4' },
+                vulnerable: { fill: '#ca8a04', stroke: '#fbbf24', text: '#fefce8' },
+                infected:   { fill: '#dc2626', stroke: '#f87171', text: '#fef2f2' },
+                unknown:    { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' },
+            }[state] || { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' });
+
+            // Force simulation
+            let simTick = 0;
+            const MAX_SIM = 300;
+            const SIM_COOLDOWN = 0.92;
+            let simRunning = true;
+
+            const simulate = () => {
+                if (!simRunning) return;
+
+                const adjList = {};
+                for (const n of nodes) adjList[n.id] = [];
+                for (const e of uniqueEdges) {
+                    adjList[e.source].push(e.target);
+                    adjList[e.target].push(e.source);
+                }
+
+                // Repulsion
+                for (let i = 0; i < nodes.length; i++) {
+                    for (let j = i + 1; j < nodes.length; j++) {
+                        const a = nodes[i], b = nodes[j];
+                        const dx = b.x - a.x, dy = b.y - a.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+                        const force = Math.min(8000 / (dist * dist), 60);
+                        const fx = (dx / dist) * force, fy = (dy / dist) * force;
+                        a.vx -= fx; a.vy -= fy;
+                        b.vx += fx; b.vy += fy;
+                    }
+                }
+
+                // Spring (edges)
+                for (const e of uniqueEdges) {
+                    const a = nodeMap[e.source], b = nodeMap[e.target];
+                    if (!a || !b) continue;
+                    const dx = b.x - a.x, dy = b.y - a.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+                    const ideal = (a.radius + b.radius) * 5 + 30;
+                    const force = (dist - ideal) * 0.04;
+                    const fx = (dx / dist) * force, fy = (dy / dist) * force;
+                    a.vx += fx; a.vy += fy;
+                    b.vx -= fx; b.vy -= fy;
+                }
+
+                // Center gravity
+                for (const n of nodes) {
+                    n.vx += -n.x * 0.004;
+                    n.vy += -n.y * 0.004;
+                }
+
+                // Integrate + dampen
+                for (const n of nodes) {
+                    if (n.fx !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
+                    n.vx *= SIM_COOLDOWN; n.vy *= SIM_COOLDOWN;
+                    n.x += n.vx; n.y += n.vy;
+                }
+
+                simTick++;
+                if (simTick > MAX_SIM) simRunning = false;
+            };
+
+            // Render
+            const render = () => {
+                const dpr = window.devicePixelRatio || 1;
+                const rect = canvas.getBoundingClientRect();
+                if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+                    canvas.width = rect.width * dpr;
+                    canvas.height = rect.height * dpr;
+                }
+                const ctx = canvas.getContext('2d');
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.scale(dpr, dpr);
+
+                const W = rect.width, H = rect.height;
+                const tx = W / 2 + panX, ty = H / 2 + panY;
+
+                ctx.save();
+                ctx.translate(tx, ty);
+                ctx.scale(scale, scale);
+
+                // Edges
+                ctx.lineWidth = 0.8;
+                for (const e of uniqueEdges) {
+                    const a = nodeMap[e.source], b = nodeMap[e.target];
+                    if (!a || !b) continue;
+                    const isHighlighted = highlightId && (e.source === highlightId || e.target === highlightId);
+                    const isSearchMatch = searchMatches.size > 0 && (searchMatches.has(e.source) || searchMatches.has(e.target));
+                    const dimmed = (highlightId && !isHighlighted) || (searchMatches.size > 0 && !isSearchMatch);
+                    ctx.globalAlpha = dimmed ? 0.08 : isHighlighted ? 0.9 : 0.25;
+                    ctx.strokeStyle = isHighlighted ? '#ef4444' : '#525252';
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.lineTo(b.x, b.y);
+                    ctx.stroke();
+
+                    // Arrow
+                    if (isHighlighted || !dimmed) {
+                        const ang = Math.atan2(b.y - a.y, b.x - a.x);
+                        const ex = b.x - Math.cos(ang) * (b.radius + 3);
+                        const ey = b.y - Math.sin(ang) * (b.radius + 3);
+                        ctx.globalAlpha = dimmed ? 0.08 : 0.5;
+                        ctx.fillStyle = isHighlighted ? '#ef4444' : '#737373';
+                        ctx.beginPath();
+                        ctx.moveTo(ex, ey);
+                        ctx.lineTo(ex - Math.cos(ang - 0.4) * 6, ey - Math.sin(ang - 0.4) * 6);
+                        ctx.lineTo(ex - Math.cos(ang + 0.4) * 6, ey - Math.sin(ang + 0.4) * 6);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                }
+
+                // Nodes
+                for (const n of nodes) {
+                    const c = stateColor(n.state);
+                    const isHl = n.id === highlightId;
+                    const isMatch = searchMatches.has(n.id);
+                    const dimmed = (highlightId && !isHl) || (searchMatches.size > 0 && !isMatch && !isHl);
+
+                    ctx.globalAlpha = dimmed ? 0.15 : 1;
+
+                    // Glow ring for matches
+                    if (isMatch || isHl) {
+                        ctx.beginPath();
+                        ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2);
+                        ctx.fillStyle = isHl ? '#ef4444' : c.stroke;
+                        ctx.globalAlpha = 0.25;
+                        ctx.fill();
+                        ctx.globalAlpha = dimmed ? 0.15 : 1;
+                    }
+
+                    ctx.beginPath();
+                    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+                    ctx.fillStyle = c.fill;
+                    ctx.fill();
+                    ctx.strokeStyle = isHl ? '#ffffff' : c.stroke;
+                    ctx.lineWidth = isHl ? 2.5 : 1.5;
+                    ctx.stroke();
+
+                    // Label (only if zoomed enough or highlighted/matched)
+                    const showLabel = scale > 0.7 || isHl || isMatch;
+                    if (showLabel) {
+                        ctx.globalAlpha = dimmed ? 0.15 : isHl ? 1 : 0.85;
+                        ctx.fillStyle = '#e5e5e5';
+                        ctx.font = \`\${isHl ? 'bold ' : ''}\${Math.max(9, Math.min(11, n.radius * 0.9))}px JetBrains Mono, monospace\`;
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        const labelY = n.y + n.radius + 9;
+                        // Shadow
+                        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+                        ctx.fillText(n.label, n.x + 0.5, labelY + 0.5);
+                        ctx.fillStyle = isHl ? '#ffffff' : '#d4d4d4';
+                        ctx.fillText(n.label, n.x, labelY);
+                    }
+                }
+
+                ctx.globalAlpha = 1;
+                ctx.restore();
+            };
+
+            // Animation loop
+            let animId;
+            const loop = () => {
+                simulate();
+                render();
+                animId = requestAnimationFrame(loop);
+            };
+            loop();
+
+            // Canvas → world coords
+            const toWorld = (cx, cy) => {
+                const rect = canvas.getBoundingClientRect();
+                const W = rect.width, H = rect.height;
+                return {
+                    x: (cx - W / 2 - panX) / scale,
+                    y: (cy - H / 2 - panY) / scale,
+                };
+            };
+
+            const hitTest = (wx, wy) => {
+                let best = null, bestDist = Infinity;
+                for (const n of nodes) {
+                    const d = Math.sqrt((wx - n.x) ** 2 + (wy - n.y) ** 2);
+                    if (d < n.radius + 4 && d < bestDist) { best = n; bestDist = d; }
+                }
+                return best;
+            };
+
+            // Tooltip
+            const tooltip = document.getElementById('graph-tooltip');
+            canvas.addEventListener('mousemove', (e) => {
+                const r = canvas.getBoundingClientRect();
+                const mx = e.clientX - r.left, my = e.clientY - r.top;
+                const { x: wx, y: wy } = toWorld(mx, my);
+                const hit = hitTest(wx, wy);
+                if (hit) {
+                    canvas.style.cursor = dragging ? 'grabbing' : 'pointer';
+                    const inv = reportData.inventory.find(x => x.id === hit.id);
+                    const vulns = reportData.vulnerabilities.filter(v => v.affected_purl === hit.id);
+                    tooltip.textContent = [
+                        hit.id,
+                        \`State: \${hit.state}\`,
+                        inv ? \`License: \${inv.license || 'unknown'}\` : '',
+                        inv ? \`Scopes: \${(inv.scopes || []).join(', ') || '—'}\` : '',
+                        vulns.length ? \`Vulns: \${vulns.length} (\${vulns.map(v=>v.severity).join(', ')})\` : 'No vulnerabilities',
+                    ].filter(Boolean).join('\\n');
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (mx + 14) + 'px';
+                    tooltip.style.top = (my - 10) + 'px';
+                } else {
+                    canvas.style.cursor = isPanning ? 'grabbing' : 'grab';
+                    tooltip.style.display = 'none';
+                }
+
+                if (dragging) {
+                    dragging.fx = (mx - canvas.getBoundingClientRect().left - canvas.getBoundingClientRect().width / 2 - panX) / scale;
+                    dragging.fy = (my - canvas.getBoundingClientRect().top - canvas.getBoundingClientRect().height / 2 - panY) / scale;
+                    dragging.x = dragging.fx;
+                    dragging.y = dragging.fy;
+                }
+
+                if (isPanning) {
+                    panX = panOriginX + (e.clientX - panStartX);
+                    panY = panOriginY + (e.clientY - panStartY);
+                }
+            });
+
+            canvas.addEventListener('mousedown', (e) => {
+                const r = canvas.getBoundingClientRect();
+                const mx = e.clientX - r.left, my = e.clientY - r.top;
+                const { x: wx, y: wy } = toWorld(mx, my);
+                const hit = hitTest(wx, wy);
+                if (hit) {
+                    dragging = hit;
+                    hit.fx = hit.x; hit.fy = hit.y;
+                    simRunning = true; simTick = 0;
+                } else {
+                    isPanning = true;
+                    panStartX = e.clientX; panStartY = e.clientY;
+                    panOriginX = panX; panOriginY = panY;
+                    canvas.style.cursor = 'grabbing';
+                }
+            });
+
+            canvas.addEventListener('mouseup', (e) => {
+                if (dragging) {
+                    dragging.fx = null; dragging.fy = null;
+                    dragging = null;
+                }
+                isPanning = false;
+                canvas.style.cursor = 'grab';
+            });
+
+            canvas.addEventListener('click', (e) => {
+                if (isPanning) return;
+                const r = canvas.getBoundingClientRect();
+                const mx = e.clientX - r.left, my = e.clientY - r.top;
+                const { x: wx, y: wy } = toWorld(mx, my);
+                const hit = hitTest(wx, wy);
+                if (hit) {
+                    highlightId = hit.id === highlightId ? null : hit.id;
+                    if (hit.id) openInvModal(hit.id);
+                } else {
+                    highlightId = null;
+                }
+            });
+
+            // Touch support
+            let lastTouchDist = null;
+            canvas.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 2) {
+                    lastTouchDist = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                }
+            }, { passive: true });
+            canvas.addEventListener('touchmove', (e) => {
+                if (e.touches.length === 2) {
+                    const d = Math.hypot(
+                        e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY
+                    );
+                    if (lastTouchDist) { scale = Math.max(0.1, Math.min(5, scale * (d / lastTouchDist))); }
+                    lastTouchDist = d;
+                    e.preventDefault();
+                }
+            }, { passive: false });
+
+            // Scroll zoom
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                const r = canvas.getBoundingClientRect();
+                const mx = e.clientX - r.left, my = e.clientY - r.top;
+                const W = r.width, H = r.height;
+                const wxBefore = (mx - W/2 - panX) / scale;
+                const wyBefore = (my - H/2 - panY) / scale;
+                scale = Math.max(0.08, Math.min(5, scale + delta * scale));
+                panX = mx - W/2 - wxBefore * scale;
+                panY = my - H/2 - wyBefore * scale;
+            }, { passive: false });
+
+            // Search
+            document.getElementById('graph-search').addEventListener('input', (e) => {
+                const q = e.target.value.trim().toLowerCase();
+                searchMatches.clear();
+                if (q.length >= 2) {
+                    for (const n of nodes) {
+                        if (n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q)) {
+                            searchMatches.add(n.id);
+                        }
+                    }
+                }
+                // Re-kick sim briefly so things settle
+                simRunning = true; simTick = Math.max(0, MAX_SIM - 60);
+            });
+
+            graphState = {
+                nodes, scale: () => scale, setScale: (v) => { scale = v; },
+                panX: () => panX, panY: () => panY,
+                setPan: (x, y) => { panX = x; panY = y; },
+                reset: () => {
+                    scale = 1; panX = 0; panY = 0;
+                    for (const n of nodes) { n.fx = null; n.fy = null; }
+                    simRunning = true; simTick = 0;
+                },
+                stop: () => { cancelAnimationFrame(animId); },
+            };
+        }
+
+        function graphZoom(delta) {
+            if (!graphState) return;
+            graphState.setScale(Math.max(0.08, Math.min(5, graphState.scale() + delta)));
+        }
+
+        function graphReset() {
+            if (!graphState) return;
+            graphState.reset();
+        }
+
+
+        // --- CORE LOGIC (existing) ---
         function init() {
-            // Fill inventory to match reported size if needed (for demo consistency)
+            // Fill inventory to match reported size if needed
             if (reportData.inventory.length < reportData.stats.inventory_size) {
                 const currentCount = reportData.inventory.length;
                 const needed = reportData.stats.inventory_size - currentCount;
@@ -475,9 +508,7 @@ function generateHTMLReport(data) {
                 }
             }
 
-            // Ensure modal is strictly hidden
             closeModal();
-            
             renderDashboard();
             renderVulnerabilities();
             renderInventory();
@@ -487,13 +518,13 @@ function generateHTMLReport(data) {
         }
 
         function switchTab(tabId) {
-            // Update UI
             document.querySelectorAll('nav button').forEach(btn => btn.classList.remove('tab-active'));
             document.getElementById(\`tab-\${tabId}\`).classList.add('tab-active');
-
-            // Hide all sections
             document.querySelectorAll('main section').forEach(sec => sec.classList.add('hidden'));
             document.getElementById(\`section-\${tabId}\`).classList.remove('hidden');
+            if (tabId === 'graph' && !graphState) {
+                setTimeout(initGraph, 50);
+            }
         }
 
         function renderDashboard() {
@@ -558,7 +589,7 @@ function generateHTMLReport(data) {
             });
 
             if (filtered.length === 0) {
-                tbody.innerHTML = \`<tr><td colspan="6" class="px-6 py-12 text-center text-neutral-500 italic">No vulnerabilities found matching criteria.</td></tr>\`;
+                tbody.innerHTML = \`<tr><td colspan="8" class="px-6 py-12 text-center text-neutral-500 italic">No vulnerabilities found matching criteria.</td></tr>\`;
                 return;
             }
 
@@ -627,7 +658,6 @@ function generateHTMLReport(data) {
         function renderStats() {
             const s = reportData.stats;
             
-            // Text Stats
             document.getElementById('stats-inv-size').textContent = s.inventory_size;
             document.getElementById('stats-inv-safe').textContent = s.inventory_stats.safe;
             document.getElementById('stats-inv-vuln').textContent = s.inventory_stats.vulnerable;
@@ -638,8 +668,8 @@ function generateHTMLReport(data) {
             document.getElementById('stats-vuln-high').textContent = s.vulnerabilities_stats.severity.high;
             document.getElementById('stats-vuln-med').textContent = s.vulnerabilities_stats.severity.medium;
             document.getElementById('stats-vuln-low').textContent = s.vulnerabilities_stats.severity.low;
+            document.getElementById('stats-vuln-unk').textContent = s.vulnerabilities_stats.severity.unknown;
 
-            // Inventory Chart
             new Chart(document.getElementById('statsInventoryChart'), {
                 type: 'doughnut',
                 data: {
@@ -653,26 +683,25 @@ function generateHTMLReport(data) {
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
 
-            // Vulnerability Chart
             new Chart(document.getElementById('statsVulnChart'), {
                 type: 'pie',
                 data: {
-                    labels: ['Critical', 'High', 'Medium', 'Low'],
+                    labels: ['Critical', 'High', 'Medium', 'Low', 'Unknown'],
                     datasets: [{
                         data: [
                             s.vulnerabilities_stats.severity.critical,
                             s.vulnerabilities_stats.severity.high,
                             s.vulnerabilities_stats.severity.medium,
-                            s.vulnerabilities_stats.severity.low
+                            s.vulnerabilities_stats.severity.low,
+                            s.vulnerabilities_stats.severity.unknown
                         ],
-                        backgroundColor: ['#ef4444', '#f87171', '#fb923c', '#60a5fa'],
+                        backgroundColor: ['#ef4444', '#f87171', '#fb923c', '#60a5fa', '#cbd5e0'],
                         borderWidth: 0
                     }]
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
 
-            // Ecosystem Chart
             const ecoData = {};
             reportData.inventory.forEach(item => { ecoData[item.ecosystem] = (ecoData[item.ecosystem] || 0) + 1; });
             const ecoLabels = Object.keys(ecoData);
@@ -686,7 +715,6 @@ function generateHTMLReport(data) {
                         data: ecoValues,
                         backgroundColor: ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'],
                         borderWidth: 1,
-                        // borderColor: '#262626'
                     }]
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
@@ -709,30 +737,25 @@ function generateHTMLReport(data) {
             const tool = reportData.tool_info;
             const scan = reportData.scan_info;
 
-            // Runtime
             document.getElementById('run-env').textContent = r.environment;
             document.getElementById('run-node').textContent = r.version;
             document.getElementById('run-platform').textContent = r.platform;
             document.getElementById('run-arch').textContent = r.arch;
             document.getElementById('run-cwd').textContent = r.cwd;
 
-            // Engine & Tool
             document.getElementById('engine-name').textContent = eng.name;
             document.getElementById('engine-version').textContent = eng.version;
             document.getElementById('tool-name').textContent = tool.name;
             document.getElementById('tool-version').textContent = tool.version;
 
-            // Scan Info
             document.getElementById('scan-type').textContent = scan.type;
             document.getElementById('scan-ecosystems').textContent = scan.ecosystems.join(', ');
             document.getElementById('scan-engine').textContent = scan.engine;
 
-            // OS Info
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
-            // Git Info
             document.getElementById('git-available').textContent = git.available ? 'Yes' : 'No';
             document.getElementById('git-reason').textContent = git.reason || 'N/A';
         }
@@ -753,106 +776,106 @@ function generateHTMLReport(data) {
         }
 
         function openInvModal(id) {
-    const item = reportData.inventory.find(x => x.id === id);
-    if (!item) return;
+            const item = reportData.inventory.find(x => x.id === id);
+            if (!item) return;
 
-    const itemVulns = reportData.vulnerabilities.filter(v => v.affected_purl === item.id);
-    const stateColor = item.state === 'safe' ? 'text-green-400'
-                     : item.state === 'infected' ? 'text-red-400'
-                     : 'text-yellow-400';
+            const itemVulns = reportData.vulnerabilities.filter(v => v.affected_purl === item.id);
+            const stateColor = item.state === 'safe' ? 'text-green-400'
+                             : item.state === 'infected' ? 'text-red-400'
+                             : 'text-yellow-400';
 
-    const vulnRows = itemVulns.length ? itemVulns.map(v => \`
-        <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openVulnModal('\${v.id}'), 50)">
-            <div class="flex items-center gap-3">
-                <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
-                <span class="mono text-xs text-white">\${v.id}</span>
-            </div>
-            <div class="flex items-center gap-3">
-                \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
-                \${v.is_policy_violation
-                    ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>'
-                    : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </div>
-        </div>
-    \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
-
-    const introRows = (item.introduced_by || []).length
-        ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700">\${ib}</span>\`).join('')
-        : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
-
-    const pathRows = (item.paths || []).length
-        ? item.paths.map(p => \`<div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all">\${p}</div>\`).join('')
-        : '<span class="text-neutral-500 text-xs italic">No path info</span>';
-
-    const depsRows = (item.dependencies || []).length
-        ? item.dependencies.map(d => {
-            const dep = reportData.inventory.find(x => x.id === d);
-            return \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${d}'), 50)">\${dep ? dep.name + '@' + dep.version : d}</span>\`;
-          }).join('')
-        : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
-
-    document.getElementById('modal-body').innerHTML = \`
-        <div class="space-y-6">
-            <div class="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                    <div class="flex items-center gap-3 mb-1 flex-wrap">
-                        <span class="text-[10px] uppercase font-bold \${stateColor} border border-current px-2 py-0.5 rounded">\${item.state}</span>
-                        <h2 class="text-xl font-bold">\${item.name}</h2>
-                        <span class="mono text-neutral-400 text-sm">v\${item.version}</span>
+            const vulnRows = itemVulns.length ? itemVulns.map(v => \`
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openVulnModal('\${v.id}'), 50)">
+                    <div class="flex items-center gap-3">
+                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
+                        <span class="mono text-xs text-white">\${v.id}</span>
                     </div>
-                    <p class="mono text-[11px] text-neutral-500 break-all">\${item.id}</p>
+                    <div class="flex items-center gap-3">
+                        \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
+                        \${v.is_policy_violation
+                            ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>'
+                            : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </div>
                 </div>
-                <div class="text-right shrink-0">
-                    <p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest mb-1">Ecosystem</p>
-                    <p class="mono text-sm">\${item.ecosystem}</p>
+            \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
+
+            const introRows = (item.introduced_by || []).length
+                ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700">\${ib}</span>\`).join('')
+                : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
+
+            const pathRows = (item.paths || []).length
+                ? item.paths.map(p => \`<div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all">\${p}</div>\`).join('')
+                : '<span class="text-neutral-500 text-xs italic">No path info</span>';
+
+            const depsRows = (item.dependencies || []).length
+                ? item.dependencies.map(d => {
+                    const dep = reportData.inventory.find(x => x.id === d);
+                    return \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${d}'), 50)">\${dep ? dep.name + '@' + dep.version : d}</span>\`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
+
+            document.getElementById('modal-body').innerHTML = \`
+                <div class="space-y-6">
+                    <div class="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                            <div class="flex items-center gap-3 mb-1 flex-wrap">
+                                <span class="text-[10px] uppercase font-bold \${stateColor} border border-current px-2 py-0.5 rounded">\${item.state}</span>
+                                <h2 class="text-xl font-bold">\${item.name}</h2>
+                                <span class="mono text-neutral-400 text-sm">v\${item.version}</span>
+                            </div>
+                            <p class="mono text-[11px] text-neutral-500 break-all">\${item.id}</p>
+                        </div>
+                        <div class="text-right shrink-0">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest mb-1">Ecosystem</p>
+                            <p class="mono text-sm">\${item.ecosystem}</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p>
+                            <p class="mono text-xs">\${item.type || 'library'}</p>
+                        </div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p>
+                            <p class="mono text-xs">\${item.license || 'unknown'}</p>
+                        </div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p>
+                            <p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p>
+                        </div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p>
+                            <p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4>
+                        <div class="flex flex-wrap gap-2">\${introRows}</div>
+                    </div>
+
+                    <div>
+                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4>
+                        <div class="flex flex-wrap gap-2">\${depsRows}</div>
+                    </div>
+
+                    <div>
+                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4>
+                        <div class="space-y-1">\${pathRows}</div>
+                    </div>
+
+                    <div>
+                        <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4>
+                        <div class="space-y-0">\${vulnRows}</div>
+                    </div>
                 </div>
-            </div>
+            \`;
 
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p>
-                    <p class="mono text-xs">\${item.type || 'library'}</p>
-                </div>
-                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p>
-                    <p class="mono text-xs">\${item.license || 'unknown'}</p>
-                </div>
-                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p>
-                    <p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p>
-                </div>
-                <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
-                    <p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p>
-                    <p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p>
-                </div>
-            </div>
-
-            <div>
-                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4>
-                <div class="flex flex-wrap gap-2">\${introRows}</div>
-            </div>
-
-            <div>
-                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4>
-                <div class="flex flex-wrap gap-2">\${depsRows}</div>
-            </div>
-
-            <div>
-                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4>
-                <div class="space-y-1">\${pathRows}</div>
-            </div>
-
-            <div>
-                <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4>
-                <div class="space-y-0">\${vulnRows}</div>
-            </div>
-        </div>
-    \`;
-
-    document.getElementById('modal-overlay').style.display = 'flex';
-    document.body.style.overflow = 'hidden';
-}
+            document.getElementById('modal-overlay').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
 
         function openVulnModal(id) {
             const v = reportData.vulnerabilities.find(x => x.id === id);
@@ -922,22 +945,365 @@ function generateHTMLReport(data) {
             document.body.style.overflow = 'auto';
         }
 
-        // Close modal on escape
         window.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeModal();
         });
 
-        // Close modal on overlay click
         document.getElementById('modal-overlay').addEventListener('click', (e) => {
             if (e.target.id === 'modal-overlay') closeModal();
         });
 
-        // Initialize
         init();
+    `;
+
+    // Now produce the final HTML with all sections intact
+    return `<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ubel Security Scan Report</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --card: #141414;
+            --border: #262626;
+            --accent: #ef4444;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: #e5e5e5;
+        }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glass {
+            background: rgba(20, 20, 20, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+        }
+        .severity-high { color: #f87171; border-color: #f87171; }
+        .severity-medium { color: #fb923c; border-color: #fb923c; }
+        .severity-low { color: #60a5fa; border-color: #60a5fa; }
+        .severity-critical { color: #ef4444; border-color: #ef4444; font-weight: bold; }
+        
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #404040; }
+
+        .tab-active {
+            border-bottom: 2px solid var(--accent);
+            color: white;
+        }
+        
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 50;
+            backdrop-filter: blur(4px);
+        }
+        .modal-content {
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        #tree-tooltip {
+            position: fixed;
+            background: rgba(20,20,20,0.95);
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: #e5e5e5;
+            pointer-events: none;
+            max-width: 280px;
+            z-index: 100;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+            display: none;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="border-b border-neutral-800 bg-neutral-900/50 sticky top-0 z-40 backdrop-blur-md">
+        <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white">U</div>
+                <div>
+                    <h1 class="text-lg font-semibold tracking-tight">Security Scan Report</h1>
+                    <p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ...</p>
+                </div>
+            </div>
+            <div id="overall-status" class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider">
+                Status: Loading...
+            </div>
+        </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="border-b border-neutral-800 bg-neutral-900/30">
+        <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
+            <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
+            <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities</button>
+            <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory</button>
+            <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Graph</button>
+            <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
+            <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="flex-1 max-w-7xl mx-auto w-full p-4 md:p-8">
+        
+        <!-- Dashboard Section -->
+        <section id="section-dashboard" class="space-y-8">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="glass p-6 rounded-xl">
+                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Total Items</p>
+                    <p class="text-3xl font-bold" id="stat-total">0</p>
+                </div>
+                <div class="glass p-6 rounded-xl border-l-4 border-l-red-500">
+                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerable Items</p>
+                    <p class="text-3xl font-bold text-red-500" id="stat-vulnerabilities">0</p>
+                </div>
+                <div class="glass p-6 rounded-xl">
+                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Infections</p>
+                    <p class="text-3xl font-bold" id="stat-infections">0</p>
+                </div>
+                <div class="glass p-6 rounded-xl border-l-4 border-l-green-500">
+                    <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Safe Items</p>
+                    <p class="text-3xl font-bold text-green-500" id="stat-safe">0</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div class="glass p-6 rounded-xl lg:col-span-2">
+                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3>
+                    <div class="h-64">
+                        <canvas id="severityChart"></canvas>
+                    </div>
+                </div>
+                <div class="glass p-6 rounded-xl">
+                    <h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3>
+                    <div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700">
+                        <p class="text-sm leading-relaxed" id="decision-reason">...</p>
+                    </div>
+                    <div class="mt-6 space-y-4">
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-neutral-500">Policy:</span>
+                        </div>
+                        <div class="flex justify-between items-center text-sm">
+                            <table class="w-auto text-sm mono">
+                                <tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr>
+                                <tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr>
+                                <tr><td class="pr-2">High</td><td id="policy-high">...</td></tr>
+                                <tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr>
+                                <tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Vulnerabilities Section -->
+        <section id="section-vulnerabilities" class="hidden space-y-6">
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
+                <h2 class="text-xl font-bold">Vulnerability Findings</h2>
+                <div class="flex gap-2 w-full md:w-auto">
+                    <input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
+                    <select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
+                        <option value="all">All Severities</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="glass rounded-xl overflow-hidden">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
+                        <tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th class="text-right">Action</th></tr>
+                    </thead>
+                    <tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Inventory Section -->
+        <section id="section-inventory" class="hidden space-y-6">
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
+                <h2 class="text-xl font-bold">Package Inventory</h2>
+                <div class="flex gap-2 w-full md:w-auto">
+                    <input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64">
+                    <select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
+                        <option value="all">All States</option>
+                        <option value="safe">Safe</option>
+                        <option value="vulnerable">Vulnerable</option>
+                        <option value="infected">Infected</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="glass rounded-xl overflow-hidden">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
+                        <tr><th class="px-6 py-4">ID</th><th>Name</th><th>Version</th><th>State</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr>
+                    </thead>
+                    <tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Dependency Graph Section -->
+        <section id="section-graph" class="hidden space-y-4" style="height: calc(100vh - 220px); min-height: 500px;">
+            <div class="flex flex-col md:flex-row gap-3 justify-between items-start md:items-center">
+                <h2 class="text-xl font-bold">Dependency Graph</h2>
+                <div class="flex gap-2 w-full md:w-auto items-center flex-wrap">
+                    <input type="text" id="graph-search" placeholder="Search by package ID..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-72">
+                    <button onclick="graphZoom(0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">＋</button>
+                    <button onclick="graphZoom(-0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">－</button>
+                    <button onclick="graphReset()" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700 transition-colors">Reset</button>
+                    <div class="flex items-center gap-3 text-[10px] mono text-neutral-500 flex-wrap">
+                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500"></span>safe</span>
+                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-500"></span>vulnerable</span>
+                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500"></span>infected</span>
+                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-neutral-500"></span>unknown</span>
+                    </div>
+                </div>
+            </div>
+            <div class="glass rounded-xl overflow-hidden relative" style="height: calc(100% - 56px);">
+                <canvas id="dep-graph-canvas" style="width:100%;height:100%;cursor:grab;display:block;"></canvas>
+                <div id="graph-tooltip" style="display:none;position:absolute;background:rgba(20,20,20,0.95);border:1px solid #404040;border-radius:8px;padding:8px 12px;font-size:11px;font-family:'JetBrains Mono',monospace;color:#e5e5e5;pointer-events:none;max-width:280px;z-index:10;line-height:1.6;white-space:pre-wrap;word-break:break-all;"></div>
+            </div>
+        </section>
+
+
+        <!-- Detailed Stats Section -->
+        <section id="section-stats" class="hidden space-y-8">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <div class="glass p-6 rounded-xl space-y-6">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3>
+                    <div class="h-48"><canvas id="statsInventoryChart"></canvas></div>
+                    <div class="space-y-2">
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div>
+                    </div>
+                </div>
+                <div class="glass p-6 rounded-xl space-y-6">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3>
+                    <div class="h-48"><canvas id="statsVulnChart"></canvas></div>
+                    <div class="space-y-2">
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div>
+                        <div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div>
+                    </div>
+                </div>
+                <div class="glass p-6 rounded-xl space-y-6">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3>
+                    <div class="h-48"><canvas id="statsEcoChart"></canvas></div>
+                    <div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- System Section -->
+        <section id="section-system" class="hidden space-y-8">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <!-- Runtime -->
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Runtime</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Environment</span><span class="mono text-xs" id="run-env">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="run-node">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="run-platform">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Arch</span><span class="mono text-xs" id="run-arch">...</span></div>
+                        <div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">CWD</span><span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span></div>
+                    </div>
+                </div>
+                <!-- Engine & Tool -->
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Engine & Tool</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Name</span><span class="mono text-xs" id="engine-name">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Version</span><span class="mono text-xs" id="engine-version">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Name</span><span class="mono text-xs" id="tool-name">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Version</span><span class="mono text-xs" id="tool-version">...</span></div>
+                    </div>
+                </div>
+                <!-- Scan Info -->
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Info</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Type</span><span class="mono text-xs" id="scan-type">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Ecosystems</span><span class="mono text-xs" id="scan-ecosystems">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Engine</span><span class="mono text-xs" id="scan-engine">...</span></div>
+                    </div>
+                </div>
+                <!-- OS Metadata -->
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> OS Metadata</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS ID</span><span class="mono text-xs" id="os-id">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Name</span><span class="mono text-xs" id="os-name">...</span></div>
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Version</span><span class="mono text-xs" id="os-version">...</span></div>
+                    </div>
+                </div>
+                <!-- Git Metadata -->
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg> Git Metadata</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Available</span><span class="mono text-xs" id="git-available">...</span></div>
+                        <div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">Reason</span><span class="mono text-[10px] text-neutral-400 italic" id="git-reason">...</span></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50">
+        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+            <p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p>
+        </div>
+    </footer>
+
+    <!-- Modal Overlay -->
+    <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
+        <div class="modal-content glass w-full max-w-3xl rounded-2xl shadow-2xl relative">
+            <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+            <div id="modal-body" class="p-8"></div>
+        </div>
+    </div>
+
+    <script>
+        ${clientScript}
     </script>
 </body>
 </html>`;
 }
+
 
 function fetchJSON(url, method = "GET", body = null, opts = {}) {
   const {
