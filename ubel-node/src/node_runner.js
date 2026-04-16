@@ -7,6 +7,7 @@ import { LockfileParser } from "./lockfiles_parser.js";
 import { TOOL_NAME, VERSION} from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
 import {PhpComposerScanner} from "./php_runner.js";
+import { RustCargoScanner} from "./rust_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -786,8 +787,10 @@ export class NodeManager {
 
     await PythonVenvScanner.getInstalled();
     await PhpComposerScanner.getInstalled();
+    await RustCargoScanner.getInstalled();
     NodeManager.inventoryData.push(...PythonVenvScanner.inventoryData);
     NodeManager.inventoryData.push(...PhpComposerScanner.inventoryData);
+    NodeManager.inventoryData.push(...RustCargoScanner.inventoryData);
 
     // Assign pro/dev/env scopes from the project's package.json.
     const pkgJsonPath = path.join(startDir, 'package.json');

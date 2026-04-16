@@ -203,7 +203,7 @@ function generateHTMLReport(data) {
             }
 
             // Initial build (all nodes)
-            currentFilter = 'all';
+            currentFilter = 'vulnerable';
             rebuildFromFilter();
 
             // ---- Helper: initial positions (circular layout) ----
@@ -1020,9 +1020,9 @@ function generateHTMLReport(data) {
                 <div class="flex gap-2 w-full md:w-auto items-center flex-wrap">
                     <input type="text" id="graph-search" placeholder="Search by package ID..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-72">
                     <select id="graph-filter" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All nodes</option>
-                        <option value="vulnerable">Vulnerable nodes (show impact chains)</option>
-                        <option value="infected">Infected nodes (show impact chains)</option>
+                        <option value="all">All graphs</option>
+                        <option value="vulnerable" selected>Vulnerable graphs</option>
+                        <option value="infected">Infected graphs</option>
                     </select>
                     <button onclick="graphZoom(0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">＋</button>
                     <button onclick="graphZoom(-0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">－</button>
@@ -1190,6 +1190,8 @@ function getDependencyFromPurl(purl) {
 function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:npm/"))          return "npm";
   if (purl.startsWith("pkg:maven/"))        return "maven";
+  if (purl.startsWith("pkg:golang/"))       return "golang";
+  if (purl.startsWith("pkg:cargo/"))        return "rust";
   if (purl.startsWith("pkg:composer/"))       return "composer";
   if (purl.startsWith("pkg:pypi/"))         return "pypi";
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
