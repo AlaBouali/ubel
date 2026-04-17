@@ -146,7 +146,7 @@ export class PythonVenvScanner {
         version,
         type: "library",
         license,
-        ecosystem: "pypi",
+        ecosystem: "python",
         state: "undetermined",
         scopes: [],
         dependencies,

@@ -186,7 +186,7 @@ export class RustCargoScanner {
         version:      pkg.version,
         type:         "library",
         license:      "unknown",
-        ecosystem:    "cargo",
+        ecosystem:    "rust",
         state:        "undetermined",
         scopes:       [],
         dependencies,
@@ -298,9 +298,6 @@ export class RustCargoScanner {
         if (["node_modules", ".git", ".ubel", "target"].includes(entry.name)) continue;
 
         const full = path.join(dir, entry.name);
-        if (RustCargoScanner._isCargoRoot(full)) {
-          console.log(`Found Cargo project at ${full}, scanning...`);
-        }
 
         if (RustCargoScanner._isCargoRoot(full)) {
           const key = path.resolve(full);
@@ -332,7 +329,6 @@ export class RustCargoScanner {
     for (const c of merged) delete c._source;
 
     this.inventoryData = merged;
-    console.log(`[+] Detected ${merged.length} unique Cargo packages.`);
     return merged.map(c => c.id);
   }
 }

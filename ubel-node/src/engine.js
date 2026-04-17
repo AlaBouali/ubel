@@ -696,10 +696,10 @@ function generateHTMLReport(data) {
                 row.className = 'hover:bg-neutral-800/30 transition-colors';
                 row.onclick = () => openInvModal(item.id);
                 row.innerHTML = \`
-                    <td class="px-6 py-4 mono text-xs font-medium">\${item.id}</td>
                     <td class="px-6 py-4 font-medium">\${item.name}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${item.version}</td>
                     <td class="px-6 py-4"><span class="text-xs \${item.state === 'safe' ? 'text-green-400' : 'text-red-400'}">\${item.state}</span></td>
+                    <td class="px-6 py-4"><span class="text-xs \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</span></td>
                     <td class="px-6 py-4 text-neutral-400">\${item.ecosystem}</td>
                     <td class="px-6 py-4 text-neutral-400">\${item.license}</td>
                     <td class="px-6 py-4 text-neutral-500 text-xs">\${item.scopes.join(', ')}</td>
@@ -852,7 +852,7 @@ function generateHTMLReport(data) {
             \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
 
             const introRows = (item.introduced_by || []).length
-                ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700">\${ib}</span>\`).join('')
+                ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${ib}'), 50)">\${ib}</span>\`).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
             const pathRows = (item.paths || []).length
@@ -887,7 +887,7 @@ function generateHTMLReport(data) {
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p><p class="mono text-xs">\${item.type || 'library'}</p></div>
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p><p class="mono text-xs">\${item.license || 'unknown'}</p></div>
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p><p class="mono text-xs">\${(item.scopes || []).join(', ') || '—'}</p></div>
-                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vulnerabilities</p><p class="text-lg font-bold \${itemVulns.length > 0 ? 'text-red-400' : 'text-green-400'}">\${itemVulns.length}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
                     </div>
 
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
@@ -923,9 +923,9 @@ function generateHTMLReport(data) {
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p><p class="text-xs mono">\${new Date(v.modified).toLocaleDateString()}</p></div>
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="\${v.severity_vector}">\${v.severity_vector}</p></div>
                     </div>
-                    <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
                     \${v.fixes.length > 0 ? \`<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">\${v.fixes.map(f => \`<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">\${f}</li>\`).join('')}</ul></div>\` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
+                    <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
                 </div>
             \`;
 
@@ -1011,7 +1011,7 @@ function generateHTMLReport(data) {
         <!-- Inventory Section -->
         <section id="section-inventory" class="hidden space-y-6">
             <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option></select></div></div>
-            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Name</th><th>Version</th><th>State</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
+            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th>Name</th><th>Version</th><th>State</th><th>Policy Violation</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Dependency Graph Section with filter dropdown -->
         <section id="section-graph" class="hidden space-y-4" style="height: calc(100vh - 220px); min-height: 500px;">
@@ -1171,29 +1171,85 @@ function fetchJSON(url, method = "GET", body = null, opts = {}) {
 
 // ── PURL helpers ──────────────────────────────────────────────────────────────
 function getDependencyFromPurl(purl) {
-  // e.g. pkg:npm/%40scope/name@1.2.3  or  pkg:npm/name@1.2.3
-  let info;
-  if (purl.startsWith("pkg:pypi/") || purl.startsWith("pkg:npm/")) {
-    const prefix = purl.startsWith("pkg:pypi/") ? "pkg:pypi/" : "pkg:npm/";
-    info = purl.slice(prefix.length);
-  } else {
-    info = purl.split("/").pop();
+  if (!purl || typeof purl !== "string" || !purl.startsWith("pkg:")) {
+    return ["unknown", "unknown"];
   }
-  // Decode percent-encoded @ for scoped packages (%40scope/name → @scope/name)
-  info = info.replace(/^%40/, "@");
-  // Handle scoped packages: @scope/name@version has two @ signs
-  const lastAt = info.lastIndexOf("@");
-  if (lastAt <= 0) return [info, "unknown"];
-  return [info.slice(0, lastAt), info.slice(lastAt + 1)];
+
+  // Remove "pkg:"
+  let body = purl.slice(4);
+
+  // Strip qualifiers (?...) and subpath (#...)
+  body = body.split("?")[0].split("#")[0];
+
+  // Extract type
+  const firstSlash = body.indexOf("/");
+  if (firstSlash === -1) return ["unknown", "unknown"];
+
+  const type = body.slice(0, firstSlash);
+  let remainder = body.slice(firstSlash + 1);
+
+  // Decode percent encoding
+  remainder = decodeURIComponent(remainder);
+
+  // Extract version (last @ only)
+  let name, version = "unknown";
+  const lastAt = remainder.lastIndexOf("@");
+
+  if (lastAt > 0) {
+    name = remainder.slice(0, lastAt);
+    version = remainder.slice(lastAt + 1);
+  } else {
+    name = remainder;
+  }
+
+  // Normalize per ecosystem
+  switch (type) {
+    case "npm":
+      // @scope/name OR name
+      return [name, version];
+
+    case "pypi":
+      return [name.toLowerCase(), version];
+
+    case "golang":
+      // github.com/user/repo[/subpkg]
+      return [name, version];
+
+    case "maven": {
+      return [name, version];
+    }
+
+    case "nuget":
+      return [name.toLowerCase(), version];
+
+    case "cargo":
+      // rust
+      return [name, version];
+
+    case "gem":
+      // ruby
+      return [name, version];
+
+    case "deb":
+    case "rpm": {
+      // distro packages (debian, ubuntu, rhel, rocky, almalinux)
+      // format: distro/name
+      const parts = name.split("/");
+      return [parts[parts.length - 1], version];
+    }
+
+    default:
+      return [name, version];
+  }
 }
 
 function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:npm/"))          return "npm";
-  if (purl.startsWith("pkg:maven/"))        return "maven";
+  if (purl.startsWith("pkg:maven/"))        return "java";
   if (purl.startsWith("pkg:golang/"))       return "golang";
   if (purl.startsWith("pkg:cargo/"))        return "rust";
-  if (purl.startsWith("pkg:composer/"))       return "composer";
-  if (purl.startsWith("pkg:pypi/"))         return "pypi";
+  if (purl.startsWith("pkg:composer/"))       return "php";
+  if (purl.startsWith("pkg:pypi/"))         return "python";
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
   if (purl.startsWith("pkg:deb/debian/"))   return "debian";
   if (purl.startsWith("pkg:rpm/redhat/"))   return "redhat";
@@ -1247,7 +1303,7 @@ function generateFix(ranges, versions, pkgName, ecosystem) {
   if (fixed.length)
     return `Upgrade ${pkgName} ( ${ecosystem} ) to: ${fixed.join(" or ")}`;
   if (fallback.length)
-    return `Upgrade ${pkgName} ( ${ecosystem} ) to a version other than: ${fallback.join(" or ")}`;
+    return `Upgrade ${pkgName} ( ${ecosystem} ) to a version higher than: ${fallback.join(" or ")}`;
   return `No fix available for ${pkgName}`;
 }
 
@@ -1586,6 +1642,10 @@ export class UbelEngine {
         v.is_policy_violation = v.policy_decision === "block";
       }
 
+      for (const inventoryItem of inventory) {
+        ecosystems.add(getEcosystemFromPurl(inventoryItem.id));
+        inventoryItem.is_policy_violation = vulnerabilities.some(v => v.affected_purl === inventoryItem.id && v.policy_decision === "block");
+      }
       // ── Stats ──────────────────────────────────────────────────────────────
       const severityBuckets = { critical:0, high:0, medium:0, low:0, unknown:0 };
       const infectedPurls   = new Set();
@@ -1637,7 +1697,6 @@ export class UbelEngine {
           for (const depPurl of (comp.dependencies || [])) {
             const dep = byId.get(depPurl);
             if (!dep) continue;
-            ecosystems.add(dep.ecosystem);
             // Propagate all non-env scopes from parent to child.
             let changed = false;
             for (const s of comp.scopes) {

@@ -113,7 +113,7 @@ export class PhpComposerScanner {
         version,
         type:         "library",
         license,
-        ecosystem:    "composer",
+        ecosystem:    "php",
         state:        "undetermined",
         scopes:       [],
         dependencies,
