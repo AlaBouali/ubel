@@ -47,6 +47,9 @@ const PURL_TYPE = {
 
 function makePurl(ecosystem, name, version) {
   const type = PURL_TYPE[ecosystem] ?? ecosystem;
+  if (ecosystem === "rockylinux") {
+    ecosystem = "rocky-linux";
+  }
   return `pkg:${type}/${ecosystem}/${name}@${version ?? ""}`;
 }
 
@@ -158,7 +161,7 @@ function buildPackage(ecosystem, name, version, license_, paths, depNames, purls
     id,
     name,
     version,
-    type:         "library",
+    type:         "application",
     ecosystem,
     license:      license_ || "unknown",
     state:        "undetermined",

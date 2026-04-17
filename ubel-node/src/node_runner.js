@@ -9,6 +9,9 @@ import { PythonVenvScanner } from "./python_runner.js";
 import {PhpComposerScanner} from "./php_runner.js";
 import { RustCargoScanner} from "./rust_runner.js";
 import {GoModScanner} from "./go_runner.js";
+import {CSharpNuGetScanner} from "./csharp_runner.js";
+import { JavaMavenScanner} from "./java_runner.js";
+import { RubyBundlerScanner} from "./ruby_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -789,11 +792,17 @@ export class NodeManager {
     await PythonVenvScanner.getInstalled();
     await PhpComposerScanner.getInstalled();
     await RustCargoScanner.getInstalled();
-    GoModScanner.getInstalled();
+    await GoModScanner.getInstalled();
+    await CSharpNuGetScanner.getInstalled();
+    await JavaMavenScanner.getInstalled();
+    await RubyBundlerScanner.getInstalled();
     NodeManager.inventoryData.push(...PythonVenvScanner.inventoryData);
     NodeManager.inventoryData.push(...PhpComposerScanner.inventoryData);
     NodeManager.inventoryData.push(...RustCargoScanner.inventoryData);
     NodeManager.inventoryData.push(...GoModScanner.inventoryData);
+    NodeManager.inventoryData.push(...CSharpNuGetScanner.inventoryData);
+    NodeManager.inventoryData.push(...JavaMavenScanner.inventoryData);
+    NodeManager.inventoryData.push(...RubyBundlerScanner.inventoryData);
 
     // Assign pro/dev/env scopes from the project's package.json.
     const pkgJsonPath = path.join(startDir, 'package.json');

@@ -810,7 +810,9 @@ function generateHTMLReport(data) {
             document.getElementById('os-version').textContent = os.os_version;
 
             document.getElementById('git-available').textContent = git.available ? 'Yes' : 'No';
-            document.getElementById('git-reason').textContent = git.reason || 'N/A';
+            document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
+            document.getElementById('git-branch').textContent = git.branch || 'N/A';
+            document.getElementById('git-url').textContent = git.url || 'N/A';
         }
 
         function setupFilters() {
@@ -1050,14 +1052,157 @@ function generateHTMLReport(data) {
         </section>
         <!-- System Section -->
         <section id="section-system" class="hidden space-y-8">
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg> Runtime</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Environment</span><span class="mono text-xs" id="run-env">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="run-node">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="run-platform">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Arch</span><span class="mono text-xs" id="run-arch">...</span></div><div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">CWD</span><span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span></div></div></div>
-                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg> Engine & Tool</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Name</span><span class="mono text-xs" id="engine-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Engine Version</span><span class="mono text-xs" id="engine-version">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Name</span><span class="mono text-xs" id="tool-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool Version</span><span class="mono text-xs" id="tool-version">...</span></div></div></div>
-                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Info</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Type</span><span class="mono text-xs" id="scan-type">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Ecosystems</span><span class="mono text-xs" id="scan-ecosystems">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Scan Engine</span><span class="mono text-xs" id="scan-engine">...</span></div></div></div>
-                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> OS Metadata</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS ID</span><span class="mono text-xs" id="os-id">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Name</span><span class="mono text-xs" id="os-name">...</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OS Version</span><span class="mono text-xs" id="os-version">...</span></div></div></div>
-                <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg> Git Metadata</h3><div class="space-y-3"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Available</span><span class="mono text-xs" id="git-available">...</span></div><div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">Reason</span><span class="mono text-[10px] text-neutral-400 italic" id="git-reason">...</span></div></div></div>
-            </div>
-        </section>
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+
+    <!-- Runtime -->
+    <div class="glass p-6 rounded-xl space-y-4">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+        </svg>
+        Runtime
+      </h3>
+      <div class="space-y-3">
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Environment</span>
+          <span class="mono text-xs" id="run-env">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Version</span>
+          <span class="mono text-xs" id="run-node">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Platform</span>
+          <span class="mono text-xs" id="run-platform">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Arch</span>
+          <span class="mono text-xs" id="run-arch">...</span>
+        </div>
+        <div class="flex flex-col gap-1">
+          <span class="text-neutral-500 text-xs">CWD</span>
+          <span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="run-cwd">...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Engine -->
+    <div class="glass p-6 rounded-xl space-y-4">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+        </svg>
+        Engine & Tool
+      </h3>
+      <div class="space-y-3">
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Engine Name</span>
+          <span class="mono text-xs" id="engine-name">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Engine Version</span>
+          <span class="mono text-xs" id="engine-version">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Tool Name</span>
+          <span class="mono text-xs" id="tool-name">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Tool Version</span>
+          <span class="mono text-xs" id="tool-version">...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scan Info -->
+    <div class="glass p-6 rounded-xl space-y-4">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        Scan Info
+      </h3>
+      <div class="space-y-3">
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Scan Type</span>
+          <span class="mono text-xs" id="scan-type">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Ecosystems</span>
+          <span class="mono text-xs" id="scan-ecosystems">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Scan Engine</span>
+          <span class="mono text-xs" id="scan-engine">...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- OS -->
+    <div class="glass p-6 rounded-xl space-y-4">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+          <line x1="8" y1="21" x2="16" y2="21"/>
+          <line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        OS Metadata
+      </h3>
+      <div class="space-y-3">
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">OS ID</span>
+          <span class="mono text-xs" id="os-id">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">OS Name</span>
+          <span class="mono text-xs" id="os-name">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">OS Version</span>
+          <span class="mono text-xs" id="os-version">...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Git (fixed) -->
+    <div class="glass p-6 rounded-xl space-y-4">
+      <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="18" cy="18" r="3"/>
+          <circle cx="6" cy="6" r="3"/>
+          <path d="M13 6h3a2 2 0 0 1 2 2v7"/>
+          <line x1="6" y1="9" x2="6" y2="21"/>
+        </svg>
+        Git Metadata
+      </h3>
+
+      <div class="space-y-3">
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Available</span>
+          <span class="mono text-xs" id="git-available">...</span>
+        </div>
+
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Lastest commit</span>
+          <span class="mono text-xs" id="git-rev">...</span>
+        </div>
+
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Branch</span>
+          <span class="mono text-xs" id="git-branch">...</span>
+        </div>
+
+        <div class="flex flex-col gap-1">
+          <span class="text-neutral-500 text-xs">Remote URL</span>
+          <span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="git-url">...</span>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</section>
     </main>
     <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p></div></footer>
     <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
@@ -1244,6 +1389,8 @@ function getDependencyFromPurl(purl) {
 }
 
 function getEcosystemFromPurl(purl) {
+  if (purl.startsWith("pkg:gem/"))        return "ruby";
+  if (purl.startsWith("pkg:nuget/"))      return "dotnet";
   if (purl.startsWith("pkg:npm/"))          return "npm";
   if (purl.startsWith("pkg:maven/"))        return "java";
   if (purl.startsWith("pkg:golang/"))       return "golang";
@@ -1379,9 +1526,11 @@ function matchDependenciesWithInventory(inventory) {
 
 function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   for (const item of inventory) {
+    if (item.version !== ""){
     if (infectedPurls.has(item.id))   item.state = "infected";
     else if (vulnerablePurls.has(item.id)) item.state = "vulnerable";
     else                               item.state = "safe";
+  }
   }
 }
 
@@ -1616,6 +1765,12 @@ export class UbelEngine {
         reportContent = {};
       }
 
+      for (const purl of purls) {
+        if (purl.split('@')[1] === "") {
+          purls = purls.filter(p => p !== purl);
+        }
+      }
+
       // ── OSV query ─────────────────────────────────────────────────────────
       const vuln_ids = await submitToOsv(purls);
       const uniquePurls = [...new Set(purls)];
@@ -1738,10 +1893,9 @@ export class UbelEngine {
       }
 
       const git_metadata = getGitMetadata();
-      const isEmpty = (git_metadata)=> Object.keys(git_metadata).length === 0;
+      const isEmpty = git_metadata.url === null && git_metadata.branch === null && git_metadata.commit === null;
       if (isEmpty) {
         git_metadata.available = false;
-        git_metadata.reason = "not_a_git_repository";
       }else{
         git_metadata.available = true;
       }
