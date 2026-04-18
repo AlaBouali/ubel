@@ -1,41 +1,50 @@
-#!/usr/bin/env python3
+"""
+linux_manager.py — Linux host package manager.
 
-import subprocess
+Pure-Python, zero external dependencies.
+  - OS detection via /etc/os-release (stdlib only, no `distro` package)
+  - Package inventory delegated to LinuxHostScanner (linux_host_scanner.py)
+  - All other methods (resolve, real install, PURL building, dep sequences)
+    preserved 1:1 from the original.
+"""
+
+from __future__ import annotations
+
+import os
+import re
 import shutil
-import distro
-import json,os
+import subprocess
 import sys
-from .os_health import scan_host
+from typing import Any, Dict, List, Optional
+
+from .os_health import LinuxHostScanner
+
 
 class Linux_Manager:
 
-    inventory_data = []
+    inventory_data: List[Dict[str, Any]] = []
 
+    # ------------------------------------------------------------------ #
+    # Dependency sequences                                                 #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def build_dependency_sequences(inventory):
-
+    def build_dependency_sequences(inventory: List[Dict]) -> List[Dict]:
         by_id = {c["id"]: c for c in inventory}
 
-        depended = set()
-
+        depended: set = set()
         for comp in inventory:
             for dep in comp.get("dependencies", []):
                 depended.add(dep)
 
         roots = [c["id"] for c in inventory if c["id"] not in depended]
 
-        sequences = {}
+        sequences: Dict[str, List] = {}
 
-        def dfs(node, path):
-
+        def dfs(node: str, path: List[str]) -> None:
             next_path = path + [node]
-
             sequences.setdefault(node, []).append(next_path)
-
-            deps = by_id.get(node, {}).get("dependencies", [])
-
-            for dep in deps:
+            for dep in by_id.get(node, {}).get("dependencies", []):
                 if dep not in path and dep in by_id:
                     dfs(dep, next_path)
 
@@ -47,390 +56,321 @@ class Linux_Manager:
 
         return inventory
 
+    # ------------------------------------------------------------------ #
+    # Merge                                                                #
+    # ------------------------------------------------------------------ #
+
     @staticmethod
-    def merge_inventory_by_purl(components):
-
-        merged = {}
-
+    def merge_inventory_by_purl(components: List[Dict]) -> List[Dict]:
+        merged: Dict[str, Dict] = {}
         for comp in components:
-
             cid = comp["id"]
-
             if cid not in merged:
                 clone = dict(comp)
-                clone["paths"] = clone.get("paths", [])
+                clone["paths"] = list(clone.get("paths", []))
                 merged[cid] = clone
                 continue
-
             existing = merged[cid]
-
             for p in comp.get("paths", []):
                 if p and p not in existing["paths"]:
                     existing["paths"].append(p)
-
         return list(merged.values())
 
+    # ------------------------------------------------------------------ #
+    # Shell helpers                                                        #
+    # ------------------------------------------------------------------ #
+
     @staticmethod
-    def command_exists(cmd):
+    def command_exists(cmd: str) -> bool:
         return shutil.which(cmd) is not None
 
-
     @staticmethod
-    def run_command(cmd):
+    def run_command(cmd: List[str]) -> str:
         try:
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                check=True
+                check=True,
             )
             return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError as exc:
             print(f"[!] Command failed: {' '.join(cmd)}", file=sys.stderr)
-            print(e.stderr, file=sys.stderr)
+            print(exc.stderr, file=sys.stderr)
             return ""
 
+    # ------------------------------------------------------------------ #
+    # OS detection  (stdlib only — no `distro` package)                   #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def get_os_info():
-        info = {
-            "id": distro.id().replace(" ",""),
-            "name": distro.name(),
-            "version": distro.version(),
-            "like": distro.like(),
-            "package_manager":Linux_Manager.get_pkg_manager(),
-            "info": distro.info()
+    def _parse_os_release() -> Dict[str, str]:
+        """Parse /etc/os-release (or /usr/lib/os-release) into a plain dict."""
+        data: Dict[str, str] = {}
+        for candidate in ("/etc/os-release", "/usr/lib/os-release"):
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                    for raw in fh:
+                        line = raw.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        eq  = line.index("=")
+                        key = line[:eq].strip().lower()
+                        val = line[eq + 1:].strip().strip('"').strip("'")
+                        data[key] = val
+                return data
+            except OSError:
+                continue
+        return data
+
+    @staticmethod
+    def get_os_info() -> Dict[str, str]:
+        """
+        Return an OS information dict that mirrors the shape previously
+        produced by the `distro` library, extended with raw os-release keys.
+
+        Keys guaranteed to be present:
+            id, name, version, like, package_manager
+        All raw /etc/os-release keys are also included (lowercased).
+        """
+        raw = Linux_Manager._parse_os_release()
+
+        os_id   = raw.get("id", "").replace(" ", "")
+        name    = raw.get("pretty_name") or raw.get("name", os_id)
+        version = raw.get("version_id", raw.get("version", ""))
+        like    = raw.get("id_like", "")
+
+        info: Dict[str, str] = {
+            "id":              os_id,
+            "name":            name,
+            "version":         version,
+            "like":            like,
+            "package_manager": Linux_Manager.get_pkg_manager(),
         }
-
-        # Try /etc/os-release (most reliable)
-        try:
-            with open("/etc/os-release") as f:
-                for line in f:
-                    if "=" in line:
-                        k, v = line.rstrip().split("=", 1)
-                        info[k.lower()] = v.strip('"')
-        except FileNotFoundError:
-            pass
-
+        # Merge all raw os-release keys so callers that read e.g. info["id_like"]
+        # directly continue to work.
+        info.update(raw)
         return info
 
-    @staticmethod
-    def list_dpkg_packages():
-        os_info=Linux_Manager.get_os_info()
-        output = Linux_Manager.run_command(["dpkg-query", "-W", "-f=${Package}\t${Version}\n"])
-        packages = []
-        for line in output.splitlines():
-            name, version = line.split("\t", 1)
-            packages.append({
-                "name": name,
-                "version": version,
-                "type": "application",
-                "license": "unknown",
-                "locations": [],
-                "ecosystem": os_info["id"]})
-        return packages
-
+    # ------------------------------------------------------------------ #
+    # Package manager detection                                            #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def list_rpm_packages():
-        os_info=Linux_Manager.get_os_info()
-        output = Linux_Manager.run_command(["rpm", "-qa", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}\n"])
-        packages = []
-        for line in output.splitlines():
-            name, version = line.split("\t", 1)
-            packages.append({
-                "name": name, 
-                "version": version,
-                "type": "application",
-                "license": "unknown",
-                "locations": [],
-                "ecosystem": os_info["id"]})
-        return packages
+    def get_pkg_manager() -> Optional[str]:
+        for pm in ("apt", "apt-get", "dnf", "yum"):
+            if Linux_Manager.command_exists(pm):
+                return pm
+        return None
 
+    # ------------------------------------------------------------------ #
+    # PURL builder                                                         #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def list_pacman_packages():
-        os_info=Linux_Manager.get_os_info()
-        output = Linux_Manager.run_command(["pacman", "-Q"])
-        packages = []
-        for line in output.splitlines():
-            name, version = line.split(" ", 1)
-            packages.append({
-                "name": name, 
-                "version": version,
-                "type": "application",
-                "license": "unknown",
-                "locations": [],
-                "ecosystem": os_info["id"]})
-        return packages
+    def package_to_purl(os_info: Dict[str, str], package: str, version: str) -> str:
+        os_id      = os_info.get("id", "").replace(" ", "").lower()
+        like       = os_info.get("like", "").lower()
+        pkg_manager = os_info.get("package_manager", "")
 
+        if pkg_manager in ("apt", "apt-get"):
+            if "ubuntu" in os_id or "ubuntu" in like:
+                return f"pkg:deb/ubuntu/{package}@{version}"
+            return f"pkg:deb/debian/{package}@{version}"
+        if "almalinux" in os_id:
+            return f"pkg:rpm/almalinux/{package}@{version}"
+        if "redhat" in os_id or "rhel" in os_id:
+            return f"pkg:rpm/redhat/{package}@{version}"
+        if "alpaquita" in os_id:
+            return f"pkg:apk/alpaquita/{package}@{version}"
+        if "rocky" in os_id:
+            return f"pkg:rpm/rocky-linux/{package}@{version}"
+        if "alpine" in os_id:
+            return f"pkg:apk/alpine/{package}@{version}"
+        raise RuntimeError(
+            f"Unsupported Linux distribution: id={os_id!r} like={like!r}"
+        )
 
-    @staticmethod
-    def list_apk_packages():
-        output = Linux_Manager.run_command(["apk", "info", "-v"])
-        packages = []
-        for line in output.splitlines():
-            # example: musl-1.2.4-r1
-            if "-" in line:
-                name, version = line.split("-")[0], "-".join(line.split("-")[1:])
-                packages.append({
-                    "name": name, 
-                    "version": version,
-                    "type": "application",
-                    "license": "unknown",
-                    "locations": [],
-                    "ecosystem": Linux_Manager.get_os_info()["id"]})
-        return packages
+    # ------------------------------------------------------------------ #
+    # get_linux_packages  (delegates scanning to LinuxHostScanner)        #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def get_pkg_manager():
-        for item in ["apt","apt-get","dnf","yum"]:
-            if Linux_Manager.command_exists(item):
-                return item
+    def get_linux_packages() -> List[str]:
+        """
+        Inventory all installed system packages via LinuxHostScanner,
+        annotate with dependency sequences, append the running kernel
+        component (on apt-based systems), and return a list of PURL strings.
 
-    @staticmethod
-    def detect_and_list_packages():
-        if Linux_Manager.command_exists("dpkg-query"):
-            return Linux_Manager.list_dpkg_packages()
-
-        if Linux_Manager.command_exists("rpm"):
-            return Linux_Manager.list_rpm_packages()
-
-        if Linux_Manager.command_exists("pacman"):
-            return Linux_Manager.list_pacman_packages()
-
-        if Linux_Manager.command_exists("apk"):
-            return Linux_Manager.list_apk_packages()
-
-        raise RuntimeError("Unsupported Linux distribution or unknown package manager")
-
-    @staticmethod
-    def package_to_purl(os_info,package, version):
-        os_id=os_info["id"].replace(" ","")
-        pkg_manager=os_info["package_manager"]
-        if pkg_manager in ["apt","apt-get"]:
-             if "ubuntu" in os_id.lower() or "ubuntu" in os_info.get("like","").lower():
-                return f'pkg:deb/ubuntu/{package}@{version}' 
-             else:
-                return f'pkg:deb/debian/{package}@{version}'
-        if "almalinux" in os_id.lower():
-            return f'pkg:rpm/almalinux/{package}@{version}'
-        if "redhat" in os_id.lower():
-            return f'pkg:rpm/redhat/{package}@{version}'
-        if "alpaquita" in os_id.lower():
-            return f'pkg:apk/alpaquita/{package}@{version}'
-        if "rocky" in os_id.lower():
-            return f'pkg:rpm/rocky-linux/{package}@{version}'
-        if "alpine" in os_id.lower():
-            return f'pkg:apk/alpine/{package}@{version}'
-        raise Exception("Unsupported Linux distribution.")
-
-    @staticmethod
-    def get_linux_packages():
-
+        Full records are stored in Linux_Manager.inventory_data.
+        """
         system_info = Linux_Manager.get_os_info()
 
-        raw_packages = scan_host()
+        # LinuxHostScanner.scan() is synchronous; no event loop needed here.
+        LinuxHostScanner.scan()
+        raw_packages = LinuxHostScanner.inventory_data
 
-        components = []
-
+        components: List[Dict] = []
         for pkg in raw_packages:
-
-            component = {
-                "id": pkg["id"],
-                "name": pkg["name"],
-                "version": pkg["version"],
-                "type": "application",
-                "license": pkg.get("license") or pkg.get("licence") or "unknown",
+            components.append({
+                "id":           pkg["id"],
+                "name":         pkg["name"],
+                "version":      pkg["version"],
+                "type":         "application",
+                "license":      pkg.get("license") or pkg.get("licence") or "unknown",
                 "dependencies": pkg.get("dependencies", []),
-                "paths": pkg.get("paths", []),
-                "ecosystem": pkg["ecosystem"],
-                "state": "undetermined"
-            }
+                "paths":        pkg.get("paths", []),
+                "ecosystem":    pkg["ecosystem"],
+                "state":        "undetermined",
+            })
 
-            components.append(component)
-
-        # merge duplicate packages
         components = Linux_Manager.merge_inventory_by_purl(components)
-
-        # compute dependency sequences
         components = Linux_Manager.build_dependency_sequences(components)
 
         Linux_Manager.inventory_data = components
+        purls = [c["id"] for c in components]
 
-        purls = [pkg["id"] for pkg in components]
-
-        # kernel component
-        kernel_version = os.uname().release
-        pkg_manager = system_info["package_manager"]
-
-        if pkg_manager in ["apt", "apt-get"]:
-
+        # Kernel component (apt-based distros only, matching original behaviour)
+        pkg_manager = system_info.get("package_manager")
+        if pkg_manager in ("apt", "apt-get"):
+            kernel_version = os.uname().release
             kernel_purl = Linux_Manager.package_to_purl(
                 system_info, "linux", kernel_version
             )
-
             kernel_component = {
-                "id": kernel_purl,
-                "name": "linux",
-                "version": kernel_version,
-                "type": "application",
-                "license": "unknown",
-                "paths": [],
-                "dependencies": [],
-                "ecosystem": system_info["id"],
-                "state": "undetermined",
-                "dependency_sequences": []
+                "id":                   kernel_purl,
+                "name":                 "linux",
+                "version":              kernel_version,
+                "type":                 "application",
+                "license":              "unknown",
+                "paths":                [],
+                "dependencies":         [],
+                "ecosystem":            system_info["id"],
+                "state":                "undetermined",
+                "dependency_sequences": [],
             }
-
             components.append(kernel_component)
             purls.append(kernel_purl)
 
         return purls
 
-    @staticmethod
-    def resolve_packages(packages):
-        """
-        Simulate dependency resolution and return:
-        [
-            {"name": "...", "version": "..."},
-            ...
-        ]
-        """
+    # ------------------------------------------------------------------ #
+    # resolve_packages  (dry-run via the native package manager)          #
+    # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def resolve_packages(packages: Any) -> List[Dict]:
+        """
+        Simulate dependency resolution and return a list of package dicts:
+            [{"name": "...", "version": "...", ...}, ...]
+        """
         if isinstance(packages, str):
             packages = [packages]
-        
-        os_info=Linux_Manager.get_os_info()
 
-        pm = Linux_Manager.get_pkg_manager()
-        resolved = []
+        os_info = Linux_Manager.get_os_info()
+        pm      = Linux_Manager.get_pkg_manager()
+        resolved: List[Dict] = []
 
-        # -----------------------------
-        # APT (Debian / Ubuntu)
-        # -----------------------------
-        if pm in ["apt", "apt-get"]:
-
-            cmd = ["apt-get", "-s", "--no-install-recommends", "install"] + packages
+        # ── APT (Debian / Ubuntu) ─────────────────────────────────────────
+        if pm in ("apt", "apt-get"):
+            cmd    = ["apt-get", "-s", "--no-install-recommends", "install"] + packages
             output = Linux_Manager.run_command(cmd)
-
-            # Example line:
-            # Inst curl (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])
-            import re
+            # e.g. "Inst curl (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])"
             pattern = re.compile(r"^Inst\s+(\S+)\s+\(([^ ]+)")
-
             for line in output.splitlines():
-                match = pattern.search(line.strip())
-                if match:
+                m = pattern.search(line.strip())
+                if m:
                     resolved.append({
-                        "name": match.group(1),
-                        "version": match.group(2),
-                        "type": "application",
-                        "ecosystem": os_info["id"],
-                        "license": "unknown",
-                        "paths": [],
+                        "name":         m.group(1),
+                        "version":      m.group(2),
+                        "type":         "application",
+                        "ecosystem":    os_info["id"],
+                        "license":      "unknown",
+                        "paths":        [],
                         "dependencies": [],
                     })
-
             return resolved
 
-        # -----------------------------
-        # DNF (RHEL 8+, AlmaLinux)
-        # -----------------------------
+        # ── DNF (RHEL 8+, AlmaLinux, Rocky) ──────────────────────────────
         if pm == "dnf":
-
-            cmd = ["dnf", "install", "--assumeno"] + packages
+            cmd    = ["dnf", "install", "--assumeno"] + packages
             output = Linux_Manager.run_command(cmd)
-
             capture = False
-
             for line in output.splitlines():
-
                 line = line.strip()
-
-                # Start of transaction summary
                 if line.startswith("Installing:"):
                     capture = True
                     continue
-
                 if capture:
                     if not line:
                         break
-
                     parts = line.split()
                     if len(parts) >= 2:
-                        name_arch = parts[0]
-                        version = parts[1]
-                        name = name_arch.split(".")[0]
-
                         resolved.append({
-                            "name": name,
-                            "version": version,
-                            "type": "application",
-                            "license": "unknown",
-                            "paths": [],
+                            "name":         parts[0].split(".")[0],
+                            "version":      parts[1],
+                            "type":         "application",
+                            "license":      "unknown",
+                            "paths":        [],
                             "dependencies": [],
-                            "ecosystem": os_info["id"]
+                            "ecosystem":    os_info["id"],
                         })
-
             return resolved
 
-        # -----------------------------
-        # YUM (RHEL 7)
-        # -----------------------------
+        # ── YUM (RHEL 7) ──────────────────────────────────────────────────
         if pm == "yum":
-
-            cmd = ["yum", "install", "--assumeno"] + packages
+            cmd    = ["yum", "install", "--assumeno"] + packages
             output = Linux_Manager.run_command(cmd)
-
             capture = False
-
             for line in output.splitlines():
-
                 line = line.strip()
-
                 if line.startswith("Installing:"):
                     capture = True
                     continue
-
                 if capture:
                     if not line:
                         break
-
                     parts = line.split()
                     if len(parts) >= 2:
-                        name_arch = parts[0]
-                        version = parts[1]
-                        name = name_arch.split(".")[0]
                         resolved.append({
-                            "name": name,
-                            "version": version,
-                            "type": "application",
-                            "ecosystem": os_info["id"],
-                            "license": "unknown",
-                            "paths": [],
+                            "name":         parts[0].split(".")[0],
+                            "version":      parts[1],
+                            "type":         "application",
+                            "ecosystem":    os_info["id"],
+                            "license":      "unknown",
+                            "paths":        [],
                             "dependencies": [],
                         })
             return resolved
 
-        raise RuntimeError("Unsupported package manager for resolution")
+        raise RuntimeError(f"Unsupported package manager for resolution: {pm!r}")
+
+    # ------------------------------------------------------------------ #
+    # get_packages_purls                                                   #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def get_packages_purls(packages):
-        packages=Linux_Manager.resolve_packages(packages)
-        system_info=Linux_Manager.get_os_info()
-        Linux_Manager.inventory_data=identified_packages = [({"id":Linux_Manager.package_to_purl(system_info,pkg["name"],pkg["version"])}) for pkg in packages]
-        return [pkg["id"] for pkg in identified_packages]
+    def get_packages_purls(packages: Any) -> List[str]:
+        packages    = Linux_Manager.resolve_packages(packages)
+        system_info = Linux_Manager.get_os_info()
+        identified  = [
+            {"id": Linux_Manager.package_to_purl(system_info, pkg["name"], pkg["version"])}
+            for pkg in packages
+        ]
+        Linux_Manager.inventory_data = identified
+        return [pkg["id"] for pkg in identified]
 
+    # ------------------------------------------------------------------ #
+    # run_real_install                                                     #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def run_real_install(packages_list):
-        pmg=Linux_Manager.get_os_info()["package_manager"]
-        packages=[]
-        if pmg in ["apt","apt-get"]:
-            packages+=[f"{item[0]}={item[1]}" for item in packages_list]
+    def run_real_install(packages_list: List[Any]) -> subprocess.CompletedProcess:
+        pm = Linux_Manager.get_os_info()["package_manager"]
+        if pm in ("apt", "apt-get"):
+            pkgs = [f"{item[0]}={item[1]}" for item in packages_list]
         else:
-            packages+=[f"{item[0]}-{item[1]}" for item in packages_list]
-        cmd = ["sudo", pmg , "install","-y"]+packages
+            pkgs = [f"{item[0]}-{item[1]}" for item in packages_list]
+        cmd = ["sudo", pm, "install", "-y"] + pkgs
         return subprocess.run(cmd)

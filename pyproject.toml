@@ -4,20 +4,8 @@ version = "0.6.0"
 description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, Debian, Red Hat, Almalinux, Rocky Linux, Alpine, and Docker."
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = [
-    "requests",
-    "python-dotenv",
-    "cvss",
-    "reportlab",
-    "distro",
-    "packaging"
-]
+dependencies = []
 
 [project.scripts]
 ubel-pip = "ubel.__main__:pip_mode"
-ubel-npm = "ubel.__main__:npm_mode"
-ubel-pnpm = "ubel.__main__:pnpm_mode"
-ubel-bun = "ubel.__main__:bun_mode"
-ubel-yarn = "ubel.__main__:yarn_mode"
-ubel-docker = "ubel.__main__:docker_mode"
 ubel = "ubel.__main__:linux_mode"
