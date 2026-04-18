@@ -2094,6 +2094,8 @@ class UbelEngine:
                     inventory = list(PythonVenvScanner.inventory_data)
             else:
                 inventory = list(Linux_Manager.inventory_data)
+                for item in inventory:
+                    item["scopes"] = ["prod"]
 
             match_dependencies_with_inventory(inventory)
 

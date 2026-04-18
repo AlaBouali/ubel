@@ -218,6 +218,7 @@ class Linux_Manager:
                 "name":         pkg["name"],
                 "version":      pkg["version"],
                 "type":         "application",
+                "scopes":       ["prod"],
                 "license":      pkg.get("license") or pkg.get("licence") or "unknown",
                 "dependencies": pkg.get("dependencies", []),
                 "paths":        pkg.get("paths", []),
