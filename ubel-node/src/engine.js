@@ -616,11 +616,12 @@ function generateHTMLReport(data) {
             }
 
             document.getElementById('decision-reason').textContent = reportData.decision.reason;
-            document.getElementById('policy-infection').textContent = reportData.policy.infections;
-            document.getElementById('policy-high').textContent = reportData.policy.severity.high;
-            document.getElementById('policy-medium').textContent = reportData.policy.severity.medium;
-            document.getElementById('policy-low').textContent = reportData.policy.severity.low;
-            document.getElementById('policy-critical').textContent = reportData.policy.severity.critical;
+            const pol = reportData.policy || {};
+            const thresh = pol.severity_threshold || 'none';
+            const blockUnk = pol.block_unknown_vulnerabilities === true ? 'block' : 'allow';
+            document.getElementById('policy-threshold').textContent = thresh;
+            document.getElementById('policy-block-unknown').textContent = blockUnk;
+            document.getElementById('policy-infection').textContent = 'block (always)';
 
             const ctxSev = document.getElementById('severityChart').getContext('2d');
             const sevStats = stats.vulnerabilities_stats.severity;
@@ -698,7 +699,17 @@ function generateHTMLReport(data) {
                 row.innerHTML = \`
                     <td class="px-6 py-4 font-medium">\${item.name}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${item.version}</td>
-                    <td class="px-6 py-4"><span class="text-xs \${item.state === 'safe' ? 'text-green-400' : 'text-red-400'}">\${item.state}</span></td>
+                    <td class="px-6 py-4"><span class="text-xs \${
+  item.state === 'safe'
+    ? 'text-green-400'
+    : item.state === 'undetermined'
+    ? 'text-blue-400'
+    : item.state === 'vulnerable'
+    ? 'text-orange-400'
+    : item.state === 'infected'
+    ? 'text-red-400'
+    : 'text-neutral-400'
+}">\${item.state}</span></td>
                     <td class="px-6 py-4"><span class="text-xs \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</span></td>
                     <td class="px-6 py-4 text-neutral-400">\${item.ecosystem}</td>
                     <td class="px-6 py-4 text-neutral-400">\${item.license}</td>
@@ -715,6 +726,7 @@ function generateHTMLReport(data) {
             document.getElementById('stats-inv-safe').textContent = s.inventory_stats.safe;
             document.getElementById('stats-inv-vuln').textContent = s.inventory_stats.vulnerable;
             document.getElementById('stats-inv-inf').textContent = s.inventory_stats.infected;
+            document.getElementById('stats-inv-und').textContent = s.inventory_stats.undetermined;
             
             document.getElementById('stats-vuln-total').textContent = s.total_vulnerabilities;
             document.getElementById('stats-vuln-crit').textContent = s.vulnerabilities_stats.severity.critical;
@@ -726,10 +738,10 @@ function generateHTMLReport(data) {
             new Chart(document.getElementById('statsInventoryChart'), {
                 type: 'doughnut',
                 data: {
-                    labels: ['Safe', 'Vulnerable', 'Infected'],
+                    labels: ['Safe', 'Vulnerable', 'Infected', 'Undetermined'],
                     datasets: [{
-                        data: [s.inventory_stats.safe, s.inventory_stats.vulnerable, s.inventory_stats.infected],
-                        backgroundColor: ['#10b981', '#f59e0b', '#ef4444'],
+                        data: [s.inventory_stats.safe, s.inventory_stats.vulnerable, s.inventory_stats.infected, s.inventory_stats.undetermined],
+                        backgroundColor: ['#10b981', '#f59e0b', '#ef4444', '#6b7280'],
                         borderWidth: 0
                     }]
                 },
@@ -1002,17 +1014,17 @@ function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infection</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Critical</td><td id="policy-critical">...</td></tr><tr><td class="pr-2">High</td><td id="policy-high">...</td></tr><tr><td class="pr-2">Medium</td><td id="policy-medium">...</td></tr><tr><td class="pr-2">Low</td><td id="policy-low">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Vulnerabilities Section -->
         <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select></div></div>
             <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Inventory Section -->
         <section id="section-inventory" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option></select></div></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option><option value="undetermined">Undetermined</option></select></div></div>
             <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th>Name</th><th>Version</th><th>State</th><th>Policy Violation</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Dependency Graph Section with filter dropdown -->
@@ -1045,7 +1057,7 @@ function generateHTMLReport(data) {
         <!-- Detailed Stats Section -->
         <section id="section-stats" class="hidden space-y-8">
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3><div class="h-48"><canvas id="statsInventoryChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3><div class="h-48"><canvas id="statsInventoryChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Undetermined</span><span class="mono text-gray-400" id="stats-inv-und">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3><div class="h-48"><canvas id="statsVulnChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3><div class="h-48"><canvas id="statsEcoChart"></canvas></div><div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div></div>
             </div>
@@ -1633,17 +1645,18 @@ function sortVulnerabilities(vulns) {
 
 
 // ── Policy ────────────────────────────────────────────────────────────────────
+//
+// Schema:
+//   severity_threshold            — block this level and everything above it.
+//                                   Order: low < medium < high < critical.
+//                                   Set to "none" to disable severity blocking entirely.
+//                                   Infections are ALWAYS blocked regardless.
+//   block_unknown_vulnerabilities — whether to block vulnerabilities whose
+//                                   severity could not be determined.
+//
 const DEFAULT_POLICY = {
-  infections: "block",
-  severity: {
-    critical: "block",
-    high:     "block",
-    medium:   "allow",
-    low:      "allow",
-    unknown:  "allow",
-  },
-  // kev and weaponized enrichment require an API key (paid tier)
-  // and are intentionally excluded from the freemium default policy.
+  severity_threshold:            "high",
+  block_unknown_vulnerabilities: false,
 };
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────
@@ -1655,13 +1668,31 @@ export class PolicyViolationError extends Error {
   }
 }
 
+const SEVERITY_ORDER_POLICY = ["low", "medium", "high", "critical"];
+
 function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
+  const threshold    = (policy.severity_threshold || "").toLowerCase();
+  const thresholdIdx = SEVERITY_ORDER_POLICY.indexOf(threshold);
+  const blockUnknown = policy.block_unknown_vulnerabilities === true;
+
   for (const v of vulnerabilities) {
-    if (v.is_infection && policy.infections === "block") {
+    // Infections are always blocked — no policy toggle.
+    if (v.is_infection) {
       v.policy_decision = "block";
-    } else if (!v.is_infection) {
-      const sev = (v.severity || "unknown").toLowerCase();
-      v.policy_decision = policy.severity[sev] === "block" ? "block" : "allow";
+      continue;
+    }
+
+    const sev    = (v.severity || "unknown").toLowerCase();
+    const sevIdx = SEVERITY_ORDER_POLICY.indexOf(sev);
+
+    if (sev === "unknown") {
+      v.policy_decision = blockUnknown ? "block" : "allow";
+    } else if (threshold === "none" || thresholdIdx === -1) {
+      // "none" (or unrecognised value) disables severity blocking entirely.
+      v.policy_decision = "allow";
+    } else if (sevIdx >= thresholdIdx) {
+      // Severity meets or exceeds the threshold → block.
+      v.policy_decision = "block";
     } else {
       v.policy_decision = "allow";
     }
@@ -1684,6 +1715,9 @@ export class UbelEngine {
   static engine                = "npm";
   static was_successful_scan = false;
 
+  static runtime_environment = "node"
+  static runtime_version = process.version.replace(/^v/, "").replace(/^V/, "");
+
   static vulns_ids_found= new Set();
 
   static initiateLocalPolicy() {
@@ -1703,11 +1737,16 @@ export class UbelEngine {
     return JSON.parse(fs.readFileSync(file, "utf-8"));
   }
 
-  static setPolicyRules(action, severities) {
+  /**
+   * Set a single top-level policy field and persist it to disk.
+   * Replaces the old setPolicyRules(action, severities) API.
+   *
+   * @param {"severity_threshold"|"block_unknown_vulnerabilities"} key
+   * @param {string|boolean} value
+   */
+  static setPolicyField(key, value) {
     const data = UbelEngine.loadPolicy();
-    for (const rule of Object.keys(data.severity)) {
-      if (severities.includes(rule)) data.severity[rule] = action;
-    }
+    data[key] = value;
     const file = path.join(UbelEngine.policyDir, UbelEngine.policyFilename);
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
@@ -1866,12 +1905,19 @@ export class UbelEngine {
         }
       }
 
+      const undeterminedCount = inventory.filter(c => c.version === "").length;
+      if (undeterminedCount > 0) {
+        console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected. This may lead to false positives or negatives in the report. Please ensure all dependencies have resolvable versions for accurate scanning.`);
+        console.warn();
+      }
+
       const stats = {
         inventory_size: inventory.length,
         inventory_stats: {
           infected:   infectedPurls.size,
           vulnerable: vulnerablePurls.size,
-          safe:       Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size),
+          safe:       Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size - undeterminedCount),
+          undetermined: undeterminedCount
         },
         total_vulnerabilities: vulnerabilities.length,
         vulnerabilities_stats: { severity: severityBuckets },
@@ -1879,12 +1925,11 @@ export class UbelEngine {
       };
 
       const runtime = {
-        environment: "node",
-        version: process.version.replace(/^v/, "").replace(/^V/, ""),
+        environment: UbelEngine.runtime_environment,
+        version: UbelEngine.runtime_version,
         platform: process.platform,
         arch: process.arch,
         cwd: process.cwd(),
-        execPath: process.execPath,
       };
 
       const engine_info ={
@@ -1893,12 +1938,6 @@ export class UbelEngine {
       }
 
       const git_metadata = getGitMetadata();
-      const isEmpty = git_metadata.url === null && git_metadata.branch === null && git_metadata.commit === null;
-      if (isEmpty) {
-        git_metadata.available = false;
-      }else{
-        git_metadata.available = true;
-      }
 
       // ── Build final JSON ───────────────────────────────────────────────────
       const findingsSummary = summarizeVulnerabilities(vulnerabilities, inventory);

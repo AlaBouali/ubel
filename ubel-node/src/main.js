@@ -5,9 +5,12 @@
  * Usage (called by bin/* wrappers):
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- * engine  : npm | pnpm | bun | yarn
- * mode    : check | install | health | init | allow | block
- * extra   : package names for check/install, or severity names for allow/block
+ * engine    : npm | pnpm | bun
+ * mode      : check | install | health | init | threshold | block-unknown
+ *
+ * Policy configuration modes:
+ *   threshold <level>         — set severity_threshold (low|medium|high|critical)
+ *   block-unknown <true|false> — set block_unknown_vulnerabilities
  *
  * check/install support matrix:
  *   npm  — yes  (--package-lock-only dry-run)
@@ -20,7 +23,8 @@ import { UbelEngine, PolicyViolationError } from "./engine.js";
 import { banner }     from "./info.js";
 import { loadEnvironment } from "./utils.js";
 
-const VALID_MODES = ["check", "install", "health", "init", "allow", "block"];
+const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
+const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 
 async function main() {
   const [, , engine, mode, ...extraArgs] = process.argv;
@@ -47,45 +51,52 @@ async function main() {
   const effectiveMode = VALID_MODES.includes(mode) ? mode : "health";
   UbelEngine.checkMode = effectiveMode;
 
+  // ── init ──────────────────────────────────────────────────────────────────
   if (effectiveMode === "init") {
     process.exit(0);
   }
 
-  if (effectiveMode === "allow" || effectiveMode === "block") {
-    if (!extraArgs.length) {
-      console.error("[!] Provide severity levels: critical high medium low unknown");
+  // ── threshold <level> ─────────────────────────────────────────────────────
+  // Sets severity_threshold in the policy file.
+  // Example: ubel-npm threshold high  (or "none" to disable severity blocking)
+  if (effectiveMode === "threshold") {
+    const level = (extraArgs[0] || "").toLowerCase();
+    if (!level || !VALID_SEVERITIES.has(level)) {
+      console.error("[!] Provide a valid severity level: low | medium | high | critical | none");
+      console.error("[!] Example: ubel-npm threshold high");
       process.exit(1);
     }
-    const VALID_SEVERITIES = new Set(["critical", "high", "medium", "low", "unknown"]);
-    const invalid = extraArgs.filter(a => !VALID_SEVERITIES.has(a.toLowerCase()));
-    if (invalid.length) {
-      console.error(`[!] Unrecognised severity level(s): ${invalid.join(", ")}`);
-      console.error("[!] Valid values: critical high medium low unknown");
-      process.exit(1);
-    }
-    UbelEngine.setPolicyRules(effectiveMode, extraArgs.map(a => a.toLowerCase()));
-    console.log(`[+] Updated policy: ${effectiveMode} → ${extraArgs.join(", ")}`);
+    UbelEngine.setPolicyField("severity_threshold", level);
+    console.log(`[+] Policy updated: severity_threshold = ${level}`);
+    console.log("[i] Infections are always blocked regardless of this setting.");
     process.exit(0);
   }
 
-  // check/install require a lockfile-only dry-run capability.
-  // yarn has no equivalent flag and always writes node_modules — unsupported.
+  // ── block-unknown <true|false> ────────────────────────────────────────────
+  // Sets block_unknown_vulnerabilities in the policy file.
+  // Example: ubel-npm block-unknown true
+  if (effectiveMode === "block-unknown") {
+    const raw = (extraArgs[0] || "").toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      console.error("[!] Provide true or false");
+      console.error("[!] Example: ubel-npm block-unknown true");
+      process.exit(1);
+    }
+    const value = raw === "true";
+    UbelEngine.setPolicyField("block_unknown_vulnerabilities", value);
+    console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
+    process.exit(0);
+  }
+
+  // ── check/install require lockfile-only dry-run support ───────────────────
   const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
   if (!CHECK_INSTALL_ENGINES.has(engine)) {
     console.error(`[!] '${engine}' is not supported.`);
     console.error("[!] Supported engines: npm, pnpm, bun");
     process.exit(1);
   }
-  if ((effectiveMode === "check" || effectiveMode === "install") && !CHECK_INSTALL_ENGINES.has(engine)) {
-    console.error(`[!] '${engine}' does not support check/install mode.`);
-    console.error("[!] Supported engines for check/install: npm, pnpm, bun");
-    console.error("[!] Use 'health' mode to scan already-installed packages with any engine.");
-    process.exit(1);
-  }
 
-  // For check/install: validate package specifier format before they reach
-  // spawnSync.  The regex mirrors the one in NodeManager.runDryRun so the
-  // error surfaces early with a clear message rather than deep inside npm.
+  // ── validate package specifiers early ────────────────────────────────────
   const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
   let pkgArgs = extraArgs;
   if (pkgArgs.length) {
@@ -97,21 +108,21 @@ async function main() {
     }
   }
   if (!pkgArgs.length && (effectiveMode === "check" || effectiveMode === "install")) {
-    // Pass empty array — dry-run will use existing package.json
     pkgArgs = [];
   }
 
+  // ── remote mode guard ─────────────────────────────────────────────────────
   const { apiKey, assetId } = loadEnvironment();
   if (apiKey && assetId) {
     console.error("[!] Remote mode (UBEL_API_KEY + UBEL_ASSET_ID) is not yet implemented in the Node CLI.");
     process.exit(1);
   }
 
+  // ── scan ──────────────────────────────────────────────────────────────────
   try {
     await UbelEngine.scan(pkgArgs);
   } catch (err) {
     if (err instanceof PolicyViolationError) {
-      // Messages were already printed inside scan() — just exit.
       process.exit(1);
     }
     console.error("[!] Scan failed:", err.message);
