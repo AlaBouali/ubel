@@ -240,6 +240,7 @@ class Pypi_Manager:
                 "dependencies": deps,
                 "paths":        [],
                 "ecosystem":    "pypi",
+                "scopes":       ["prod"],
                 "state":        "undetermined",
             })
 

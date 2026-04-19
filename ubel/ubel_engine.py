@@ -1545,21 +1545,6 @@ def generate_html_report(data: Dict) -> str:
             if (reportData.inventory.length < reportData.stats.inventory_size) {
                 const currentCount = reportData.inventory.length;
                 const needed = reportData.stats.inventory_size - currentCount;
-                for (let i = 0; i < needed; i++) {
-                    reportData.inventory.push({
-                        id: `pkg:npm/dummy-pkg-${i + 1}@1.0.0`,
-                        name: `dummy-pkg-${i + 1}`,
-                        version: "1.0.0",
-                        type: "library",
-                        license: "MIT",
-                        ecosystem: "npm",
-                        state: "safe",
-                        dependencies: [],
-                        paths: [],
-                        scopes: ["prod"],
-                        introduced_by: []
-                    });
-                }
             }
 
             closeModal();
@@ -2186,6 +2171,8 @@ class UbelEngine:
             dep_tree = build_dependency_tree(inventory)
             for item in inventory:
                 item.pop("dependency_sequences", None)
+                if item.get("id","") in item.get("introduced_by", []):
+                    item["introduced_by"].remove(item["id"])
 
             # ── Final JSON ────────────────────────────────────────────────
             final_json: Dict[str, Any] = {

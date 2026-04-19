@@ -43,7 +43,7 @@ VALID_SEVERITIES = {"low", "medium", "high", "critical", "none"}
 
 # Same regex as the JS PKG_ARG_RE used to validate pypi/npm package args
 PKG_ARG_RE = re.compile(
-    r'^(@[a-z0-9_.\\-]+/)?[a-z0-9_.\\-]+(@[^\s;&|`$(){}\\\\\'\"<>]+)?$',
+    r'^(@[a-z0-9_.+-]+/)?[a-z0-9_.+-]+(@[^\s;&|`$(){}\\\'\"<>]+)?$',
     re.IGNORECASE,
 )
 
@@ -122,7 +122,14 @@ def _cmd_block_unknown(raw: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _validate_pkg_args(pkg_args: list[str]) -> None:
-    bad = [a for a in pkg_args if not PKG_ARG_RE.match(a)]
+    bad = [] #[a for a in pkg_args if not PKG_ARG_RE.match(a)]
+    accepted_non_alphanumeric_characters ="=._+-@/~"
+    for arg in pkg_args:
+        pkg=arg.strip()
+        for char in accepted_non_alphanumeric_characters:
+            pkg=pkg.replace(char,"")
+        if not pkg.isalnum():
+            bad.append(arg)
     if bad:
         print(
             f"[!] Rejected unsafe or malformed package argument(s): {', '.join(bad)}",
