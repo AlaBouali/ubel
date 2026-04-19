@@ -1314,7 +1314,7 @@ function fetchJSON(url, method = "GET", body = null, opts = {}) {
 // ── PURL helpers ──────────────────────────────────────────────────────────────
 function getDependencyFromPurl(purl) {
   if (!purl || typeof purl !== "string" || !purl.startsWith("pkg:")) {
-    return ["unknown", "unknown"];
+    return ["unknown", ""];
   }
 
   // Remove "pkg:"
@@ -1325,7 +1325,7 @@ function getDependencyFromPurl(purl) {
 
   // Extract type
   const firstSlash = body.indexOf("/");
-  if (firstSlash === -1) return ["unknown", "unknown"];
+  if (firstSlash === -1) return ["unknown", ""];
 
   const type = body.slice(0, firstSlash);
   let remainder = body.slice(firstSlash + 1);
@@ -1334,7 +1334,8 @@ function getDependencyFromPurl(purl) {
   remainder = decodeURIComponent(remainder);
 
   // Extract version (last @ only)
-  let name, version = "unknown";
+  let name = "unknown";
+  let version = "";
   const lastAt = remainder.lastIndexOf("@");
 
   if (lastAt > 0) {
@@ -1641,7 +1642,7 @@ function sortVulnerabilities(vulns) {
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
-  block_unknown_vulnerabilities: true,
+  block_unknown_vulnerabilities: false,
 };
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────

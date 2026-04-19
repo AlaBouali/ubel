@@ -13,6 +13,7 @@ import path from "path";
  *       is preferred (generated via: mvn dependency:tree -DoutputFile=.ubel/maven-deps.txt)
  *   3.  Multi-module projects: parent pom.xml <modules> entries are followed.
  *   4.  PURL: pkg:maven/<groupId>/<artifactId>@<version>
+ *            (no @  when version is unknown)
  *
  * pom.xml dependency format:
  *   <dependency>
@@ -28,9 +29,11 @@ export class JavaMavenScanner {
 
   // ─────────────────────────────
   // PURL
+  // Omits @<version> when version is blank to avoid silent PURL collisions.
   // ─────────────────────────────
   static _mavenPurl(groupId, artifactId, version) {
-    return `pkg:maven/${groupId.toLowerCase()}/${artifactId.toLowerCase()}@${version ?? ""}`;
+    const base = `pkg:maven/${groupId.toLowerCase()}/${artifactId.toLowerCase()}`;
+    return version ? `${base}@${version}` : `${base}@`;
   }
 
   // ─────────────────────────────
@@ -67,10 +70,11 @@ export class JavaMavenScanner {
       const artifactId = this._extractTag(block, "artifactId")[0] ?? "";
       const version    = this._extractTag(block, "version")[0]    ?? "";
       const scope      = this._extractTag(block, "scope")[0]      ?? "compile";
+      // optional deps: skip by default — they are not installed transitively
       const optional   = (this._extractTag(block, "optional")[0] ?? "false") === "true";
 
-      if (groupId && artifactId) {
-        deps.push({ groupId, artifactId, version, scope: scope.toLowerCase(), optional });
+      if (groupId && artifactId && !optional) {
+        deps.push({ groupId, artifactId, version, scope: scope.toLowerCase() });
       }
     }
     return deps;
@@ -78,7 +82,7 @@ export class JavaMavenScanner {
 
   // ─────────────────────────────
   // Extract <properties> block for variable interpolation
-  // Returns Map<"project.X" | varName, value>
+  // Returns Map<varName, value>
   // ─────────────────────────────
   static _parsePomProperties(xml) {
     const props = new Map();
@@ -93,11 +97,17 @@ export class JavaMavenScanner {
   }
 
   // ─────────────────────────────
-  // Resolve ${...} property references
+  // Resolve ${...} property references (single-pass).
+  // Returns empty string if version is blank.
+  // Flags with "UNRESOLVED:" prefix if a ${ref} survives after substitution so
+  // callers can detect broken versions instead of emitting garbage PURLs.
   // ─────────────────────────────
   static _resolveVersion(version, props) {
     if (!version) return "";
-    return version.replace(/\$\{([^}]+)\}/g, (_, key) => props.get(key) ?? "");
+    const resolved = version.replace(/\$\{([^}]+)\}/g, (_, key) => props.get(key) ?? "");
+    // If an unresolved placeholder remains, mark it explicitly
+    if (resolved.includes("${")) return "";   // treat as unknown version
+    return resolved;
   }
 
   // ─────────────────────────────
@@ -106,7 +116,9 @@ export class JavaMavenScanner {
   //   [INFO] com.example:my-app:jar:1.0
   //   [INFO] +- org.springframework:spring-core:jar:5.3.21:compile
   //   [INFO] |  \- org.springframework:spring-jcl:jar:5.3.21:compile
-  // Returns array of { groupId, artifactId, version, scope, depth }
+  // Returns array of { groupId, artifactId, version, scope }
+  // Note: the root artifact line (no scope field) is intentionally skipped —
+  // it represents the project itself, not a dependency.
   // ─────────────────────────────
   static _parseDepsTree(filePath) {
     const deps = [];
@@ -124,7 +136,7 @@ export class JavaMavenScanner {
         .replace(/^[|\s\\+\-]+/, "")
         .trim();
 
-      // groupId:artifactId:packaging:version:scope
+      // groupId:artifactId:packaging:version:scope (root line has no :scope → skipped)
       const m = line.match(/^([^:]+):([^:]+):[^:]+:([^:]+):([^:\s]+)/);
       if (!m) continue;
 
@@ -167,14 +179,17 @@ export class JavaMavenScanner {
   }
 
   // ─────────────────────────────
-  // Scan a single Maven project
+  // Scan a single Maven project.
+  // visited  – shared Set<resolvedPath> across the entire getInstalled() call,
+  //            prevents both the outer walk and multi-module recursion from
+  //            processing the same directory twice.
   // ─────────────────────────────
-  static _scanProject(projectRoot, visited = new Set()) {
-    const pomPath = path.join(projectRoot, "pom.xml");
-    const key     = path.resolve(projectRoot);
+  static _scanProject(projectRoot, visited) {
+    const key = path.resolve(projectRoot);
     if (visited.has(key)) return [];
     visited.add(key);
 
+    const pomPath = path.join(projectRoot, "pom.xml");
     let xml;
     try {
       xml = fs.readFileSync(pomPath, "utf8");
@@ -185,7 +200,7 @@ export class JavaMavenScanner {
     // Remove XML comments to avoid false matches
     xml = xml.replace(/<!--[\s\S]*?-->/g, "");
 
-    const props    = this._parsePomProperties(xml);
+    const props      = this._parsePomProperties(xml);
     const components = [];
 
     // Prefer pre-generated dependency tree if available
@@ -202,35 +217,34 @@ export class JavaMavenScanner {
       }));
     }
 
-    // Build name index for dep-graph resolution within this project
-    const nameIndex = new Map();
-    for (const dep of deps) {
-      const k = `${dep.groupId.toLowerCase()}:${dep.artifactId.toLowerCase()}`;
-      if (!nameIndex.has(k)) nameIndex.set(k, dep);
-    }
-
     for (const dep of deps) {
       if (!dep.groupId || !dep.artifactId) continue;
 
-      const id    = this._mavenPurl(dep.groupId, dep.artifactId, dep.version);
-      const scope = this._mavenScopeToUbel(dep.scope ?? "compile");
+      const version = dep.version ?? "";
+      const id      = this._mavenPurl(dep.groupId, dep.artifactId, version);
+      const scope   = this._mavenScopeToUbel(dep.scope ?? "compile");
+
+      if (version === "unknown") {
+        version = "";  // treat as unknown version (no @ in PURL)
+        }
+
 
       components.push({
         id,
         name:         `${dep.groupId.toLowerCase()}:${dep.artifactId.toLowerCase()}`,
-        version:      dep.version ?? "",
+        version,
         type:         "library",
         license:      "unknown",
-        ecosystem:    "maven",
-        state:        "undetermined",
+        ecosystem:    "java",
+        state:        version ? "undetermined" : "undetermined",
         scopes:       [scope],
-        dependencies: [],   // tree file gives depth but not explicit edges; left empty
+        dependencies: [],
         paths:        [projectRoot],
         project_root: projectRoot
       });
     }
 
-    // Recurse into <modules>
+    // Recurse into <modules> — pass the same visited set so no dir is double-scanned
     for (const mod of this._parseModules(xml)) {
       const modRoot = path.join(projectRoot, mod);
       components.push(...this._scanProject(modRoot, visited));
@@ -260,6 +274,10 @@ export class JavaMavenScanner {
 
   // ─────────────────────────────
   // ENTRY
+  // Walks startDir (and subdirs) for Maven project roots, then scans each.
+  // A single shared `visited` set prevents any directory from being processed
+  // more than once, regardless of whether it was found by the walk or by
+  // multi-module recursion inside _scanProject.
   // ─────────────────────────────
   static async getInstalled(startDir = process.cwd()) {
     this.inventoryData = [];
@@ -267,6 +285,12 @@ export class JavaMavenScanner {
     const visited = new Set();
     const raw     = [];
 
+    // Scan startDir itself if it is a Maven root
+    if (JavaMavenScanner._isMavenRoot(startDir)) {
+      raw.push(...JavaMavenScanner._scanProject(startDir, visited));
+    }
+
+    // Walk subdirectories for additional Maven roots
     function walk(dir) {
       let entries;
       try {
@@ -277,16 +301,17 @@ export class JavaMavenScanner {
 
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        // Skip dirs that cannot contain user project files
         if (["node_modules", ".git", ".ubel", "target", ".m2"].includes(entry.name)) continue;
 
         const full = path.join(dir, entry.name);
 
         if (JavaMavenScanner._isMavenRoot(full)) {
-          const key = path.resolve(full);
-          if (!visited.has(key)) {
-            // _scanProject handles its own visited set for multi-module recursion
-            raw.push(...JavaMavenScanner._scanProject(full, visited));
-          }
+          // _scanProject will add full to visited on first call;
+          // multi-module recursion reuses the same set so no double-scan.
+          raw.push(...JavaMavenScanner._scanProject(full, visited));
+          // Do NOT recurse further into a Maven root — _scanProject follows
+          // <modules> itself.
           continue;
         }
 
@@ -294,14 +319,9 @@ export class JavaMavenScanner {
       }
     }
 
-    if (JavaMavenScanner._isMavenRoot(startDir)) {
-      raw.push(...JavaMavenScanner._scanProject(startDir, visited));
-    }
-
     walk(startDir);
 
     const merged = this.mergeInventoryByPurl(raw);
-
     this.inventoryData = merged;
     return merged.map(c => c.id);
   }

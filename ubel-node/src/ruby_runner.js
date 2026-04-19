@@ -217,7 +217,7 @@ export class RubyBundlerScanner {
         version,
         type:         "library",
         license:      "unknown",
-        ecosystem:    "gem",
+        ecosystem:    "ruby",
         state:        "undetermined",
         scopes:       [],
         dependencies: resolvedDeps,
