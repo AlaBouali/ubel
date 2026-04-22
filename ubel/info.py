@@ -1,5 +1,5 @@
 __version__ = "0.6.0"
-__tool_name__="Ubel-python"
+__tool_name__="ubel-python"
 __tool_license__="Apache 2.0"
 __tool_name_ascii__="""
 
