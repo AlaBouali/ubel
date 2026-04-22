@@ -273,6 +273,13 @@ export class NodeManager {
    */
   static candidate_lockfile_content = null;
 
+  /**
+   * SHA-256 hex digest of the raw candidate lockfile bytes written to disk
+   * by runDryRun.  Used by verifyCandidateLockfileHash() to detect any
+   * on-disk mutation between the dry-run scan and the real install.
+   */
+  static _candidateLockfileHash = null;
+
   static _captureEngineVersion(binary) {
     try {
       const r = spawnSync(binary, ["--version"], { encoding: "utf8", shell: true });
@@ -408,6 +415,7 @@ export class NodeManager {
     NodeManager._original_lockfile         = null;
     NodeManager._lockfileBackupDir         = null;
     NodeManager.candidate_lockfile_content = null;
+    NodeManager._candidateLockfileHash     = null;
 
     // ── 1. Validate engine ───────────────────────────────────────────────
 
@@ -480,6 +488,15 @@ export class NodeManager {
 
     const candidateRaw = fs.readFileSync(lockPath, "utf8");
     NodeManager.candidate_lockfile_content = candidateRaw;
+
+    // Hash the raw bytes so we can verify the file has not been tampered with
+    // between the dry-run scan and the real install (TOCTOU guard).
+    {
+      const { createHash } = await import("crypto");
+      NodeManager._candidateLockfileHash = createHash("sha256")
+        .update(candidateRaw, "utf8")
+        .digest("hex");
+    }
 
     const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
 
@@ -981,6 +998,53 @@ export class NodeManager {
   }
 
   // ─────────────────────────────
+  // Lockfile integrity check  (TOCTOU guard)
+  //
+  // Re-hashes the on-disk lockfile and compares it against the SHA-256
+  // digest captured at the end of runDryRun.  Must be called immediately
+  // before runRealInstall so that any mutation of the lockfile between the
+  // dry-run scan and the real install is detected and the install is aborted.
+  //
+  // Returns { ok: true } on success, or
+  //         { ok: false, reason: string } on any failure.
+  // ─────────────────────────────
+
+  static async verifyCandidateLockfileHash(engine = "npm", projectPath = process.cwd()) {
+    const cfg = ENGINE_CONFIG[engine];
+    if (!cfg) {
+      return { ok: false, reason: `Unknown engine '${engine}'` };
+    }
+
+    if (!NodeManager._candidateLockfileHash) {
+      return { ok: false, reason: "No candidate lockfile hash recorded — runDryRun() must be called first" };
+    }
+
+    const lockPath = path.join(projectPath, cfg.lockfile);
+
+    let currentContent;
+    try {
+      currentContent = fs.readFileSync(lockPath, "utf8");
+    } catch (err) {
+      return { ok: false, reason: `Could not read lockfile for verification: ${err.message}` };
+    }
+
+    const { createHash } = await import("crypto");
+    const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
+
+    if (currentHash !== NodeManager._candidateLockfileHash) {
+      return {
+        ok:       false,
+        reason:   `Lockfile integrity check FAILED — the lockfile was modified after scanning.\n` +
+                  `  Expected : ${NodeManager._candidateLockfileHash}\n` +
+                  `  Got      : ${currentHash}\n` +
+                  `  File     : ${lockPath}`,
+      };
+    }
+
+    return { ok: true };
+  }
+
+  // ─────────────────────────────
   // Real install  (engine-aware)
   //
   // Runs the engine's frozen/clean install command so that node_modules
@@ -988,6 +1052,12 @@ export class NodeManager {
   // ─────────────────────────────
 
   static runRealInstall(engine) {
+    NodeManager.verifyCandidateLockfileHash(engine).then(result => {
+      if (!result.ok) {
+        throw new Error(`Lockfile verification failed: ${result.reason}`);
+      }
+    });
+    
     const cfg = ENGINE_CONFIG[engine];
     if (!cfg) {
       throw new Error(

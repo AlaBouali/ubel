@@ -1,5 +1,5 @@
 [project]
-name = "ubel"
+name = "ubel-python"
 version = "0.6.0"
 description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, Debian, Red Hat, Almalinux, Rocky Linux, Alpine, and Docker."
 readme = "README.md"

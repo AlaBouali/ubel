@@ -194,7 +194,7 @@ def get_ecosystem_from_purl(purl: str) -> str:
 # OS metadata  (stdlib only)
 # ---------------------------------------------------------------------------
 
-def _get_os_metadata() -> Dict[str, str]:
+def _get_os_metadata() -> Dict[str, Any]:
     os_id = os_name = os_version = "unknown"
     for candidate in ("/etc/os-release", "/usr/lib/os-release"):
         try:
@@ -217,11 +217,120 @@ def _get_os_metadata() -> Dict[str, str]:
 
     # Fallback for non-Linux
     if os_id == "unknown":
-        os_id   = sys.platform
-        os_name = platform.system()
+        os_id      = sys.platform
+        os_name    = platform.system()
         os_version = platform.release()
 
-    return {"os_id": os_id, "os_name": os_name, "os_version": os_version}
+    return {
+        "os_id":      os_id,
+        "os_name":    os_name,
+        "os_version": os_version,
+        "local_ips":  _get_local_ips(),
+        "external_ip": None,          # filled in by scan() after async fetch
+    }
+
+
+# ---------------------------------------------------------------------------
+# Network metadata helpers
+# ---------------------------------------------------------------------------
+
+def _get_local_ips() -> Dict[str, str]:
+    """
+    Return all non-loopback IPv4 addresses keyed by interface name.
+    e.g. {"eth0": "192.168.1.42", "wlan0": "10.0.0.5"}
+    Uses only stdlib — no external deps.
+    """
+    import socket
+    result: Dict[str, str] = {}
+    try:
+        import socket, struct, fcntl  # fcntl is POSIX-only
+        import array
+
+        SIOCGIFCONF = 0x8912
+        STRUCT_SIZE = 40 if platform.architecture()[0] == "64bit" else 32
+        nstructs    = 128
+        buf_size    = nstructs * STRUCT_SIZE
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            buf  = array.array("B", b"\0" * buf_size)
+            addr = buf.buffer_info()[0]
+            ifreq = struct.pack("iL", buf_size, addr)
+            res   = fcntl.ioctl(s.fileno(), SIOCGIFCONF, ifreq)
+            out_len = struct.unpack("iL", res)[0]
+            raw = bytes(buf)[:out_len]
+            offset = 0
+            while offset + STRUCT_SIZE <= len(raw):
+                iface_name = raw[offset:offset + 16].split(b"\x00")[0].decode(errors="replace")
+                ip_bytes   = raw[offset + 20:offset + 24]
+                ip_str     = socket.inet_ntoa(ip_bytes)
+                if ip_str and not ip_str.startswith("127."):
+                    result[iface_name] = ip_str
+                offset += STRUCT_SIZE
+    except Exception:
+        # Fallback: hostname resolution (works on all platforms including Windows)
+        try:
+            hostname = socket.gethostname()
+            ip       = socket.gethostbyname(hostname)
+            if ip and not ip.startswith("127."):
+                result["primary"] = ip
+        except Exception:
+            pass
+    return result
+
+
+def _get_external_ip() -> Optional[str]:
+    """
+    Fetch the host's public IP via api.ipify.org.
+    Returns None on any error or if the request exceeds 4 seconds.
+    """
+    try:
+        req = urllib.request.Request(
+            "https://api.ipify.org/?format=text",
+            headers={"User-Agent": "ubel_tool"},
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            return resp.read().decode("ascii", errors="replace").strip() or None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# SystemPath helpers
+# ---------------------------------------------------------------------------
+
+def _make_system_path(path_str: Any, host_ip: str = "") -> Dict[str, Any]:
+    """
+    Wrap a plain filesystem path string into the canonical SystemPath object.
+
+    Schema: { "type": "system_path", "text": str, "ip": str, "ports": [] }
+    """
+    return {
+        "type":  "system_path",
+        "text":  str(path_str) if path_str is not None else "",
+        "ip":    host_ip,
+        "ports": [],
+    }
+
+
+def _normalize_inventory_paths(inventory: List[Dict], host_ip: str) -> None:
+    """
+    Convert every string path in inventory[*].paths (and the legacy singular
+    .path field) to a SystemPath object in-place.
+    Already-converted objects are left unchanged (idempotent).
+    """
+    for item in inventory:
+        if isinstance(item.get("paths"), list):
+            item["paths"] = [
+                p if (isinstance(p, dict) and p.get("type") == "system_path")
+                else _make_system_path(p, host_ip)
+                for p in item["paths"]
+            ]
+        if "path" in item and item["path"] is not None:
+            p = item["path"]
+            item["path"] = (
+                p if (isinstance(p, dict) and p.get("type") == "system_path")
+                else _make_system_path(p, host_ip)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1089,14 @@ def generate_html_report(data: Dict) -> str:
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">OS Version</span>
           <span class="mono text-xs" id="os-version">...</span>
+        </div>
+        <div class="flex flex-col gap-1 border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Local IPs</span>
+          <div id="os-local-ips" class="mono text-[10px] text-neutral-300 space-y-0.5"></div>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-500 text-xs">External IP</span>
+          <span class="mono text-xs text-neutral-300" id="os-external-ip">...</span>
         </div>
       </div>
     </div>
@@ -1790,6 +1907,16 @@ def generate_html_report(data: Dict) -> str:
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
+            const localIpsEl = document.getElementById('os-local-ips');
+            const localIPs = os.local_ips || {};
+            const ifaceEntries = Object.entries(localIPs);
+            localIpsEl.innerHTML = ifaceEntries.length
+                ? ifaceEntries.map(([iface, ip]) =>
+                    `<div class="flex justify-between gap-4"><span class="text-neutral-500">${iface}</span><span>${ip}</span></div>`
+                  ).join('')
+                : '<span class="text-neutral-600 italic">none detected</span>';
+            document.getElementById('os-external-ip').textContent = os.external_ip || 'unavailable';
+
             document.getElementById('git-available').textContent = git.available ? 'Yes' : 'No';
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
@@ -1839,7 +1966,18 @@ def generate_html_report(data: Dict) -> str:
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
             const pathRows = (item.paths || []).length
-                ? item.paths.map(p => `<div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all">${p}</div>`).join('')
+                ? item.paths.map(p => {
+                    const isObj = p && typeof p === 'object' && p.type === 'system_path';
+                    const text  = isObj ? p.text  : String(p ?? '');
+                    const ip    = isObj ? p.ip    : '';
+                    const ports = isObj && Array.isArray(p.ports) && p.ports.length ? p.ports : null;
+                    return `
+                      <div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all space-y-0.5">
+                        <div class="text-neutral-300">${text}</div>
+                        ${ip    ? `<div class="text-neutral-600 text-[9px]">host: ${ip}</div>`            : ''}
+                        ${ports ? `<div class="text-neutral-600 text-[9px]">ports: ${ports.join(', ')}</div>` : ''}
+                      </div>`;
+                  }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No path info</span>';
 
             const depsRows = (item.dependencies || []).length
@@ -2162,6 +2300,16 @@ class UbelEngine:
                     for v in vulnerabilities
                 )
 
+            # ── Network metadata ───────────────────────────────────────────
+            # local IPs already collected in _get_os_metadata(); fetch external
+            # IP here so it doesn't block the scan startup path.
+            external_ip  = _get_external_ip()
+            local_ips    = _get_local_ips()
+            primary_ip   = next(iter(local_ips.values()), "")
+
+            # ── Convert all path strings → SystemPath objects ──────────────
+            _normalize_inventory_paths(inventory, primary_ip)
+
             # Undetermined count (version-less)
             undetermined_count = sum(1 for c in inventory if c.get("version","") == "")
             if undetermined_count:
@@ -2198,11 +2346,15 @@ class UbelEngine:
                     item["introduced_by"].remove(item["id"])
 
             # ── Final JSON ────────────────────────────────────────────────
+            os_meta = _get_os_metadata()
+            os_meta["local_ips"]   = local_ips
+            os_meta["external_ip"] = external_ip
+
             final_json: Dict[str, Any] = {
                 "generated_at": now.isoformat().replace("+00:00","") + "Z",
                 "runtime":      _get_runtime(),
                 "engine":       {"name": UbelEngine.engine, "version": ""},
-                "os_metadata":  _get_os_metadata(),
+                "os_metadata":  os_meta,
                 "git_metadata": _get_git_metadata(),
                 "tool_info":    {"name": __tool_name__, "version": __version__, "license": __tool_license__},
                 "scan_info":    {

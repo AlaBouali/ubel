@@ -16,6 +16,90 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 
+// ── Network metadata helpers ──────────────────────────────────────────────────
+
+// Synchronous version using the already-imported `os` module via dynamic import
+// isn't available at module level — we use Node's built-in synchronously:
+import os_module from "os";
+
+function getLocalIPsSync() {
+  try {
+    const ifaces = os_module.networkInterfaces();
+    const result = {};
+    for (const [name, addrs] of Object.entries(ifaces || {})) {
+      for (const addr of addrs) {
+        if (addr.family === "IPv4" && !addr.internal) {
+          result[name] = addr.address;
+        }
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Fetches the host's external (public) IP via the ipify API.
+ * Returns null on any error or timeout.
+ */
+async function getExternalIP() {
+  return new Promise((resolve) => {
+    const req = https.get(
+      { hostname: "api.ipify.org", path: "/?format=text", timeout: 4000 },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => { data += c; });
+        res.on("end",  () => resolve((data || "").trim() || null));
+      }
+    );
+    req.on("error",   () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * Wraps a plain filesystem path string into the canonical SystemPath object.
+ * Port list is empty at scan time (populated by enrichment tier if needed).
+ *
+ * @param {string} pathStr   - Absolute or relative filesystem path.
+ * @param {string} [hostIp]  - IP of the host that owns this path.
+ * @returns {{ type: "system_path", text: string, ip: string, ports: [] }}
+ */
+function makeSystemPath(pathStr, hostIp = "") {
+  return {
+    type:  "system_path",
+    text:  typeof pathStr === "string" ? pathStr : String(pathStr ?? ""),
+    ip:    hostIp,
+    ports: [],
+  };
+}
+
+/**
+ * Converts every path in an inventory array from a plain string to a
+ * SystemPath object.  Already-converted objects are left unchanged.
+ *
+ * @param {object[]} inventory
+ * @param {string}   hostIp
+ */
+function normalizeInventoryPaths(inventory, hostIp) {
+  for (const item of inventory) {
+    if (Array.isArray(item.paths)) {
+      item.paths = item.paths.map(p =>
+        p && typeof p === "object" && p.type === "system_path"
+          ? p
+          : makeSystemPath(p, hostIp)
+      );
+    }
+    // Also normalise the legacy singular `path` field if present.
+    if (item.path !== undefined && item.path !== null) {
+      item.path = typeof item.path === "object" && item.path.type === "system_path"
+        ? item.path
+        : makeSystemPath(item.path, hostIp);
+    }
+  }
+}
+
 
 function escapeHTML(str) {
     if (!str || typeof str !== 'string') return str;
@@ -806,6 +890,18 @@ function generateHTMLReport(data) {
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
+            // Local IPs — render one line per interface
+            const localIpsEl = document.getElementById('os-local-ips');
+            const localIPs = os.local_ips || {};
+            const ifaceEntries = Object.entries(localIPs);
+            localIpsEl.innerHTML = ifaceEntries.length
+                ? ifaceEntries.map(([iface, ip]) =>
+                    \`<div class="flex justify-between gap-4"><span class="text-neutral-500">\${iface}</span><span>\${ip}</span></div>\`
+                  ).join('')
+                : '<span class="text-neutral-600 italic">none detected</span>';
+
+            document.getElementById('os-external-ip').textContent = os.external_ip || 'unavailable';
+
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
@@ -854,7 +950,18 @@ function generateHTMLReport(data) {
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
             const pathRows = (item.paths || []).length
-                ? item.paths.map(p => \`<div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all">\${p}</div>\`).join('')
+                ? item.paths.map(p => {
+                    const isObj = p && typeof p === 'object' && p.type === 'system_path';
+                    const text  = isObj ? p.text  : String(p ?? '');
+                    const ip    = isObj ? p.ip    : '';
+                    const ports = isObj && Array.isArray(p.ports) && p.ports.length ? p.ports : null;
+                    return \`
+                      <div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all space-y-0.5">
+                        <div class="text-neutral-300">\${text}</div>
+                        \${ip    ? \`<div class="text-neutral-600 text-[9px]">host: \${ip}</div>\`                         : ''}
+                        \${ports ? \`<div class="text-neutral-600 text-[9px]">ports: \${ports.join(', ')}</div>\` : ''}
+                      </div>\`;
+                  }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No path info</span>';
 
             const depsRows = (item.dependencies || []).length
@@ -1157,6 +1264,14 @@ function generateHTMLReport(data) {
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">OS Version</span>
           <span class="mono text-xs" id="os-version">...</span>
+        </div>
+        <div class="flex flex-col gap-1 border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Local IPs</span>
+          <div id="os-local-ips" class="mono text-[10px] text-neutral-300 space-y-0.5"></div>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-500 text-xs">External IP</span>
+          <span class="mono text-xs text-neutral-300" id="os-external-ip">...</span>
         </div>
       </div>
     </div>
@@ -1900,6 +2015,16 @@ export class UbelEngine {
         }
       }
 
+      // ── Network metadata ──────────────────────────────────────────────────
+      // Collect local IPs synchronously; fetch external IP asynchronously.
+      // Both are stored on os_metadata for traceability across hosts.
+      const localIPs      = getLocalIPsSync();
+      const externalIP    = await getExternalIP();
+      const primaryLocalIP = Object.values(localIPs)[0] || "";
+
+      // ── Convert all path strings → SystemPath objects ─────────────────────
+      normalizeInventoryPaths(inventory, primaryLocalIP);
+
       const undeterminedCount = inventory.filter(c => c.version === "").length;
       if (undeterminedCount > 0) {
         console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected. This may lead to false positives or negatives in the report. Please ensure all dependencies have resolvable versions for accurate scanning.`);
@@ -1948,7 +2073,7 @@ export class UbelEngine {
         generated_at: now.toISOString().replace("Z","") + "Z",
         runtime,
         engine: engine_info,
-        os_metadata: getOSMetadata(),
+        os_metadata: { ...getOSMetadata(), local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: VERSION, license: TOOL_LICENSE },
         scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },
@@ -2061,10 +2186,16 @@ export class UbelEngine {
         console.error("[!] Could not write candidate lockfile:", saveResult.reason);
         process.exit(1);
       }
-
-      const installResult = NodeManager.runRealInstall(UbelEngine.engine);
-      if (installResult.status !== 0) {
-        console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+      try {
+        const installResult = NodeManager.runRealInstall(UbelEngine.engine);
+        if (installResult.status !== 0) {
+          console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+          // Restore originals so the project is left in a consistent state.
+          NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
+          process.exit(1);
+        }
+      } catch (err) {
+        console.error("[!] Failed to run npm ci:", err.message);
         // Restore originals so the project is left in a consistent state.
         NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
         process.exit(1);
