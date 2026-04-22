@@ -4,7 +4,7 @@ import { spawnSync }    from "child_process";
 import { fileURLToPath } from "url";
 
 import { LockfileParser } from "./lockfiles_parser.js";
-import { TOOL_NAME, VERSION} from "./info.js";
+import { TOOL_NAME, VERSION, TOOL_LICENSE} from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
 import {PhpComposerScanner} from "./php_runner.js";
 import { RustCargoScanner} from "./rust_runner.js";
@@ -503,11 +503,15 @@ export class NodeManager {
     const merged = NodeManager.mergeInventoryByPurl(newComponents);
     NodeManager.inventoryData = merged;
     if (NodeManager.engineVersion) {
+      let engine_license = "MIT";
+      if (["yarn"].includes(engine)) {
+        engine_license = "BSD 2-Clause";
+      }
                NodeManager.inventoryData.push({
                 id: `pkg:npm/${engine}@${NodeManager.engineVersion}`,
                 name: engine,
                 version: NodeManager.engineVersion,
-                license: null,
+                license: engine_license,
                 ecosystem: "npm",
                 state: "undetermined",
                 scopes: ["env"],
@@ -519,10 +523,10 @@ export class NodeManager {
                 id: `pkg:npm/${TOOL_NAME}@${VERSION}`,
                 name: TOOL_NAME,
                 version: VERSION,
-                license: null,
+                license: TOOL_LICENSE,
                 ecosystem: "npm",
                 state: "undetermined",
-                scopes: ["env"],
+                scopes: ["env", "prod", "dev"],
                 dependencies: [],
                 type: "library",
                 paths: [],

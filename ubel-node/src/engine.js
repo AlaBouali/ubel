@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { NodeManager }          from "./node_runner.js";
 import { processVulnerability } from "./cvss_parser.js";
 import { evaluatePolicy }       from "./policy.js";
-import { VERSION, TOOL_NAME }   from "./info.js";
+import { VERSION, TOOL_NAME, TOOL_LICENSE }   from "./info.js";
 import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
 import {getGitMetadata}         from "./git_info.js";
@@ -806,7 +806,6 @@ function generateHTMLReport(data) {
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
-            document.getElementById('git-available').textContent = git.available ? 'Yes' : 'No';
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
@@ -1175,13 +1174,9 @@ function generateHTMLReport(data) {
       </h3>
 
       <div class="space-y-3">
-        <div class="flex justify-between border-b border-neutral-800 pb-2">
-          <span class="text-neutral-500 text-xs">Available</span>
-          <span class="mono text-xs" id="git-available">...</span>
-        </div>
 
         <div class="flex justify-between border-b border-neutral-800 pb-2">
-          <span class="text-neutral-500 text-xs">Lastest commit</span>
+          <span class="text-neutral-500 text-xs">Latest commit</span>
           <span class="mono text-xs" id="git-rev">...</span>
         </div>
 
@@ -1201,7 +1196,7 @@ function generateHTMLReport(data) {
   </div>
 </section>
     </main>
-    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p></div></footer>
+    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine</span></p></div></footer>
     <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
         <div class="modal-content glass w-full max-w-3xl rounded-2xl shadow-2xl relative">
             <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
@@ -1787,6 +1782,20 @@ export class UbelEngine {
         // health — scan installed packages
         NodeManager.inventoryData = [];
         purls = await NodeManager.getInstalled();
+        NodeManager.inventoryData.push(
+          {
+                id: `pkg:npm/${TOOL_NAME}@${VERSION}`,
+                name: TOOL_NAME,
+                version: VERSION,
+                license: TOOL_LICENSE,
+                ecosystem: "npm",
+                state: "undetermined",
+                scopes: ["env", "prod", "dev"],
+                dependencies: [],
+                type: "library",
+                paths: [],
+              }
+        )
         reportContent = {};
       }
 
@@ -1932,13 +1941,16 @@ export class UbelEngine {
           delete item.dependency_sequences;
         }
       }
+      if (UbelEngine.checkMode === "health") {
+        UbelEngine.engine = TOOL_NAME;
+      }
       const finalJson = {
         generated_at: now.toISOString().replace("Z","") + "Z",
         runtime,
         engine: engine_info,
         os_metadata: getOSMetadata(),
         git_metadata: git_metadata,
-        tool_info:    { name: TOOL_NAME, version: VERSION },
+        tool_info:    { name: TOOL_NAME, version: VERSION, license: TOOL_LICENSE },
         scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),

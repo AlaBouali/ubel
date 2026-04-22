@@ -5,6 +5,10 @@ description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, De
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Ala Bouali"}
+]
 
 [project.scripts]
 ubel-pip = "ubel.__main__:pip_mode"

@@ -43,10 +43,11 @@ from .python_runner import Pypi_Manager, PythonVenvScanner
 from .linux_runner import Linux_Manager
 
 try:
-    from info import __version__, __tool_name__
+    from .info import __version__, __tool_name__, __tool_license__
 except ImportError:
     __version__   = "0.0.0"
-    __tool_name__ = "ubel"
+    __tool_name__ = "ubel-python"
+    __tool_license__ = "Apache 2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1023,7 @@ def generate_html_report(data: Dict) -> str:
   </div>
 </section>
     </main>
-    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine v1.0.0</span></p></div></footer>
+    <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">UBEL Security Engine</span></p></div></footer>
     <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
         <div class="modal-content glass w-full max-w-3xl rounded-2xl shadow-2xl relative">
             <button onclick="closeModal()" class="absolute top-6 right-6 text-neutral-500 hover:text-white transition-colors"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
@@ -2081,6 +2082,28 @@ class UbelEngine:
                 inventory = list(Linux_Manager.inventory_data)
                 for item in inventory:
                     item["scopes"] = ["prod"]
+            
+            for item in inventory:
+                if item.get("id","").startswith("pkg:pypi/pip@"):
+                    if "env" not in item.get("scopes", []):
+                        item["scopes"].append("env")
+            
+            inventory.append(
+                        {
+                            "id": f"pkg:pypi/python-ubel@{__version__}",
+                            "name": "python-ubel",
+                            "version": __version__,
+                            "type": "library",
+                            "ecosystem": "python",
+                            "license": "MIT",
+                            "paths": [],
+                            "scopes": ["dev","prod","env"],
+                            "dependencies": [],
+                            "state": "undetermined",
+                        }
+                    )
+            
+            purls.append(f"pkg:pypi/python-ubel@{__version__}")
 
             match_dependencies_with_inventory(inventory)
 
@@ -2181,11 +2204,11 @@ class UbelEngine:
                 "engine":       {"name": UbelEngine.engine, "version": ""},
                 "os_metadata":  _get_os_metadata(),
                 "git_metadata": _get_git_metadata(),
-                "tool_info":    {"name": __tool_name__, "version": __version__},
+                "tool_info":    {"name": __tool_name__, "version": __version__, "license": __tool_license__},
                 "scan_info":    {
                     "type":       UbelEngine.check_mode,
                     "ecosystems": sorted(ecosystems),
-                    "engine":     UbelEngine.engine,
+                    "engine":     UbelEngine.engine if UbelEngine.check_mode != "health" else __tool_name__,
                 },
                 "stats":               stats,
                 "vulnerabilities_ids": sorted(UbelEngine._vuln_ids_found),

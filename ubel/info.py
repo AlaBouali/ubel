@@ -1,5 +1,6 @@
 __version__ = "0.6.0"
-__tool_name__="Ubel"
+__tool_name__="Ubel-python"
+__tool_license__="Apache 2.0"
 __tool_name_ascii__="""
 
  ██    ██  ██████▒   ████████  ██       
@@ -23,15 +24,11 @@ __company__="Arcane-Spark"
 
 __github__="https://github.com/AlaBouali/ubel"
 
-banner=f"""
-{__tool_name_ascii__}
-
-        Version: {__version__}
-
-        Author: {__author__}
+banner=f"""Author: {__author__}
 
         GitHub: {__github__}
 
         Company: {__company__}
 
+        License: {__tool_license__}
 """

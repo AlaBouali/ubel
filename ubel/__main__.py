@@ -29,9 +29,11 @@ from .ubel_engine import UbelEngine, PolicyViolationError, _initiate_local_polic
 from .info import banner                         # from the existing info module
 
 try:
-    from .info import __version__
+    from .info import __version__, __tool_name__, __tool_license__
 except ImportError:
     __version__ = "0.0.0"
+    __tool_name__ = "ubel-pip"
+    __tool_license__ = "Apache 2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +249,7 @@ def linux_mode() -> None:
     UbelEngine.reports_location = str(home / UbelEngine.reports_location.lstrip("./"))
     UbelEngine.policy_dir       = str(home / UbelEngine.policy_dir.lstrip("./"))
     UbelEngine.system_type      = "linux"
-    _run_mode("system", "linux", "Safe Linux policy-driven supply-chain firewall")
+    _run_mode(__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall")
 
 
 # ---------------------------------------------------------------------------

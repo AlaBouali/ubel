@@ -120,6 +120,23 @@ class Pypi_Manager:
         raise RuntimeError(
             f"Cannot locate Python interpreter inside venv: {venv_dir}"
         )
+    
+    @staticmethod
+    def get_pip_version(python: str) -> Optional[str]:
+        """Return the version of pip installed in the venv, or None if not found."""
+        try:
+            result = subprocess.run(
+                [python, "-m", "pip", "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            output = result.stdout.strip()
+            if output.startswith("pip "):
+                return output.split()[1]
+        except (subprocess.CalledProcessError, IndexError):
+            pass
+        return None
 
     @staticmethod
     def _resolve_dep_purl(raw_dep_name: str, name_to_purl: Dict[str, str]) -> str:
@@ -175,6 +192,10 @@ class Pypi_Manager:
         Full records are stored in ``Pypi_Manager.inventory_data``.
         """
         python = Pypi_Manager._venv_python(venv_dir)
+
+        pip_version = Pypi_Manager.get_pip_version(python)
+        if pip_version is None:
+            raise RuntimeError(f"pip is not installed in the venv at {venv_dir}")
         args   = [a for a in initial_args if a != "--"]
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
@@ -239,10 +260,25 @@ class Pypi_Manager:
                 "license":      meta.get("license", "unknown"),
                 "dependencies": deps,
                 "paths":        [],
-                "ecosystem":    "pypi",
+                "ecosystem":    "python",
                 "scopes":       ["prod"],
                 "state":        "undetermined",
             })
+        
+        components.append(
+            {
+                "id": f"pkg:pypi/pip@{pip_version}",
+                "name": "pip",
+                "version": pip_version,
+                "type": "tool",
+                "license": "MIT",
+                "dependencies": [],
+                "paths": [],
+                "ecosystem": "python",
+                "scopes": ["dev", "env", "prod"],
+                "state": "undetermined",
+            }
+        )
 
         components = Pypi_Manager.merge_inventory_by_purl(components)
         components = Pypi_Manager.build_dependency_sequences(components)
