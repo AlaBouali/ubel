@@ -2090,12 +2090,12 @@ class UbelEngine:
             
             inventory.append(
                         {
-                            "id": f"pkg:pypi/python-ubel@{__version__}",
-                            "name": "python-ubel",
+                            "id": f"pkg:pypi/{__name__}@{__version__}",
+                            "name": __name__,
                             "version": __version__,
                             "type": "library",
                             "ecosystem": "python",
-                            "license": "MIT",
+                            "license": __tool_license__,
                             "paths": [],
                             "scopes": ["dev","prod","env"],
                             "dependencies": [],
