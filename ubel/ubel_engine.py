@@ -2225,6 +2225,9 @@ class UbelEngine:
                 if item.get("id","").startswith("pkg:pypi/pip@"):
                     if "env" not in item.get("scopes", []):
                         item["scopes"].append("env")
+                if "venv_root" in item:
+                    item.pop("venv_root", None)
+                
             
             inventory.append(
                         {
