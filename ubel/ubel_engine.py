@@ -2234,8 +2234,8 @@ class UbelEngine:
             
             inventory.append(
                         {
-                            "id": f"pkg:pypi/{__name__}@{__version__}",
-                            "name": __name__,
+                            "id": f"pkg:pypi/{__tool_name__}@{__version__}",
+                            "name": __tool_name__,
                             "version": __version__,
                             "type": "library",
                             "ecosystem": "python",
