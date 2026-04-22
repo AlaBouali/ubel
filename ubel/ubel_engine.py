@@ -211,6 +211,7 @@ def _get_os_metadata() -> Dict[str, Any]:
             os_id      = data.get("id",          "unknown")
             os_name    = data.get("pretty_name") or data.get("name", os_id)
             os_version = data.get("version_id")  or data.get("version", "unknown")
+            os_release = platform.release()
             break
         except OSError:
             continue
@@ -219,12 +220,14 @@ def _get_os_metadata() -> Dict[str, Any]:
     if os_id == "unknown":
         os_id      = sys.platform
         os_name    = platform.system()
-        os_version = platform.release()
+        os_version = platform.version()
+        os_release  = platform.release()
 
     return {
         "os_id":      os_id,
         "os_name":    os_name,
         "os_version": os_version,
+        "os_release": os_release,
         "local_ips":  _get_local_ips(),
         "external_ip": None,          # filled in by scan() after async fetch
     }

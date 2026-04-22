@@ -37,8 +37,8 @@ export function getLinux() {
       os_id: data.ID,
       os_name: data.NAME,
       os_version: data.VERSION_ID || data.VERSION,
-      /* build: undefined, // not standardized in Linux
-      release: data.VERSION */
+      /* build: undefined, // not standardized in Linux */
+      os_release: data.VERSION 
     };
   } catch (e) {
     return { error: e.message };
@@ -74,8 +74,8 @@ export function getWindows() {
       /* build:
         reg.CurrentBuild && reg.UBR
           ? `${reg.CurrentBuild}.${reg.UBR}`
-          : reg.CurrentBuild,
-      release: reg.DisplayVersion || reg.ReleaseId */
+          : reg.CurrentBuild,*/
+      release: reg.DisplayVersion || reg.ReleaseId
     };
   } catch (e) {
     return {
@@ -83,7 +83,7 @@ export function getWindows() {
       os_name: undefined,
       os_version: undefined,
       //build: undefined,
-      //release: undefined
+      os_release: undefined
     };
   }
 }
@@ -107,8 +107,8 @@ export function getMacOS() {
       os_id: "macos",
       os_name: data.ProductName,
       os_version: data.ProductVersion,
-      /* build: data.BuildVersion,
-      release: data.ProductVersion */
+      os_release: data.ProductVersion,
+      /* build: data.BuildVersion, */
     };
   } catch (e) {
     return { error: e.message };
