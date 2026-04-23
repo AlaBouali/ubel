@@ -9,7 +9,7 @@
  * mode      : check | install | health | init | threshold | block-unknown
  *
  * Policy configuration modes:
- *   threshold <level>         — set severity_threshold (low|medium|high|critical)
+ *   threshold <level>          — set severity_threshold (low|medium|high|critical)
  *   block-unknown <true|false> — set block_unknown_vulnerabilities
  *
  * check/install support matrix:
@@ -20,8 +20,8 @@
  */
 
 import { UbelEngine, PolicyViolationError } from "./engine.js";
-import { banner }     from "./info.js";
-import { loadEnvironment } from "./utils.js";
+import { banner }            from "./info.js";
+import { loadEnvironment }   from "./utils.js";
 
 const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
@@ -57,8 +57,6 @@ async function main() {
   }
 
   // ── threshold <level> ─────────────────────────────────────────────────────
-  // Sets severity_threshold in the policy file.
-  // Example: ubel-npm threshold high  (or "none" to disable severity blocking)
   if (effectiveMode === "threshold") {
     const level = (extraArgs[0] || "").toLowerCase();
     if (!level || !VALID_SEVERITIES.has(level)) {
@@ -73,8 +71,6 @@ async function main() {
   }
 
   // ── block-unknown <true|false> ────────────────────────────────────────────
-  // Sets block_unknown_vulnerabilities in the policy file.
-  // Example: ubel-npm block-unknown true
   if (effectiveMode === "block-unknown") {
     const raw = (extraArgs[0] || "").toLowerCase();
     if (raw !== "true" && raw !== "false") {
@@ -120,7 +116,12 @@ async function main() {
 
   // ── scan ──────────────────────────────────────────────────────────────────
   try {
-    await UbelEngine.scan(pkgArgs);
+    await UbelEngine.scan(pkgArgs, {
+      is_script:    false,
+      save_reports: true,
+      os_scan:      false,
+      full_stack:   true,
+    });
   } catch (err) {
     if (err instanceof PolicyViolationError) {
       process.exit(1);
@@ -131,4 +132,65 @@ async function main() {
   }
 }
 
-main();
+/**
+ * scan_project — called by the VS Code extension (and any other script consumer).
+ *
+ * Fixes vs. the inline CLI path:
+ *   1. Sets UbelEngine.engine + UbelEngine.systemType before scanning —
+ *      the CLI does this in main() but scan_project previously skipped it.
+ *   2. Forces checkMode to "health" so the scan() path never reaches the
+ *      process.exit(0) calls that live in the "check" / "install" branches —
+ *      those would kill the VS Code host process.
+ *   3. Resets was_successful_scan so a second call in the same process gets
+ *      a clean slate (static class, single process lifetime).
+ *
+ * @param {string} [projectRoot] - Absolute path to scan. Defaults to cwd().
+ * @returns {Promise<object>}    - The finalJson report object.
+ */
+export async function scan_project(projectRoot, options={
+      is_script:    true,
+      save_reports: true,
+      os_scan:      false,
+      full_stack:   true,
+    }) {
+  // ── change cwd so all relative paths (.ubel/, node_modules/, …) resolve
+  //    inside the target project, not inside the extension's install dir.
+  const original_cwd = process.cwd();
+  if (projectRoot && projectRoot !== original_cwd) {
+    process.chdir(projectRoot);
+  }
+
+  try {
+    // ── Engine state must be initialised before scan() ────────────────────
+    UbelEngine.engine            = "npm";
+    UbelEngine.systemType        = "npm";
+    UbelEngine.checkMode         = "health";   // avoids the process.exit() branches
+    UbelEngine.was_successful_scan = false;    // reset for re-runs in same process
+    UbelEngine.vulns_ids_found   = new Set();  // reset accumulated vuln ids
+
+    UbelEngine.initiateLocalPolicy();
+
+    return await UbelEngine.scan([], options);
+  } finally {
+    // Always restore the original cwd, even if the scan throws.
+    if (projectRoot && projectRoot !== original_cwd) {
+      process.chdir(original_cwd);
+    }
+  }
+}
+
+
+// main() must run when:
+//   • executed directly via node src/main.js
+//   • loaded by a bin wrapper via import("../src/main.js")
+//     (in that case process.argv[1] is npm.js/pnpm.js/bun.js — NOT main.js,
+//      so any argv[1] check is wrong)
+//
+// main() must NOT run when:
+//   • bundled by esbuild for the VS Code extension.
+//     esbuild compiles away import.meta, so typeof import.meta === "undefined"
+//     inside the CJS bundle — that is the only safe distinguishing signal.
+
+if (typeof import.meta !== "undefined") {
+  main();
+}

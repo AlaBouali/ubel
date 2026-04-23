@@ -4,7 +4,7 @@ import { spawnSync }    from "child_process";
 import { fileURLToPath } from "url";
 
 import { LockfileParser } from "./lockfiles_parser.js";
-import { TOOL_NAME, VERSION, TOOL_LICENSE} from "./info.js";
+import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE} from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
 import {PhpComposerScanner} from "./php_runner.js";
 import { RustCargoScanner} from "./rust_runner.js";
@@ -12,6 +12,7 @@ import {GoModScanner} from "./go_runner.js";
 import {CSharpNuGetScanner} from "./csharp_runner.js";
 import { JavaMavenScanner} from "./java_runner.js";
 import { RubyBundlerScanner} from "./ruby_runner.js";
+import {LinuxHostScanner} from "./linux_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -537,9 +538,9 @@ export class NodeManager {
                 paths: [],
               },
               {
-                id: `pkg:npm/${TOOL_NAME}@${VERSION}`,
+                id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
                 name: TOOL_NAME,
-                version: VERSION,
+                version: TOOL_VERSION,
                 license: TOOL_LICENSE,
                 ecosystem: "npm",
                 state: "undetermined",
@@ -767,7 +768,7 @@ export class NodeManager {
   // Recursive project scanner
   // ─────────────────────────────
 
-  static async getInstalled(startDir = process.cwd()) {
+  static async getInstalled(startDir = process.cwd(), full_stack = false, os_scan = false) {
 
     const visited = new Set();
     const results = [];
@@ -810,6 +811,8 @@ export class NodeManager {
     const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);
     NodeManager.inventoryData = merged;
 
+    if (full_stack) {
+
     await PythonVenvScanner.getInstalled();
     await PhpComposerScanner.getInstalled();
     await RustCargoScanner.getInstalled();
@@ -824,6 +827,11 @@ export class NodeManager {
     NodeManager.inventoryData.push(...CSharpNuGetScanner.inventoryData);
     NodeManager.inventoryData.push(...JavaMavenScanner.inventoryData);
     NodeManager.inventoryData.push(...RubyBundlerScanner.inventoryData);
+    }
+    if (os_scan) {
+      await LinuxHostScanner.getInstalled();
+      NodeManager.inventoryData.push(...LinuxHostScanner.inventoryData);
+    }
 
     // Assign pro/dev/env scopes from the project's package.json.
     const pkgJsonPath = path.join(startDir, 'package.json');

@@ -1,4 +1,4 @@
-export const VERSION = "1.0.0";
+export const TOOL_VERSION = "1.0.0";
 export const TOOL_NAME = "ubel-node";
 export const TOOL_LICENSE = "Apache 2.0";
 export const AUTHOR = "Ala Bouali";

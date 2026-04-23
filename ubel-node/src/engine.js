@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { NodeManager }          from "./node_runner.js";
 import { processVulnerability } from "./cvss_parser.js";
 import { evaluatePolicy }       from "./policy.js";
-import { VERSION, TOOL_NAME, TOOL_LICENSE }   from "./info.js";
+import {TOOL_NAME, TOOL_LICENSE, TOOL_VERSION }   from "./info.js";
 import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
 import {getGitMetadata}         from "./git_info.js";
@@ -40,6 +40,7 @@ const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 // Synchronous version using the already-imported `os` module via dynamic import
 // isn't available at module level — we use Node's built-in synchronously:
 import os_module from "os";
+import { flushCompileCache } from "module";
 
 function getLocalIPsSync() {
   try {
@@ -1874,7 +1875,7 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {is_script: false}) {
+  static async scan(args, options = {is_script: false, save_reports: true, scan_os: false, full_stack: false}) {
     const ecosystems = new Set();
     if (!options.is_script) {
       NodeManager._captureEngineVersion(UbelEngine.engine);
@@ -1917,18 +1918,20 @@ export class UbelEngine {
         reportContent = NodeManager.currentLockFileContent;
         // Tell the user where the originals are in case anything goes wrong.
         if (NodeManager._lockfileBackupDir) {
+          if (options.is_script==false){
           console.log(`[~] Original lockfiles backed up to: ${NodeManager._lockfileBackupDir}`);
           console.log();
+          }
         }
       } else {
         // health — scan installed packages
         NodeManager.inventoryData = [];
-        purls = await NodeManager.getInstalled();
+        purls = await NodeManager.getInstalled(process.cwd(),options.full_stack,options.scan_os);
         NodeManager.inventoryData.push(
           {
-                id: `pkg:npm/${TOOL_NAME}@${VERSION}`,
+                id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
                 name: TOOL_NAME,
-                version: VERSION,
+                version: TOOL_VERSION,
                 license: TOOL_LICENSE,
                 ecosystem: "npm",
                 state: "undetermined",
@@ -2103,7 +2106,7 @@ export class UbelEngine {
         engine: engine_info,
         os_metadata: { ...getOSMetadata(), local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
-        tool_info:    { name: TOOL_NAME, version: VERSION, license: TOOL_LICENSE },
+        tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
         scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
@@ -2113,16 +2116,21 @@ export class UbelEngine {
         policy,
         dependencies_tree: NodeManager.buildDependencyTree(inventory),
       };
+      
 
       const [allowed, reason] = evaluatePolicy(finalJson);
       finalJson.decision = { allowed, reason, policy_violations: policyViolations };
+
+      if (options.is_script==true&& options.save_reports === false) {
+        return finalJson;
+      }
 
       const htmlReport = generateHTMLReport(finalJson);
       const htmlPath = jsonPath.replace(/\.json$/, ".html");
       fs.writeFileSync(htmlPath, htmlReport);
 
       fs.writeFileSync(jsonPath, JSON.stringify(finalJson, null, 2));
-
+      if (options.is_script==false){
       // ── Console output ─────────────────────────────────────────────────────
       console.log();
       console.log("Policy:");
@@ -2135,12 +2143,15 @@ export class UbelEngine {
       console.log(dictToStr(stats));
       console.log();
       console.log();
+      }
 
       // ── Findings summary — one block per affected package ─────────────────
       const summaryEntries = Object.values(findingsSummary);
       if (summaryEntries.length > 0) {
+        if (options.is_script==false){
         console.log("Findings Summary:");
         console.log();
+          }
         for (const pkg of summaryEntries) {
           const s = pkg.stats;
           const counts = [];
@@ -2151,23 +2162,33 @@ export class UbelEngine {
           if (s.low)       counts.push(`${s.low} low`);
           if (s.unknown)   counts.push(`${s.unknown} unknown`);
 
+
+          if (options.is_script==false){
           console.log(`  ${pkg.name}@${pkg.version}  [${counts.join(", ")}]`);
+            }
 
           for (const vuln of pkg.vulnerabilities) {
             const label = vuln.is_infection ? "INFECTION" : vuln.severity.toUpperCase();
             const score = vuln.severity_score != null ? ` (${vuln.severity_score})` : "";
+            if (options.is_script==false){
+
             console.log(`    \u2022 ${vuln.id}  ${label}${score}`);
             for (const fix of (vuln.fixes || [])) {
+
               console.log(`      fix: ${fix}`);
             }
           }
+          }
+          if (options.is_script==false){
           console.log();
+          }
         }
       }
-
+      if (options.is_script==false){
       console.log(`Policy Decision: ${allowed ? "ALLOW" : "BLOCK"}`);
       console.log();
       console.log();
+      }
       /* console.log(`JSON report saved to: ${jsonPath}`);
       console.log();
       console.log(); */
@@ -2179,17 +2200,21 @@ export class UbelEngine {
       const lateshtmlpath=latestPath.replace(/\.json$/, ".html");
       fs.writeFileSync(lateshtmlpath, htmlReport);
       fs.writeFileSync(latestPath, JSON.stringify(finalJson, null, 2));
+      if (options.is_script==false){
       console.log(`Latest JSON report saved to: ${latestPath}`);
       console.log(`Latest HTML report saved to: ${lateshtmlpath}`);
       console.log();
       console.log();
+      }
 
       if (!allowed) {
         // Throw so the finally block runs and reverts the lockfile before we exit.
         // main() catches PolicyViolationError and exits with code 1 silently
         // (the messages below have already been printed).
+        if (options.is_script==false){
         console.error("[!] Policy violation detected!");
         console.log(`[!] ${reason}`);
+        }
         throw new PolicyViolationError(reason);
       }
 
@@ -2202,28 +2227,37 @@ export class UbelEngine {
         NodeManager.was_successful_scan = true;
         NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
         NodeManager.cleanupLockfileBackup();
+        if (options.is_script==false){
         console.log("[+] Backup lockfiles removed.");
+        }
         process.exit(0);
       }
-
+      if (options.is_script==false){
       console.log("[+] Policy passed. Installing dependencies...");
+      }
       NodeManager.was_successful_scan = true;
 
       const saveResult = NodeManager.saveCandidateLockfile(UbelEngine.engine, process.cwd())
       if (!saveResult.written) {
+        if (options.is_script==false){
         console.error("[!] Could not write candidate lockfile:", saveResult.reason);
+        }
         process.exit(1);
       }
       try {
         const installResult = NodeManager.runRealInstall(UbelEngine.engine);
         if (installResult.status !== 0) {
+          if (options.is_script==false){
           console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+          }
           // Restore originals so the project is left in a consistent state.
           NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
           process.exit(1);
         }
       } catch (err) {
+        if (options.is_script==false){
         console.error("[!] Failed to run npm ci:", err.message);
+        }
         // Restore originals so the project is left in a consistent state.
         NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
         process.exit(1);
@@ -2264,7 +2298,9 @@ export class UbelEngine {
 
       // Everything succeeded — safe to remove the disk backup now.
       NodeManager.cleanupLockfileBackup();
+      if (options.is_script==false){
       console.log("[+] Backup lockfiles removed.");
+      }
 
     } finally {
       // Always restore the lockfile and package.json if a dry-run mutated them,
@@ -2272,14 +2308,20 @@ export class UbelEngine {
       if (!NodeManager.was_successful_scan && needsRevert) {
         const revertResult = NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
         if (!revertResult.reverted) {
+          if (options.is_script==false){
           console.error("[!] Failed to restore original lockfiles:", revertResult.reason);
+          }
           if (revertResult.backupDir) {
+            if (options.is_script==false){
             console.error(`[~] Originals are preserved at: ${revertResult.backupDir}`);
             console.error("[~] Restore them manually if needed.");
+            }
           }
         } else {
           NodeManager.cleanupLockfileBackup();
+          if (options.is_script==false){
           console.log("[+] Backup lockfiles removed.");
+          }
         }
       }
     }
