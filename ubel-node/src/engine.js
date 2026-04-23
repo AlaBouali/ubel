@@ -13,6 +13,25 @@ import {getGitMetadata}         from "./git_info.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// ── buildParents — injected here so node_runner.js needs no edits ─────────────
+// Populates comp.parents: the list of packages that directly depend on this
+// node (one-hop reverse of comp.dependencies). Distinct from introduced_by,
+// which tracks root ancestors only.
+NodeManager.buildParents = function buildParents(inventory) {
+  const parents = new Map(inventory.map(c => [c.id, []]));
+  for (const comp of inventory) {
+    for (const depId of (comp.dependencies || [])) {
+      if (parents.has(depId)) {
+        parents.get(depId).push(comp.id);
+      }
+    }
+  }
+  for (const comp of inventory) {
+    comp.parents = (parents.get(comp.id) || []).sort();
+  }
+  return inventory;
+};
+
 const OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 
@@ -949,6 +968,13 @@ function generateHTMLReport(data) {
                 ? (item.introduced_by).map(ib => \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${ib}'), 50)">\${ib}</span>\`).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
+            const parentsRows = (item.parents || []).length
+                ? item.parents.map(p => {
+                    const par = reportData.inventory.find(x => x.id === p);
+                    return \`<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${p}'), 50)">\${par ? par.name + '@' + par.version : p}</span>\`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No dependents (root)</span>';
+
             const pathRows = (item.paths || []).length
                 ? item.paths.map(p => {
                     const isObj = p && typeof p === 'object' && p.type === 'system_path';
@@ -995,7 +1021,8 @@ function generateHTMLReport(data) {
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
                     </div>
 
-                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (\${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">\${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">\${depsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">\${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4><div class="space-y-0">\${vulnRows}</div></div>
@@ -1975,6 +2002,7 @@ export class UbelEngine {
       inventory = NodeManager.buildDependencySequences(inventory);
 
       inventory = NodeManager.buildIntroducedBy(inventory);
+      inventory = NodeManager.buildParents(inventory);
 
       // ── Second-pass scope propagation ─────────────────────────────────────
       // _assignScopes runs inside runDryRun against the lockfile dep graph,

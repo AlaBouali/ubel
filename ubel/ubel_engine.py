@@ -602,6 +602,27 @@ def build_introduced_by(inventory: List[Dict]) -> List[Dict]:
     return inventory
 
 
+def build_parents(inventory: List[Dict]) -> List[Dict]:
+    """
+    Populate parents on each inventory node: the list of packages that
+    directly depend on this node (one-hop reverse of .dependencies).
+
+    Distinct from introduced_by (which tracks root ancestors) — parents
+    gives the immediate callers in the dep graph, useful for impact analysis.
+    """
+    # Build reverse map: child_id -> [parent_ids]
+    parents: Dict[str, List[str]] = {c["id"]: [] for c in inventory}
+    for comp in inventory:
+        for dep_id in comp.get("dependencies", []):
+            if dep_id in parents:
+                parents[dep_id].append(comp["id"])
+
+    for comp in inventory:
+        comp["parents"] = sorted(parents.get(comp["id"], []))
+
+    return inventory
+
+
 def build_dependency_tree(inventory: List[Dict]) -> Dict:
     """
     Build a nested dict tree used by the HTML graph renderer.
@@ -1968,6 +1989,13 @@ def generate_html_report(data: Dict) -> str:
                 ? (item.introduced_by).map(ib => `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${ib}'), 50)">${ib}</span>`).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
+            const parentsRows = (item.parents || []).length
+                ? item.parents.map(p => {
+                    const par = reportData.inventory.find(x => x.id === p);
+                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${p}'), 50)">${par ? par.name + '@' + par.version : p}</span>`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No dependents (root)</span>';
+
             const pathRows = (item.paths || []).length
                 ? item.paths.map(p => {
                     const isObj = p && typeof p === 'object' && p.type === 'system_path';
@@ -2014,7 +2042,8 @@ def generate_html_report(data: Dict) -> str:
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold ${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
                     </div>
 
-                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (${itemVulns.length})</h4><div class="space-y-0">${vulnRows}</div></div>
@@ -2230,6 +2259,7 @@ class UbelEngine:
                         item["scopes"].append("env")
                 if "venv_root" in item:
                     item.pop("venv_root", None)
+                item["dependencies"] = list(set(item.get("dependencies", [])))
                 
             
             inventory.append(
@@ -2297,6 +2327,7 @@ class UbelEngine:
 
             inventory = build_dependency_sequences(inventory)
             inventory = build_introduced_by(inventory)
+            inventory = build_parents(inventory)
             _propagate_scopes(inventory)
 
             for item in inventory:
