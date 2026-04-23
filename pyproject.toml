@@ -10,6 +10,9 @@ authors = [
     {name = "Ala Bouali"}
 ]
 
+[tool.setuptools]
+packages = ["ubel"]
+
 [project.scripts]
 ubel-pip = "ubel.__main__:pip_mode"
 ubel = "ubel.__main__:linux_mode"
