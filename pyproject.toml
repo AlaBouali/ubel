@@ -5,7 +5,7 @@ description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, De
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 authors = [
     {name = "Ala Bouali"}
 ]
