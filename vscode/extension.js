@@ -54,6 +54,7 @@ function activate(context) {
             save_reports: true,
             os_scan:      false,
             full_stack:   true,
+            is_vscanned_project: true,  // enables vscode-specific engine_info fields
           });
 
           // ── Clean scan ────────────────────────────────────────────────

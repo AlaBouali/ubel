@@ -808,9 +808,6 @@ export class NodeManager {
 
     await walk(startDir);
 
-    const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);
-    NodeManager.inventoryData = merged;
-
     if (full_stack) {
 
     await PythonVenvScanner.getInstalled();
@@ -832,6 +829,9 @@ export class NodeManager {
       await LinuxHostScanner.getInstalled();
       NodeManager.inventoryData.push(...LinuxHostScanner.inventoryData);
     }
+
+    const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);
+    NodeManager.inventoryData = merged;
 
     // Assign pro/dev/env scopes from the project's package.json.
     const pkgJsonPath = path.join(startDir, 'package.json');

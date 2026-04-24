@@ -152,6 +152,7 @@ export async function scan_project(projectRoot, options={
       save_reports: true,
       os_scan:      false,
       full_stack:   true,
+      is_vscanned_project: false,  // enables vscode-specific engine_info fields
     }) {
   // ── change cwd so all relative paths (.ubel/, node_modules/, …) resolve
   //    inside the target project, not inside the extension's install dir.
@@ -168,6 +169,11 @@ export async function scan_project(projectRoot, options={
     UbelEngine.was_successful_scan = false;    // reset for re-runs in same process
     UbelEngine.vulns_ids_found   = new Set();  // reset accumulated vuln ids
 
+    UbelEngine.inventory = [];
+    UbelEngine.vulnerabilities = [];
+    UbelEngine.dependency_tree = {};
+
+    UbelEngine.vulns_ids_found = new Set();
     UbelEngine.initiateLocalPolicy();
 
     return await UbelEngine.scan([], options);

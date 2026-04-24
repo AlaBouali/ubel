@@ -9,7 +9,7 @@ import { evaluatePolicy }       from "./policy.js";
 import {TOOL_NAME, TOOL_LICENSE, TOOL_VERSION }   from "./info.js";
 import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
-import {getGitMetadata}         from "./git_info.js";
+import {getGitMetadata, getvscodeversion}         from "./git_info.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -925,6 +925,7 @@ function generateHTMLReport(data) {
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
+            document.getElementById('git-version').textContent = git.version || 'N/A';
         }
 
         function setupFilters() {
@@ -1317,6 +1318,11 @@ function generateHTMLReport(data) {
       </h3>
 
       <div class="space-y-3">
+
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Git version</span>
+          <span class="mono text-xs" id="git-version">...</span>
+        </div>
 
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">Latest commit</span>
@@ -1831,6 +1837,7 @@ function get_policy_violations(vulnerabilities) {
 
 // ── Engine class ──────────────────────────────────────────────────────────────
 export class UbelEngine {
+
   static reportsLocation       = "./.ubel/local/reports";
   static policyDir             = "./.ubel/local/policy";
   static policyFilename        = "config.json";
@@ -1875,7 +1882,7 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {is_script: false, save_reports: true, scan_os: false, full_stack: false}) {
+  static async scan(args, options = {is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false }) {
     const ecosystems = new Set();
     if (!options.is_script) {
       NodeManager._captureEngineVersion(UbelEngine.engine);
@@ -1949,11 +1956,10 @@ export class UbelEngine {
           purls = purls.filter(p => p !== purl);
         }
       }
-
+      purls = [...new Set(purls)]; 
+      let inventory = [...NodeManager.inventoryData];
       // ── OSV query ─────────────────────────────────────────────────────────
       const vuln_ids = await submitToOsv(purls);
-      const uniquePurls = [...new Set(purls)];
-      let inventory = [...NodeManager.inventoryData];
       matchDependenciesWithInventory(inventory);
 
       // ── Enrich vulnerabilities concurrently ───────────────────────────────
@@ -2099,6 +2105,11 @@ export class UbelEngine {
       }
       if (UbelEngine.checkMode === "health") {
         UbelEngine.engine = TOOL_NAME;
+      }
+
+      if (options.is_vscanned_project) {
+        engine_info.name="vscode";
+        engine_info.version=getvscodeversion();
       }
       const finalJson = {
         generated_at: now.toISOString().replace("Z","") + "Z",

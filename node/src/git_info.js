@@ -13,6 +13,7 @@ OUTPUT:
 function run(cmd) {
   try {
     return execSync(cmd, {
+      shell: true,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
@@ -21,11 +22,20 @@ function run(cmd) {
   }
 }
 
+export function getvscodeversion() {
+  return run("code --version").split("\n")[0];
+}
+
+export function getGitVersion() {
+  return run("git --version").split("\n")[0].replace("git version ", "");
+}
+
 export function getGitMetadata() {
   // check if inside a git repo
   const inside = run("git rev-parse --is-inside-work-tree");
   if (inside !== "true") {
     return {
+      version: getGitVersion(),
       url: undefined,
       branch: undefined,
       commit: undefined
@@ -56,6 +66,7 @@ export function getGitMetadata() {
   const latest_commit = run("git rev-parse HEAD");
 
   return {
+    version: getGitVersion(),
     url:url,
     branch:branch,
     latest_commit:latest_commit
