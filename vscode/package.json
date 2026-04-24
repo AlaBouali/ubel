@@ -1,0 +1,33 @@
+{
+  "name": "ubel",
+  "displayName": "UBEL — Supply-Chain Firewall",
+  "description": "Dependency security scanner and supply-chain firewall powered by UBEL.",
+  "version": "0.1.0",
+  "publisher": "arcane-spark",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ubel.scan",
+        "title": "UBEL: Scan Project"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ubel.scan",
+        "key": "ctrl+shift+u",
+        "mac": "cmd+shift+u",
+        "when": "editorTextFocus || explorerViewletVisible"
+      }
+    ]
+  },
+  "scripts": {
+    "prepackage": "xcopy /E /I /Y ..\\node\\src node\\src",
+    "package": "vsce package --no-dependencies --out ubel-vscode-extension.vsix --allow-missing-repository",
+    "vs_install": "code --install-extension ubel-vscode-extension.vsix",
+    "clean": "rmdir /S /Q node || rm -rf node"
+  }
+}

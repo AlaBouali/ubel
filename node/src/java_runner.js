@@ -220,13 +220,10 @@ export class JavaMavenScanner {
     for (const dep of deps) {
       if (!dep.groupId || !dep.artifactId) continue;
 
-      const version = dep.version ?? "";
-      const id      = this._mavenPurl(dep.groupId, dep.artifactId, version);
-      const scope   = this._mavenScopeToUbel(dep.scope ?? "compile");
-
-      if (version === "unknown") {
-        version = "";  // treat as unknown version (no @ in PURL)
-        }
+      let version = dep.version ?? "";
+      if (version === "unknown") version = "";
+      const id    = this._mavenPurl(dep.groupId, dep.artifactId, version);
+      const scope = this._mavenScopeToUbel(dep.scope ?? "compile");
 
 
       components.push({
