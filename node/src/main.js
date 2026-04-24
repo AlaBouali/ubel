@@ -20,13 +20,14 @@
  */
 
 import { UbelEngine, PolicyViolationError } from "./engine.js";
+import { NodeManager }           from "./node_runner.js";
 import { banner }            from "./info.js";
 import { loadEnvironment }   from "./utils.js";
 
 const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 
-async function main() {
+export async function main() {
   const [, , engine, mode, ...extraArgs] = process.argv;
 
   if (!engine) {
@@ -152,6 +153,7 @@ export async function scan_project(projectRoot, options={
       save_reports: true,
       os_scan:      false,
       full_stack:   true,
+      current_dir: projectRoot || process.cwd(),
       is_vscanned_project: false,  // enables vscode-specific engine_info fields
     }) {
   // ── change cwd so all relative paths (.ubel/, node_modules/, …) resolve
@@ -163,17 +165,16 @@ export async function scan_project(projectRoot, options={
 
   try {
     // ── Engine state must be initialised before scan() ────────────────────
-    UbelEngine.engine            = "npm";
-    UbelEngine.systemType        = "npm";
-    UbelEngine.checkMode         = "health";   // avoids the process.exit() branches
-    UbelEngine.was_successful_scan = false;    // reset for re-runs in same process
-    UbelEngine.vulns_ids_found   = new Set();  // reset accumulated vuln ids
+    UbelEngine.engine              = "npm";
+    UbelEngine.systemType          = "npm";
+    UbelEngine.checkMode           = "health";   // avoids the process.exit() branches
+    UbelEngine.was_successful_scan = false;      // reset for re-runs in same process
+    UbelEngine.vulns_ids_found     = new Set();  // reset accumulated vuln ids
 
-    UbelEngine.inventory = [];
-    UbelEngine.vulnerabilities = [];
-    UbelEngine.dependency_tree = {};
+    // Reset NodeManager static state so re-runs in the same process get a
+    // clean slate instead of carrying over inventory from the previous scan.
+    NodeManager.inventoryData      = [];
 
-    UbelEngine.vulns_ids_found = new Set();
     UbelEngine.initiateLocalPolicy();
 
     return await UbelEngine.scan([], options);
@@ -197,6 +198,6 @@ export async function scan_project(projectRoot, options={
 //     esbuild compiles away import.meta, so typeof import.meta === "undefined"
 //     inside the CJS bundle — that is the only safe distinguishing signal.
 
-if (typeof import.meta !== "undefined") {
+/*if (typeof import.meta !== "undefined") {
   main();
-}
+}*/

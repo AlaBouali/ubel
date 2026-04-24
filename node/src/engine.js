@@ -1882,7 +1882,7 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false }) {
+  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false }) {
     const ecosystems = new Set();
     if (!options.is_script) {
       NodeManager._captureEngineVersion(UbelEngine.engine);
@@ -1933,7 +1933,7 @@ export class UbelEngine {
       } else {
         // health — scan installed packages
         NodeManager.inventoryData = [];
-        purls = await NodeManager.getInstalled(process.cwd(),options.full_stack,options.scan_os);
+        purls = await NodeManager.getInstalled(options.current_dir,options.full_stack,options.scan_os);
         NodeManager.inventoryData.push(
           {
                 id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
@@ -2229,7 +2229,7 @@ export class UbelEngine {
         throw new PolicyViolationError(reason);
       }
 
-      if (UbelEngine.checkMode === "health") {
+      if (UbelEngine.checkMode === "health" && !options.is_script) {
         process.exit(0);
       }
       if (UbelEngine.checkMode === "check") {

@@ -810,13 +810,13 @@ export class NodeManager {
 
     if (full_stack) {
 
-    await PythonVenvScanner.getInstalled();
-    await PhpComposerScanner.getInstalled();
-    await RustCargoScanner.getInstalled();
-    await GoModScanner.getInstalled();
-    await CSharpNuGetScanner.getInstalled();
-    await JavaMavenScanner.getInstalled();
-    await RubyBundlerScanner.getInstalled();
+    await PythonVenvScanner.getInstalled(startDir);
+    await PhpComposerScanner.getInstalled(startDir);
+    await RustCargoScanner.getInstalled(startDir);
+    await GoModScanner.getInstalled(startDir);
+    await CSharpNuGetScanner.getInstalled(startDir);
+    await JavaMavenScanner.getInstalled(startDir);
+    await RubyBundlerScanner.getInstalled(startDir);
     NodeManager.inventoryData.push(...PythonVenvScanner.inventoryData);
     NodeManager.inventoryData.push(...PhpComposerScanner.inventoryData);
     NodeManager.inventoryData.push(...RustCargoScanner.inventoryData);
