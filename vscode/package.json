@@ -12,28 +12,26 @@
   "main": "./extension.js",
 
   "contributes": {
-    "commands": [
+        "commands": [
+          {
+            "command": "ubel.scan",
+            "title": "UBEL: Scan Project"
+          },
+          {
+            "command": "ubel.scanExtensions",
+            "title": "UBEL: Scan VS Code Extensions"
+          }
+        ],
+        "keybindings": [
       {
         "command": "ubel.scan",
-        "title": "UBEL: Scan Project"
+        "key": "ctrl+alt+u",
+        "mac": "cmd+alt+u"
       },
       {
         "command": "ubel.scanExtensions",
-        "title": "UBEL: Scan VS Code Extensions"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "ubel.scan",
-        "key": "ctrl+shift+q",
-        "mac": "cmd+shift+q",
-        "when": "editorTextFocus || explorerViewletVisible"
-      },
-      {
-        "command": "ubel.scanExtensions",
-        "key": "ctrl+shift+i",
-        "mac": "cmd+shift+i",
-        "when": "editorTextFocus || explorerViewletVisible"
+        "key": "ctrl+alt+x",
+        "mac": "cmd+alt+x"
       }
     ]
   },
