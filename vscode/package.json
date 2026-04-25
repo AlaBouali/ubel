@@ -1,28 +1,93 @@
 {
-  "name": "ubel",
-  "displayName": "UBEL — Supply-Chain Firewall",
-  "description": "Dependency security scanner and supply-chain firewall powered by UBEL.",
-  "version": "0.1.0",
-  "publisher": "arcane-spark",
+  "name": "ubel-vscode",
+  "displayName": "UBEL — Supply-Chain security scanner and firewall",
+  "description": "Multi-ecosystem dependency security scanner and supply-chain firewall. Scans Node.js, Python, PHP, Rust, Go, C#, Java, and Ruby projects — plus your VS Code extensions — for vulnerabilities and malicious packages. Runs entirely locally, no cloud calls except for osv.dev's API.",
+  "version": "0.2.0",
+  "publisher": "Arcane-Spark",
+  "author": {
+    "name": "Ala Bouali",
+    "email": "ala.bouali.1997@gmail.com",
+    "url": "https://github.com/AlaBouali"
+  },
+  "icon": "ubel_logo.png",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlaBouali/ubel"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/AlaBouali/ubel",
+  "bugs": {
+    "url": "https://github.com/AlaBouali/ubel/issues"
+  },
+  "galleryBanner": {
+    "color": "#0d1117",
+    "theme": "dark"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "security",
+    "supply chain",
+    "vulnerability",
+    "malicious packages",
+    "python",
+    "node.js",
+    "php",
+    "rust",
+    "go",
+    "c#",
+    "java",
+    "ruby",
+    ".NET",
+    "scan",
+    "vulnerability assessment",
+    "dependencies",
+    "audit",
+    "malware",
+    "firewall",
+    "sbom",
+    "cve",
+    "cvss",
+    "osv",
+    "sca",
+    "software composition analysis",
+    "devops",
+    "devsecops",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "pip",
+    "composer",
+    "cargo",
+    "go modules",
+    "nuget",
+    "maven",
+    "bundler"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./extension.js",
-
   "contributes": {
-        "commands": [
-          {
-            "command": "ubel.scan",
-            "title": "UBEL: Scan Project"
-          },
-          {
-            "command": "ubel.scanExtensions",
-            "title": "UBEL: Scan VS Code Extensions"
-          }
-        ],
-        "keybindings": [
+    "commands": [
+      {
+        "command": "ubel.scan",
+        "title": "UBEL: Scan Project",
+        "category": "UBEL"
+      },
+      {
+        "command": "ubel.scanExtensions",
+        "title": "UBEL: Scan VS Code Extensions",
+        "category": "UBEL"
+      }
+    ],
+    "keybindings": [
       {
         "command": "ubel.scan",
         "key": "ctrl+alt+u",
@@ -35,7 +100,6 @@
       }
     ]
   },
-
   "scripts": {
     "prepackage": "xcopy /E /I /Y ..\\node\\src node\\src",
     "package": "vsce package --no-dependencies --out ubel-vscode-extension.vsix --allow-missing-repository",

@@ -1,0 +1,51 @@
+<svg width="100%" viewBox="0 0 680 400" role="img" xmlns="http://www.w3.org/2000/svg">
+
+<!-- DARK BACKGROUND -->
+<rect x="0" y="0" width="680" height="400" fill="#0d1117"/>
+
+<title>UBEL badge logo variant</title>
+<desc>Circular badge style logo with concentric rings, U glyph, and UBEL wordmark</desc>
+
+<!-- badge circle -->
+<circle cx="340" cy="148" r="112" fill="rgb(17,17,17)" stroke="rgb(192,57,43)" stroke-width="2.5"/>
+<circle cx="340" cy="148" r="100" fill="none" stroke="rgb(192,57,43)" stroke-width="0.8" opacity="0.35"/>
+<circle cx="340" cy="148" r="88" fill="none" stroke="rgb(51,51,51)" stroke-width="0.6"/>
+
+<!-- tick marks -->
+<g stroke="#c0392b" stroke-width="1.5" opacity="0.5">
+  <line x1="340" y1="36" x2="340" y2="48"/>
+  <line x1="340" y1="248" x2="340" y2="260"/>
+  <line x1="228" y1="148" x2="240" y2="148"/>
+  <line x1="440" y1="148" x2="452" y2="148"/>
+  <line x1="261" y1="69" x2="269" y2="83"/>
+  <line x1="411" y1="213" x2="419" y2="227"/>
+  <line x1="419" y1="69" x2="411" y2="83"/>
+  <line x1="269" y1="213" x2="261" y2="227"/>
+</g>
+
+<!-- corner dots -->
+<circle cx="340" cy="38" r="3" fill="rgb(192,57,43)"/>
+<circle cx="340" cy="258" r="3" fill="rgb(192,57,43)"/>
+<circle cx="228" cy="148" r="3" fill="rgb(192,57,43)"/>
+<circle cx="452" cy="148" r="3" fill="rgb(192,57,43)"/>
+
+<!-- U glyph -->
+<line x1="308" y1="108" x2="308" y2="168" stroke="#fff" stroke-width="12" stroke-linecap="round"/>
+<line x1="372" y1="108" x2="372" y2="168" stroke="#fff" stroke-width="12" stroke-linecap="round"/>
+<path d="M308 168 Q308 196 340 196 Q372 196 372 168" stroke="#fff" stroke-width="12" fill="none" stroke-linecap="round"/>
+<path d="M308 168 Q308 196 340 196 Q372 196 372 168" stroke="#c0392b" stroke-width="4" fill="none"/>
+
+<!-- wordmark -->
+<text x="340" y="314" text-anchor="middle" fill="#fff" font-family="JetBrains Mono, monospace" font-size="48" font-weight="700">
+  <tspan fill="#c0392b">U</tspan>BEL
+</text>
+
+<text x="340" y="342" text-anchor="middle" fill="#9ca3af" font-family="JetBrains Mono, monospace" font-size="10.5">
+  UNIFIED BILL · ENFORCED LAW
+</text>
+
+<text x="340" y="368" text-anchor="middle" fill="#6b7280" font-family="JetBrains Mono, monospace" font-size="9">
+  ARCANE-SPARK
+</text>
+
+</svg>
