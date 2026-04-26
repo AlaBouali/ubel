@@ -2248,7 +2248,7 @@ export class UbelEngine {
       }
       NodeManager.was_successful_scan = true;
 
-      const saveResult = NodeManager.saveCandidateLockfile(UbelEngine.engine, process.cwd())
+      const saveResult = await NodeManager.saveCandidateLockfile(UbelEngine.engine, process.cwd())
       if (!saveResult.written) {
         if (options.is_script==false){
         console.error("[!] Could not write candidate lockfile:", saveResult.reason);
@@ -2256,7 +2256,7 @@ export class UbelEngine {
         process.exit(1);
       }
       try {
-        const installResult = NodeManager.runRealInstall(UbelEngine.engine);
+        const installResult = await NodeManager.runRealInstall(UbelEngine.engine);
         if (installResult.status !== 0) {
           if (options.is_script==false){
           console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);

@@ -281,6 +281,14 @@ export class NodeManager {
    */
   static _candidateLockfileHash = null;
 
+  /**
+   * SHA-256 hex digest of the candidate package.json bytes as they exist on
+   * disk after the dry-run command completes (and after saveCandidateLockfile
+   * regenerates package.json for npm).  Used by verifyPackageJsonHash() to
+   * detect any mutation of package.json between the scan and the real install.
+   */
+  static _candidatePackageJsonHash = null;
+
   static _captureEngineVersion(binary) {
     try {
       const r = spawnSync(binary, ["--version"], { encoding: "utf8", shell: true });
@@ -417,6 +425,7 @@ export class NodeManager {
     NodeManager._lockfileBackupDir         = null;
     NodeManager.candidate_lockfile_content = null;
     NodeManager._candidateLockfileHash     = null;
+    NodeManager._candidatePackageJsonHash  = null;
 
     // ── 1. Validate engine ───────────────────────────────────────────────
 
@@ -483,6 +492,26 @@ export class NodeManager {
 
     if (!fs.existsSync(lockPath)) {
       throw new Error(`${engine} did not produce a lockfile at ${lockPath}`);
+    }
+
+    // ── 4b. Hash candidate package.json (TOCTOU guard) ───────────────────
+    // For pnpm/bun/yarn the PM rewrites package.json in-place during the
+    // dry-run command (adding exact resolved versions).  Capture the digest
+    // now so we can detect any subsequent mutation before the real install.
+    // For npm, saveCandidateLockfile() regenerates package.json from the
+    // lockfile and must call _hashPackageJson() again after writing it.
+    {
+      const { createHash } = await import("crypto");
+      if (fs.existsSync(packageJsonPath)) {
+        const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
+        NodeManager._candidatePackageJsonHash = createHash("sha256")
+          .update(pkgRaw, "utf8")
+          .digest("hex");
+      } else {
+        // No package.json on disk — record a sentinel so verification can
+        // distinguish "was absent" from "hash not yet captured".
+        NodeManager._candidatePackageJsonHash = "absent";
+      }
     }
 
     // ── 5. Parse candidate lockfile via LockfileParser ───────────────────
@@ -663,7 +692,7 @@ export class NodeManager {
   // For other engines: only writes back the raw lockfile text.
   // ─────────────────────────────
 
-  static saveCandidateLockfile(engine = "npm", projectPath = process.cwd()) {
+  static async saveCandidateLockfile(engine = "npm", projectPath = process.cwd()) {
 
     const cfg          = ENGINE_CONFIG[engine] || ENGINE_CONFIG.npm;
     const lockfilePath = path.join(projectPath, cfg.lockfile);
@@ -713,6 +742,17 @@ export class NodeManager {
         if (Object.keys(exactDevDeps).length) pkgJson.devDependencies = exactDevDeps;
 
         fs.writeFileSync(packageJsonPath, JSON.stringify(pkgJson, null, 2), "utf8");
+
+        // Re-capture the package.json hash now that we've regenerated it from
+        // the lockfile.  The dry-run hash (captured before regeneration) would
+        // be stale and cause verifyPackageJsonHash() to fail in runRealInstall.
+        {
+          const { createHash } = await import("crypto");
+          const written = fs.readFileSync(packageJsonPath, "utf8");
+          NodeManager._candidatePackageJsonHash = createHash("sha256")
+            .update(written, "utf8")
+            .digest("hex");
+        }
 
         return { written: true, filePath: lockfilePath, packageJsonPath };
 
@@ -1053,19 +1093,88 @@ export class NodeManager {
   }
 
   // ─────────────────────────────
-  // Real install  (engine-aware)
+  // package.json integrity check  (TOCTOU guard)
+  //
+  // Re-hashes the on-disk package.json and compares it against the SHA-256
+  // digest captured at the end of runDryRun (and updated by
+  // saveCandidateLockfile for npm, which regenerates package.json from the
+  // lockfile).  Must be called immediately before runRealInstall so that any
+  // mutation of package.json between the scan and the real install is
+  // detected and the install is aborted.
+  //
+  // Returns { ok: true } on success, or
+  //         { ok: false, reason: string } on any failure.
+  // ─────────────────────────────
+
+  static async verifyPackageJsonHash(projectPath = process.cwd()) {
+    if (!NodeManager._candidatePackageJsonHash) {
+      return {
+        ok:     false,
+        reason: "No candidate package.json hash recorded — runDryRun() must be called first",
+      };
+    }
+
+    const pkgPath = path.join(projectPath, "package.json");
+
+    // Handle the "absent" sentinel: if no package.json existed after the
+    // dry-run, the file must still be absent now.
+    if (NodeManager._candidatePackageJsonHash === "absent") {
+      if (fs.existsSync(pkgPath)) {
+        return {
+          ok:     false,
+          reason: `package.json integrity check FAILED — file was created after scanning.\n` +
+                  `  Expected : <absent>\n` +
+                  `  File     : ${pkgPath}`,
+        };
+      }
+      return { ok: true };
+    }
+
+    let currentContent;
+    try {
+      currentContent = fs.readFileSync(pkgPath, "utf8");
+    } catch (err) {
+      return {
+        ok:     false,
+        reason: `Could not read package.json for verification: ${err.message}`,
+      };
+    }
+
+    const { createHash } = await import("crypto");
+    const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
+
+    if (currentHash !== NodeManager._candidatePackageJsonHash) {
+      return {
+        ok:     false,
+        reason: `package.json integrity check FAILED — the file was modified after scanning.\n` +
+                `  Expected : ${NodeManager._candidatePackageJsonHash}\n` +
+                `  Got      : ${currentHash}\n` +
+                `  File     : ${pkgPath}`,
+      };
+    }
+
+    return { ok: true };
+  }
   //
   // Runs the engine's frozen/clean install command so that node_modules
   // exactly matches the committed lockfile.  Never modifies the lockfile.
   // ─────────────────────────────
 
-  static runRealInstall(engine) {
-    NodeManager.verifyCandidateLockfileHash(engine).then(result => {
-      if (!result.ok) {
-        throw new Error(`Lockfile verification failed: ${result.reason}`);
-      }
-    });
-    
+  static async runRealInstall(engine) {
+    // ── Integrity checks (TOCTOU guards) ─────────────────────────────────
+    // Both checks must pass before the package manager is allowed to run.
+    // Either failure aborts the install and throws so the caller can revert.
+
+    const lockfileCheck = await NodeManager.verifyCandidateLockfileHash(engine);
+    if (!lockfileCheck.ok) {
+      throw new Error(`Lockfile integrity check failed: ${lockfileCheck.reason}`);
+    }
+
+    const pkgJsonCheck = await NodeManager.verifyPackageJsonHash(process.cwd());
+    if (!pkgJsonCheck.ok) {
+      throw new Error(`package.json integrity check failed: ${pkgJsonCheck.reason}`);
+    }
+
     const cfg = ENGINE_CONFIG[engine];
     if (!cfg) {
       throw new Error(
