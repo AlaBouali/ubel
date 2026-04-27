@@ -1786,7 +1786,7 @@ function sortVulnerabilities(vulns) {
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
-  block_unknown_vulnerabilities: false,
+  block_unknown_vulnerabilities: true,
 };
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────
