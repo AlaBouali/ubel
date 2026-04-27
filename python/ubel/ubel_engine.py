@@ -2215,7 +2215,7 @@ class UbelEngine:
             if UbelEngine.system_type == "pypi":
                 if needs_revert:
                     # Ensure a local venv exists
-                    venv_dir = UbelEngine.venv_dir or "./venv"
+                    venv_dir = UbelEngine.venv_dir or "./.ubel/venv"
                     Pypi_Manager.init_venv(venv_dir)
                     purls          = Pypi_Manager.run_dry_run(args, venv_dir)
                     report_content = Pypi_Manager.inventory_data
@@ -2487,17 +2487,18 @@ class UbelEngine:
                 sys.exit(0)
 
             if UbelEngine.check_mode == "check":
-                # check passed — revert dry-run artefacts and exit cleanly
+                # check passed — clean up the dry-run venv and exit cleanly.
+                # pin_versions is intentionally NOT called here: check mode does
+                # not install anything, so requirements.txt must not be touched.
                 if UbelEngine.system_type == "pypi":
-                    _cleanup_venv(UbelEngine.venv_dir or "./venv")
-                    UbelEngine.pin_versions()
+                    _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
                 sys.exit(0)
 
             # install mode
             print("[+] Policy passed. Installing dependencies...")
             if UbelEngine.system_type == "pypi":
                 req_file = UbelEngine._generate_requirements_file(purls)
-                venv_dir = UbelEngine.venv_dir or "./venv"
+                venv_dir = UbelEngine.venv_dir or "./.ubel/venv"
                 Pypi_Manager.run_real_install(req_file, UbelEngine.engine, venv_dir)
                 UbelEngine.pin_versions()
             else:
@@ -2507,13 +2508,13 @@ class UbelEngine:
         except PolicyViolationError:
             # Revert if needed, then exit 1
             if needs_revert and UbelEngine.system_type == "pypi":
-                _cleanup_venv(UbelEngine.venv_dir or "./venv")
+                _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
             sys.exit(1)
 
         except Exception as exc:
             print(f"[!] Scan failed: {exc}", file=sys.stderr)
             if needs_revert and UbelEngine.system_type == "pypi":
-                _cleanup_venv(UbelEngine.venv_dir or "./venv")
+                _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
             raise
     
     @staticmethod
