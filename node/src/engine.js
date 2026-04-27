@@ -10,6 +10,7 @@ import {TOOL_NAME, TOOL_LICENSE, TOOL_VERSION }   from "./info.js";
 import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
 import {getGitMetadata, getvscodeversion}         from "./git_info.js";
+import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1963,7 +1964,7 @@ export class UbelEngine {
       matchDependenciesWithInventory(inventory);
 
       // ── Enrich vulnerabilities concurrently ───────────────────────────────
-      const vulnerabilities = [];
+      let vulnerabilities = [];
       const CONCURRENCY = 40;
       for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
         const batch = vuln_ids.slice(i, i + CONCURRENCY);
@@ -1974,39 +1975,6 @@ export class UbelEngine {
             console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
         }
       }
-
-      tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy);
-      const policyViolations = get_policy_violations(vulnerabilities);
-
-      for (const v of vulnerabilities) {
-        v.is_policy_violation = v.policy_decision === "block";
-      }
-
-      for (const inventoryItem of inventory) {
-        ecosystems.add(getEcosystemFromPurl(inventoryItem.id));
-        inventoryItem.is_policy_violation = vulnerabilities.some(v => v.affected_purl === inventoryItem.id && v.policy_decision === "block");
-      }
-      // ── Stats ──────────────────────────────────────────────────────────────
-      const severityBuckets = { critical:0, high:0, medium:0, low:0, unknown:0 };
-      const infectedPurls   = new Set();
-      const vulnerablePurls = new Set();
-      let infectionCount    = 0;
-
-      for (const v of vulnerabilities) {
-        UbelEngine.vulns_ids_found.add(v.id);
-        if (v.is_infection) {
-          infectionCount++;
-          infectedPurls.add(v.affected_purl);
-        } else {
-          const sev = ((v.severity || "unknown").toLowerCase()) in severityBuckets
-            ? (v.severity || "unknown").toLowerCase()
-            : "unknown";
-          severityBuckets[sev]++;
-          vulnerablePurls.add(v.affected_purl);
-        }
-      }
-
-      setInventoryState(infectedPurls, vulnerablePurls, inventory);
 
       inventory = NodeManager.buildDependencySequences(inventory);
 
@@ -2062,10 +2030,46 @@ export class UbelEngine {
       // ── Convert all path strings → SystemPath objects ─────────────────────
       normalizeInventoryPaths(inventory, primaryLocalIP);
 
+      [vulnerabilities, inventory] = filterFalsePositiveInfections(inventory, vulnerabilities);
+
+      // ── Stats ──────────────────────────────────────────────────────────────
+      const severityBuckets = { critical:0, high:0, medium:0, low:0, unknown:0 };
+      const infectedPurls   = new Set();
+      const vulnerablePurls = new Set();
+      let infectionCount    = 0;
+
+      for (const v of vulnerabilities) {
+        UbelEngine.vulns_ids_found.add(v.id);
+        if (v.is_infection) {
+          infectionCount++;
+          infectedPurls.add(v.affected_purl);
+        } else {
+          const sev = ((v.severity || "unknown").toLowerCase()) in severityBuckets
+            ? (v.severity || "unknown").toLowerCase()
+            : "unknown";
+          severityBuckets[sev]++;
+          vulnerablePurls.add(v.affected_purl);
+        }
+      }
+
       const undeterminedCount = inventory.filter(c => c.version === "").length;
       if (undeterminedCount > 0) {
         console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected. This may lead to false positives or negatives in the report. Please ensure all dependencies have resolvable versions for accurate scanning.`);
         console.warn();
+      }
+
+      setInventoryState(infectedPurls, vulnerablePurls, inventory);
+
+      tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy);
+      const policyViolations = get_policy_violations(vulnerabilities);
+
+      for (const v of vulnerabilities) {
+        v.is_policy_violation = v.policy_decision === "block";
+      }
+
+      for (const inventoryItem of inventory) {
+        ecosystems.add(getEcosystemFromPurl(inventoryItem.id));
+        inventoryItem.is_policy_violation = vulnerabilities.some(v => v.affected_purl === inventoryItem.id && v.policy_decision === "block");
       }
 
       const stats = {
