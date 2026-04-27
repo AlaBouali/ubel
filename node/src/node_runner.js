@@ -709,11 +709,17 @@ export class NodeManager {
       // ── Write candidate lockfile ────────────────────────────────────────
       if (engine === "npm") {
         // npm: content was stored as a parsed object → serialise
+        const raw = typeof NodeManager.candidate_lockfile_content === "string"
+          ? NodeManager.candidate_lockfile_content
+          : JSON.stringify(NodeManager.candidate_lockfile_content, null, 2);
+        fs.writeFileSync(lockfilePath, raw, "utf8");
+
+        // Parse a copy to read dependencies for package.json regeneration
         const parsed = typeof NodeManager.candidate_lockfile_content === "string"
           ? JSON.parse(NodeManager.candidate_lockfile_content)
           : NodeManager.candidate_lockfile_content;
 
-        fs.writeFileSync(lockfilePath, JSON.stringify(parsed, null, 2), "utf8");
+        // fs.writeFileSync(lockfilePath, JSON.stringify(parsed, null, 2), "utf8");
 
         // Regenerate package.json with exact pinned versions from the lockfile
         const packageJsonPath = path.join(projectPath, "package.json");
@@ -1058,6 +1064,7 @@ export class NodeManager {
   // ─────────────────────────────
 
   static async verifyCandidateLockfileHash(engine = "npm", projectPath = process.cwd()) {
+    console.log(`Verifying lockfile integrity for engine '${engine}'...`);
     const cfg = ENGINE_CONFIG[engine];
     if (!cfg) {
       return { ok: false, reason: `Unknown engine '${engine}'` };
@@ -1078,7 +1085,6 @@ export class NodeManager {
 
     const { createHash } = await import("crypto");
     const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
-
     if (currentHash !== NodeManager._candidateLockfileHash) {
       return {
         ok:       false,
