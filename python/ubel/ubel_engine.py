@@ -352,7 +352,9 @@ def _get_git_metadata() -> Dict[str, Any]:
             return None
 
     available = _git("rev-parse", "--is-inside-work-tree") == "true"
+    version   = _git("--version")   # e.g. "git version 2.39.2"
     return {
+        "version":      version or "N/A",
         "latest_commit": _git("rev-parse", "--short", "HEAD") if available else None,
         "branch":        _git("rev-parse", "--abbrev-ref", "HEAD") if available else None,
         "url":           _git("remote", "get-url", "origin") if available else None,
@@ -1139,12 +1141,12 @@ def generate_html_report(data: Dict) -> str:
 
       <div class="space-y-3">
         <div class="flex justify-between border-b border-neutral-800 pb-2">
-          <span class="text-neutral-500 text-xs">Available</span>
-          <span class="mono text-xs" id="git-available">...</span>
+          <span class="text-neutral-500 text-xs">Git version</span>
+          <span class="mono text-xs" id="git-version">...</span>
         </div>
 
         <div class="flex justify-between border-b border-neutral-800 pb-2">
-          <span class="text-neutral-500 text-xs">Lastest commit</span>
+          <span class="text-neutral-500 text-xs">Latest commit</span>
           <span class="mono text-xs" id="git-rev">...</span>
         </div>
 
@@ -1941,7 +1943,7 @@ def generate_html_report(data: Dict) -> str:
                 : '<span class="text-neutral-600 italic">none detected</span>';
             document.getElementById('os-external-ip').textContent = os.external_ip || 'unavailable';
 
-            document.getElementById('git-available').textContent = git.available ? 'Yes' : 'No';
+            document.getElementById('git-version').textContent = git.version || 'N/A';
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
