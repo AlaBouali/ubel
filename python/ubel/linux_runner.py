@@ -374,4 +374,8 @@ class Linux_Manager:
         else:
             pkgs = [f"{item[0]}-{item[1]}" for item in packages_list]
         cmd = ["sudo", pm, "install", "-y"] + pkgs
-        return subprocess.run(cmd, check=True, text=True, capture_output=True)
+        try:
+            return subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            print(f"[!] Package install failed (exit {exc.returncode}): {' '.join(cmd)}", file=sys.stderr)
+            raise
