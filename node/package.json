@@ -6,7 +6,8 @@
   "bin": {
     "ubel-npm": "bin/npm.js",
     "ubel-pnpm": "bin/pnpm.js",
-    "ubel-bun": "bin/bun.js"
+    "ubel-bun": "bin/bun.js",
+    "ubel-agent": "bin/agent.js"
   },
   "scripts": {
     "test": "node src/main.js npm health"
