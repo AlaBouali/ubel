@@ -306,6 +306,10 @@ class Pypi_Manager:
 
         if engine == "pip":
             cmd = [python, "-m", "pip", "install", "-r", file_name]
-            return subprocess.run(cmd)
+            try:
+                return subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"[!] Package install failed (exit {exc.returncode}): {' '.join(cmd)}", file=sys.stderr)
+                raise
 
         raise ValueError(f"Unsupported engine: {engine!r}")

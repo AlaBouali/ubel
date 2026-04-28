@@ -30,7 +30,15 @@ const SUBPROCESS_TIMEOUT = 120_000;   // ms
 
 const ALLOWED_ECOSYSTEMS = new Set([
   "debian", "ubuntu", "redhat", "almalinux", "rockylinux", "alpine",
+  "rhel", "centos", "fedora",
 ]);
+
+// Map ID_LIKE tokens that aren't direct ecosystem names to canonical ones
+const ECOSYSTEM_ALIAS = {
+  rhel:    "redhat",
+  centos:  "redhat",
+  fedora:  "redhat",
+};
 
 const PURL_TYPE = {
   debian:     "deb",
@@ -74,7 +82,7 @@ function parseOsRelease(content) {
   if (data.ID_LIKE) data.ID_LIKE.split(/\s+/).forEach(t => candidates.push(normalise(t)));
 
   for (const c of candidates) {
-    if (ALLOWED_ECOSYSTEMS.has(c)) return c;
+    if (ALLOWED_ECOSYSTEMS.has(c)) return ECOSYSTEM_ALIAS[c] ?? c;
   }
   throw new Error(`Unsupported OS ecosystem: ${JSON.stringify(candidates)}`);
 }
@@ -177,8 +185,9 @@ function buildPackage(ecosystem, name, version, license_, paths, depNames, purls
 
 function parseDpkgStatus(content) {
   // Returns Map<name, {version, license, deps[]}>
+  // Only includes packages with "Status: install ok installed"
   const pkgs = new Map();
-  let pkg, ver, lic, dep;
+  let pkg, ver, lic, dep, installed;
 
   for (const raw of content.split("\n")) {
     const line = raw.trimEnd();
@@ -186,12 +195,14 @@ function parseDpkgStatus(content) {
       pkg = line.slice("Package:".length).trim();
     } else if (line.startsWith("Version:")) {
       ver = line.slice("Version:".length).trim();
+    } else if (line.startsWith("Status:")) {
+      installed = line.slice("Status:".length).trim() === "install ok installed";
     } else if (line.startsWith("License:")) {
       lic = line.slice("License:".length).trim();
     } else if (line.startsWith("Depends:")) {
       dep = line.slice("Depends:".length).trim();
     } else if (line.trim() === "") {
-      if (pkg && ver) {
+      if (pkg && ver && installed) {
         pkgs.set(pkg, {
           version: ver,
           license: lic || "unknown",
@@ -199,10 +210,11 @@ function parseDpkgStatus(content) {
         });
       }
       pkg = ver = lic = dep = undefined;
+      installed = false;
     }
   }
   // flush last stanza
-  if (pkg && ver) {
+  if (pkg && ver && installed) {
     pkgs.set(pkg, {
       version: ver,
       license: lic || "unknown",
@@ -281,6 +293,7 @@ function parseApkInstalled(content, ecosystem) {
     if (name && version && !seeded) {
       pkgs.set(name, { version, license: license_, deps, paths: [] });
     }
+    name = version = undefined;
     prefix = ""; license_ = "unknown"; deps = []; seeded = false;
   };
 
@@ -386,9 +399,7 @@ function rpmQueryAll() {
   return pkgs;
 }
 
-function* rpmQueryFiles(pkgNames) {
-  if (!pkgNames.length) return;
-
+function* rpmQueryFilesChunk(pkgNames) {
   let out;
   try {
     out = execFileSync(
@@ -410,6 +421,15 @@ function* rpmQueryFiles(pkgNames) {
     const pkgName  = trimmed.slice(0, tab);
     const filepath = trimmed.slice(tab + 1).trim();
     if (filepath) yield { pkgName, filepath };
+  }
+}
+
+const RPM_CHUNK_SIZE = 200;
+
+function* rpmQueryFiles(pkgNames) {
+  if (!pkgNames.length) return;
+  for (let i = 0; i < pkgNames.length; i += RPM_CHUNK_SIZE) {
+    yield* rpmQueryFilesChunk(pkgNames.slice(i, i + RPM_CHUNK_SIZE));
   }
 }
 
@@ -459,7 +479,7 @@ export class LinuxHostScanner {
    * Returns an array of PURL id strings (same contract as the other scanners).
    * Full records are available on LinuxHostScanner.inventoryData.
    */
-  static async getInstalled() {
+  static getInstalled() {
 
     this.inventoryData = [];
 

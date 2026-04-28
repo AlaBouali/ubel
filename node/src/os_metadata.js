@@ -10,7 +10,7 @@ OUTPUT SCHEMA (identical everywhere)
   os_name: string,
   os_version: string,
   build: string | undefined,
-  release: string | undefined
+  os_release: string | undefined
 }
 */
 
@@ -75,7 +75,7 @@ export function getWindows() {
         reg.CurrentBuild && reg.UBR
           ? `${reg.CurrentBuild}.${reg.UBR}`
           : reg.CurrentBuild,*/
-      release: reg.DisplayVersion || reg.ReleaseId
+      os_release: reg.DisplayVersion || reg.ReleaseId
     };
   } catch (e) {
     return {

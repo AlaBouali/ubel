@@ -2208,14 +2208,16 @@ class UbelEngine:
         report_content: Any        = None
         ecosystems:     Set[str]   = set()
 
-        needs_revert = UbelEngine.check_mode in ("check", "install")
+        # True for check/install (dry-run or real install against candidate packages);
+        # False for health (scan the already-installed environment).
+        is_dry_run = UbelEngine.check_mode in ("check", "install")
 
         try:
             # ── Collect packages ──────────────────────────────────────────
             if UbelEngine.system_type == "pypi":
-                if needs_revert:
+                if is_dry_run:
                     # Ensure a local venv exists
-                    venv_dir = UbelEngine.venv_dir or "./.ubel/venv"
+                    venv_dir = UbelEngine.venv_dir or "./venv"
                     Pypi_Manager.init_venv(venv_dir)
                     purls          = Pypi_Manager.run_dry_run(args, venv_dir)
                     report_content = Pypi_Manager.inventory_data
@@ -2226,7 +2228,7 @@ class UbelEngine:
                     report_content = PythonVenvScanner.inventory_data
 
             else:  # linux
-                if needs_revert:
+                if is_dry_run:
                     packages       = Linux_Manager.resolve_packages(args)
                     system_info    = Linux_Manager.get_os_info()
                     report_content = {"packages": packages, "system_info": system_info}
@@ -2245,7 +2247,7 @@ class UbelEngine:
             # ── Build inventory ───────────────────────────────────────────
             inventory: List[Dict] = []
             if UbelEngine.system_type == "pypi":
-                if needs_revert:
+                if is_dry_run:
                     inventory = list(Pypi_Manager.inventory_data)
                 else:
                     from .venv_scanner import PythonVenvScanner
@@ -2487,18 +2489,17 @@ class UbelEngine:
                 sys.exit(0)
 
             if UbelEngine.check_mode == "check":
-                # check passed — clean up the dry-run venv and exit cleanly.
-                # pin_versions is intentionally NOT called here: check mode does
-                # not install anything, so requirements.txt must not be touched.
-                if UbelEngine.system_type == "pypi":
-                    _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
+                # check passed — nothing to clean up, ./venv is the persistent
+                # user-managed venv. pin_versions is intentionally NOT called:
+                # check mode does not install anything, requirements.txt must
+                # not be touched.
                 sys.exit(0)
 
             # install mode
             print("[+] Policy passed. Installing dependencies...")
             if UbelEngine.system_type == "pypi":
                 req_file = UbelEngine._generate_requirements_file(purls)
-                venv_dir = UbelEngine.venv_dir or "./.ubel/venv"
+                venv_dir = UbelEngine.venv_dir or "./venv"
                 Pypi_Manager.run_real_install(req_file, UbelEngine.engine, venv_dir)
                 UbelEngine.pin_versions()
             else:
@@ -2506,21 +2507,16 @@ class UbelEngine:
                 Linux_Manager.run_real_install(packages_list)
 
         except PolicyViolationError:
-            # Revert if needed, then exit 1
-            if needs_revert and UbelEngine.system_type == "pypi":
-                _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
             sys.exit(1)
 
         except Exception as exc:
             print(f"[!] Scan failed: {exc}", file=sys.stderr)
-            if needs_revert and UbelEngine.system_type == "pypi":
-                _cleanup_venv(UbelEngine.venv_dir or "./.ubel/venv")
             raise
     
     @staticmethod
     def pin_versions():
         installed= []
-        PythonVenvScanner.get_installed(is_recursive=False)
+        PythonVenvScanner.get_installed(start_dir=".", is_recursive=False)
         for pkg in PythonVenvScanner.inventory_data:
             installed.append(f"{pkg['name']}=={pkg['version']}")
         with open("requirements.txt", "w", encoding="utf-8") as f:
@@ -2531,20 +2527,3 @@ class UbelEngine:
 # ---------------------------------------------------------------------------
 # Venv cleanup helper
 # ---------------------------------------------------------------------------
-
-def _cleanup_venv(venv_dir: str) -> None:
-    """
-    Remove the ephemeral venv created for a dry-run / check scan.
-    The venv is only cleaned up if it lives under .ubel/ (i.e. it was
-    created by us, not an externally supplied venv_dir).
-    """
-    import shutil
-    venv_path = Path(venv_dir).resolve()
-    ubel_root  = Path(".ubel").resolve()
-    try:
-        venv_path.relative_to(ubel_root)
-    except ValueError:
-        # Not under .ubel/ — leave it alone
-        return
-    if venv_path.exists():
-        shutil.rmtree(venv_path, ignore_errors=True)
