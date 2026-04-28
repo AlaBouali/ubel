@@ -12,7 +12,8 @@ import {GoModScanner} from "./go_runner.js";
 import {CSharpNuGetScanner} from "./csharp_runner.js";
 import { JavaMavenScanner} from "./java_runner.js";
 import { RubyBundlerScanner} from "./ruby_runner.js";
-import {LinuxHostScanner} from "./linux_runner.js";
+import {LinuxHostScanner}   from "./linux_runner.js";
+import {WindowsHostScanner} from "./windows_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -814,7 +815,7 @@ export class NodeManager {
   // Recursive project scanner
   // ─────────────────────────────
 
-  static async getInstalled(startDir = process.cwd(), full_stack = false, os_scan = false) {
+  static async getInstalled(startDir = process.cwd(), options = { full_stack: false, scan_os: false }) {
 
     const visited = new Set();
     const results = [];
@@ -854,7 +855,7 @@ export class NodeManager {
 
     await walk(startDir);
 
-    if (full_stack) {
+    if (options.full_stack) {
 
     await PythonVenvScanner.getInstalled(startDir);
     await PhpComposerScanner.getInstalled(startDir);
@@ -871,9 +872,14 @@ export class NodeManager {
     NodeManager.inventoryData.push(...JavaMavenScanner.inventoryData);
     NodeManager.inventoryData.push(...RubyBundlerScanner.inventoryData);
     }
-    if (os_scan) {
-      await LinuxHostScanner.getInstalled();
-      NodeManager.inventoryData.push(...LinuxHostScanner.inventoryData);
+    if (options.scan_os) {
+      if (process.platform === "win32") {
+        await WindowsHostScanner.getInstalled();
+        NodeManager.inventoryData.push(...WindowsHostScanner.inventoryData);
+      } else {
+        await LinuxHostScanner.getInstalled();
+        NodeManager.inventoryData.push(...LinuxHostScanner.inventoryData);
+      }
     }
 
     const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);

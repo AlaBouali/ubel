@@ -1,7 +1,7 @@
 import fs      from "fs";
 import path    from "path";
 import https   from "https";
-import http    from "http";
+import http, { get }    from "http";
 import { fileURLToPath } from "url";
 import { NodeManager }          from "./node_runner.js";
 import { processVulnerability } from "./cvss_parser.js";
@@ -1532,6 +1532,7 @@ function getDependencyFromPurl(purl) {
 }
 
 function getEcosystemFromPurl(purl) {
+  if (purl.startsWith("cpe:"))        return "windows";
   if (purl.startsWith("pkg:gem/"))        return "ruby";
   if (purl.startsWith("pkg:nuget/"))      return "dotnet";
   if (purl.startsWith("pkg:npm/"))          return "npm";
@@ -1547,8 +1548,273 @@ function getEcosystemFromPurl(purl) {
   return "unknown";
 }
 
+// ── NVD CPE querying ──────────────────────────────────────────────────────────
+//
+// Queries the NVD REST API for each CPE string that does NOT start with "pkg:"
+// (i.e. items from the Windows/Linux host scanner that have a CPE 2.3 id).
+// Results are normalised into the same shape the OSV enrichment pipeline
+// expects so they can flow through processVulnerability / getFix unchanged.
+//
+// Rate-limit: NVD allows ~5 req/30 s without an API key.  We use a serial
+// queue with per-request exponential backoff (same fetchJSON opts) so we
+// never hammer the endpoint.
+
+const NVD_CVE_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+
+/**
+ * Pick the best available CVSS vector + score from an NVD CVE entry.
+ * Preference order (highest fidelity first): 4.0 → 3.1 → 3.0 → 2.0
+ * NVD uses both "cvssMetricV40" and "cvssMetricV4" as key names across
+ * different API versions, so we check both aliases for the 4.x family.
+ */
+function extractNvdCvss(metrics = {}) {
+  // CVSS 4.0 — try both key variants emitted by different NVD API versions
+  const v40 = (metrics.cvssMetricV40 || metrics.cvssMetricV4 || [])[0];
+  if (v40?.cvssData) {
+    return {
+      score:   v40.cvssData.baseScore,
+      vector:  v40.cvssData.vectorString,
+      version: "4.0",
+    };
+  }
+  // CVSS 3.1
+  const v31 = (metrics.cvssMetricV31 || [])[0];
+  if (v31?.cvssData) {
+    return {
+      score:   v31.cvssData.baseScore,
+      vector:  v31.cvssData.vectorString,
+      version: "3.1",
+    };
+  }
+  // CVSS 3.0
+  const v30 = (metrics.cvssMetricV30 || [])[0];
+  if (v30?.cvssData) {
+    return {
+      score:   v30.cvssData.baseScore,
+      vector:  v30.cvssData.vectorString,
+      version: "3.0",
+    };
+  }
+  // CVSS 2.0
+  const v2 = (metrics.cvssMetricV2 || [])[0];
+  if (v2?.cvssData) {
+    return {
+      score:   v2.cvssData.baseScore,
+      vector:  v2.cvssData.vectorString,
+      version: "2.0",
+    };
+  }
+  return { score: null, vector: null, version: null };
+}
+
+/**
+ * Map a CVSS base score to a severity label.
+ */
+function scoreToSeverity(score) {
+  if (score == null) return "unknown";
+  if (score >= 9.0)  return "critical";
+  if (score >= 7.0)  return "high";
+  if (score >= 4.0)  return "medium";
+  if (score >= 0.1)  return "low";
+  return "unknown";
+}
+
+/**
+ * Convert a single NVD CVE item into the OSV-compatible shape that the
+ * rest of the pipeline (processVulnerability, getFix, etc.) consumes.
+ *
+ * @param {object} nvdItem   - One element from NVD response `.vulnerabilities[]`
+ * @param {string} cpe       - The CPE string used to query NVD (used as affected_purl)
+ * @param {string} name      - Human-readable package name
+ * @param {string} version   - Installed version string
+ * @param {string} ecosystem - e.g. "windows"
+ */
+function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
+  const cveData = nvdItem.cve || nvdItem;
+  const cveId   = cveData.id || cveData.CVE_data_meta?.ID || "";
+
+  const desc = (cveData.descriptions || [])
+    .find(d => d.lang === "en")?.value || "";
+
+  const cvss = extractNvdCvss(cveData.metrics || {});
+
+  const refs = (cveData.references || []).map(r => ({
+    type: "WEB",
+    url:  r.url,
+  }));
+
+  // ── Fix extraction from NVD CPE configurations ───────────────────────────
+  // NVD encodes fixed versions inside configurations[].nodes[].cpeMatch[]
+  // as versionEndExcluding (exclusive upper bound → that version IS the fix)
+  // or versionEndIncluding (inclusive upper bound → fix is "something higher").
+  // We match each cpeMatch entry against the queried CPE by comparing the
+  // vendor:product prefix (fields 3-4 of the colon-split CPE 2.3 string).
+  //
+  // CPE 2.3 format:  cpe:2.3:a:<vendor>:<product>:<version>:...
+  //                  idx: 0   1  2       3          4         5+
+  const cpePrefix = cpe.split(":").slice(0, 5).join(":");   // up to <product>
+
+  const fixedVersions  = [];
+  const lastAffected   = [];
+
+  for (const config of (cveData.configurations || [])) {
+    for (const node of (config.nodes || [])) {
+      for (const match of (node.cpeMatch || [])) {
+        if (!match.vulnerable) continue;
+        // Match when the criteria shares the same vendor:product prefix.
+        const matchPrefix = (match.criteria || "").split(":").slice(0, 5).join(":");
+        if (matchPrefix.toLowerCase() !== cpePrefix.toLowerCase()) continue;
+
+        if (match.versionEndExcluding) {
+          // The first version that is NOT affected → it is the fix version.
+          fixedVersions.push(match.versionEndExcluding);
+        } else if (match.versionEndIncluding) {
+          // Last known affected version — fix is "upgrade beyond this".
+          lastAffected.push(match.versionEndIncluding);
+        }
+      }
+    }
+  }
+
+  // Deduplicate
+  const uniqueFixes       = [...new Set(fixedVersions)];
+  const uniqueLastAffected = [...new Set(lastAffected)];
+
+  // Build an OSV-compatible "affected" block so getFix / get_fixed_versions
+  // can consume the data without special-casing the NVD path.
+  const affectedRangeEvents = [];
+  for (const fv of uniqueFixes) {
+    affectedRangeEvents.push({ introduced: "0" }, { fixed: fv });
+  }
+
+  const affected = [{
+    package:  { name, ecosystem, purl: cpe },
+    ranges:   affectedRangeEvents.length
+      ? [{ type: "ECOSYSTEM", events: affectedRangeEvents }]
+      : [],
+    versions: uniqueLastAffected.length ? uniqueLastAffected : [version],
+  }];
+
+  return {
+    id:           cveId,
+    published:    cveData.published    || "",
+    modified:     cveData.lastModified || "",
+    summary:      desc.slice(0, 200),
+    details:      desc,
+    severity:     scoreToSeverity(cvss.score),
+    severity_score: cvss.score,
+    severity_vector: cvss.vector,
+    references:   refs,
+    affected,
+
+    // pipeline fields populated later by getFix / processVulnerability
+    affected_purl:               cpe,
+    affected_dependency:         name,
+    affected_dependency_version: version,
+    ecosystem,
+    url:        `https://nvd.nist.gov/vuln/detail/${cveId}`,
+    is_infection: false,
+  };
+}
+
+/**
+ * Query NVD for one CPE string.  Returns an array of OSV-shaped vuln objects.
+ * Sleeps 650 ms between requests to stay under the unauthenticated rate limit
+ * (5 req / 30 s ≈ one every 6 s; we batch per-CPE sequentially so the delay
+ * is added *between* CPEs, not inside fetchJSON's own backoff).
+ *
+ * @param {string} cpe       CPE 2.3 string
+ * @param {string} name      package name (for the OSV shape)
+ * @param {string} version   installed version
+ * @param {string} ecosystem e.g. "windows"
+ */
+
+/**
+ * For every inventory item whose id does NOT start with "pkg:" (i.e. CPE-based
+ * items from the host scanners), query NVD and return enriched vuln objects in
+ * OSV shape.  Runs requests serially with a 700 ms inter-request gap to respect
+ * the NVD rate limit.
+ *
+ * @param {object[]} inventory  Full merged inventory array
+ * @returns {Promise<object[]>} Array of OSV-shaped vulnerability objects
+ */
+/**
+ * Query NVD for one CPE string.  Returns { status, vulns } so the caller
+ * can distinguish 429 (rate-limited) from real errors.
+ */
+async function queryNvdForCpe(cpe, name, version, ecosystem) {
+  const url = `${NVD_CVE_BASE}?cpeName=${encodeURIComponent(cpe)}`;
+  const res  = await fetchJSON(url, "GET", null, {
+    timeoutMs:  30_000,
+    maxRetries: 1,   // no internal backoff — submitToNvd owns retry for 429
+  });
+
+  if (res.status === 429) {
+    return { status: 429, vulns: [] };
+  }
+
+  if (res.status !== 200) {
+    console.error(`[!] NVD query failed for ${cpe}: HTTP ${res.status}`);
+    return { status: res.status, vulns: [] };
+  }
+
+  const items = (res.body?.vulnerabilities || []).map(
+    item => nvdItemToOsvShape(item, cpe, name, version, ecosystem)
+  );
+  return { status: 200, vulns: items };
+}
+
+async function submitToNvd(inventory) {
+  console.log("[*] Submitting CPE items to NVD for enrichment...");
+
+  const cpeItems = inventory.filter(item => !item.id.startsWith("pkg:"));
+  console.log(`[*] Found ${cpeItems.length} CPE items to query NVD for.`);
+  if (!cpeItems.length) return [];
+
+  const NVD_INTER_REQUEST_DELAY_MS = 700;
+  const NVD_RATELIMIT_RETRY_MS     = 10_000;
+  const results = [];
+
+  for (let i = 0; i < cpeItems.length; i++) {
+    const item = cpeItems[i];
+
+    // Retry loop: keeps retrying this specific CPE every 10 s on 429.
+    while (true) {
+      try {
+        const { status, vulns } = await queryNvdForCpe(
+          item.id,
+          item.name,
+          item.version,
+          item.ecosystem || "unknown"
+        );
+
+        if (status === 429) {
+          console.warn(`[~] NVD rate-limited on ${item.id}, retrying in ${NVD_RATELIMIT_RETRY_MS / 1000}s...`);
+          await new Promise(r => setTimeout(r, NVD_RATELIMIT_RETRY_MS));
+          continue; // retry same item
+        }
+
+        results.push(...vulns);
+        break; // success or non-retryable error — move to next item
+
+      } catch (err) {
+        console.error(`[!] NVD query error for ${item.id}: ${err.message}`);
+        break; // network-level failure — skip this item, don't retry forever
+      }
+    }
+
+    // Inter-request delay (skip after last item)
+    if (i < cpeItems.length - 1) {
+      await new Promise(r => setTimeout(r, NVD_INTER_REQUEST_DELAY_MS));
+    }
+  }
+
+  return results;
+}
+
 // ── OSV querying ──────────────────────────────────────────────────────────────
 async function submitToOsv(purlsList) {
+  purlsList = purlsList.filter(p => p.startsWith("pkg:"));
   if (!purlsList.length) return [];
 
   const PAGE = 800;
@@ -1884,6 +2150,10 @@ export class UbelEngine {
   }
 
   static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false }) {
+    const getinstalledoptions = {
+      full_stack: options.full_stack,
+      scan_os: options.scan_os ?? options.os_scan
+    }
     const ecosystems = new Set();
     if (!options.is_script) {
       NodeManager._captureEngineVersion(UbelEngine.engine);
@@ -1934,7 +2204,7 @@ export class UbelEngine {
       } else {
         // health — scan installed packages
         NodeManager.inventoryData = [];
-        purls = await NodeManager.getInstalled(options.current_dir,options.full_stack,options.scan_os);
+        purls = await NodeManager.getInstalled(options.current_dir,getinstalledoptions);
         NodeManager.inventoryData.push(
           {
                 id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
@@ -1973,6 +2243,36 @@ export class UbelEngine {
           if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
           else if (r.status === "rejected")
             console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
+        }
+      }
+
+      // ── NVD query for CPE-based inventory items (host scanner) ────────────
+      const nvdVulns = await submitToNvd(inventory);
+      if (nvdVulns.length) {
+        // Apply processVulnerability + getFix to each NVD result so the
+        // severity/score fields go through the same normalisation pipeline.
+        for (const v of nvdVulns) {
+          // Stash the CVSS fields extracted directly from NVD metrics before
+          // processVulnerability runs: that function reads the OSV severity[]
+          // array, which NVD records don't carry, so it would overwrite these
+          // with null/undefined.  We restore them afterward if it did.
+          const nvdScore  = v.severity_score;
+          const nvdVector = v.severity_vector;
+          processVulnerability(v);
+          if (v.severity_score  == null) v.severity_score  = nvdScore;
+          if (v.severity_vector == null) v.severity_vector = nvdVector;
+          v.severity = scoreToSeverity(v.severity_score);
+          getFix(v);
+          for (const key of ["database_specific", "affected", "schema_version"]) {
+            delete v[key];
+          }
+        }
+        // Deduplicate: if OSV already found the same CVE for the same purl, skip.
+        const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_purl}`));
+        for (const v of nvdVulns) {
+          if (!osvKeys.has(`${v.id}::${v.affected_purl}`)) {
+            vulnerabilities.push(v);
+          }
         }
       }
 
@@ -2112,8 +2412,12 @@ export class UbelEngine {
       }
 
       if (options.is_vscanned_project) {
-        engine_info.name="vscode";
-        engine_info.version=getvscodeversion();
+        engine_info.name    = "vscode";
+        engine_info.version = getvscodeversion();
+        // runtime was built before VS Code was detected — patch it now so the
+        // report reflects the host editor, not the embedded Node runtime.
+        runtime.environment = "vscode";
+        runtime.version     = getvscodeversion();
       }
       const finalJson = {
         generated_at: now.toISOString().replace("Z","") + "Z",

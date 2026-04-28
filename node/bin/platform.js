@@ -5,13 +5,15 @@ import { scan_project } from "../src/main.js";
 async function run() {
   const [, , targetPath] = process.argv;
 
+  console.log("Running platform scan on:", targetPath || process.cwd());
+
   try {
     const result = await scan_project(targetPath || process.cwd(), {
       is_script: true,
       save_reports: true,
 
       // critical flags
-      full_stack: true,
+      full_stack: false,
       scan_os: true,
 
     });
@@ -26,4 +28,4 @@ async function run() {
   }
 }
 
-run();
+(async () => { run(); })();
