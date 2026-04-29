@@ -41,7 +41,6 @@ const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 // Synchronous version using the already-imported `os` module via dynamic import
 // isn't available at module level — we use Node's built-in synchronously:
 import os_module from "os";
-import { flushCompileCache } from "module";
 
 function getLocalIPsSync() {
   try {
