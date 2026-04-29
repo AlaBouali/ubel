@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 
 import { scan_project } from "../src/main.js";
+import { homedir } from 'os';
 
 async function run() {
   const [, , targetPath] = process.argv;
-
-  console.log("Running platform scan on:", targetPath || process.cwd());
-
   try {
-    const result = await scan_project(targetPath || process.cwd(), {
+    const result = await scan_project(targetPath || process.homedir, {
       is_script: true,
       save_reports: true,
+      scan_node: false,
 
       // critical flags
       full_stack: false,
@@ -22,7 +21,7 @@ async function run() {
     process.exit(0);
 
   } catch (err) {
-    console.error("[!] Agent scan failed:", err.message);
+    console.error("[!] Platform scan failed:", err.message);
     if (process.env.DEBUG) console.error(err.stack);
     process.exit(1);
   }

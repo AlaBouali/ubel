@@ -815,7 +815,7 @@ export class NodeManager {
   // Recursive project scanner
   // ─────────────────────────────
 
-  static async getInstalled(startDir = process.cwd(), options = { full_stack: false, scan_os: false }) {
+  static async getInstalled(startDir = process.cwd(), options = { full_stack: false, scan_os: false, scan_node: true }) {
 
     const visited = new Set();
     const results = [];
@@ -853,7 +853,9 @@ export class NodeManager {
       }
     }
 
-    await walk(startDir);
+    if (options.scan_node){
+      await walk(startDir);
+    }
 
     if (options.full_stack) {
 

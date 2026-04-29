@@ -283,17 +283,18 @@ const COMPONENTS = {
   windows: {
     cpe: "cpe:2.3:o:microsoft:windows_", // dummy, overridden by parseResult
     cmds: [{
-      type: "powershell",
-      script: `$r='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion';
-                $props=Get-ItemProperty $r;
-                $build=[int]$props.CurrentBuildNumber;
-                $edition=if($build -ge 22000){'11'}elseif($build -ge 10240){'10'}else{'unknown'};
-                $v=$props.CurrentMajorVersionNumber;
-                $m=$props.CurrentMinorVersionNumber;
-                $b=$props.CurrentBuildNumber;
-                $u=$props.UBR;
-                "$edition|$v.$m.$b.$u"`,
-      parse: out => out.trim() || null,
+      type: "exec",
+      bin: "cmd.exe",
+      args: ["/c", "ver"],
+      parse: out => {
+        // ver outputs: "Microsoft Windows [Version 10.0.22631.3447]"
+        const m = out.match(/Version\s+([\d.]+)/i);
+        if (!m) return null;
+        const version = m[1]; // e.g. "10.0.22631.3447"
+        const build = parseInt(version.split(".")[2] ?? "0", 10);
+        const edition = build >= 22000 ? "11" : build >= 10240 ? "10" : "unknown";
+        return `${edition}|${version}`;
+      },
     }],
     parseResult: (raw) => {
       const [edition, version] = raw.split("|");
@@ -641,11 +642,16 @@ const COMPONENTS = {
 function buildPackage(key, componentDef, version, paths, cpeOverride = null) {
   const name = componentDef.nameOverride ?? key;
   const cpe = cpeOverride ?? buildCpe(componentDef.cpe, version);
+  let sw_type = "application";
+  if (cpe.startsWith("cpe:2.3:o:")) {
+    sw_type = "operating_system";
+  }
   return {
     id: cpe,
+    cpe,
     name,
     version,
-    type: "application",
+    type: sw_type,
     ecosystem: "windows",
     license: "unknown",
     state: "undetermined",
@@ -789,6 +795,7 @@ export class WindowsHostScanner {
     packages.sort((a, b) => a.name.localeCompare(b.name));
     for (const pkg of packages) {
       pkg.id = pkg.id.trim();
+      delete pkg.cpe; // id now contains the full CPE, so we can remove the redundant cpe field
     }
     this.inventoryData = packages;
     return packages.map(p => p.id);

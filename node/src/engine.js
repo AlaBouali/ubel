@@ -1359,7 +1359,7 @@ function generateHTMLReport(data) {
 
 function fetchJSON(url, method = "GET", body = null, opts = {}) {
   const {
-    timeoutMs = 20000,
+    timeoutMs = 40000,
     maxRetries = 5,
   } = opts;
 
@@ -1744,12 +1744,12 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
 async function queryNvdForCpe(cpe, name, version, ecosystem) {
   const url = `${NVD_CVE_BASE}?cpeName=${encodeURIComponent(cpe)}`;
   const res  = await fetchJSON(url, "GET", null, {
-    timeoutMs:  30_000,
+    timeoutMs:  40_000,
     maxRetries: 1,   // no internal backoff — submitToNvd owns retry for 429
   });
 
-  if (res.status === 429) {
-    return { status: 429, vulns: [] };
+  if (res.status === 429 || res.status === 503) {
+    return { status: res.status, vulns: [] };
   }
 
   if (res.status !== 200) {
@@ -1770,14 +1770,16 @@ async function submitToNvd(inventory) {
   console.log(`[*] Found ${cpeItems.length} CPE items to query NVD for.`);
   if (!cpeItems.length) return [];
 
-  const NVD_INTER_REQUEST_DELAY_MS = 700;
-  const NVD_RATELIMIT_RETRY_MS     = 10_000;
+  const NVD_INTER_REQUEST_DELAY_MS = 5_000;  // 5 s between each CPE request
+  const NVD_RATELIMIT_RETRY_MS     = 5_000;   // 5 s between retries on 429/503
+  const NVD_MAX_RETRIES            = 5;        // max attempts per CPE on 429/503
   const results = [];
 
   for (let i = 0; i < cpeItems.length; i++) {
     const item = cpeItems[i];
 
-    // Retry loop: keeps retrying this specific CPE every 10 s on 429.
+    // Retry loop: up to NVD_MAX_RETRIES attempts on 429/503, 5 s apart.
+    let attempt = 0;
     while (true) {
       try {
         const { status, vulns } = await queryNvdForCpe(
@@ -1787,8 +1789,13 @@ async function submitToNvd(inventory) {
           item.ecosystem || "unknown"
         );
 
-        if (status === 429) {
-          console.warn(`[~] NVD rate-limited on ${item.id}, retrying in ${NVD_RATELIMIT_RETRY_MS / 1000}s...`);
+        if (status === 429 || status === 503) {
+          attempt++;
+          if (attempt >= NVD_MAX_RETRIES) {
+            console.warn(`[~] NVD returned ${status} for ${item.id} after ${NVD_MAX_RETRIES} attempts — skipping.`);
+            break;
+          }
+          console.warn(`[~] NVD ${status} on ${item.id} (attempt ${attempt}/${NVD_MAX_RETRIES}), retrying in ${NVD_RATELIMIT_RETRY_MS / 1000}s...`);
           await new Promise(r => setTimeout(r, NVD_RATELIMIT_RETRY_MS));
           continue; // retry same item
         }
@@ -2148,10 +2155,12 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false }) {
+  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false, scan_node:true }) {
+    const os_metadata_info = await getOSMetadata();
     const getinstalledoptions = {
       full_stack: options.full_stack,
-      scan_os: options.scan_os ?? options.os_scan
+      scan_os: options.scan_os ?? options.os_scan,
+      scan_node: options.scan_node ?? true,
     }
     const ecosystems = new Set();
     if (!options.is_script) {
@@ -2422,7 +2431,7 @@ export class UbelEngine {
         generated_at: now.toISOString().replace("Z","") + "Z",
         runtime,
         engine: engine_info,
-        os_metadata: { ...getOSMetadata(), local_ips: localIPs, external_ip: externalIP || null },
+        os_metadata: { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
         scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },

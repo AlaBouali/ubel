@@ -9,6 +9,7 @@ async function run() {
     const result = await scan_project(targetPath || process.cwd(), {
       is_script: true,
       save_reports: true,
+      scan_node: true,
 
       // critical flags
       full_stack: true,

@@ -1,6 +1,6 @@
 import fs from "fs";
 import os from "os";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 
 /*
 OUTPUT SCHEMA (identical everywhere)
@@ -8,9 +8,9 @@ OUTPUT SCHEMA (identical everywhere)
 {
   os_id: string,
   os_name: string,
-  os_version: string,
+  os_version: string,   // full build: "10.0.19045.6466"  (Linux/macOS: VERSION_ID / ProductVersion)
   build: string | undefined,
-  os_release: string | undefined
+  os_release: string | undefined  // human-readable channel: "22H2" / "15.0" / VERSION string
 }
 */
 
@@ -38,7 +38,7 @@ export function getLinux() {
       os_name: data.NAME,
       os_version: data.VERSION_ID || data.VERSION,
       /* build: undefined, // not standardized in Linux */
-      os_release: data.VERSION 
+      os_release: data.VERSION
     };
   } catch (e) {
     return { error: e.message };
@@ -48,6 +48,9 @@ export function getLinux() {
 // ---------- Windows ----------
 export function getWindows() {
   try {
+    const fullVersion = spawnSync("cmd", ["/c", "ver"], { encoding: "utf8" }).stdout.trim();
+    // Example output: "Microsoft Windows [Version 10.0.19045.6466]"
+    const os_version = fullVersion.split("ersion ")[1].replace("[","").replace("]","")
     const output = execSync(
       'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"',
       { encoding: "utf8" }
@@ -59,7 +62,9 @@ export function getWindows() {
       line = line.trim();
       if (!line || line.startsWith("HKEY")) return;
 
-      // split by multiple spaces (NOT regex with \S+)
+      // Registry lines: "    KeyName    REG_SZ    Value"
+      // After trim: "KeyName    REG_SZ    Value"
+      // Split on 2+ spaces → ["KeyName", "REG_SZ", "Value"]
       const parts = line.split(/\s{2,}/);
       if (parts.length < 3) return;
 
@@ -67,23 +72,32 @@ export function getWindows() {
       reg[key] = value;
     });
 
+    // Full NT build: "10.0.<CurrentBuild>.<UBR>"
+    // CurrentBuild  e.g. "19045"
+    // UBR           e.g. "6466"  (Update Build Revision — the patch suffix)
+    const currentBuild = reg.CurrentBuild;
+    const ubr = reg.UBR;
+    const fullBuild =
+      currentBuild && ubr
+        ? `10.0.${currentBuild}.${ubr}`
+        : currentBuild
+          ? `10.0.${currentBuild}`
+          : undefined;
     return {
       os_id: "windows",
       os_name: reg.ProductName || reg["Product Name"],
-      os_version: reg.DisplayVersion || reg.ReleaseId,
-      /* build:
-        reg.CurrentBuild && reg.UBR
-          ? `${reg.CurrentBuild}.${reg.UBR}`
-          : reg.CurrentBuild,*/
-      os_release: reg.DisplayVersion || reg.ReleaseId
+      // os_version → full dotted build string used for CPE / vulnerability matching
+      os_version: os_version,
+      // os_release → human-readable channel label (e.g. "22H2", "24H2")
+      os_release: reg.DisplayVersion || reg.ReleaseId,
     };
   } catch (e) {
     return {
       os_id: "windows",
       os_name: undefined,
       os_version: undefined,
-      //build: undefined,
-      os_release: undefined
+      os_release: undefined,
+      error: e.message,
     };
   }
 }
