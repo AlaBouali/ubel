@@ -1,97 +1,95 @@
-# UBEL — Supply-Chain Firewall
+# UBEL — VS Code Extension
 
-**Multi-ecosystem dependency security scanner and supply-chain firewall for VS Code.**  
-Scans your project, your installed extensions, and your host platform for vulnerabilities and malicious packages — entirely on your machine, zero cloud calls except for osv.dev's API and the NVD's API.
+**Supply-chain firewall and vulnerability scanner for VS Code.**  
+Scan your workspace, your installed extensions, and your host platform — directly from the editor, with no terminal required.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE.md)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
-[![GitHub](https://img.shields.io/badge/github-AlaBouali%2Fubel-lightgrey)](https://github.com/AlaBouali/ubel)
+[![Marketplace](https://img.shields.io/badge/marketplace-Install-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
 
----
-
-## What is UBEL?
-
-UBEL is a **software composition analysis (SCA)** tool and **install-blocking firewall** built for developers who care about what goes into their supply chain. Unlike report-only scanners, UBEL enforces a policy — if a scan fails, it tells you clearly and blocks the operation.
-
-It covers **8 ecosystems in a single scan pass**, works via calling the public osv.dev and NVD's APIs to query the installed packages, and ships with zero external runtime dependencies. No API keys required for local use.
-
----
-
-## Features
-
-- 🔍 **Multi-ecosystem** — Node.js, Python, PHP, Rust, Go, C#, Java, Ruby in one pass
-- 🖥️ **Platform scanning** — enumerate and audit system-level software: OS, runtimes, browsers, Docker, Git, and more
-- 🛡️ **Policy enforcement** — configurable severity threshold; violations surface as explicit warnings
-- ☠️ **Malware blocking** — `MAL-*` infected packages are unconditionally blocked
-- 📄 **HTML report** — self-contained interactive report written on every scan
-- 🔒 **Fully local** — no dependency tree, no package names, no data sent anywhere except for PURLs sent to osv.dev's API and CPEs to NVD's
-- ⚡ **Zero setup** — no extra installs, no Docker, no config files required to get started
-- 🧩 **Scans your extensions too** — audit `~/.vscode/extensions` with a single command
+> For CLI usage, CI/CD integration, server-side firewall (apt, dnf, pip), and full architecture documentation, see the [main README](https://github.com/AlaBouali/ubel/blob/main/README.md).
 
 ---
 
 ## Commands
 
-| Command | Shortcut (Win/Linux) | Shortcut (Mac) | Description |
+| Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
 |---|---|---|---|
-| **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | Scans the currently open workspace folder |
-| **UBEL: Scan VS Code Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | Scans `~/.vscode/extensions` for vulnerable npm packages |
-| **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | Scans system-level software installed on this machine |
+| **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder |
+| **UBEL: Scan VS Code Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` |
+| **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
 
-All commands are also reachable via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search for **UBEL**.
+All three commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
 
 ---
 
 ## Installation
 
-1. Download `ubel-vscode-extension.vsix` from the [releases page](https://github.com/AlaBouali/ubel/releases).
-2. Open the Command Palette and run **Extensions: Install from VSIX…**
+**From the Marketplace**
+
+Search for **UBEL** in the VS Code Extensions panel, or install directly:
+
+```
+ext install Arcane-Spark.ubel
+```
+
+**From VSIX**
+
+1. Download `ubel-vscode-extension.vsix` from the [releases page](https://github.com/AlaBouali/ubel/vscode).
+2. Open the Command Palette → **Extensions: Install from VSIX…**
 3. Select the downloaded file.
 
 ---
 
-## Usage
+## Scan Project (`Ctrl+Alt+U`)
 
-Run any command. A progress notification appears while the scan runs. When it finishes:
+Scans every ecosystem present anywhere inside the currently open workspace folder. Monorepos with mixed stacks are fully covered in a single pass — no configuration needed.
 
-| Result | Notification |
+**What gets scanned**
+
+| Ecosystem | Resolved From |
 |---|---|
-| ✅ Clean | No policy violations detected |
-| ⚠️ Blocked | Policy violation — vulnerable or malicious package found |
-| ❌ Error | Scan failed — see message for details |
+| Node.js (npm, pnpm, yarn, bun) | `node_modules/` on-disk walk |
+| Python | `.venv/`, `venv/`, virtual environment directories |
+| PHP | `vendor/` |
+| Rust | `Cargo.lock` |
+| Go | `go.sum` |
+| C#/.NET | `packages.lock.json`, `obj/project.assets.json` |
+| Java | `pom.xml` resolved dependencies |
+| Ruby | `Gemfile.lock` |
 
-Every notification includes an **Open Report** button that opens the full HTML report in your browser.
+**Report location**
 
-Reports are saved to:
-
-| Scan target | Report path |
-|---|---|
-| Workspace | `<project-root>/.ubel/reports/latest.html` |
-| Extensions | `~/.vscode/extensions/.ubel/reports/latest.html` |
-| Host platform | `~/.ubel/reports/latest.html` |
-
-Previous scans are stored locally under:
-
-- `<project-root>/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.vscode/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
+```
+<project-root>/.ubel/reports/latest.html
+```
 
 ---
 
-## Platform Scanning
+## Scan VS Code Extensions (`Ctrl+Alt+X`)
 
-**UBEL: Scan Host Platform** (`Ctrl+Alt+P`) audits the software installed on your development machine itself — a distinct attack surface from your project's dependencies. It detects and cross-references against the CVE/NVD database using [CPE 2.3](https://nvd.nist.gov/products/cpe) identifiers.
+Scans the npm packages bundled inside your installed VS Code extensions (`~/.vscode/extensions`). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
 
-### What gets scanned
+**Report location**
 
-**Windows**
+```
+~/.vscode/extensions/.ubel/reports/latest.html
+```
 
-Detected via registry probes and PowerShell — no elevated privileges required.
+---
+
+## Scan Host Platform (`Ctrl+Alt+P`)
+
+Audits the system-level software installed on the developer's machine itself — a distinct attack surface from project dependencies. Vulnerabilities are matched using [CPE 2.3](https://nvd.nist.gov/products/cpe) identifiers against the CVE/NVD database.
+
+This catches what dependency scanners miss: a vulnerable version of Git, an unpatched Python interpreter, an outdated Docker Desktop install, or an end-of-life .NET runtime.
+
+**Windows** — detected via registry probes and PowerShell, no elevated privileges required:
 
 | Category | Components |
 |---|---|
-| Operating system | Windows 10 / 11 (build-accurate version) |
+| Operating system | Windows 10 / 11 (build-accurate CPE version) |
 | Security | Windows Defender |
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
@@ -99,40 +97,82 @@ Detected via registry probes and PowerShell — no elevated privileges required.
 | Developer tools | Git, Docker Desktop, VS Code, Cursor |
 | Shell | PowerShell |
 
-**Linux**
+**Linux** — reads the system package database directly, works as a standard user on most distributions:
 
-Detected by reading the system package database directly — works as a standard user on most distributions.
-
-| Distro family | Package manager | Database path |
-|---|---|---|
-| Debian / Ubuntu | dpkg | `/var/lib/dpkg/status` |
-| Alpine | apk | `/lib/apk/db/installed` |
-| Red Hat / AlmaLinux / Rocky | rpm | `rpm -qa` |
+| Distro family | Source |
+|---|---|
+| Debian / Ubuntu | `/var/lib/dpkg/status` |
+| Alpine | `/lib/apk/db/installed` |
+| Red Hat / AlmaLinux / Rocky | `rpm -qa` |
 
 > On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
 
-### Report output
+**Report location**
 
-The platform scan produces the same interactive HTML report as a project scan. Each detected component is shown in the **Inventory** tab with its CPE identifier, detected version, and any matched CVEs. The **Dependency Graph** and **Vulnerability** tabs are fully populated.
+The report is always written to `~/.ubel/reports/latest.html`, independent of any open workspace.
 
-Because the platform scan target is your home directory rather than a project folder, the report is always written to `~/.ubel/reports/latest.html` — independent of whether a workspace is open in VS Code.
+```
+~/.ubel/reports/latest.html
+```
 
 ---
 
-## Supported Ecosystems (Project Scan)
+## Scan Results
 
-UBEL performs a full-stack scan, automatically detecting all of the following ecosystems anywhere inside the scanned directory. Monorepos with mixed stacks are covered in a single pass.
+Every scan ends with a VS Code notification:
 
-| Ecosystem | Package Manager | Resolved From |
+| Result | Notification | Meaning |
 |---|---|---|
-| **Node.js** | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
-| **Python** | pip / virtualenv | `.venv`, `venv`, virtual environment directories |
-| **PHP** | Composer | `vendor/` |
-| **Rust** | Cargo | `Cargo.lock` |
-| **Go** | Go Modules | `go.sum` |
-| **C#/.NET** | NuGet | `packages.lock.json` / `obj/project.assets.json` |
-| **Java** | Maven | `pom.xml` resolved dependencies |
-| **Ruby** | Bundler | `Gemfile.lock` |
+| ✅ | Scan complete — no policy violations | All packages passed |
+| ⚠️ | Policy violation | Vulnerable or malicious package found above threshold |
+| ❌ | Scan error | Unexpected failure — message contains details |
+
+Every notification includes an **Open Report** button that opens the full interactive HTML report in your browser.
+
+---
+
+## The HTML Report
+
+Each scan produces a self-contained HTML file that works fully offline. It contains six tabs:
+
+| Tab | Contents |
+|---|---|
+| **Dashboard** | Vulnerability counts by severity, policy decision summary, scan metadata |
+| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, and policy decision |
+| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, and vulnerability count |
+| **Graph** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
+| **Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
+| **System** | OS metadata, Node.js version, scan engine info |
+
+---
+
+## Policy
+
+Policy is stored per-project at `.ubel/local/policy/config.json` and shared across the VS Code extension and CLI.
+
+| Setting | Values | Default |
+|---|---|---|
+| `severity_threshold` | `low` `medium` `high` `critical` `none` | `high` |
+| `block_unknown_vulnerabilities` | `true` `false` | `true` |
+
+The threshold is inclusive — `high` blocks both `high` and `critical`. `MAL-*` (malware) packages are unconditionally blocked regardless of any setting.
+
+To change policy from the CLI:
+
+```bash
+ubel-npm threshold critical
+ubel-npm block-unknown false
+```
+
+---
+
+## Report Storage
+
+| Scan | Latest report | History |
+|---|---|---|
+| Project | `<project-root>/.ubel/reports/latest.html` | `<project-root>/.ubel/local/reports/npm/health/<year>/<month>/<day>/` |
+| Extensions | `~/.vscode/extensions/.ubel/reports/latest.html` | `~/.vscode/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/` |
+| Platform | `~/.ubel/reports/latest.html` | `~/.ubel/local/reports/npm/health/<year>/<month>/<day>/` |
 
 ---
 
@@ -143,7 +183,13 @@ UBEL performs a full-stack scan, automatically detecting all of the following ec
 
 ---
 
+## Privacy
+
+UBEL is fully local. The only external call is to [osv.dev's public API](https://osv.dev/) and [NVD's API] (https://nvd.nist.gov/) , which receives package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere.
+
+---
+
 ## License
 
 Apache-2.0 with Commons Clause — free for scanning your own projects and systems.  
-See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/vscode/LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.
+See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.
