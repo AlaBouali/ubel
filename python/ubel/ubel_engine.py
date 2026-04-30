@@ -552,15 +552,21 @@ def build_dependency_sequences(inventory: List[Dict]) -> List[Dict]:
     roots = [c["id"] for c in inventory if c["id"] not in depended]
     sequences: Dict[str, List] = {}
 
-    def dfs(node: str, path: List[str]) -> None:
+    def dfs(node: str, path: List[str], visited_in_tree: Set[str]) -> None:
+        # visited_in_tree prevents re-visiting a node already expanded from
+        # this root, which causes O(2^n) blow-up on diamond graphs
+        # (A->B, A->C, B->D, C->D) and stack overflows on large real envs.
+        if node in visited_in_tree:
+            return
+        visited_in_tree = visited_in_tree | {node}
         next_path = path + [node]
         sequences.setdefault(node, []).append(next_path)
         for dep in by_id.get(node, {}).get("dependencies", []):
             if dep not in path and dep in by_id:
-                dfs(dep, next_path)
+                dfs(dep, next_path, visited_in_tree)
 
     for root in roots:
-        dfs(root, [])
+        dfs(root, [], set())
 
     for comp in inventory:
         comp["dependency_sequences"] = sequences.get(comp["id"], [])
@@ -2521,13 +2527,23 @@ class UbelEngine:
     
     @staticmethod
     def pin_versions():
-        installed= []
         PythonVenvScanner.get_installed(start_dir=".", is_recursive=False)
-        for pkg in PythonVenvScanner.inventory_data:
-            installed.append(f"{pkg['name']}=={pkg['version']}")
+        installed = [
+            f"{pkg['name']}=={pkg['version']}"
+            for pkg in PythonVenvScanner.inventory_data
+            if pkg.get("name") and pkg.get("version")
+        ]
+
+        if not installed:
+            print(
+                "[!] pin_versions: no installed packages found — "
+                "requirements.txt was NOT modified.",
+                file=sys.stderr,
+            )
+            return
+
         with open("requirements.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(installed))
-            f.close()
+            f.write("\n".join(installed) + "\n")
 
 
 # ---------------------------------------------------------------------------
