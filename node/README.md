@@ -85,6 +85,26 @@ Uses bun's `--lockfile-only` flag. The candidate `bun.lock` is written and scann
 
 Before any dry-run mutation, originals are backed up to `.ubel/lockfiles/<timestamp>/`. If the revert itself fails (e.g. a disk error mid-restore), the original lockfile is preserved at the backup path and its location is printed to stderr so the user can recover manually.
 
+### TOCTOU integrity protection
+
+After the dry-run completes and the scan passes policy, there is a window between the scan decision and the real install during which the on-disk lockfile or `package.json` could be mutated — by another process, a racing script, or a compromised tool. UBEL closes this window with SHA-256 integrity checks before any real install is allowed to proceed.
+
+At the end of every dry-run, UBEL captures two digests in memory:
+
+- **`_candidateLockfileHash`** — SHA-256 of the raw candidate lockfile bytes written to disk by the dry-run (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`).
+- **`_candidatePackageJsonHash`** — SHA-256 of `package.json` as it exists on disk after the dry-run. For npm, this digest is re-captured after UBEL regenerates `package.json` with exact pinned versions from the lockfile, so the hash always reflects the file that will be present at install time.
+
+Immediately before invoking the real install command (`npm ci`, `pnpm install --frozen-lockfile`, `bun install --frozen-lockfile`), both files are re-hashed from disk and compared against the in-memory digests. If either hash does not match, the install is aborted and the lockfile is reverted — nothing is written to `node_modules/`. The mismatch details (expected hash, actual hash, file path) are printed to stderr.
+
+```
+Lockfile integrity check FAILED — the lockfile was modified after scanning.
+  Expected : a3f1…
+  Got      : 9c2b…
+  File     : /project/package-lock.json
+```
+
+If no lockfile existed before the dry-run (fresh project), the absence itself is recorded as the expected state and enforced the same way.
+
 ---
 
 ## Modes
