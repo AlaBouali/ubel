@@ -1,7 +1,7 @@
 # UBEL — Supply-Chain Firewall
 
 **Multi-ecosystem dependency security scanner and supply-chain firewall for VS Code.**  
-Scans your project, your installed extensions, and your host platform for vulnerabilities and malicious packages — entirely on your machine, zero cloud calls except for osv.dev's API.
+Scans your project, your installed extensions, and your host platform for vulnerabilities and malicious packages — entirely on your machine, zero cloud calls except for osv.dev's API and the NVD's API.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE.md)
@@ -14,7 +14,7 @@ Scans your project, your installed extensions, and your host platform for vulner
 
 UBEL is a **software composition analysis (SCA)** tool and **install-blocking firewall** built for developers who care about what goes into their supply chain. Unlike report-only scanners, UBEL enforces a policy — if a scan fails, it tells you clearly and blocks the operation.
 
-It covers **8 ecosystems in a single scan pass**, works via calling the public osv.dev API to query the installed packages, and ships with zero external runtime dependencies. No API keys required for local use.
+It covers **8 ecosystems in a single scan pass**, works via calling the public osv.dev and NVD's APIs to query the installed packages, and ships with zero external runtime dependencies. No API keys required for local use.
 
 ---
 
@@ -25,7 +25,7 @@ It covers **8 ecosystems in a single scan pass**, works via calling the public o
 - 🛡️ **Policy enforcement** — configurable severity threshold; violations surface as explicit warnings
 - ☠️ **Malware blocking** — `MAL-*` infected packages are unconditionally blocked
 - 📄 **HTML report** — self-contained interactive report written on every scan
-- 🔒 **Fully local** — no dependency tree, no package names, no data sent anywhere except for PURLs sent to osv.dev's API
+- 🔒 **Fully local** — no dependency tree, no package names, no data sent anywhere except for PURLs sent to osv.dev's API and CPEs to NVD's
 - ⚡ **Zero setup** — no extra installs, no Docker, no config files required to get started
 - 🧩 **Scans your extensions too** — audit `~/.vscode/extensions` with a single command
 
