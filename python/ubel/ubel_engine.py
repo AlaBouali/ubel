@@ -1090,6 +1090,10 @@ def generate_html_report(data: Dict) -> str:
           <span class="text-neutral-500 text-xs">Scan Engine</span>
           <span class="mono text-xs" id="scan-engine">...</span>
         </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Scan Scope</span>
+          <span class="mono text-xs" id="scan-scope">...</span>
+        </div>
       </div>
     </div>
 
@@ -1928,6 +1932,7 @@ def generate_html_report(data: Dict) -> str:
             document.getElementById('scan-type').textContent = scan.type;
             document.getElementById('scan-ecosystems').textContent = scan.ecosystems.join(', ');
             document.getElementById('scan-engine').textContent = scan.engine;
+            document.getElementById('scan-scope').textContent = scan.scan_scope || 'repository';
 
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
@@ -2184,7 +2189,7 @@ class UbelEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def scan(args: List[str]) -> None:
+    def scan(args: List[str], scan_scope: str = "repository") -> None:
         UbelEngine._vuln_ids_found = set()
 
         # ── Timestamp & paths ──────────────────────────────────────────
@@ -2402,6 +2407,7 @@ class UbelEngine:
                     "type":       UbelEngine.check_mode,
                     "ecosystems": sorted(ecosystems),
                     "engine":     UbelEngine.engine if UbelEngine.check_mode != "health" else __tool_name__,
+                    "scan_scope": scan_scope,
                 },
                 "stats":               stats,
                 "vulnerabilities_ids": sorted(UbelEngine._vuln_ids_found),

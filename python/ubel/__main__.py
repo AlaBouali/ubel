@@ -153,6 +153,7 @@ def _run_mode(
     ecosystem: str,
     description: str,
     extra_argv: list[str] | None = None,
+    scan_scope: str = "repository",
 ) -> None:
     _print_header()
 
@@ -223,7 +224,7 @@ def _run_mode(
     # ── scan ─────────────────────────────────────────────────────────────────
     UbelEngine.check_mode = mode
     try:
-        UbelEngine.scan(pkg_args)
+        UbelEngine.scan(pkg_args, scan_scope=scan_scope)
     except PolicyViolationError:
         sys.exit(1)
     except Exception as exc:
@@ -238,7 +239,7 @@ def _run_mode(
 # ---------------------------------------------------------------------------
 
 def pip_mode() -> None:
-    _run_mode("pip", "pypi", "Safe Python policy-driven supply-chain firewall")
+    _run_mode("pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
     
     
 
@@ -249,7 +250,7 @@ def linux_mode() -> None:
     UbelEngine.reports_location = str(home / UbelEngine.reports_location.lstrip("./"))
     UbelEngine.policy_dir       = str(home / UbelEngine.policy_dir.lstrip("./"))
     UbelEngine.system_type      = "linux"
-    _run_mode(__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall")
+    _run_mode(__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
 
 
 # ---------------------------------------------------------------------------
