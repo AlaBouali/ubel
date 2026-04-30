@@ -31,7 +31,7 @@ All three commands are also accessible via the Command Palette (`Ctrl+Shift+P` /
 Search for **UBEL** in the VS Code Extensions panel, or install directly:
 
 ```
-ext install Arcane-Spark.ubel
+ext install Arcane-Spark.ubel-vscode
 ```
 
 **From VSIX**
