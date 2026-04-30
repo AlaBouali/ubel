@@ -9,6 +9,11 @@ const os     = require("os");
 // Resolve ubel source relative to this file
 const ubelRoot = path.join(__dirname, "node", "src");
 
+// Per-scan-type flags to prevent concurrent scans of the same type
+let scanningProject     = false;
+let scanningExtensions  = false;
+let scanningPlatform    = false;
+
 /**
  * Extension activation
  */
@@ -18,6 +23,12 @@ function activate(context) {
   // Command 1: Scan current workspace
   // ─────────────────────────────────────────────
   const scanWorkspaceCmd = vscode.commands.registerCommand("ubel.scan", async () => {
+    // Prevent multiple project scans at once
+    if (scanningProject) {
+      vscode.window.showWarningMessage("UBEL: A project scan is already in progress. Please wait.");
+      return;
+    }
+
     let main, PolicyViolationError;
 
     try {
@@ -40,30 +51,40 @@ function activate(context) {
       path.join(projectRoot, ".ubel", "reports", "latest.html")
     );
 
-    await runScan({
-      main,
-      PolicyViolationError,
-      scanOptions: {
-        projectRoot,
-        engine             : "npm",
-        mode               : "health",
-        is_script          : true,
-        save_reports       : true,
-        scan_os            : false,
-        full_stack         : true,
-        scan_node          : true,
-        is_vscanned_project: true,
-        scan_scope         : "repository",
-      },
-      reportUri,
-      title: "UBEL: Scanning project…",
-    });
+    try {
+      scanningProject = true;
+      await runScan({
+        main,
+        PolicyViolationError,
+        scanOptions: {
+          projectRoot,
+          engine             : "npm",
+          mode               : "health",
+          is_script          : true,
+          save_reports       : true,
+          scan_os            : false,
+          full_stack         : true,
+          scan_node          : true,
+          is_vscanned_project: true,
+          scan_scope         : "repository",
+        },
+        reportUri,
+        title: "UBEL: Scanning project…",
+      });
+    } finally {
+      scanningProject = false;
+    }
   });
 
   // ─────────────────────────────────────────────
   // Command 2: Scan VS Code extensions directory
   // ─────────────────────────────────────────────
   const scanExtensionsCmd = vscode.commands.registerCommand("ubel.scanExtensions", async () => {
+    if (scanningExtensions) {
+      vscode.window.showWarningMessage("UBEL: An extensions scan is already in progress. Please wait.");
+      return;
+    }
+
     let main, PolicyViolationError;
 
     try {
@@ -80,42 +101,40 @@ function activate(context) {
       path.join(extensionsDir, ".ubel", "reports", "latest.html")
     );
 
-    await runScan({
-      main,
-      PolicyViolationError,
-      scanOptions: {
-        projectRoot        : extensionsDir,
-        engine             : "npm",
-        mode               : "health",
-        is_script          : true,
-        save_reports       : true,
-        scan_os            : false,
-        full_stack         : true,
-        scan_node          : true,
-        is_vscanned_project: true,
-        scan_scope         : "vs_code_extension",
-      },
-      reportUri,
-      title: "UBEL: Scanning VS Code extensions…",
-    });
+    try {
+      scanningExtensions = true;
+      await runScan({
+        main,
+        PolicyViolationError,
+        scanOptions: {
+          projectRoot        : extensionsDir,
+          engine             : "npm",
+          mode               : "health",
+          is_script          : true,
+          save_reports       : true,
+          scan_os            : false,
+          full_stack         : true,
+          scan_node          : true,
+          is_vscanned_project: true,
+          scan_scope         : "vs_code_extension",
+        },
+        reportUri,
+        title: "UBEL: Scanning VS Code extensions…",
+      });
+    } finally {
+      scanningExtensions = false;
+    }
   });
 
   // ─────────────────────────────────────────────
   // Command 3: Scan host platform (ctrl+alt+p)
-  //
-  // Scans system-level software on the developer's machine: OS, runtimes
-  // (Python, Node, .NET, Go, PHP, JRE), browsers, Docker, Git, and
-  // security tools.  Does NOT scan npm packages.
-  //
-  // Report is written to ~/.ubel/reports/ so it has a stable, project-
-  // independent location regardless of whether a workspace is open.
-  //
-  // Note: On Linux, dpkg/apk/rpm reads require the relevant package DB to
-  // be readable by the current user.  Coverage may be partial without
-  // elevated privileges.  On Windows all probes (registry + PowerShell)
-  // run fine as a standard user.
   // ─────────────────────────────────────────────
   const scanPlatformCmd = vscode.commands.registerCommand("ubel.scanPlatform", async () => {
+    if (scanningPlatform) {
+      vscode.window.showWarningMessage("UBEL: A platform scan is already in progress. Please wait.");
+      return;
+    }
+
     let main, PolicyViolationError;
 
     try {
@@ -126,31 +145,34 @@ function activate(context) {
       return;
     }
 
-    // Use homedir as the projectRoot for platform scans — mirrors bin/platform.js.
-    // Report lands at ~/.ubel/reports/latest.html, independent of any workspace.
     const platformRoot = os.homedir();
 
     const reportUri = vscode.Uri.file(
       path.join(platformRoot, ".ubel", "reports", "latest.html")
     );
 
-    await runScan({
-      main,
-      PolicyViolationError,
-      scanOptions: {
-        projectRoot : platformRoot,
-        engine      : "npm",
-        mode        : "health",
-        is_script   : true,
-        save_reports: true,
-        scan_os     : true,   // enumerate host system software
-        full_stack  : false,  // no lockfile dry-run
-        scan_node   : false,  // not scanning npm packages
-        scan_scope  : "developer_platform",
-      },
-      reportUri,
-      title: "UBEL: Scanning host platform…",
-    });
+    try {
+      scanningPlatform = true;
+      await runScan({
+        main,
+        PolicyViolationError,
+        scanOptions: {
+          projectRoot : platformRoot,
+          engine      : "npm",
+          mode        : "health",
+          is_script   : true,
+          save_reports: true,
+          scan_os     : true,
+          full_stack  : false,
+          scan_node   : false,
+          scan_scope  : "developer_platform",
+        },
+        reportUri,
+        title: "UBEL: Scanning host platform…",
+      });
+    } finally {
+      scanningPlatform = false;
+    }
   });
 
   context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd);
