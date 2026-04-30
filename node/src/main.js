@@ -2,17 +2,33 @@
 /**
  * main.js — entry point for all ubel-node engines.
  *
- * Usage (called by bin/* wrappers):
+ * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- * engine    : npm | pnpm | bun
- * mode      : check | install | health | init | threshold | block-unknown
+ *   engine    : npm | pnpm | bun
+ *   mode      : check | install | health | init | threshold | block-unknown
  *
- * Policy configuration modes:
- *   threshold <level>          — set severity_threshold (low|medium|high|critical)
- *   block-unknown <true|false> — set block_unknown_vulnerabilities
+ *   Policy configuration modes:
+ *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
+ *     block-unknown <true|false> — set block_unknown_vulnerabilities
  *
- * check/install support matrix:
+ * ── Programmatic usage (agent, platform, VS Code extension) ──────────────────
+ *   import { main } from "./main.js";
+ *
+ *   await main({
+ *     projectRoot : "/abs/path",   // cwd() when omitted
+ *     engine      : "npm",         // default "npm"
+ *     mode        : "health",      // default "health"
+ *     // any scan() option:
+ *     is_script           : true,
+ *     save_reports        : true,
+ *     scan_os             : true,
+ *     full_stack          : true,
+ *     scan_node           : false,
+ *     is_vscanned_project : false,
+ *   });
+ *
+ * ── check/install support matrix ─────────────────────────────────────────────
  *   npm  — yes  (--package-lock-only dry-run)
  *   pnpm — yes  (--lockfile-only dry-run)
  *   bun  — yes  (--lockfile-only dry-run, node_modules untouched)
@@ -20,14 +36,111 @@
  */
 
 import { UbelEngine, PolicyViolationError } from "./engine.js";
-import { NodeManager }           from "./node_runner.js";
-import { banner }            from "./info.js";
-import { loadEnvironment }   from "./utils.js";
+import { NodeManager }    from "./node_runner.js";
+import { banner }         from "./info.js";
+import { loadEnvironment } from "./utils.js";
 
 const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 
-export async function main() {
+// ── Engines that support lockfile-only dry-runs ───────────────────────────────
+const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
+
+// ── Package-specifier allow-list (same pattern used before) ──────────────────
+const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+
+/**
+ * main() — unified entry point for CLI callers AND programmatic callers.
+ *
+ * Behaviour is determined by how it is called:
+ *
+ *   • No arguments (or called by a bin/* shim):
+ *       Reads engine / mode / extra args from process.argv, prints the banner,
+ *       handles policy-config modes (threshold / block-unknown / init), validates
+ *       package args, then runs a scan.  This is the legacy CLI path — identical
+ *       to the old main() behaviour.
+ *
+ *   • Called with a plain-object argument:
+ *       Skips argv parsing, banner, and CLI-specific exits.  Sets engine state,
+ *       chdirs into projectRoot, runs the scan, then restores cwd.  Returns the
+ *       finalJson report object (same contract as the old scan_project()).
+ *       This replaces scan_project() for agent, platform, and the VS Code extension.
+ *
+ * @param {object|undefined} programmaticOptions
+ * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
+ * @param {string}  [programmaticOptions.engine="npm"]         Package manager engine.
+ * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
+ * @param {boolean} [programmaticOptions.is_script=true]
+ * @param {boolean} [programmaticOptions.save_reports=true]
+ * @param {boolean} [programmaticOptions.scan_os=false]
+ * @param {boolean} [programmaticOptions.full_stack=false]
+ * @param {boolean} [programmaticOptions.scan_node=true]
+ * @param {boolean} [programmaticOptions.is_vscanned_project=false]
+ * @param {string}  [programmaticOptions.scan_scope="repository"]  Scan context: repository | agent | developer_platform | vs_code_extension
+ * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
+ */
+export async function main(programmaticOptions) {
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // PROGRAMMATIC PATH
+  // Called by: agent.js, platform.js, extension.js
+  // ════════════════════════════════════════════════════════════════════════════
+  if (programmaticOptions !== undefined && typeof programmaticOptions === "object") {
+
+    const {
+      projectRoot,
+      engine             = "npm",
+      mode               = "health",
+      is_script          = true,
+      save_reports       = true,
+      scan_os            = false,
+      full_stack         = false,
+      scan_node          = true,
+      is_vscanned_project = false,
+      scan_scope         = "repository",
+      ...rest                       // forward any extra options the caller passes
+    } = programmaticOptions;
+
+    const original_cwd = process.cwd();
+    if (projectRoot && projectRoot !== original_cwd) {
+      process.chdir(projectRoot);
+    }
+
+    try {
+      // Reset all static engine state so re-runs in the same process are clean.
+      UbelEngine.engine              = engine;
+      UbelEngine.systemType          = engine;
+      UbelEngine.checkMode           = mode;
+      UbelEngine.vulns_ids_found     = new Set();
+
+      NodeManager.inventoryData      = [];
+
+      UbelEngine.initiateLocalPolicy();
+
+      return await UbelEngine.scan([], {
+        current_dir: projectRoot || original_cwd,
+        is_script,
+        save_reports,
+        scan_os,
+        full_stack,
+        scan_node,
+        is_vscanned_project,
+        scan_scope,
+        ...rest,
+      });
+
+    } finally {
+      if (projectRoot && projectRoot !== original_cwd) {
+        process.chdir(original_cwd);
+      }
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // CLI PATH
+  // Called by: bin/npm.js, bin/pnpm.js, bin/bun.js, bin/yarn.js
+  // ════════════════════════════════════════════════════════════════════════════
+
   const [, , engine, mode, ...extraArgs] = process.argv;
 
   if (!engine) {
@@ -52,12 +165,12 @@ export async function main() {
   const effectiveMode = VALID_MODES.includes(mode) ? mode : "health";
   UbelEngine.checkMode = effectiveMode;
 
-  // ── init ──────────────────────────────────────────────────────────────────
+  // ── init ────────────────────────────────────────────────────────────────────
   if (effectiveMode === "init") {
     process.exit(0);
   }
 
-  // ── threshold <level> ─────────────────────────────────────────────────────
+  // ── threshold <level> ───────────────────────────────────────────────────────
   if (effectiveMode === "threshold") {
     const level = (extraArgs[0] || "").toLowerCase();
     if (!level || !VALID_SEVERITIES.has(level)) {
@@ -71,7 +184,7 @@ export async function main() {
     process.exit(0);
   }
 
-  // ── block-unknown <true|false> ────────────────────────────────────────────
+  // ── block-unknown <true|false> ───────────────────────────────────────────────
   if (effectiveMode === "block-unknown") {
     const raw = (extraArgs[0] || "").toLowerCase();
     if (raw !== "true" && raw !== "false") {
@@ -85,16 +198,14 @@ export async function main() {
     process.exit(0);
   }
 
-  // ── check/install require lockfile-only dry-run support ───────────────────
-  const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
+  // ── check/install require lockfile-only dry-run support ─────────────────────
   if (!CHECK_INSTALL_ENGINES.has(engine)) {
     console.error(`[!] '${engine}' is not supported.`);
     console.error("[!] Supported engines: npm, pnpm, bun");
     process.exit(1);
   }
 
-  // ── validate package specifiers early ────────────────────────────────────
-  const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+  // ── validate package specifiers early ───────────────────────────────────────
   let pkgArgs = extraArgs;
   if (pkgArgs.length) {
     const bad = pkgArgs.filter(a => !PKG_ARG_RE.test(a));
@@ -108,20 +219,21 @@ export async function main() {
     pkgArgs = [];
   }
 
-  // ── remote mode guard ─────────────────────────────────────────────────────
+  // ── remote mode guard ────────────────────────────────────────────────────────
   const { apiKey, assetId } = loadEnvironment();
   if (apiKey && assetId) {
     console.error("[!] Remote mode (UBEL_API_KEY + UBEL_ASSET_ID) is not yet implemented in the Node CLI.");
     process.exit(1);
   }
 
-  // ── scan ──────────────────────────────────────────────────────────────────
+  // ── scan ─────────────────────────────────────────────────────────────────────
   try {
     await UbelEngine.scan(pkgArgs, {
       is_script:    false,
       save_reports: true,
-      os_scan:      false,
+      scan_os:      false,
       full_stack:   true,
+      scan_scope:   "repository",
     });
   } catch (err) {
     if (err instanceof PolicyViolationError) {
@@ -134,70 +246,11 @@ export async function main() {
 }
 
 /**
- * scan_project — called by the VS Code extension (and any other script consumer).
+ * @deprecated Use main({ projectRoot, ...options }) instead.
  *
- * Fixes vs. the inline CLI path:
- *   1. Sets UbelEngine.engine + UbelEngine.systemType before scanning —
- *      the CLI does this in main() but scan_project previously skipped it.
- *   2. Forces checkMode to "health" so the scan() path never reaches the
- *      process.exit(0) calls that live in the "check" / "install" branches —
- *      those would kill the VS Code host process.
- *   3. Resets was_successful_scan so a second call in the same process gets
- *      a clean slate (static class, single process lifetime).
- *
- * @param {string} [projectRoot] - Absolute path to scan. Defaults to cwd().
- * @returns {Promise<object>}    - The finalJson report object.
+ * Kept as a zero-cost shim so any existing callers that haven't been updated
+ * yet continue to work without modification.
  */
-export async function scan_project(projectRoot, options={
-      is_script:    true,
-      save_reports: true,
-      os_scan:      false,
-      full_stack:   true,
-      current_dir: projectRoot || process.cwd(),
-      is_vscanned_project: false,  // enables vscode-specific engine_info fields
-    }) {
-  // ── change cwd so all relative paths (.ubel/, node_modules/, …) resolve
-  //    inside the target project, not inside the extension's install dir.
-  const original_cwd = process.cwd();
-  if (projectRoot && projectRoot !== original_cwd) {
-    process.chdir(projectRoot);
-  }
-
-  try {
-    // ── Engine state must be initialised before scan() ────────────────────
-    UbelEngine.engine              = "npm";
-    UbelEngine.systemType          = "npm";
-    UbelEngine.checkMode           = "health";   // avoids the process.exit() branches
-    UbelEngine.was_successful_scan = false;      // reset for re-runs in same process
-    UbelEngine.vulns_ids_found     = new Set();  // reset accumulated vuln ids
-
-    // Reset NodeManager static state so re-runs in the same process get a
-    // clean slate instead of carrying over inventory from the previous scan.
-    NodeManager.inventoryData      = [];
-
-    UbelEngine.initiateLocalPolicy();
-
-    return await UbelEngine.scan([], options);
-  } finally {
-    // Always restore the original cwd, even if the scan throws.
-    if (projectRoot && projectRoot !== original_cwd) {
-      process.chdir(original_cwd);
-    }
-  }
+export async function scan_project(projectRoot, options = {}) {
+  return main({ projectRoot, ...options });
 }
-
-
-// main() must run when:
-//   • executed directly via node src/main.js
-//   • loaded by a bin wrapper via import("../src/main.js")
-//     (in that case process.argv[1] is npm.js/pnpm.js/bun.js — NOT main.js,
-//      so any argv[1] check is wrong)
-//
-// main() must NOT run when:
-//   • bundled by esbuild for the VS Code extension.
-//     esbuild compiles away import.meta, so typeof import.meta === "undefined"
-//     inside the CJS bundle — that is the only safe distinguishing signal.
-
-/*if (typeof import.meta !== "undefined") {
-  main();
-}*/

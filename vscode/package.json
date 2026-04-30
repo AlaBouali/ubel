@@ -85,6 +85,11 @@
         "command": "ubel.scanExtensions",
         "title": "UBEL: Scan VS Code Extensions",
         "category": "UBEL"
+      },
+      {
+        "command": "ubel.scanPlatform",
+        "title": "UBEL: Scan Host Platform",
+        "category": "UBEL"
       }
     ],
     "keybindings": [
@@ -97,6 +102,11 @@
         "command": "ubel.scanExtensions",
         "key": "ctrl+alt+x",
         "mac": "cmd+alt+x"
+      },
+      {
+        "command": "ubel.scanPlatform",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
       }
     ]
   },

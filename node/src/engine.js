@@ -905,6 +905,7 @@ function generateHTMLReport(data) {
             document.getElementById('scan-type').textContent = scan.type;
             document.getElementById('scan-ecosystems').textContent = scan.ecosystems.join(', ');
             document.getElementById('scan-engine').textContent = scan.engine;
+            document.getElementById('scan-scope').textContent = scan.scan_scope || 'repository';
 
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
@@ -1267,6 +1268,10 @@ function generateHTMLReport(data) {
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">Scan Engine</span>
           <span class="mono text-xs" id="scan-engine">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Scan Scope</span>
+          <span class="mono text-xs" id="scan-scope">...</span>
         </div>
       </div>
     </div>
@@ -2155,7 +2160,7 @@ export class UbelEngine {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false, scan_node:true }) {
+  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false, scan_node:true, scan_scope: "repository" }) {
     const os_metadata_info = await getOSMetadata();
     const getinstalledoptions = {
       full_stack: options.full_stack,
@@ -2434,7 +2439,7 @@ export class UbelEngine {
         os_metadata: { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine },
+        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine, scan_scope: options.scan_scope ?? "repository" },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
         findings_summary: findingsSummary,

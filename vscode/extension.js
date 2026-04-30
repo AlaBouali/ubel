@@ -18,10 +18,10 @@ function activate(context) {
   // Command 1: Scan current workspace
   // ─────────────────────────────────────────────
   const scanWorkspaceCmd = vscode.commands.registerCommand("ubel.scan", async () => {
-    let scan_project, PolicyViolationError;
+    let main, PolicyViolationError;
 
     try {
-      ({ scan_project }         = require(path.join(ubelRoot, "main.js")));
+      ({ main }                 = require(path.join(ubelRoot, "main.js")));
       ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
@@ -41,11 +41,22 @@ function activate(context) {
     );
 
     await runScan({
-      scan_project,
+      main,
       PolicyViolationError,
-      targetPath: projectRoot,
+      scanOptions: {
+        projectRoot,
+        engine             : "npm",
+        mode               : "health",
+        is_script          : true,
+        save_reports       : true,
+        scan_os            : false,
+        full_stack         : true,
+        scan_node          : true,
+        is_vscanned_project: true,
+        scan_scope         : "repository",
+      },
       reportUri,
-      title: "UBEL: Scanning project…"
+      title: "UBEL: Scanning project…",
     });
   });
 
@@ -53,10 +64,10 @@ function activate(context) {
   // Command 2: Scan VS Code extensions directory
   // ─────────────────────────────────────────────
   const scanExtensionsCmd = vscode.commands.registerCommand("ubel.scanExtensions", async () => {
-    let scan_project, PolicyViolationError;
+    let main, PolicyViolationError;
 
     try {
-      ({ scan_project }         = require(path.join(ubelRoot, "main.js")));
+      ({ main }                 = require(path.join(ubelRoot, "main.js")));
       ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
@@ -70,36 +81,94 @@ function activate(context) {
     );
 
     await runScan({
-      scan_project,
+      main,
       PolicyViolationError,
-      targetPath: extensionsDir,
+      scanOptions: {
+        projectRoot        : extensionsDir,
+        engine             : "npm",
+        mode               : "health",
+        is_script          : true,
+        save_reports       : true,
+        scan_os            : false,
+        full_stack         : true,
+        scan_node          : true,
+        is_vscanned_project: true,
+        scan_scope         : "vs_code_extension",
+      },
       reportUri,
-      title: "UBEL: Scanning VS Code extensions…"
+      title: "UBEL: Scanning VS Code extensions…",
     });
   });
 
-  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd);
+  // ─────────────────────────────────────────────
+  // Command 3: Scan host platform (ctrl+alt+p)
+  //
+  // Scans system-level software on the developer's machine: OS, runtimes
+  // (Python, Node, .NET, Go, PHP, JRE), browsers, Docker, Git, and
+  // security tools.  Does NOT scan npm packages.
+  //
+  // Report is written to ~/.ubel/reports/ so it has a stable, project-
+  // independent location regardless of whether a workspace is open.
+  //
+  // Note: On Linux, dpkg/apk/rpm reads require the relevant package DB to
+  // be readable by the current user.  Coverage may be partial without
+  // elevated privileges.  On Windows all probes (registry + PowerShell)
+  // run fine as a standard user.
+  // ─────────────────────────────────────────────
+  const scanPlatformCmd = vscode.commands.registerCommand("ubel.scanPlatform", async () => {
+    let main, PolicyViolationError;
+
+    try {
+      ({ main }                 = require(path.join(ubelRoot, "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+    } catch (err) {
+      vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
+      return;
+    }
+
+    // Use homedir as the projectRoot for platform scans — mirrors bin/platform.js.
+    // Report lands at ~/.ubel/reports/latest.html, independent of any workspace.
+    const platformRoot = os.homedir();
+
+    const reportUri = vscode.Uri.file(
+      path.join(platformRoot, ".ubel", "reports", "latest.html")
+    );
+
+    await runScan({
+      main,
+      PolicyViolationError,
+      scanOptions: {
+        projectRoot : platformRoot,
+        engine      : "npm",
+        mode        : "health",
+        is_script   : true,
+        save_reports: true,
+        scan_os     : true,   // enumerate host system software
+        full_stack  : false,  // no lockfile dry-run
+        scan_node   : false,  // not scanning npm packages
+        scan_scope  : "developer_platform",
+      },
+      reportUri,
+      title: "UBEL: Scanning host platform…",
+    });
+  });
+
+  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd);
 }
 
 /**
- * Shared scan runner
+ * Shared scan runner — calls main() with a pre-built options object.
  */
-async function runScan({ scan_project, PolicyViolationError, targetPath, reportUri, title }) {
+async function runScan({ main, PolicyViolationError, scanOptions, reportUri, title }) {
   await vscode.window.withProgress(
     {
-      location: vscode.ProgressLocation.Notification,
+      location   : vscode.ProgressLocation.Notification,
       title,
       cancellable: false,
     },
     async () => {
       try {
-        await scan_project(targetPath, {
-          is_script: true,
-          save_reports: true,
-          os_scan: false,
-          full_stack: true,
-          is_vscanned_project: true,
-        });
+        await main(scanOptions);
 
         const choice = await vscode.window.showInformationMessage(
           "✅ UBEL scan complete — no policy violations.",

@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 
-import { scan_project } from "../src/main.js";
-import { homedir } from 'os';
+import { main }    from "../src/main.js";
+import { homedir } from "os";
 
 async function run() {
   const [, , targetPath] = process.argv;
+
   try {
-    const result = await scan_project(targetPath || process.homedir, {
-      is_script: true,
+    const result = await main({
+      projectRoot : targetPath || homedir(),
+      engine      : "npm",
+      mode        : "health",
+      is_script   : true,
       save_reports: true,
-      scan_node: false,
-
-      // critical flags
-      full_stack: false,
-      scan_os: true,
-
+      full_stack  : false,
+      scan_os     : true,
+      scan_node   : false,
+      scan_scope  : "developer_platform",
     });
 
     console.log(JSON.stringify(result, null, 2));
@@ -27,4 +29,4 @@ async function run() {
   }
 }
 
-(async () => { run(); })();
+run();
