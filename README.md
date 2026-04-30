@@ -1,239 +1,268 @@
-# UBEL ( Unified Bill / Enforced Law ) – Multi‑Ecosystem Security & Policy Enforcement CLI
+# UBEL — Unified Bill / Enforced Law
+### Python & Linux Supply-Chain Security CLI
 
-Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, generates PURLs, scans them through OSV.dev, and enforces security policies during installation to prevent supply-chain attacks. It works with:
+Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-- **PyPI** via: `ubel-pip`
-- **npm** via:  `ubel-npm` or `ubel-pnpm` or `ubel-bun` or `ubel-yarn`
-- **Linux distributions** via: `ubel` (Ubuntu-based, Debian-based, RHEL, AlmaLinux, Rocky-Linux, and Alpine)
-- **Docker** via: `ubel-docker` (if the image is based on one the mentioned Linux distros above)
-
-Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing clean **JSON** and **PDF** reports.
+This document covers the **Python (PyPI)** and **Linux** ecosystems.
 
 ---
 
-## ✨ Features
-- Full dependency resolution across ecosystems
-- OSV.dev vulnerability scanning (batch API)
-- Policy engine (block/allow by severity & infection)
-- Checking linux-package or node/python dependency or entire project (`check` mode)
-- Install‑time enforcement (`install` mode)
-- Project‑level/Host-level/kernal-level/Docker-level scanning (`health` mode)
-- Catches Non-CVEs
-- It is a supply-chain protection tool
-- Automatic report generation (JSON + PDF)
-- Extremely fast (seconds per scan)
+## Features
+
+- Full dependency resolution with PURL generation
+- OSV.dev vulnerability scanning via batched API queries
+- Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
+- Policy engine — block/allow by severity threshold and unknown-severity packages
+- Malicious package (infection) detection — always blocked regardless of policy
+- `check` mode — dry-run resolution and scan with no side effects
+- `install` mode — scan-gate before installation; blocks if policy violated
+- `health` mode — scan the running environment (installed venvs or all system packages)
+- `init` mode — initialize a local virtual environment
+- Dependency graph with introduced-by and parent tracking
+- Automatic report generation: timestamped **JSON** + **HTML** per scan, plus `latest.*` symlinks
+- Zero external dependencies (stdlib only)
 
 ---
 
-## 📦 Installation
+## Installation
+
 ```bash
 pip install ubel
 ```
 
-If you are on Linux, you need to:
-- setup a virtual envirenment: `python3 -m venv venv`
-- run enable the virtual envirenment `source venv/bin/activate`
-- then run: `pip install ubel`
+On Linux, use a virtual environment to avoid requiring root for pip:
 
-Ubel exposes binaries:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install ubel
+```
 
-- `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux, Rocky-Linux, and Alpine )
-- `ubel-pip` (Python ecosystem)
-- `ubel-npm` (Node.js ecosystem)
-- `ubel-pnpm` (Node.js ecosystem)
-- `ubel-bun` (Node.js ecosystem)
-- `ubel-yarn` (Node.js ecosystem)
-- `ubel-docker` (Docker)
+After installation, two entry-point binaries are available:
+
+| Binary | Ecosystem |
+|---|---|
+| `ubel-pip` | Python / PyPI projects |
+| `ubel` | Linux system packages (apt / dnf / yum / apk) |
 
 ---
 
-# 🚀 Usage Overview
+## Usage
 
-## Main CLI
 ```
-usage: ubel [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-
-## PyPI CLI
-```
-usage: ubel-pip [-h] {check,install,health,init,allow,block} [extra_args ...]
+ubel-pip  <mode> [packages...]
+ubel      <mode> [packages...]
 ```
 
-## npm CLI
-```
-usage: ubel-npm [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-pnpm [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-bun [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-yarn [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-
-## docker CLI
-```
-usage: ubel-docker [-h] {health} <docker_image>
-```
+Both CLIs share the same set of modes. Package arguments are optional for `check` and `install` — when omitted they are read from `requirements.txt` (pip) or resolved from the installed system (Linux health).
 
 ---
 
-# 🧠 Commands Explained
+## Modes
 
-### **check**
-Resolve dependencies/linux-packages → generate report → exit.
+### `health`
 
-#### Python example:
-```bash
-ubel-pip check
-```
-If no extra arguments are passed, Ubel will:
-- Detect `requirements.txt`
-- Resolve all packages
-- Scan them
-- Output PDF + JSON
+Scans the current environment without installing anything.
 
-#### npm example:
-```bash
-ubel-npm check flask==3.1.0
-```
-If no args are passed, it will detect `package.json` automatically.
+**Python** — recursively walks the current directory for virtualenvs, reads all installed packages from `.dist-info` metadata, and submits them to OSV.
 
----
-
-### **install**
-Same as `check`, but enforces policies and either **blocks or allows** installation.
-
-#### Python example:
-```bash
-ubel-pip install flask==3.1.0
-```
-Or auto-detect project requirements:
-```bash
-ubel-pip install
-```
-
-#### npm example:
-```bash
-ubel-npm install express@5.0.0
-```
-Or simply:
-```bash
-ubel-npm install
-```
-(uses `package.json` automatically)
-
----
-
-### **health**
-Scan the **entire machine** or **running project**, including:
-- Installed PyPI packages
-- Installed NPM packages
-- OS-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
-- Docker-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
-
-Example:
-( for linux )
-```bash
-ubel health
-```
-or ( for node.js app )
-```bash
-ubel-npm health
-```
-or ( for python app )
 ```bash
 ubel-pip health
 ```
 
-This mode produces large, detailed inventories and vulnerability matrices.
+**Linux** — reads all installed system packages from dpkg / apk / rpm databases, including binary paths, dependency edges, and the running kernel version (apt-based distros).
 
----
-
-### **init**
-Initialize a policy file for the project or system.
-
-Example:
 ```bash
-ubel init
+ubel health
 ```
-Creates default policy:
-```yaml
-infections: block
-severity:
-  critical: block
-  high: block
-  medium: allow
-  low: allow
-  unknown: allow
-```
+
+Reports and policy for the Linux entry-point are written under `$HOME/.ubel/` to avoid requiring root for writes.
 
 ---
 
-### **allow / block**
-Override Ubel's decision from CI/CD or scripted pipelines.
+### `check`
 
-The arguments can be: "low", "medium", "high", "critical".
+Dry-run: resolves the given packages (or `requirements.txt`) via `pip install --dry-run`, scans the resolved set, and exits. Nothing is installed and `requirements.txt` is not modified.
 
-Example:
 ```bash
-ubel block high critical
+# Scan specific packages
+ubel-pip check requests==2.32.3 flask
+
+# Scan everything in requirements.txt
+ubel-pip check
 ```
----
 
-# 📁 Automatic Project Detection
+Linux dry-run resolution uses the native package manager (`apt-get -s`, `dnf --assumeno`, `yum --assumeno`):
 
-For **npm** and **PyPI**, when running:
-- `install`
-- `check`
+```bash
+ubel check curl nginx
+```
 
-without arguments:
-
-### Ubel automatically loads:
-- `package.json` (for npm)
-- `requirements.txt` (for pip)
-
-This makes it ideal for CI/CD workflows.
+Exits `0` if policy passes, `1` if policy blocks or the scan fails.
 
 ---
 
-# 📤 Output
-Ubel generates:
+### `install`
 
-### **1. JSON report**
-Machine‑readable, includes:
-- dependency list
-- purls
-- vulnerabilities
-- severity
-- infection state
-- policy decision
-- Generate complete SBOM-like machine inventory
+Same pipeline as `check`, but proceeds to install if and only if the policy decision is **allow**.
 
-### **2. PDF report**
-Human‑readable, includes:
-- summary statistics
-- per‑dependency vulnerability details
-- fix recommendations
-- tables
-- OSV reference links
-- Generate complete SBOM-like machine inventory
+```bash
+ubel-pip install flask==3.1.0 sqlalchemy
+ubel-pip install                            # reads requirements.txt
+```
 
+```bash
+ubel install curl                           # Linux
+```
+
+If the policy blocks, installation is aborted and the process exits `1`.
 
 ---
 
-# 🧩 Ecosystem Tools
-- `ubel` → system packages, Linux distros
-- `ubel-pip` → PyPI projects, virtual environments\
-- `ubel-npm` → Node.js, npm, package.json projects
-- `ubel-pnpm` → Node.js, npm, package.json projects
-- `ubel-bun` → Node.js, npm, package.json projects
-- `ubel-yarn` → Node.js, npm, package.json projects
-- `ubel-docker` → Docker
+### `init`
 
+Creates a Python virtual environment at `./venv` (idempotent — safe to run on an existing venv).
+
+```bash
+ubel-pip init
+```
 
 ---
-Ubel – Secure every dependency, before it reaches production.
 
+### `threshold`
+
+Sets the severity level at or above which vulnerabilities block the scan. Accepts `low`, `medium`, `high`, `critical`, or `none` (disable threshold blocking).
+
+```bash
+ubel-pip threshold high       # block high and critical
+ubel-pip threshold critical   # block critical only
+ubel-pip threshold none       # disable severity blocking
+```
+
+Infections (`MAL-*` advisories) are always blocked regardless of this setting.
+
+The threshold is persisted to the local policy file and applies to all subsequent scans until changed.
+
+---
+
+### `block-unknown`
+
+Controls whether packages with unknown-severity vulnerabilities are blocked.
+
+```bash
+ubel-pip block-unknown true
+ubel-pip block-unknown false
+```
+
+---
+
+## Policy
+
+Policy is stored as JSON at `.ubel/local/policy/config.json` (pip) or `~/.ubel/local/policy/config.json` (Linux).
+
+Default policy created on first run:
+
+```json
+{
+    "severity_threshold": "high",
+    "block_unknown_vulnerabilities": true
+}
+```
+
+**Severity threshold** — vulnerabilities at or above this level cause a block. Severity order: `low → medium → high → critical`.
+
+**Block unknown** — when `true`, any vulnerability whose severity cannot be determined also causes a block.
+
+**Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to either setting above.
+
+---
+
+## Supported Linux Distributions
+
+| Distribution | Package manager | PURL type |
+|---|---|---|
+| Ubuntu | apt / apt-get | `pkg:deb/ubuntu/` |
+| Debian | apt / apt-get | `pkg:deb/debian/` |
+| Red Hat / RHEL | dnf / yum | `pkg:rpm/redhat/` |
+| AlmaLinux | dnf | `pkg:rpm/almalinux/` |
+| Rocky Linux | dnf / yum | `pkg:rpm/rocky-linux/` |
+| Alpine | apk (db file) | `pkg:apk/alpine/` |
+| Alpaquita | apk (db file) | `pkg:apk/alpaquita/` |
+
+---
+
+## Reports
+
+Every scan writes two files to a timestamped path and overwrites the `latest.*` convenience links:
+
+```
+.ubel/reports/latest.json          ← always current
+.ubel/reports/latest.html          ← always current
+
+.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
+    <ecosystem>_<mode>_<engine>__<timestamp>.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.html
+```
+
+Linux reports land under `$HOME/.ubel/` instead of the project directory.
+
+The HTML report is fully self-contained (no server required) and includes:
+
+- Dashboard with severity breakdown chart and policy decision
+- Searchable, filterable vulnerability table
+- Full inventory with state (safe / vulnerable / infected / undetermined)
+- Interactive force-directed dependency graph with vulnerable-subtree filter
+- Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV references)
+- System and runtime metadata
+
+The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
+
+After a successful `health` or `install` scan, pinned versions of all installed packages are written back to `requirements.txt`.
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `UBEL_API_KEY` | API key for paid-tier enrichment (future) |
+| `UBEL_ASSET_ID` | Asset identifier for report tagging (future) |
+| `UBEL_ENDPOINT` | Override the default API endpoint (future) |
+| `DEBUG` | Set to any value to print full tracebacks on scan failure |
+
+Variables are read from a `.env` file in the current working directory if present, and do not override existing environment variables.
+
+---
+
+## Quick-start examples
+
+```bash
+# Python project — check all deps before installing
+ubel-pip check
+
+# Python project — gate the actual install
+ubel-pip install
+
+# Python project — scan a single package for a CVE check
+ubel-pip check pillow==9.5.0
+
+# Python project — tighten policy, then re-scan
+ubel-pip threshold critical
+ubel-pip check
+
+# Scan the full Python environment on this machine
+ubel-pip health
+
+# Linux — check what curl would pull in before installing it
+ubel check curl
+
+# Linux — scan all installed system packages
+ubel health
+
+# Linux — lower the block threshold
+ubel threshold medium
+```
+
+---
+
+*Ubel — Secure every dependency, before it reaches production.*
