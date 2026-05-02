@@ -11,6 +11,7 @@ import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
 import {getGitMetadata, getvscodeversion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
+import { CycloneDXBuilder } from "./sbom_builder.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1701,6 +1702,7 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
 
   return {
     id:           cveId,
+    source:       "nvd",
     published:    cveData.published    || "",
     modified:     cveData.lastModified || "",
     summary:      desc.slice(0, 200),
@@ -1846,7 +1848,7 @@ async function submitToOsv(purlsList) {
       const purl     = chunk[i];
       const [dep, ver] = getDependencyFromPurl(purl);
       for (const v of (item.vulns || [])) {
-        results.push({ purl, vulnerability_id: v.id, dependency: dep, affected_version: ver });
+        results.push({ purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv" });
       }
     });
   }
@@ -2532,6 +2534,15 @@ export class UbelEngine {
       const lateshtmlpath=latestPath.replace(/\.json$/, ".html");
       fs.writeFileSync(lateshtmlpath, htmlReport);
       fs.writeFileSync(latestPath, JSON.stringify(finalJson, null, 2));
+      // ── Generate CycloneDX SBOM ───────────────────────────────────
+      const sbomBuilder = new CycloneDXBuilder(finalJson);
+      const sbomData = sbomBuilder.generate();
+
+      const sbomPath = jsonPath.replace(/\.json$/, "_sbom.cdx.json");
+      fs.writeFileSync(sbomPath, JSON.stringify(sbomData, null, 2));
+
+      const latestSbom = path.join(latestDir, "latest_sbom.cdx.json");
+      fs.writeFileSync(latestSbom, JSON.stringify(sbomData, null, 2));
       if (options.is_script==false){
       console.log(`Latest JSON report saved to: ${latestPath}`);
       console.log(`Latest HTML report saved to: ${lateshtmlpath}`);

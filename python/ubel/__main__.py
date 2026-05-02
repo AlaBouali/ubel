@@ -245,10 +245,12 @@ def pip_mode() -> None:
 
 
 def linux_mode() -> None:
-    # Linux reports & policy live under $HOME to avoid requiring sudo for writes
+    # Linux reports & policy live under $HOME to avoid requiring sudo for writes.
+    # These MUST be set before _run_mode() is called because _run_mode() calls
+    # _initiate_local_policy(UbelEngine.policy_dir, …) as one of its first steps.
     home = Path.home()
-    UbelEngine.reports_location = str(home / UbelEngine.reports_location.lstrip("./"))
-    UbelEngine.policy_dir       = str(home / UbelEngine.policy_dir.lstrip("./"))
+    UbelEngine.reports_location = str(home / ".ubel" / "local" / "reports")
+    UbelEngine.policy_dir       = str(home / ".ubel" / "local" / "policy")
     UbelEngine.system_type      = "linux"
     _run_mode(__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
 

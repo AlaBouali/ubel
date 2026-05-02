@@ -351,10 +351,13 @@ def _get_git_metadata() -> Dict[str, Any]:
         except Exception:
             return None
 
-    available = _git("rev-parse", "--is-inside-work-tree") == "true"
-    version   = _git("--version")   # e.g. "git version 2.39.2"
+    available    = _git("rev-parse", "--is-inside-work-tree") == "true"
+    raw_version  = _git("--version")   # e.g. "git version 2.39.2"
+    # Keep only the semver part so the report shows "2.39.2" not "git version 2.39.2"
+    if raw_version and raw_version.lower().startswith("git version "):
+        raw_version = raw_version[len("git version "):].strip()
     return {
-        "version":      version or "N/A",
+        "version":      raw_version or "N/A",
         "latest_commit": _git("rev-parse", "--short", "HEAD") if available else None,
         "branch":        _git("rev-parse", "--abbrev-ref", "HEAD") if available else None,
         "url":           _git("remote", "get-url", "origin") if available else None,
@@ -2184,6 +2187,8 @@ class UbelEngine:
         lines: List[str] = []
         for purl in purls:
             name, version = get_dependency_from_purl(purl)
+            if  name== __tool_name__ and version == __version__:
+                continue
             if name != "unknown" and version not in ("", "unknown"):
                 lines.append(f"{name}=={version}")
         with open(req_file, "w", encoding="utf-8") as fh:
@@ -2292,7 +2297,7 @@ class UbelEngine:
                         }
                     )
             
-            purls.append(f"pkg:pypi/python-ubel@{__version__}")
+            purls.append(f"pkg:pypi/ubel-python@{__version__}")
 
             match_dependencies_with_inventory(inventory)
 
@@ -2437,14 +2442,30 @@ class UbelEngine:
             with open(json_path, "w", encoding="utf-8") as jf:
                 json.dump(final_json, jf, indent=2)
 
-            # latest.* — always overwritten
-            latest_dir  = Path(".ubel/reports")
+            # ── Generate CycloneDX SBOM ───────────────────────────────────
+            try:
+                from .sbom_builder import CycloneDXBuilder
+            except ImportError:
+                from sbom_builder import CycloneDXBuilder
+
+            sbom_data = CycloneDXBuilder(final_json).generate()
+
+            # Timestamped SBOM alongside the main report
+            sbom_path = output_dir / f"{base_name}_sbom.cdx.json"
+            with open(sbom_path, "w", encoding="utf-8") as sf:
+                json.dump(sbom_data, sf, indent=2)
+
+            # latest.* — always overwritten, lives at the root of reports_location
+            latest_dir  = Path(UbelEngine.reports_location)
             latest_dir.mkdir(parents=True, exist_ok=True)
             latest_json = latest_dir / "latest.json"
             latest_html = latest_dir / "latest.html"
+            latest_sbom = latest_dir / "latest_sbom.cdx.json"
             latest_html.write_text(html_report, encoding="utf-8")
             with open(latest_json, "w", encoding="utf-8") as jf:
                 json.dump(final_json, jf, indent=2)
+            with open(latest_sbom, "w", encoding="utf-8") as sf:
+                json.dump(sbom_data, sf, indent=2)
 
             # ── Console output ────────────────────────────────────────────
             print()
@@ -2487,6 +2508,7 @@ class UbelEngine:
             print()
             print(f"Latest JSON report saved to: {latest_json}")
             print(f"Latest HTML report saved to: {latest_html}")
+            print(f"Latest SBOM saved to:        {latest_sbom}")
             print()
             print()
 
@@ -2515,7 +2537,7 @@ class UbelEngine:
                 Pypi_Manager.run_real_install(req_file, UbelEngine.engine, venv_dir)
                 UbelEngine.pin_versions()
             else:
-                packages_list = [get_dependency_from_purl(p) for p in purls]
+                packages_list = [get_dependency_from_purl(p) for p in purls if f"/{__tool_name__}@{__version__}" not in p]
                 Linux_Manager.run_real_install(packages_list)
 
         except PolicyViolationError:

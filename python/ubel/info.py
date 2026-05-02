@@ -24,7 +24,8 @@ __company__="Arcane-Spark"
 
 __github__="https://github.com/AlaBouali/ubel"
 
-banner=f"""Author: {__author__}
+banner=f"""
+        Author: {__author__}
 
         GitHub: {__github__}
 
