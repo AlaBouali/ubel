@@ -249,59 +249,55 @@ def _parse_dpkg_status(content: str) -> Dict[str, Dict]:
 
 
 def _read_dpkg_licenses() -> Dict[str, str]:
-    """
-    Build a {pkg_name: license} mapping by scanning /usr/share/doc/<pkg>/copyright
-    files with awk.  Returns an empty dict on any failure so the caller can use
-    it as a best-effort overlay without aborting the scan.
-
-    Three important implementation details:
-      1. glob is expanded in Python (subprocess never does shell glob expansion).
-      2. Files are filtered with os.path.isfile() — glob may return dangling
-         symlinks that cause mawk/gawk to abort with exit 2, skipping all
-         subsequent files in the same invocation.
-      3. awk is called in chunks (200 files) to stay well under ARG_MAX, and we
-         read stdout regardless of exit code so a single bad file doesn't silently
-         discard the rest of the output.
-    """
+    """Mirror of JS readDpkgLicenses(): os.listdir + os.stat (no glob), no blanket
+    except around the awk loop, subprocess.run reads stdout regardless of exit code."""
     licenses: Dict[str, str] = {}
-    try:
-        import glob as _glob
-        copyright_files = [
-            f for f in _glob.glob("/usr/share/doc/*/copyright")
-            if os.path.isfile(f)
-        ]
-        if not copyright_files:
-            return licenses
+    doc_dir = "/usr/share/doc"
+    if not os.path.isdir(doc_dir):
+        return licenses
 
-        AWK_SCRIPT = (
-            r"/^License:/ {pkg=FILENAME; "
-            r"gsub(/^\/usr\/share\/doc\/|\/copyright$/, \"\", pkg); "
-            r"print pkg, $2}"
+    files: List[str] = []
+    try:
+        for entry in os.listdir(doc_dir):
+            cp = os.path.join(doc_dir, entry, "copyright")
+            try:
+                if os.stat(cp).st_mode & 0o170000 == 0o100000:  # S_ISREG
+                    files.append(cp)
+            except OSError:
+                pass
+    except OSError:
+        return licenses
+
+    if not files:
+        return licenses
+
+    AWK_SCRIPT = (
+        "/^License:/ {pkg=FILENAME; "
+        "gsub(/^\\/usr\\/share\\/doc\\/|\\/copyright$/, \"\", pkg); "
+        "print pkg, $2}"
+    )
+
+    CHUNK = 200
+    for i in range(0, len(files), CHUNK):
+        chunk = files[i:i + CHUNK]
+        result = subprocess.run(
+            ["awk", AWK_SCRIPT] + chunk,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=SUBPROCESS_TIMEOUT,
         )
-        CHUNK = 200
-        for i in range(0, len(copyright_files), CHUNK):
-            chunk = copyright_files[i:i + CHUNK]
-            r = subprocess.run(
-                ["awk", AWK_SCRIPT] + chunk,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                timeout=SUBPROCESS_TIMEOUT,
-            )
-            for line in r.stdout.decode("utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                sp = line.find(" ")
-                if sp == -1:
-                    continue
-                pkg = line[:sp].strip()
-                lic = line[sp + 1:].strip()
-                # first License: line per package wins
-                if pkg and lic and pkg not in licenses:
-                    licenses[pkg] = lic
-    except Exception:
-        pass  # awk unavailable, permission error, etc. — not fatal
+        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            sp = line.find(" ")
+            if sp == -1:
+                continue
+            pkg = line[:sp].strip()
+            lic = line[sp + 1:].strip()
+            if pkg and lic and pkg not in licenses:
+                licenses[pkg] = lic
     return licenses
 
 
