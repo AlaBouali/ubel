@@ -20,7 +20,7 @@
 
 import fs            from "fs";
 import path          from "path";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -228,22 +228,44 @@ function parseDpkgStatus(content) {
  * Build a Map<pkgName, licenseString> by scanning /usr/share/doc/<pkg>/copyright
  * files with awk.  Returns an empty Map on any failure so the caller can
  * use it as a best-effort overlay without aborting the scan.
- *
- * Command:
- *   awk '/^License:/ {pkg=FILENAME; gsub(/^\/usr\/share\/doc\/|\/copyright$/, "", pkg); print pkg, $2}' \
- *       /usr/share/doc/*\/copyright | sort -u
  */
 function readDpkgLicenses() {
+  // execFileSync / shell glob never expand wildcards — enumerate files in JS.
+  // We also:
+  //   • Filter with statSync().isFile() because glob / readdirSync can surface
+  //     dangling symlinks that make mawk abort with exit 2, silently skipping
+  //     all subsequent files in the same invocation.
+  //   • Use spawnSync (not execFileSync) so we always read stdout even when awk
+  //     exits non-zero due to a missing file mid-run.
+  //   • Chunk to 200 files to stay under ARG_MAX.
   const licenses = new Map();
+  const docDir = "/usr/share/doc";
+  if (!fs.existsSync(docDir)) return licenses;
+
+  const files = [];
   try {
-    const out = execFileSync(
+    for (const entry of fs.readdirSync(docDir)) {
+      const cp = path.join(docDir, entry, "copyright");
+      try {
+        if (fs.statSync(cp).isFile()) files.push(cp);
+      } catch { /* dangling symlink or permission error — skip */ }
+    }
+  } catch { return licenses; }
+
+  if (!files.length) return licenses;
+
+  const AWK_SCRIPT =
+    String.raw`/^License:/ {pkg=FILENAME; gsub(/^\/usr\/share\/doc\/|\/copyright$/, "", pkg); print pkg, $2}`;
+
+  const CHUNK = 200;
+  for (let i = 0; i < files.length; i += CHUNK) {
+    const chunk = files.slice(i, i + CHUNK);
+    const result = spawnSync(
       "awk",
-      [
-        "/^License:/ {pkg=FILENAME; gsub(/^\\/usr\\/share\\/doc\\/|\\/copyright$/, \"\", pkg); print pkg, $2}",
-        "/usr/share/doc/*/copyright",
-      ],
-      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"], shell: false },
+      [AWK_SCRIPT, ...chunk],
+      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, maxBuffer: 10 * 1024 * 1024 },
     );
+    const out = result.stdout ?? "";
     for (const line of out.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -251,12 +273,8 @@ function readDpkgLicenses() {
       if (sp === -1) continue;
       const pkg = trimmed.slice(0, sp).trim();
       const lic = trimmed.slice(sp + 1).trim();
-      if (pkg && lic && !licenses.has(pkg)) {
-        licenses.set(pkg, lic);
-      }
+      if (pkg && lic && !licenses.has(pkg)) licenses.set(pkg, lic);
     }
-  } catch {
-    // awk not available, glob expands to nothing, or permission error — not fatal
   }
   return licenses;
 }
