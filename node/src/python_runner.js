@@ -70,6 +70,12 @@ export class PythonVenvScanner {
       if (lower.startsWith("license:")) {
         license = line.slice("license:".length).trim() || "unknown";
       }
+      if (lower.startsWith("classifier: license ")){
+        license = line.split("::").slice(2).join("::").trim().replace("License", "") || "unknown";
+      }
+      if (line.startsWith("License-Expression:")) {
+        license = line.slice("License-Expression:".length).trim() || "unknown";
+      }
 
       if (lower.startsWith("requires-dist:")) {
         const dep = line
@@ -83,7 +89,7 @@ export class PythonVenvScanner {
       }
     }
 
-    return { license, requires };
+    return { license: license.trim(), requires };
   }
 
   // ─────────────────────────────

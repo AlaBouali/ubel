@@ -1,19 +1,20 @@
-import fs   from "fs";
-import path  from "path";
-import { spawnSync }    from "child_process";
+import fs from "fs";
+import path from "path";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto"; // added for SHA-256 integrity checks
 
 import { LockfileParser } from "./lockfiles_parser.js";
-import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE} from "./info.js";
+import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE } from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
-import {PhpComposerScanner} from "./php_runner.js";
-import { RustCargoScanner} from "./rust_runner.js";
-import {GoModScanner} from "./go_runner.js";
-import {CSharpNuGetScanner} from "./csharp_runner.js";
-import { JavaMavenScanner} from "./java_runner.js";
-import { RubyBundlerScanner} from "./ruby_runner.js";
-import {LinuxHostScanner}   from "./linux_runner.js";
-import {WindowsHostScanner} from "./windows_runner.js";
+import { PhpComposerScanner } from "./php_runner.js";
+import { RustCargoScanner } from "./rust_runner.js";
+import { GoModScanner } from "./go_runner.js";
+import { CSharpNuGetScanner } from "./csharp_runner.js";
+import { JavaMavenScanner } from "./java_runner.js";
+import { RubyBundlerScanner } from "./ruby_runner.js";
+import { LinuxHostScanner } from "./linux_runner.js";
+import { WindowsHostScanner } from "./windows_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -267,6 +268,11 @@ export class NodeManager {
   static _original_package_json  = null;
   static _original_lockfile      = null;
   static _lockfileBackupDir      = null;
+  
+  // NEW: original file hashes for integrity checks
+  static _original_package_json_hash = null;
+  static _original_lockfile_hash     = null;
+
   static engineVersion = null;
 
   /**
@@ -427,6 +433,10 @@ export class NodeManager {
     NodeManager.candidate_lockfile_content = null;
     NodeManager._candidateLockfileHash     = null;
     NodeManager._candidatePackageJsonHash  = null;
+    
+    // NEW: reset original file hashes
+    NodeManager._original_package_json_hash = null;
+    NodeManager._original_lockfile_hash     = null;
 
     // ── 1. Validate engine ───────────────────────────────────────────────
 
@@ -457,6 +467,23 @@ export class NodeManager {
     NodeManager._original_lockfile = fs.existsSync(lockPath)
       ? fs.readFileSync(lockPath, "utf8")
       : null;
+
+    // NEW: compute and store original hashes
+    if (NodeManager._original_package_json !== null) {
+      NodeManager._original_package_json_hash = createHash("sha256")
+        .update(NodeManager._original_package_json, "utf8")
+        .digest("hex");
+    } else {
+      NodeManager._original_package_json_hash = "absent";
+    }
+
+    if (NodeManager._original_lockfile !== null) {
+      NodeManager._original_lockfile_hash = createHash("sha256")
+        .update(NodeManager._original_lockfile, "utf8")
+        .digest("hex");
+    } else {
+      NodeManager._original_lockfile_hash = "absent";
+    }
 
     const now = new Date();
     const pad = (n) => String(n).padStart(2, "0");
@@ -502,7 +529,6 @@ export class NodeManager {
     // For npm, saveCandidateLockfile() regenerates package.json from the
     // lockfile and must call _hashPackageJson() again after writing it.
     {
-      const { createHash } = await import("crypto");
       if (fs.existsSync(packageJsonPath)) {
         const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
         NodeManager._candidatePackageJsonHash = createHash("sha256")
@@ -523,7 +549,6 @@ export class NodeManager {
     // Hash the raw bytes so we can verify the file has not been tampered with
     // between the dry-run scan and the real install (TOCTOU guard).
     {
-      const { createHash } = await import("crypto");
       NodeManager._candidateLockfileHash = createHash("sha256")
         .update(candidateRaw, "utf8")
         .digest("hex");
@@ -633,6 +658,48 @@ export class NodeManager {
     const packageJsonPath = path.join(projectPath, "package.json");
     const lockPath        = path.join(projectPath, cfg.lockfile);
     const tmpDir          = NodeManager._lockfileBackupDir;
+
+    // Helper: verify a single file's integrity using its original hash
+    const verifyFile = (filePath, expectedHash, fileLabel) => {
+      const fileExists = fs.existsSync(filePath);
+      if (expectedHash === "absent") {
+        if (fileExists) {
+          return { ok: false, reason: `${fileLabel} exists on disk but was originally absent` };
+        }
+        return { ok: true };
+      }
+      if (!fileExists) {
+        return { ok: false, reason: `${fileLabel} is missing on disk but was originally present` };
+      }
+      let currentContent;
+      try {
+        currentContent = fs.readFileSync(filePath, "utf8");
+      } catch (err) {
+        return { ok: false, reason: `Cannot read ${fileLabel}: ${err.message}` };
+      }
+      const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
+      if (currentHash !== expectedHash) {
+        return {
+          ok: false,
+          reason: `${fileLabel} hash mismatch (expected ${expectedHash}, got ${currentHash})`,
+        };
+      }
+      return { ok: true };
+    };
+
+    // 1. Verify package.json
+    const pkgCheck = verifyFile(packageJsonPath, NodeManager._original_package_json_hash, "package.json");
+    if (!pkgCheck.ok) {
+      return { reverted: false, reason: pkgCheck.reason, backupDir: tmpDir };
+    }
+
+    // 2. Verify lockfile
+    const lockCheck = verifyFile(lockPath, NodeManager._original_lockfile_hash, cfg.lockfile);
+    if (!lockCheck.ok) {
+      return { reverted: false, reason: lockCheck.reason, backupDir: tmpDir };
+    }
+
+    // ──── Verification passed – proceed with actual revert ────
 
     try {
       // Restore package.json — primary source is in-memory; disk backup is the
@@ -754,7 +821,6 @@ export class NodeManager {
         // the lockfile.  The dry-run hash (captured before regeneration) would
         // be stale and cause verifyPackageJsonHash() to fail in runRealInstall.
         {
-          const { createHash } = await import("crypto");
           const written = fs.readFileSync(packageJsonPath, "utf8");
           NodeManager._candidatePackageJsonHash = createHash("sha256")
             .update(written, "utf8")
@@ -1091,7 +1157,6 @@ export class NodeManager {
       return { ok: false, reason: `Could not read lockfile for verification: ${err.message}` };
     }
 
-    const { createHash } = await import("crypto");
     const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
     if (currentHash !== NodeManager._candidateLockfileHash) {
       return {
@@ -1154,7 +1219,6 @@ export class NodeManager {
       };
     }
 
-    const { createHash } = await import("crypto");
     const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
 
     if (currentHash !== NodeManager._candidatePackageJsonHash) {
