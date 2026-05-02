@@ -224,6 +224,43 @@ function parseDpkgStatus(content) {
   return pkgs;
 }
 
+/**
+ * Build a Map<pkgName, licenseString> by scanning /usr/share/doc/<pkg>/copyright
+ * files with awk.  Returns an empty Map on any failure so the caller can
+ * use it as a best-effort overlay without aborting the scan.
+ *
+ * Command:
+ *   awk '/^License:/ {pkg=FILENAME; gsub(/^\/usr\/share\/doc\/|\/copyright$/, "", pkg); print pkg, $2}' \
+ *       /usr/share/doc/*\/copyright | sort -u
+ */
+function readDpkgLicenses() {
+  const licenses = new Map();
+  try {
+    const out = execFileSync(
+      "awk",
+      [
+        "/^License:/ {pkg=FILENAME; gsub(/^\\/usr\\/share\\/doc\\/|\\/copyright$/, \"\", pkg); print pkg, $2}",
+        "/usr/share/doc/*/copyright",
+      ],
+      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"], shell: false },
+    );
+    for (const line of out.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const sp = trimmed.indexOf(" ");
+      if (sp === -1) continue;
+      const pkg = trimmed.slice(0, sp).trim();
+      const lic = trimmed.slice(sp + 1).trim();
+      if (pkg && lic && !licenses.has(pkg)) {
+        licenses.set(pkg, lic);
+      }
+    }
+  } catch {
+    // awk not available, glob expands to nothing, or permission error — not fatal
+  }
+  return licenses;
+}
+
 function scanDpkg(ecosystem) {
   const statusPath = "/var/lib/dpkg/status";
   if (!fs.existsSync(statusPath)) {
@@ -231,6 +268,15 @@ function scanDpkg(ecosystem) {
   }
 
   const pkgs = parseDpkgStatus(fs.readFileSync(statusPath, "utf8"));
+
+  // Overlay licenses from /usr/share/doc/*/copyright (more reliable than dpkg status)
+  const copyrightLicenses = readDpkgLicenses();
+  for (const [name, info] of pkgs.entries()) {
+    if (info.license === "unknown" || !info.license) {
+      const lic = copyrightLicenses.get(name);
+      if (lic) info.license = lic;
+    }
+  }
 
   // Build purl index for dep resolution
   const purls = new Map();

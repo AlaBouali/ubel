@@ -248,6 +248,47 @@ def _parse_dpkg_status(content: str) -> Dict[str, Dict]:
     return pkgs
 
 
+def _read_dpkg_licenses() -> Dict[str, str]:
+    """
+    Build a {pkg_name: license} mapping by scanning /usr/share/doc/<pkg>/copyright
+    files with awk.  Returns an empty dict on any failure so the caller can use
+    it as a best-effort overlay without aborting the scan.
+
+    Command:
+        awk '/^License:/ {pkg=FILENAME; gsub(/^\\/usr\\/share\\/doc\\/|\\/copyright$/, "", pkg);
+                           print pkg, $2}' /usr/share/doc/*/copyright | sort -u
+    """
+    licenses: Dict[str, str] = {}
+    try:
+        import glob
+        copyright_files = glob.glob("/usr/share/doc/*/copyright")
+        if not copyright_files:
+            return licenses
+        out = subprocess.check_output(
+            [
+                "awk",
+                r"/^License:/ {pkg=FILENAME; gsub(/^\/usr\/share\/doc\/|\/copyright$/, \"\", pkg); print pkg, $2}",
+            ] + copyright_files,
+            timeout=SUBPROCESS_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8", errors="replace")
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            sp = line.find(" ")
+            if sp == -1:
+                continue
+            pkg = line[:sp].strip()
+            lic = line[sp + 1:].strip()
+            if pkg and lic and pkg not in licenses:
+                licenses[pkg] = lic
+    except Exception:
+        pass  # awk unavailable, permission error, etc. — not fatal
+    return licenses
+
+
 def _scan_dpkg(ecosystem: str) -> List[Dict]:
     status_path = "/var/lib/dpkg/status"
     if not os.path.exists(status_path):
@@ -255,6 +296,14 @@ def _scan_dpkg(ecosystem: str) -> List[Dict]:
 
     with open(status_path, "r", encoding="utf-8", errors="replace") as fh:
         pkgs = _parse_dpkg_status(fh.read())
+
+    # Overlay licenses from /usr/share/doc/*/copyright (more reliable than dpkg status)
+    copyright_licenses = _read_dpkg_licenses()
+    for name, info in pkgs.items():
+        if not info["license"] or info["license"] == "unknown":
+            lic = copyright_licenses.get(name)
+            if lic:
+                info["license"] = lic
 
     # PURL index
     purls: Dict[str, str] = {name: _make_purl(ecosystem, name, info["version"])
