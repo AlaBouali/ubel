@@ -2462,7 +2462,10 @@ class UbelEngine:
                 json.dump(sbom_data, sf, indent=2)
 
             # latest.* — always overwritten, lives at the root of reports_location
-            latest_dir  = Path(UbelEngine.reports_location)
+            # latest.* — always overwritten, lives at .ubel/reports to match Node.js engine
+            latest_dir = Path(".ubel") / "reports"
+            if UbelEngine.system_type== "linux":
+                latest_dir = Path.home() / latest_dir
             latest_dir.mkdir(parents=True, exist_ok=True)
             latest_json = latest_dir / "latest.json"
             latest_html = latest_dir / "latest.html"
