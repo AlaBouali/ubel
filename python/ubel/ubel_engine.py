@@ -2446,7 +2446,13 @@ class UbelEngine:
             try:
                 from .sbom_builder import CycloneDXBuilder
             except ImportError:
-                from sbom_builder import CycloneDXBuilder
+                try:
+                    from sbom_builder import CycloneDXBuilder
+                except ImportError as exc:
+                    raise ImportError(
+                        "sbom_builder module not found. "
+                        "Ensure sbom_builder.py is present in the ubel package."
+                    ) from exc
 
             sbom_data = CycloneDXBuilder(final_json).generate()
 
