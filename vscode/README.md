@@ -32,16 +32,6 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 
 ---
 
-## Coverage at a Glance
-
-| Surface | Mode | Toolchain |
-|---|---|---|
-| Source repos & monorepos | Scan + firewall | npm, pnpm, bun, pip |
-| Developer machines (Windows / Linux) | Scan | System packages, runtimes, browsers, tools |
-| VS Code | Scan extensions | walk through the extensions folder |
-
----
-
 ## Policy
 
 All package managers share the same policy engine. Policy is stored per-project in `.ubel/local/policy/config.json`.
@@ -53,6 +43,16 @@ All package managers share the same policy engine. Policy is stored per-project 
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
 The threshold is inclusive — `high` blocks both `high` and `critical`. Setting `none` disables severity blocking but infections are still blocked.
+
+---
+
+## Coverage at a Glance
+
+| Surface |
+|---|
+| Source repos & monorepos |
+| Developer machines (Windows / Linux) |
+| VS Code extension |
 
 ---
 
