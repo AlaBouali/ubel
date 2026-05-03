@@ -1,7 +1,7 @@
 # UBEL — Unified Bill / Enforced Law
 ### Node.js Supply-Chain Security CLI
 
-Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
+Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
 This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 
@@ -10,7 +10,7 @@ This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 ## Features
 
 - Full dependency resolution with PURL generation via lockfile dry-run
-- OSV.dev vulnerability scanning via batched API queries
+- OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
 - Policy engine — block/allow by severity threshold and unknown-severity packages
 - Malicious package (infection) detection — always blocked regardless of policy
@@ -20,8 +20,9 @@ This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 - Atomic lockfile revert — originals are always restored on violation or error
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure
 - Dependency graph with introduced-by and parent tracking
-- Automatic report generation: timestamped **JSON** + **HTML** per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
+- Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX.
 
 ---
 
@@ -38,7 +39,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-npm` | npm |
 | `ubel-pnpm` | pnpm |
 | `ubel-bun` | bun |
-| `ubel-agent` | AI agent workspace scan |
+| `ubel-agent` | AI agent workspace scan ( OS, runtimes, tools, dependencies ) |
 | `ubel-platform` | Host platform scan (OS, runtimes, tools) |
 
 > **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only and cannot provide install-blocking firewall coverage for it.
@@ -81,6 +82,10 @@ Identical flow to npm, using pnpm's `--lockfile-only` flag. The candidate `pnpm-
 
 Uses bun's `--lockfile-only` flag. The candidate `bun.lock` is written and scanned before any `node_modules/` mutation. The revert path is identical to npm and pnpm.
 
+### UBEL's firewall always blocks pre/post install scripts to prevent running malicious scripts
+
+All the 3 package manager are triggered with the flag: `--ignore-scripts`
+
 ### Lockfile backup and recovery
 
 Before any dry-run mutation, originals are backed up to `.ubel/lockfiles/<timestamp>/`. If the revert itself fails (e.g. a disk error mid-restore), the original lockfile is preserved at the backup path and its location is printed to stderr so the user can recover manually.
@@ -105,13 +110,15 @@ Lockfile integrity check FAILED — the lockfile was modified after scanning.
 
 If no lockfile existed before the dry-run (fresh project), the absence itself is recorded as the expected state and enforced the same way.
 
+This protection also extends to the backup manifest files created earlier before reverting the changes.
+
 ---
 
 ## Modes
 
 ### `health`
 
-Scans the current project's installed dependency graph without running any install. Reads the existing lockfile directly and submits resolved packages to OSV.dev.
+Scans the current project's installed dependency graph without running any install. Reads the existing lockfile directly and submits resolved packages to OSV.dev and NVD's APIs.
 
 ```bash
 ubel-npm health
@@ -290,15 +297,17 @@ When called this way, the banner and interactive console output are suppressed. 
 
 ## Reports
 
-Every scan writes two files to a timestamped path and overwrites the `latest.*` convenience links:
+Every scan writes two files to a timestamped path and overwrites the `latest*` convenience links:
 
 ```
 .ubel/reports/latest.json          ← always current
 .ubel/reports/latest.html          ← always current
+.ubel/reports/latest_sbom.cdx.json          ← always current
 
 .ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
     <ecosystem>_<mode>_<engine>__<timestamp>.json
     <ecosystem>_<mode>_<engine>__<timestamp>.html
+    <ecosystem>_<mode>_<engine>__<timestamp>_sbom.cdx.json
 ```
 
 The HTML report is fully self-contained (no server required) and includes:
@@ -307,7 +316,7 @@ The HTML report is fully self-contained (no server required) and includes:
 - Searchable, filterable vulnerability table
 - Full inventory with state (safe / vulnerable / infected / undetermined)
 - Interactive force-directed dependency graph with vulnerable-subtree filter
-- Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV references)
+- Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV/NVD references)
 - System and runtime metadata
 
 The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
