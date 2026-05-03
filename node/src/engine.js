@@ -2429,6 +2429,16 @@ export class UbelEngine {
       if (options.is_vscanned_project) {
         engine_info.name    = "vscode";
         engine_info.version = getvscodeversion();
+        for (const item of inventory) {
+          if (item.name === TOOL_NAME && item.version === TOOL_VERSION) {
+          // This is the embedded Node runtime that VS Code uses to run the extension.
+          // Don't tag it as "dev" scope since it's not a dev dependency of the project,
+          // and we don't want it to be treated as in-scope for policy decisions.
+            item.scopes = ["env"];
+          }else{
+            item.scopes = ["dev"];
+          }
+        }
         // runtime was built before VS Code was detected — patch it now so the
         // report reflects the host editor, not the embedded Node runtime.
         runtime.environment = "vscode";
