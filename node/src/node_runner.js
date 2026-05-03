@@ -485,12 +485,12 @@ export class NodeManager {
       NodeManager._original_lockfile_hash = "absent";
     }
 
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    const ts  = `${now.getUTCFullYear()}${pad(now.getUTCMonth()+1)}${pad(now.getUTCDate())}`
-              + `_${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
-    const tmpDir = path.join(projectPath, ".ubel", "lockfiles", ts);
-    fs.mkdirSync(tmpDir, { recursive: true });
+    // Create an atomically-unique backup directory.  mkdtempSync appends a
+    // random suffix, so concurrent UBEL invocations in the same second cannot
+    // collide on the same path (unlike a plain timestamp directory).
+    const backupParent = path.join(projectPath, ".ubel", "lockfiles");
+    fs.mkdirSync(backupParent, { recursive: true });
+    const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
 
     if (NodeManager._original_package_json !== null) {
       fs.writeFileSync(path.join(tmpDir, "package.json"), NodeManager._original_package_json, "utf8");
@@ -659,7 +659,11 @@ export class NodeManager {
     const lockPath        = path.join(projectPath, cfg.lockfile);
     const tmpDir          = NodeManager._lockfileBackupDir;
 
-    // Helper: verify a single file's integrity using its original hash
+    // Helper: verify a single file's integrity using its expected hash.
+    // At revert time the on-disk files are in *candidate* state (post-dry-run),
+    // so we compare against the candidate hashes, not the original ones.
+    // This catches any third-party mutation that occurred after the dry-run
+    // but before we restore the originals.
     const verifyFile = (filePath, expectedHash, fileLabel) => {
       const fileExists = fs.existsSync(filePath);
       if (expectedHash === "absent") {
@@ -687,14 +691,19 @@ export class NodeManager {
       return { ok: true };
     };
 
-    // 1. Verify package.json
-    const pkgCheck = verifyFile(packageJsonPath, NodeManager._original_package_json_hash, "package.json");
+    // 1. Verify package.json is still in the candidate state we left it in.
+    //    If _candidatePackageJsonHash is null (runDryRun was never called or
+    //    did not touch package.json), fall back to the original hash so the
+    //    guard is still meaningful rather than vacuously passing.
+    const pkgExpectedHash = NodeManager._candidatePackageJsonHash ?? NodeManager._original_package_json_hash;
+    const pkgCheck = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
     if (!pkgCheck.ok) {
       return { reverted: false, reason: pkgCheck.reason, backupDir: tmpDir };
     }
 
-    // 2. Verify lockfile
-    const lockCheck = verifyFile(lockPath, NodeManager._original_lockfile_hash, cfg.lockfile);
+    // 2. Verify lockfile is still in the candidate state we left it in.
+    const lockExpectedHash = NodeManager._candidateLockfileHash ?? NodeManager._original_lockfile_hash;
+    const lockCheck = verifyFile(lockPath, lockExpectedHash, cfg.lockfile);
     if (!lockCheck.ok) {
       return { reverted: false, reason: lockCheck.reason, backupDir: tmpDir };
     }
@@ -844,9 +853,35 @@ export class NodeManager {
 
         const packageJsonPath = path.join(projectPath, "package.json");
 
-        // Read the candidate package.json that the dry-run already wrote.
-        // Fall back to the in-memory original if the file is unexpectedly absent
-        // (e.g. the project never had one before the dry-run).
+        // ── TOCTOU guard: verify package.json has not been mutated since the
+        // dry-run captured its hash.  We must do this *before* reading the
+        // file so we never launder tampered content into the real install.
+        if (NodeManager._candidatePackageJsonHash &&
+            NodeManager._candidatePackageJsonHash !== "absent") {
+          if (!fs.existsSync(packageJsonPath)) {
+            return {
+              written:  false,
+              filePath: lockfilePath,
+              reason:   "package.json integrity check FAILED — file was removed after scanning",
+            };
+          }
+          const onDisk     = fs.readFileSync(packageJsonPath, "utf8");
+          const onDiskHash = createHash("sha256").update(onDisk, "utf8").digest("hex");
+          if (onDiskHash !== NodeManager._candidatePackageJsonHash) {
+            return {
+              written:  false,
+              filePath: lockfilePath,
+              reason:   `package.json integrity check FAILED — file was modified after scanning.\n` +
+                        `  Expected : ${NodeManager._candidatePackageJsonHash}\n` +
+                        `  Got      : ${onDiskHash}\n` +
+                        `  File     : ${packageJsonPath}`,
+            };
+          }
+        }
+
+        // Read the candidate package.json that the dry-run already wrote (and
+        // that we just verified above).  Fall back to the in-memory original if
+        // the file is unexpectedly absent (project never had one before dry-run).
         let pkgJsonRaw = null;
         if (fs.existsSync(packageJsonPath)) {
           pkgJsonRaw = fs.readFileSync(packageJsonPath, "utf8");

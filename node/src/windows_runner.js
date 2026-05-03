@@ -222,6 +222,91 @@ function makePurl(name, version) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// License map
+// Centralised so that multi-entry and scalar paths both use the same source.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Return the SPDX expression (or LicenseRef-* string) for a component key.
+ * Multi-entry components use a sub-key derived from the runtime name where
+ * relevant (e.g. "dotnet_runtimes" → sub-key passed by the caller).
+ */
+function licenseFor(key) {
+  switch (key) {
+    // ── Microsoft OS / tooling ──────────────────────────────────────────────
+    case "windows":
+      return "LicenseRef-Microsoft-Windows-EULA";
+    case "windows_defender":
+      return "LicenseRef-Microsoft-Commercial";
+    case "powershell":
+      return "MIT";
+    case "edge_chromium":
+      return "LicenseRef-Microsoft-Edge-EULA";
+    // VS Code: EULA for the prebuilt binary (not the MIT-licensed source).
+    // Full Visual Studio IDE: separate commercial EULA.
+    case "visual_studio_code":
+      return "LicenseRef-Microsoft-VSCode-EULA";
+    case "visual_studio_ide":
+      return "LicenseRef-Microsoft-VisualStudio-EULA";
+    // Treat the ambiguous "visual_studio" key as VS Code (see component def).
+    case "visual_studio":
+      return "LicenseRef-Microsoft-VSCode-EULA";
+
+    // ── .NET runtimes (all three flavours ship under MIT) ───────────────────
+    case "dotnet_runtimes":
+    case ".net_core_runtime":
+    case "windowsdesktop_runtime":
+    case "asp.net_core_runtime":
+      return "MIT";
+
+    // ── Languages / runtimes ────────────────────────────────────────────────
+    case "python":
+      return "PSF-2.0";
+    case "nodejs":
+      return "MIT";
+    case "php":
+      return "PHP-3.01";
+    case "rust":
+      return "MIT OR Apache-2.0";
+    case "golang":
+      return "BSD-3-Clause";
+    case "ruby":
+      // SPDX dual-licence; "Ruby" is the dedicated SPDX identifier for the
+      // Ruby licence; BSD-2-Clause covers the bsd-licensed portions.
+      return "Ruby OR BSD-2-Clause";
+    // Oracle JDK/JRE. OpenJDK variants cannot be distinguished at scan time;
+    // GPL-2.0-only WITH Classpath-exception-2.0 is correct for both Oracle
+    // OpenJDK and Eclipse Temurin. Proprietary Oracle JDK (post-2019) would
+    // differ, but version detection alone cannot tell them apart.
+    case "jre":
+    case "jdk":
+      return "GPL-2.0-only WITH Classpath-exception-2.0";
+
+    // ── Version control ─────────────────────────────────────────────────────
+    case "git":
+      return "GPL-2.0-only";
+
+    // ── Browsers ────────────────────────────────────────────────────────────
+    case "firefox":
+      return "MPL-2.0";
+    // The Google Chrome *binary* is proprietary (not Chromium/BSD-3-Clause).
+    case "chrome":
+      return "LicenseRef-Google-Chrome-TOS";
+
+    // ── Tooling ─────────────────────────────────────────────────────────────
+    case "docker_desktop":
+      // Docker Desktop requires a paid subscription for larger organisations;
+      // the underlying engine is Apache-2.0 but the desktop product is not.
+      return "LicenseRef-Docker-Desktop-EULA";
+    case "cursor":
+      return "LicenseRef-Proprietary";
+
+    default:
+      return "unknown";
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Multi‑entry runner for .NET runtimes
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -269,7 +354,7 @@ function runMultiEntry(componentDef) {
 
   if (!rawOutput) return [];
 
-  // Delegate parsing to the component’s custom parser
+  // Delegate parsing to the component's custom parser
   return componentDef.parseMultiEntry(rawOutput);
 }
 
@@ -592,9 +677,13 @@ const COMPONENTS = {
     },
   },
 
-  // Visual Studio (with edition mapping)
+  // Visual Studio Code / Visual Studio IDE
+  // NOTE: The first exec cmd detects VS Code (code --version).
+  // The PowerShell fallback detects full Visual Studio IDE installations.
+  // Both are rolled into one component key for backwards compatibility;
+  // parseResult selects the correct CPE product string based on the version shape.
   visual_studio: {
-    cpe: " cpe:2.3:a:microsoft:visual_studio_code:", // incomplete, parseResult will replace
+    cpe: "cpe:2.3:a:microsoft:visual_studio_code:", // default; overridden by parseResult
     cmds: [
       {
         type: "exec",
@@ -610,7 +699,10 @@ const COMPONENTS = {
     ],
     parseResult: (rawVersion) => {
       const year = mapVisualStudioYear(rawVersion);
-      const cpeOverride = ` cpe:2.3:a:microsoft:visual_studio_code:${rawVersion}:*:*:*:*:*:*:*`;
+      // VS Code versions are typically 1.x.x; full VS IDE versions are 17.x.x etc.
+      const isCode = rawVersion.startsWith("1.");
+      const cpeProduct = isCode ? "visual_studio_code" : `visual_studio_${year}`;
+      const cpeOverride = `cpe:2.3:a:microsoft:${cpeProduct}:${rawVersion}:*:*:*:*:*:*:*`;
       return { version: rawVersion, cpeOverride };
     },
     nameOverride: "visual_studio",
@@ -642,10 +734,7 @@ const COMPONENTS = {
 function buildPackage(key, componentDef, version, paths, cpeOverride = null) {
   const name = componentDef.nameOverride ?? key;
   const cpe = cpeOverride ?? buildCpe(componentDef.cpe, version);
-  let sw_type = "application";
-  if (cpe.startsWith("cpe:2.3:o:")) {
-    sw_type = "operating_system";
-  }
+  const sw_type = cpe.startsWith("cpe:2.3:o:") ? "operating_system" : "application";
   return {
     id: cpe,
     cpe,
@@ -653,7 +742,7 @@ function buildPackage(key, componentDef, version, paths, cpeOverride = null) {
     version,
     type: sw_type,
     ecosystem: "windows",
-    license: "unknown",
+    license: licenseFor(key),
     state: "undetermined",
     scopes: ["prod"],
     paths,
@@ -723,11 +812,15 @@ export class WindowsHostScanner {
         for (const entry of multiEntries) {
           results.push({
             id: entry.cpe,
+            cpe: entry.cpe,
             name: entry.name,
             version: entry.version,
             type: "application",
             ecosystem: "windows",
-            license: "unknown",
+            // Use the per-runtime name so licenseFor() resolves correctly
+            // (e.g. ".net_core_runtime" → "MIT") rather than falling back to
+            // the container key "dotnet_runtimes" which buildPackage never sees.
+            license: licenseFor(entry.name),
             state: "undetermined",
             scopes: ["prod"],
             paths: entry.paths,
