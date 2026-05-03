@@ -164,6 +164,38 @@ class Linux_Manager:
                 return pm
         return None
 
+    @staticmethod
+    def get_pkg_manager_version() -> str:
+        """
+        Return the installed version of the active package manager, or "unknown".
+
+        Probes in priority order:
+          apt      → apt --version   → "apt 2.4.12 (amd64)"          → "2.4.12"
+          apt-get  → apt-get --version → "apt 2.4.12 ..."            → "2.4.12"
+          dnf      → dnf --version   → "4.14.0\n  ..."               → "4.14.0"
+          yum      → yum --version   → "4.14.0\nLoaded plugins:..."  → "4.14.0"
+        """
+        pm = Linux_Manager.get_pkg_manager()
+        if pm is None:
+            return "unknown"
+        try:
+            result = subprocess.run(
+                [pm, "--version"],
+                capture_output=True,
+                text=True,
+            )
+            first_line = (result.stdout or result.stderr or "").splitlines()[0].strip()
+            # apt / apt-get: "apt 2.4.12 (amd64)"
+            # dnf / yum:     "4.14.0"
+            parts = first_line.split()
+            for part in parts:
+                # Take first token that looks like a version number
+                if re.match(r"^\d+\.\d+", part):
+                    return part
+        except Exception:
+            pass
+        return "unknown"
+
     # ------------------------------------------------------------------ #
     # PURL builder                                                         #
     # ------------------------------------------------------------------ #

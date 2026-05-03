@@ -2220,9 +2220,10 @@ class UbelEngine:
 
         policy = _load_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
 
-        purls:          List[str]  = []
-        report_content: Any        = None
-        ecosystems:     Set[str]   = set()
+        purls:           List[str]  = []
+        report_content:  Any        = None
+        ecosystems:      Set[str]   = set()
+        _engine_version: str        = ""
 
         # True for check/install (dry-run or real install against candidate packages);
         # False for health (scan the already-installed environment).
@@ -2234,14 +2235,16 @@ class UbelEngine:
                 if is_dry_run:
                     # Ensure a local venv exists
                     venv_dir = UbelEngine.venv_dir or "./venv"
-                    Pypi_Manager.init_venv(venv_dir)
+                    python         = Pypi_Manager.init_venv(venv_dir)
+                    _engine_version = Pypi_Manager.get_pip_version(python) or ""
                     purls          = Pypi_Manager.run_dry_run(args, venv_dir)
                     report_content = Pypi_Manager.inventory_data
                 else:
                     # health — scan the host Python environment via PythonVenvScanner
                     from .venv_scanner import PythonVenvScanner
-                    purls          = PythonVenvScanner.scan(os.getcwd())
-                    report_content = PythonVenvScanner.inventory_data
+                    purls           = PythonVenvScanner.scan(os.getcwd())
+                    report_content  = PythonVenvScanner.inventory_data
+                    _engine_version = __version__
 
             else:  # linux
                 if is_dry_run:
@@ -2252,10 +2255,12 @@ class UbelEngine:
                         Linux_Manager.package_to_purl(system_info, p["name"], p["version"])
                         for p in packages
                     ]
+                    _engine_version = Linux_Manager.get_pkg_manager_version()
                 else:
-                    purls          = Linux_Manager.get_linux_packages()
-                    system_info    = Linux_Manager.get_os_info()
-                    report_content = {"system_info": system_info}
+                    purls           = Linux_Manager.get_linux_packages()
+                    system_info     = Linux_Manager.get_os_info()
+                    report_content  = {"system_info": system_info}
+                    _engine_version = __version__
 
             # Strip version-less PURLs
             purls = [p for p in purls if not p.endswith("@")]
@@ -2410,7 +2415,10 @@ class UbelEngine:
             final_json: Dict[str, Any] = {
                 "generated_at": now.isoformat().replace("+00:00","") + "Z",
                 "runtime":      _get_runtime(),
-                "engine":       {"name": UbelEngine.engine, "version": ""},
+                "engine":       {
+                    "name":    __tool_name__ if not is_dry_run else UbelEngine.engine,
+                    "version": _engine_version,
+                },
                 "os_metadata":  os_meta,
                 "git_metadata": _get_git_metadata(),
                 "tool_info":    {"name": __tool_name__, "version": __version__, "license": __tool_license__},
