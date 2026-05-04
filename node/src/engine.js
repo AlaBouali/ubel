@@ -2222,7 +2222,7 @@ export class UbelEngine {
         purls = await NodeManager.getInstalled(options.current_dir,getinstalledoptions);
         NodeManager.inventoryData.push(
           {
-                id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
+                id: `pkg:npm/${TOOL_NAME.replace('@', '%40')}@${TOOL_VERSION}`,
                 name: TOOL_NAME,
                 version: TOOL_VERSION,
                 license: TOOL_LICENSE,

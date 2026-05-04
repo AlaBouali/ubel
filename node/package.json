@@ -1,8 +1,16 @@
 {
-  "name": "ubel-node",
-  "version": "1.1.1",
+  "name": "@arcane-spark/ubel-node",
+  "version": "0.1.1",
   "description": "Supply-chain security firewall for Node.js — resolves dependencies, scans via OSV.dev and NVD, and enforces configurable vulnerability policies before anything reaches node_modules.",
   "type": "module",
+  "license": "AGPL-3.0-only",
+  "files": [
+    "src/",
+    "bin/",
+    "LICENSE.md",
+    "DISCLAIMER.md",
+    "README.md"
+  ],
   "bin": {
     "ubel-npm": "bin/npm.js",
     "ubel-pnpm": "bin/pnpm.js",
@@ -47,7 +55,6 @@
     "cyclonedx"
   ],
   "author": "Ala Bouali <contact@alabouali.com>",
-  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/AlaBouali/ubel.git",

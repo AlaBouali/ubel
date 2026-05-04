@@ -17,7 +17,7 @@
     "type": "git",
     "url": "https://github.com/AlaBouali/ubel"
   },
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0-only",
   "homepage": "https://github.com/AlaBouali/ubel",
   "bugs": {
     "url": "https://github.com/AlaBouali/ubel/issues"
