@@ -2437,7 +2437,7 @@ class UbelEngine:
                 "scan_info":    {
                     "type":       UbelEngine.check_mode,
                     "ecosystems": sorted(ecosystems),
-                    "engine":     _engine_name,
+                    "engine":     __tool_name__,
                     "scan_scope": scan_scope,
                 },
                 "stats":               stats,

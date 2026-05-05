@@ -2451,7 +2451,7 @@ export class UbelEngine {
         os_metadata: { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: UbelEngine.engine, scan_scope: options.scan_scope ?? "repository" },
+        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository" },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
         findings_summary: findingsSummary,
