@@ -2255,6 +2255,17 @@ class UbelEngine:
                         Linux_Manager.package_to_purl(system_info, p["name"], p["version"])
                         for p in packages
                     ]
+                    # Populate inventory_data so the inventory build step below has data.
+                    Linux_Manager.inventory_data = [
+                        {
+                            **pkg,
+                            "id":    purl,
+                            "state": "undetermined",
+                            "scopes": ["prod"],
+                            "dependency_sequences": [],
+                        }
+                        for pkg, purl in zip(packages, purls)
+                    ]
                     _engine_version = Linux_Manager.get_pkg_manager_version()
                 else:
                     purls           = Linux_Manager.get_linux_packages()
