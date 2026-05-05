@@ -2223,7 +2223,8 @@ class UbelEngine:
         purls:           List[str]  = []
         report_content:  Any        = None
         ecosystems:      Set[str]   = set()
-        _engine_version: str        = ""
+        _engine_name = __tool_name__
+        _engine_version = __version__
 
         # True for check/install (dry-run or real install against candidate packages);
         # False for health (scan the already-installed environment).
@@ -2266,12 +2267,12 @@ class UbelEngine:
                         }
                         for pkg, purl in zip(packages, purls)
                     ]
-                    _engine_version = Linux_Manager.get_pkg_manager_version()
+                    _engine_version = Linux_Manager.pkg_manager_version
+                    _engine_name    = Linux_Manager.pkg_manager
                 else:
                     purls           = Linux_Manager.get_linux_packages()
                     system_info     = Linux_Manager.get_os_info()
                     report_content  = {"system_info": system_info}
-                    _engine_version = __version__
 
             # Strip version-less PURLs
             purls = [p for p in purls if not p.endswith("@")]
@@ -2427,7 +2428,7 @@ class UbelEngine:
                 "generated_at": now.isoformat().replace("+00:00","") + "Z",
                 "runtime":      _get_runtime(),
                 "engine":       {
-                    "name":    __tool_name__ if not is_dry_run else UbelEngine.engine,
+                    "name":    _engine_name,
                     "version": _engine_version,
                 },
                 "os_metadata":  os_meta,
@@ -2436,7 +2437,7 @@ class UbelEngine:
                 "scan_info":    {
                     "type":       UbelEngine.check_mode,
                     "ecosystems": sorted(ecosystems),
-                    "engine":     UbelEngine.engine if UbelEngine.check_mode != "health" else __tool_name__,
+                    "engine":     _engine_name,
                     "scan_scope": scan_scope,
                 },
                 "stats":               stats,

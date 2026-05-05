@@ -24,6 +24,9 @@ class Linux_Manager:
 
     inventory_data: List[Dict[str, Any]] = []
 
+    pkg_manager: Optional[str] = None
+    pkg_manager_version: Optional[str] = None
+
     # ------------------------------------------------------------------ #
     # Dependency sequences                                                 #
     # ------------------------------------------------------------------ #
@@ -303,6 +306,9 @@ class Linux_Manager:
 
         os_info = Linux_Manager.get_os_info()
         pm      = Linux_Manager.get_pkg_manager()
+
+        Linux_Manager.pkg_manager = pm  # Store for later use in real install
+        Linux_Manager.pkg_manager_version = Linux_Manager.get_pkg_manager_version()  # Probe version now while we have the PM detected
         resolved: List[Dict] = []
 
         # ── APT (Debian / Ubuntu) ─────────────────────────────────────────
