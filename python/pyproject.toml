@@ -1,11 +1,11 @@
 [project]
 name = "ubel-python"
-version = "0.6.0"
-description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, Debian, Red Hat, Almalinux, Rocky Linux, Alpine, and Docker."
+version = "0.1.0"
+description = "Supply-chain dependency firewall for: Python, Node.js, Ubuntu, Debian, Red Hat, Almalinux, Rocky Linux, and Alpine."
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 authors = [
     {name = "Ala Bouali"}
 ]

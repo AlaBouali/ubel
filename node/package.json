@@ -1,6 +1,6 @@
 {
   "name": "@arcane-spark/ubel-node",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "Supply-chain security firewall for Node.js — resolves dependencies, scans via OSV.dev and NVD, and enforces configurable vulnerability policies before anything reaches node_modules.",
   "type": "module",
   "license": "AGPL-3.0-only",

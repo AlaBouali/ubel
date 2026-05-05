@@ -29,7 +29,7 @@ This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 ## Installation
 
 ```bash
-npm install -g ubel-node
+npm install -g @arcane-spark/ubel-node
 ```
 
 After installation, the following entry-point binaries are available:
@@ -275,7 +275,7 @@ Specifiers containing shell metacharacters or other unsafe characters are reject
 `main()` doubles as a programmatic entry point for agents, platform scanners, and the VS Code extension:
 
 ```js
-import { main } from "ubel-node/src/main.js";
+import { main } from "@arcane-spark/ubel-node";
 
 const report = await main({
   projectRoot : "/abs/path/to/project",
