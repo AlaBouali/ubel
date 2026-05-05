@@ -10,6 +10,10 @@ Static methods:
                      venv_dir)
     build_dependency_sequences(inv)  → annotate inventory with dep sequences
     merge_inventory_by_purl(comps)   → deduplicate by PURL
+    get_installed(start_dir)         → aggregate scan across ALL ecosystems
+                                       (Python venvs, C#, Go, Java, PHP,
+                                        Ruby, Rust).  Returns list of PURL ids;
+                                       full records in Pypi_Manager.inventory_data.
 """
 
 from __future__ import annotations
@@ -23,6 +27,12 @@ import venv
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from .venv_scanner import PythonVenvScanner
+from .csharp_runner import CSharpNuGetScanner
+from .go_runner     import GoModScanner
+from .java_runner   import JavaMavenScanner
+from .php_runner    import PhpComposerScanner
+from .ruby_runner   import RubyBundlerScanner
+from .rust_runner   import RustCargoScanner
 
 
 class Pypi_Manager:
@@ -169,13 +179,51 @@ class Pypi_Manager:
 
         return Pypi_Manager._venv_python(str(venv_path))
     
-    @staticmethod
-    def get_installed(venv_dir: str) -> List[Dict[str, Any]]:
+    @classmethod
+    def get_installed(cls, start_dir: str = ".") -> List[str]:
         """
-        Scan the given venv for installed packages and return them in the same
-        format as the dry-run inventory (with "id", "name", "version", etc.).
+        Aggregate scan across ALL supported ecosystems rooted at *start_dir*.
+
+        Delegates to each ecosystem scanner's own ``get_installed`` then merges
+        the results into a single de-duplicated inventory keyed by PURL.
+
+        Ecosystems covered:
+          - Python venvs      (PythonVenvScanner)
+          - C# / NuGet        (CSharpNuGetScanner)
+          - Go modules        (GoModScanner)
+          - Java / Maven      (JavaMavenScanner)
+          - PHP / Composer    (PhpComposerScanner)
+          - Ruby / Bundler    (RubyBundlerScanner)
+          - Rust / Cargo      (RustCargoScanner)
+
+        Returns a list of PURL id strings.
+        Full component records are stored in ``Pypi_Manager.inventory_data``.
         """
-        return PythonVenvScanner.get_installed(venv_dir)
+        start_dir = os.path.abspath(start_dir)
+
+        scanners = [
+            PythonVenvScanner,
+            CSharpNuGetScanner,
+            GoModScanner,
+            JavaMavenScanner,
+            PhpComposerScanner,
+            RubyBundlerScanner,
+            RustCargoScanner,
+        ]
+
+        all_components: List[Dict[str, Any]] = []
+
+        for scanner in scanners:
+            try:
+                scanner.get_installed(start_dir)
+                all_components.extend(scanner.inventory_data)
+            except Exception:
+                # One failing ecosystem must not block the others
+                pass
+
+        merged = cls.merge_inventory_by_purl(all_components)
+        cls.inventory_data = merged
+        return [c["id"] for c in merged]
 
     # ------------------------------------------------------------------ #
     # run_dry_run                                                          #

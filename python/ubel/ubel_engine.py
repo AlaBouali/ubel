@@ -2243,8 +2243,8 @@ class UbelEngine:
                 else:
                     # health — scan the host Python environment via PythonVenvScanner
                     from .venv_scanner import PythonVenvScanner
-                    purls           = PythonVenvScanner.scan(os.getcwd())
-                    report_content  = PythonVenvScanner.inventory_data
+                    purls           = Pypi_Manager.get_installed(os.getcwd())
+                    report_content  = Pypi_Manager.inventory_data
                     _engine_version = __version__
 
             else:  # linux
@@ -2284,7 +2284,7 @@ class UbelEngine:
                     inventory = list(Pypi_Manager.inventory_data)
                 else:
                     from .venv_scanner import PythonVenvScanner
-                    inventory = list(PythonVenvScanner.inventory_data)
+                    inventory = list(Pypi_Manager.inventory_data)
             else:
                 inventory = list(Linux_Manager.inventory_data)
                 for item in inventory:
@@ -2314,7 +2314,7 @@ class UbelEngine:
                         }
                     )
             
-            purls.append(f"pkg:pypi/ubel-python@{__version__}")
+            purls.append(f"pkg:pypi/{__tool_name__}@{__version__}")
 
             match_dependencies_with_inventory(inventory)
 
