@@ -19,6 +19,7 @@
  *     projectRoot : "/abs/path",   // cwd() when omitted
  *     engine      : "npm",         // default "npm"
  *     mode        : "health",      // default "health"
+ *     packages    : ["express@4.18.0", "lodash"],  // check/install only
  *     // any scan() option:
  *     is_script           : true,
  *     save_reports        : true,
@@ -75,7 +76,7 @@ const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
  * @param {boolean} [programmaticOptions.scan_os=false]
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
- * @param {boolean} [programmaticOptions.is_vscanned_project=false]
+ * @param {string[]} [programmaticOptions.packages=[]]           Package specifiers for check/install mode (e.g. ["requests==2.31.0", "flask"]). Ignored in health mode.
  * @param {string}  [programmaticOptions.scan_scope="repository"]  Scan context: repository | agent | developer_platform | vs_code_extension
  * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
  */
@@ -91,6 +92,7 @@ export async function main(programmaticOptions) {
       projectRoot,
       engine             = "npm",
       mode               = "health",
+      packages           = [],
       is_script          = true,
       save_reports       = true,
       scan_os            = false,
@@ -117,7 +119,7 @@ export async function main(programmaticOptions) {
 
       UbelEngine.initiateLocalPolicy();
 
-      return await UbelEngine.scan([], {
+      return await UbelEngine.scan(packages, {
         current_dir: projectRoot || original_cwd,
         is_script,
         save_reports,
