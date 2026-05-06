@@ -2200,8 +2200,41 @@ class UbelEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def scan(args: List[str], scan_scope: str = "repository") -> None:
+    def scan(
+        args: List[str],
+        *,
+        scan_scope:   str  = "repository",
+        current_dir:  Optional[str]  = None,
+        is_script:    bool = False,
+        save_reports: bool = True,
+        scan_os:      bool = False,
+        full_stack:   bool = False,
+        scan_venv:    bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run a UBEL scan.
+
+        Parameters
+        ----------
+        args          : Package arguments (check/install) or [] for health.
+        scan_scope    : Scan context label written into scan_info.
+        current_dir   : Directory to scan (defaults to os.getcwd()).
+                        Passed to Pypi_Manager.get_installed().
+        is_script     : When True — suppresses all console output and never calls
+                        sys.exit().  Returns final_json instead of None.
+        save_reports  : When False AND is_script=True — skip writing any files to
+                        disk and return final_json immediately after evaluation.
+        scan_os       : Include OS packages in the inventory.
+                        Forwarded to Pypi_Manager.get_installed(scan_os=...).
+        full_stack    : Scan all supported ecosystems, not just Python venvs.
+                        Forwarded to Pypi_Manager.get_installed(full_stack=...).
+        scan_venv     : Include Python venvs.  Set False to skip them entirely.
+                        Forwarded to Pypi_Manager.get_installed(scan_venv=...).
+        """
         UbelEngine._vuln_ids_found = set()
+
+        # ── Resolve working directory ──────────────────────────────────
+        start_dir = os.path.abspath(current_dir) if current_dir else os.getcwd()
 
         # ── Timestamp & paths ──────────────────────────────────────────
         now       = datetime.datetime.now(datetime.timezone.utc)
@@ -2236,15 +2269,20 @@ class UbelEngine:
                 if is_dry_run:
                     # Ensure a local venv exists
                     venv_dir = UbelEngine.venv_dir or "./venv"
-                    python         = Pypi_Manager.init_venv(venv_dir)
+                    python          = Pypi_Manager.init_venv(venv_dir)
                     _engine_version = Pypi_Manager.get_pip_version(python) or ""
-                    purls          = Pypi_Manager.run_dry_run(args, venv_dir)
-                    report_content = Pypi_Manager.inventory_data
-                else:
-                    # health — scan the host Python environment via PythonVenvScanner
-                    from .venv_scanner import PythonVenvScanner
-                    purls           = Pypi_Manager.get_installed(os.getcwd())
+                    purls           = Pypi_Manager.run_dry_run(args, venv_dir)
                     report_content  = Pypi_Manager.inventory_data
+                else:
+                    # health — delegate entirely to Pypi_Manager.get_installed()
+                    # which owns all the full_stack / scan_venv / scan_os logic.
+                    purls          = Pypi_Manager.get_installed(
+                        start_dir,
+                        full_stack=full_stack,
+                        scan_venv=scan_venv,
+                        scan_os=scan_os,
+                    )
+                    report_content = Pypi_Manager.inventory_data
                     _engine_version = __version__
 
             else:  # linux
@@ -2456,6 +2494,11 @@ class UbelEngine:
                 "policy_violations": policy_violations,
             }
 
+            # ── Programmatic fast-return (no disk I/O) ────────────────────
+            # Mirrors: if (options.is_script==true && options.save_reports===false) return finalJson;
+            if is_script and not save_reports:
+                return final_json
+
             # ── Write reports ─────────────────────────────────────────────
             html_report = generate_html_report(final_json)
             html_path.write_text(html_report, encoding="utf-8")
@@ -2497,23 +2540,25 @@ class UbelEngine:
                 json.dump(sbom_data, sf, indent=2)
 
             # ── Console output ────────────────────────────────────────────
-            print()
-            print("Policy:")
-            print()
-            print(dict_to_str(policy))
-            print()
-            print()
-            print("Findings:")
-            print()
-            print(dict_to_str(stats))
-            print()
-            print()
+            if not is_script:
+                print()
+                print("Policy:")
+                print()
+                print(dict_to_str(policy))
+                print()
+                print()
+                print("Findings:")
+                print()
+                print(dict_to_str(stats))
+                print()
+                print()
 
             # Per-package summary
             summary_entries = list(findings_summary.values())
             if summary_entries:
-                print("Findings Summary:")
-                print()
+                if not is_script:
+                    print("Findings Summary:")
+                    print()
                 for pkg_data in summary_entries:
                     s = pkg_data["stats"]
                     counts: List[str] = []
@@ -2523,43 +2568,47 @@ class UbelEngine:
                     if s.get("medium"):    counts.append(f"{s['medium']} medium")
                     if s.get("low"):       counts.append(f"{s['low']} low")
                     if s.get("unknown"):   counts.append(f"{s['unknown']} unknown")
-                    print(f"  {pkg_data['name']}@{pkg_data['version']}  [{', '.join(counts)}]")
-                    for vuln_entry in pkg_data["vulnerabilities"]:
-                        label = "INFECTION" if vuln_entry["is_infection"] else vuln_entry["severity"].upper()
-                        score = f" ({vuln_entry['severity_score']})" if vuln_entry["severity_score"] is not None else ""
-                        print(f"    \u2022 {vuln_entry['id']}  {label}{score}")
-                        for fix in vuln_entry.get("fixes", []):
-                            print(f"      fix: {fix}")
-                    print()
+                    if not is_script:
+                        print(f"  {pkg_data['name']}@{pkg_data['version']}  [{', '.join(counts)}]")
+                        for vuln_entry in pkg_data["vulnerabilities"]:
+                            label = "INFECTION" if vuln_entry["is_infection"] else vuln_entry["severity"].upper()
+                            score = f" ({vuln_entry['severity_score']})" if vuln_entry["severity_score"] is not None else ""
+                            print(f"    \u2022 {vuln_entry['id']}  {label}{score}")
+                            for fix in vuln_entry.get("fixes", []):
+                                print(f"      fix: {fix}")
+                        print()
 
-            print(f"Policy Decision: {'ALLOW' if allowed else 'BLOCK'}")
-            print()
-            print()
-            print(f"Latest JSON report saved to: {latest_json}")
-            print(f"Latest HTML report saved to: {latest_html}")
-            print(f"Latest SBOM saved to:        {latest_sbom}")
-            print()
-            print()
+            if not is_script:
+                print(f"Policy Decision: {'ALLOW' if allowed else 'BLOCK'}")
+                print()
+                print()
+                print(f"Latest JSON report saved to: {latest_json}")
+                print(f"Latest HTML report saved to: {latest_html}")
+                print(f"Latest SBOM saved to:        {latest_sbom}")
+                print()
+                print()
 
             if not allowed:
-                print("[!] Policy violation detected!")
-                print(f"[!] {reason}")
+                if not is_script:
+                    print("[!] Policy violation detected!")
+                    print(f"[!] {reason}")
                 raise PolicyViolationError(reason)
 
             # ── Mode-specific post-scan actions ───────────────────────────
             if UbelEngine.check_mode == "health":
                 UbelEngine.pin_versions()
-                sys.exit(0)
+                if not is_script:
+                    sys.exit(0)
+                return final_json
 
             if UbelEngine.check_mode == "check":
-                # check passed — nothing to clean up, ./venv is the persistent
-                # user-managed venv. pin_versions is intentionally NOT called:
-                # check mode does not install anything, requirements.txt must
-                # not be touched.
-                sys.exit(0)
+                if not is_script:
+                    sys.exit(0)
+                return final_json
 
             # install mode
-            print("[+] Policy passed. Installing dependencies...")
+            if not is_script:
+                print("[+] Policy passed. Installing dependencies...")
             if UbelEngine.system_type == "pypi":
                 req_file = UbelEngine._generate_requirements_file(purls)
                 venv_dir = UbelEngine.venv_dir or "./venv"
@@ -2569,7 +2618,11 @@ class UbelEngine:
                 packages_list = [get_dependency_from_purl(p) for p in purls if f"/{__tool_name__}@{__version__}" not in p]
                 Linux_Manager.run_real_install(packages_list)
 
+            return final_json
+
         except PolicyViolationError:
+            if is_script:
+                raise
             sys.exit(1)
 
         except Exception as exc:

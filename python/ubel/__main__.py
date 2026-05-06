@@ -154,6 +154,12 @@ def _run_mode(
     description: str,
     extra_argv: list[str] | None = None,
     scan_scope: str = "repository",
+    is_script:    bool = False,
+    save_reports: bool = True,
+    scan_os:      bool = False,
+    full_stack:   bool = False,
+    scan_venv:    bool = True,
+    current_dir:  str | None = None,
 ) -> None:
     _print_header()
 
@@ -224,7 +230,16 @@ def _run_mode(
     # ── scan ─────────────────────────────────────────────────────────────────
     UbelEngine.check_mode = mode
     try:
-        UbelEngine.scan(pkg_args, scan_scope=scan_scope)
+        UbelEngine.scan(
+            pkg_args,
+            scan_scope=scan_scope,
+            is_script=is_script,
+            save_reports=save_reports,
+            scan_os=scan_os,
+            full_stack=full_stack,
+            scan_venv=scan_venv,
+            current_dir=current_dir,
+        )
     except PolicyViolationError:
         sys.exit(1)
     except Exception as exc:
@@ -232,6 +247,119 @@ def _run_mode(
         if os.environ.get("DEBUG"):
             import traceback; traceback.print_exc()
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Programmatic entry point  (mirrors JS main(programmaticOptions))
+# ---------------------------------------------------------------------------
+
+def main(programmatic_options: dict | None = None) -> dict | None:
+    """
+    Unified entry point for CLI callers AND programmatic callers.
+
+    Programmatic usage (agent, platform, CI tool)::
+
+        from ubel.__main__ import main
+
+        report = main({
+            "project_root": "/abs/path",
+            "engine":       "pip",        # default "pip"
+            "mode":         "health",     # default "health"
+            "packages":     ["requests==2.31.0", "flask"],  # check/install only
+            "is_script":    True,
+            "save_reports": True,
+            "scan_os":      False,
+            "full_stack":   False,
+            "scan_venv":    True,
+            "scan_scope":   "repository",
+        })
+
+    When called with a dict, this function:
+      - does NOT print the banner
+      - does NOT call sys.exit()
+      - returns the final_json report dict
+
+    When called with no argument (or None) it falls through to the CLI
+    dispatch based on sys.argv, identical to the old behaviour.
+
+    Parameters
+    ----------
+    project_root : str        Absolute path to scan (cwd() when omitted).
+    engine       : str        "pip" or the linux tool name.  default "pip".
+    mode         : str        "health" | "check" | "install".  default "health".
+    packages     : list[str]  Package specifiers for check/install mode
+                              (e.g. ["requests==2.31.0", "flask"]).
+                              Ignored in health mode.  Defaults to [].
+    is_script    : bool       Suppress console output; never call sys.exit().
+    save_reports : bool       Write reports to disk.  Set False to skip all I/O.
+    scan_os      : bool       Include OS packages (Linux/Windows host).
+    full_stack   : bool       Scan all ecosystems, not just Python venvs.
+    scan_venv    : bool       Include Python venvs (set False to skip them).
+    scan_scope   : str        Label written into scan_info.scan_scope.
+    """
+    if programmatic_options is not None and isinstance(programmatic_options, dict):
+        opts = programmatic_options
+
+        project_root  = opts.get("project_root")
+        engine        = opts.get("engine",       "pip")
+        mode          = opts.get("mode",         "health")
+        packages      = opts.get("packages",     [])
+        is_script     = opts.get("is_script",    True)
+        save_reports  = opts.get("save_reports", True)
+        scan_os_opt   = opts.get("scan_os",      False)
+        full_stack    = opts.get("full_stack",   False)
+        scan_venv     = opts.get("scan_venv",    True)
+        scan_scope    = opts.get("scan_scope",   "repository")
+
+        original_cwd = os.getcwd()
+        if project_root and project_root != original_cwd:
+            os.chdir(project_root)
+
+        try:
+            UbelEngine.engine      = engine
+            UbelEngine.system_type = "pypi" if engine == "pip" else engine
+            UbelEngine.check_mode  = mode
+            UbelEngine._vuln_ids_found = set()
+            Pypi_Manager.inventory_data = []
+
+            _initiate_local_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
+
+            return UbelEngine.scan(
+                packages,
+                scan_scope=scan_scope,
+                current_dir=project_root or original_cwd,
+                is_script=is_script,
+                save_reports=save_reports,
+                scan_os=scan_os_opt,
+                full_stack=full_stack,
+                scan_venv=scan_venv,
+            )
+        finally:
+            if project_root and project_root != original_cwd:
+                os.chdir(original_cwd)
+
+    # CLI fallback — dispatch via sys.argv (legacy path)
+    argv = sys.argv[1:]
+    if not argv:
+        print("Usage: python -m ubel <engine> <mode> [args...]", file=sys.stderr)
+        print("Engines: pip, linux", file=sys.stderr)
+        sys.exit(1)
+
+    engine_arg = argv[0].lower()
+    rest       = argv[1:]
+
+    dispatch = {
+        "pip":   pip_mode,
+        "linux": linux_mode,
+    }
+
+    if engine_arg not in dispatch:
+        print(f"[!] Unknown engine: {engine_arg!r}. Choose from: {', '.join(dispatch)}", file=sys.stderr)
+        sys.exit(1)
+
+    sys.argv = [sys.argv[0]] + rest
+    dispatch[engine_arg]()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -258,36 +386,6 @@ def linux_mode() -> None:
 # ---------------------------------------------------------------------------
 # __main__ dispatch  (python -m ubel <engine> <mode> [args...])
 # ---------------------------------------------------------------------------
-
-def main() -> None:
-    """
-    Dispatch: python -m ubel pip health
-                             pip check requests flask
-                             pip threshold high
-                             linux health
-    """
-    argv = sys.argv[1:]
-    if not argv:
-        print("Usage: python -m ubel <engine> <mode> [args...]", file=sys.stderr)
-        print("Engines: pip, linux", file=sys.stderr)
-        sys.exit(1)
-
-    engine_arg = argv[0].lower()
-    rest       = argv[1:]
-
-    dispatch = {
-        "pip":   pip_mode,
-        "linux": linux_mode,
-    }
-
-    if engine_arg not in dispatch:
-        print(f"[!] Unknown engine: {engine_arg!r}. Choose from: {', '.join(dispatch)}", file=sys.stderr)
-        sys.exit(1)
-
-    # Inject the remaining argv so each mode's argparse sees mode + extra_args
-    sys.argv = [sys.argv[0]] + rest
-    dispatch[engine_arg]()
-
 
 if __name__ == "__main__":
     main()

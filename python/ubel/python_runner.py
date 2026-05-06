@@ -182,38 +182,47 @@ class Pypi_Manager:
         return Pypi_Manager._venv_python(str(venv_path))
     
     @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
+    def get_installed(
+        cls,
+        start_dir:  str  = ".",
+        full_stack: bool = False,
+        scan_venv:  bool = True,
+        scan_os:    bool = False,
+    ) -> List[str]:
         """
-        Aggregate scan across ALL supported ecosystems rooted at *start_dir*.
+        Scan installed packages rooted at *start_dir*.
 
-        Delegates to each ecosystem scanner's own ``get_installed`` then merges
-        the results into a single de-duplicated inventory keyed by PURL.
-
-        Ecosystems covered:
-          - Python venvs      (PythonVenvScanner)
-          - Node.js           (NodeModulesScanner)
-          - C# / NuGet        (CSharpNuGetScanner)
-          - Go modules        (GoModScanner)
-          - Java / Maven      (JavaMavenScanner)
-          - PHP / Composer    (PhpComposerScanner)
-          - Ruby / Bundler    (RubyBundlerScanner)
-          - Rust / Cargo      (RustCargoScanner)
+        Parameters
+        ----------
+        full_stack : When True, scan all supported ecosystems (Node.js, C#,
+                     Go, Java, PHP, Ruby, Rust) in addition to Python venvs.
+                     When False (default), scan Python venvs only.
+        scan_venv  : Include Python venvs (PythonVenvScanner).  Default True.
+                     Set False to skip Python venvs entirely (e.g. when you
+                     only want the other ecosystems from a full_stack run).
+        scan_os    : Include the host OS packages (Linux_Manager) after the
+                     package-ecosystem sweep.  Default False.
 
         Returns a list of PURL id strings.
         Full component records are stored in ``Pypi_Manager.inventory_data``.
         """
         start_dir = os.path.abspath(start_dir)
 
-        scanners = [
-            PythonVenvScanner,
-            NodeModulesScanner,
-            CSharpNuGetScanner,
-            GoModScanner,
-            JavaMavenScanner,
-            PhpComposerScanner,
-            RubyBundlerScanner,
-            RustCargoScanner,
-        ]
+        scanners = []
+
+        if scan_venv:
+            scanners.append(PythonVenvScanner)
+
+        if full_stack:
+            scanners += [
+                NodeModulesScanner,
+                CSharpNuGetScanner,
+                GoModScanner,
+                JavaMavenScanner,
+                PhpComposerScanner,
+                RubyBundlerScanner,
+                RustCargoScanner,
+            ]
 
         all_components: List[Dict[str, Any]] = []
 
@@ -223,6 +232,14 @@ class Pypi_Manager:
                 all_components.extend(scanner.inventory_data)
             except Exception:
                 # One failing ecosystem must not block the others
+                pass
+
+        if scan_os:
+            try:
+                from .linux_runner import Linux_Manager
+                Linux_Manager.get_linux_packages()
+                all_components.extend(Linux_Manager.inventory_data)
+            except Exception:
                 pass
 
         merged = cls.merge_inventory_by_purl(all_components)
