@@ -2191,7 +2191,7 @@ export class UbelEngine {
     fs.mkdirSync(outputDir, { recursive: true });
 
     const baseName    = `${UbelEngine.systemType}_${UbelEngine.checkMode}_${UbelEngine.engine}__${timestamp}`;
-    const jsonPath    = path.join(outputDir, `${baseName}.json`);
+    const jsonPath    = path.join(outputDir, `${encodeURIComponent(baseName)}.json`);
 
     const policy = UbelEngine.loadPolicy();
     let purls = [];
