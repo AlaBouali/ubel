@@ -11,9 +11,10 @@ Static methods:
     build_dependency_sequences(inv)  → annotate inventory with dep sequences
     merge_inventory_by_purl(comps)   → deduplicate by PURL
     get_installed(start_dir)         → aggregate scan across ALL ecosystems
-                                       (Python venvs, C#, Go, Java, PHP,
-                                        Ruby, Rust).  Returns list of PURL ids;
-                                       full records in Pypi_Manager.inventory_data.
+                                       (Python venvs, Node.js, C#, Go, Java,
+                                        PHP, Ruby, Rust).  Returns list of
+                                       PURL ids; full records in
+                                       Pypi_Manager.inventory_data.
 """
 
 from __future__ import annotations
@@ -26,13 +27,14 @@ import tempfile
 import venv
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from .venv_scanner import PythonVenvScanner
-from .csharp_runner import CSharpNuGetScanner
-from .go_runner     import GoModScanner
-from .java_runner   import JavaMavenScanner
-from .php_runner    import PhpComposerScanner
-from .ruby_runner   import RubyBundlerScanner
-from .rust_runner   import RustCargoScanner
+from .venv_scanner          import PythonVenvScanner
+from .node_runner  import NodeModulesScanner
+from .csharp_runner         import CSharpNuGetScanner
+from .go_runner             import GoModScanner
+from .java_runner           import JavaMavenScanner
+from .php_runner            import PhpComposerScanner
+from .ruby_runner           import RubyBundlerScanner
+from .rust_runner           import RustCargoScanner
 
 
 class Pypi_Manager:
@@ -189,6 +191,7 @@ class Pypi_Manager:
 
         Ecosystems covered:
           - Python venvs      (PythonVenvScanner)
+          - Node.js           (NodeModulesScanner)
           - C# / NuGet        (CSharpNuGetScanner)
           - Go modules        (GoModScanner)
           - Java / Maven      (JavaMavenScanner)
@@ -203,6 +206,7 @@ class Pypi_Manager:
 
         scanners = [
             PythonVenvScanner,
+            NodeModulesScanner,
             CSharpNuGetScanner,
             GoModScanner,
             JavaMavenScanner,
