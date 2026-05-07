@@ -599,7 +599,7 @@ export class NodeManager {
                 license: TOOL_LICENSE,
                 ecosystem: "npm",
                 state: "undetermined",
-                scopes: ["env", "prod", "dev"],
+                scopes: ["env"],
                 dependencies: [],
                 type: "library",
                 paths: [],

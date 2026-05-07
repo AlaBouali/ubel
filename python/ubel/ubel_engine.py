@@ -2363,7 +2363,7 @@ class UbelEngine:
                             "ecosystem": "python",
                             "license": __tool_license__,
                             "paths": [],
-                            "scopes": ["dev","prod","env"],
+                            "scopes": ["env"],
                             "dependencies": [],
                             "state": "undetermined",
                         }
