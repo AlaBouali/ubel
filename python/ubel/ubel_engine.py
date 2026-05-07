@@ -2194,6 +2194,20 @@ class UbelEngine:
         with open(req_file, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines))
         return req_file
+    
+    def validate_pkg_args(pkg_args: list[str]) -> None:
+        bad = [] #[a for a in pkg_args if not PKG_ARG_RE.match(a)]
+        accepted_non_alphanumeric_characters ="=._+-@/~"
+        for arg in pkg_args:
+            pkg=arg.strip()
+            for char in accepted_non_alphanumeric_characters:
+                pkg=pkg.replace(char,"")
+            if not pkg.isalnum():
+                bad.append(arg)
+        if bad:
+            return bad
+        return []
+
 
     # ------------------------------------------------------------------
     # Main scan
@@ -2231,6 +2245,9 @@ class UbelEngine:
         scan_venv     : Include Python venvs.  Set False to skip them entirely.
                         Forwarded to Pypi_Manager.get_installed(scan_venv=...).
         """
+        bad_args=UbelEngine.validate_pkg_args(args)
+        if bad_args!=[]:
+            raise Exception(f"Rejected unsafe or malformed package argument(s): {', '.join(bad_args)}")
         UbelEngine._vuln_ids_found = set()
 
         # ── Resolve working directory ──────────────────────────────────

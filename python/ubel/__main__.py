@@ -123,27 +123,6 @@ def _cmd_block_unknown(raw: str) -> None:
 # Argument validation
 # ---------------------------------------------------------------------------
 
-def _validate_pkg_args(pkg_args: list[str]) -> None:
-    bad = [] #[a for a in pkg_args if not PKG_ARG_RE.match(a)]
-    accepted_non_alphanumeric_characters ="=._+-@/~"
-    for arg in pkg_args:
-        pkg=arg.strip()
-        for char in accepted_non_alphanumeric_characters:
-            pkg=pkg.replace(char,"")
-        if not pkg.isalnum():
-            bad.append(arg)
-    if bad:
-        print(
-            f"[!] Rejected unsafe or malformed package argument(s): {', '.join(bad)}",
-            file=sys.stderr,
-        )
-        print(
-            "[!] Expected format: name, name==version, or @scope/name@version",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
 # ---------------------------------------------------------------------------
 # Shared mode runner
 # ---------------------------------------------------------------------------
@@ -222,9 +201,6 @@ def _run_mode(
             for line in req.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.startswith("#")
         ]
-
-    if pkg_args:
-        _validate_pkg_args(pkg_args)
 
 
     # ── scan ─────────────────────────────────────────────────────────────────

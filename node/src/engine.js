@@ -2163,6 +2163,15 @@ export class UbelEngine {
   }
 
   static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false, scan_node:true, scan_scope: "repository" }) {
+    const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+    if (args.length) {
+    const bad = args.filter(a => !PKG_ARG_RE.test(a));
+    if (bad.length) {
+      console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
+      console.error("[!] Expected format: name, name@version, or @scope/name@version");
+      process.exit(1);
+    }
+  }
     const os_metadata_info = await getOSMetadata();
     const getinstalledoptions = {
       full_stack: options.full_stack,

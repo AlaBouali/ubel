@@ -47,9 +47,6 @@ const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
 const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
 
-// ── Package-specifier allow-list (same pattern used before) ──────────────────
-const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
-
 /**
  * main() — unified entry point for CLI callers AND programmatic callers.
  *
@@ -209,14 +206,6 @@ export async function main(programmaticOptions) {
 
   // ── validate package specifiers early ───────────────────────────────────────
   let pkgArgs = extraArgs;
-  if (pkgArgs.length) {
-    const bad = pkgArgs.filter(a => !PKG_ARG_RE.test(a));
-    if (bad.length) {
-      console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
-      console.error("[!] Expected format: name, name@version, or @scope/name@version");
-      process.exit(1);
-    }
-  }
   if (!pkgArgs.length && (effectiveMode === "check" || effectiveMode === "install")) {
     pkgArgs = [];
   }
