@@ -4,7 +4,7 @@
 Covers source repos, developer machines, zero cloud calls except for osv.dev and NVD API.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE.md)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-green)](LICENSE.md)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
 [![GitHub](https://img.shields.io/badge/github-AlaBouali%2Fubel-lightgrey)](https://github.com/AlaBouali/ubel)
 
@@ -280,5 +280,5 @@ UBEL is fully local. The only external call is to [osv.dev's public API](https:/
 
 ## License
 
-Apache-2.0 with Commons Clause — free for scanning your own projects and systems.  
+AGPL-3.0-only — free for scanning your own projects and systems.  
 See [LICENSE.md](LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.

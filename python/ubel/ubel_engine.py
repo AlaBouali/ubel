@@ -47,7 +47,7 @@ try:
 except ImportError:
     __version__   = "0.0.0"
     __tool_name__ = "ubel-python"
-    __tool_license__ = "Apache 2.0"
+    __tool_license__ = "AGPL-3.0-only"
 
 
 # ---------------------------------------------------------------------------
