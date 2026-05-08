@@ -14,16 +14,129 @@ let scanningProject     = false;
 let scanningExtensions  = false;
 let scanningPlatform    = false;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Editor Detection
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Extension activation
+ * Detected editor identity.
+ * @typedef {"vscode" | "cursor" | "vscodium" | "unknown"} EditorKind
  */
+
+/**
+ * Detects which editor is hosting this extension.
+ *
+ * Signal priority (most → least reliable):
+ *
+ *   1. vscode.env.uriScheme   — explicitly set per product: "vscode" | "cursor" | "vscodium"
+ *                               This is the definitive signal; all forks change it.
+ *
+ *   2. vscode.env.appName     — human-readable product name set by each fork:
+ *                               "Visual Studio Code" | "Cursor" | "VSCodium"
+ *                               Reliable but a fork could theoretically keep VS Code's name.
+ *
+ *   3. vscode.env.appRoot     — install path; contains the product name as a directory segment.
+ *                               Checked before execPath because appRoot is the editor's own
+ *                               resource directory, whereas execPath may be a shared helper
+ *                               binary (e.g. Cursor's internal electron helper is still named
+ *                               "code" on some platforms, which broke the old regex).
+ *
+ *   4. process.execPath       — last resort; Cursor and VSCodium name their main executables
+ *                               distinctly, but helper/renderer processes may not.
+ *                               We only test for cursor/codium here — we never test for
+ *                               "code" because that substring appears in Cursor's paths too.
+ *
+ * @returns {{ kind: EditorKind, label: string, extensionsDir: string }}
+ */
+function detectEditor() {
+  // --- 1. uriScheme (definitive) ------------------------------------------
+  // VS Code  → "vscode"
+  // Cursor   → "cursor"
+  // VSCodium → "vscodium"
+  const scheme = (vscode.env.uriScheme || "").toLowerCase();
+
+  if (scheme === "cursor")   return buildEditorInfo("cursor");
+  if (scheme === "vscodium") return buildEditorInfo("vscodium");
+  if (scheme === "vscode")   return buildEditorInfo("vscode");
+
+  // --- 2. appName ---------------------------------------------------------
+  const appName = (vscode.env.appName || "").toLowerCase();
+
+  if (appName.includes("cursor"))              return buildEditorInfo("cursor");
+  if (appName.includes("codium"))              return buildEditorInfo("vscodium");
+  if (appName.includes("visual studio code") ||
+      appName.includes("vscode"))              return buildEditorInfo("vscode");
+
+  // --- 3. appRoot path ----------------------------------------------------
+  const appRoot = (vscode.env.appRoot || "").toLowerCase();
+
+  if (appRoot.includes("cursor"))              return buildEditorInfo("cursor");
+  if (appRoot.includes("codium"))              return buildEditorInfo("vscodium");
+  // Deliberately NOT testing appRoot for "code" — too broad and matches Cursor paths.
+
+  // --- 4. execPath (narrow patterns only) ---------------------------------
+  // We only match cursor/codium explicitly; we never use "code" as a positive
+  // signal because Cursor's Electron helper is named "code" on Linux/macOS.
+  const execName = path.basename(process.execPath).toLowerCase();
+
+  if (/cursor/i.test(execName))   return buildEditorInfo("cursor");
+  if (/codium/i.test(execName))   return buildEditorInfo("vscodium");
+
+  // If all signals say nothing distinctive, assume VS Code.
+  return buildEditorInfo("vscode");
+}
+
+/**
+ * Returns the canonical info object for the detected editor.
+ *
+ * `version` is read from `vscode.version` — a top-level property exported by
+ * the VS Code API module that every fork (Cursor, VSCodium, …) sets to its own
+ * release string (e.g. "1.89.1").  This is always available inside the extension
+ * host process and requires no shell exec or PATH lookup.
+ *
+ * Directory conventions:
+ *   VS Code   : ~/.vscode/extensions
+ *   Cursor    : ~/.cursor/extensions
+ *   VSCodium  : ~/.vscode-oss/extensions
+ *
+ * @param {EditorKind} kind
+ * @returns {{ kind: EditorKind, label: string, version: string, extensionsDir: string }}
+ */
+function buildEditorInfo(kind) {
+  const home = os.homedir();
+
+  const dirMap = {
+    vscode  : path.join(home, ".vscode",     "extensions"),
+    cursor  : path.join(home, ".cursor",     "extensions"),
+    vscodium: path.join(home, ".vscode-oss", "extensions"),
+  };
+
+  const labelMap = {
+    vscode  : "Visual Studio Code",
+    cursor  : "Cursor",
+    vscodium: "VSCodium",
+  };
+
+  return {
+    kind,
+    label        : labelMap[kind],
+    // vscode.version is the authoritative editor version available in the
+    // extension host — no shell exec or PATH lookup required.
+    version      : vscode.version,
+    extensionsDir: dirMap[kind],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extension activation
+// ─────────────────────────────────────────────────────────────────────────────
+
 function activate(context) {
 
   // ─────────────────────────────────────────────
   // Command 1: Scan current workspace
   // ─────────────────────────────────────────────
   const scanWorkspaceCmd = vscode.commands.registerCommand("ubel.scan", async () => {
-    // Prevent multiple project scans at once
     if (scanningProject) {
       vscode.window.showWarningMessage("UBEL: A project scan is already in progress. Please wait.");
       return;
@@ -77,7 +190,7 @@ function activate(context) {
   });
 
   // ─────────────────────────────────────────────
-  // Command 2: Scan VS Code extensions directory
+  // Command 2: Scan host editor's extensions
   // ─────────────────────────────────────────────
   const scanExtensionsCmd = vscode.commands.registerCommand("ubel.scanExtensions", async () => {
     if (scanningExtensions) {
@@ -95,7 +208,10 @@ function activate(context) {
       return;
     }
 
-    const extensionsDir = path.join(os.homedir(), ".vscode", "extensions");
+    // Detect which editor we are running inside and pick the right directory.
+    const editor = detectEditor();
+
+    const extensionsDir = editor.extensionsDir;
 
     const reportUri = vscode.Uri.file(
       path.join(extensionsDir, ".ubel", "reports", "latest.html")
@@ -116,10 +232,17 @@ function activate(context) {
           full_stack         : true,
           scan_node          : true,
           is_vscanned_project: true,
-          scan_scope         : "vs_code_extension",
+          // Tag the report with the editor that was scanned so the HTML
+          // report header can display "Scanned: Cursor extensions" etc.
+          scan_scope         : "editor_extension",
+          editor_kind        : editor.kind,
+          editor_label       : editor.label,
+          // vscode.version is resolved here in extension.js where the vscode
+          // API is available, so engine.js never needs to shell out for it.
+          editor_version     : editor.version,
         },
         reportUri,
-        title: "UBEL: Scanning VS Code extensions…",
+        title: `UBEL: Scanning ${editor.label} extensions…`,
       });
     } finally {
       scanningExtensions = false;
@@ -178,8 +301,13 @@ function activate(context) {
   context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared scan runner
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Shared scan runner — calls main() with a pre-built options object.
+ * Calls main() with a pre-built options object and handles all three outcome
+ * states: clean, PolicyViolationError, and unexpected error.
  */
 async function runScan({ main, PolicyViolationError, scanOptions, reportUri, title }) {
   await vscode.window.withProgress(

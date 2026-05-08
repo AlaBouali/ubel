@@ -74,7 +74,7 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
  * @param {string[]} [programmaticOptions.packages=[]]           Package specifiers for check/install mode (e.g. ["requests==2.31.0", "flask"]). Ignored in health mode.
- * @param {string}  [programmaticOptions.scan_scope="repository"]  Scan context: repository | agent | developer_platform | vs_code_extension
+ * @param {string}  [programmaticOptions.scan_scope="repository"]  Scan context: repository | agent | developer_platform | editor_extension
  * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
  */
 export async function main(programmaticOptions) {

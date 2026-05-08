@@ -37,7 +37,7 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 | Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
 |---|---|---|---|
 | **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder |
-| **UBEL: Scan VS Code Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` |
+| **UBEL: Scan VS Code / Cursor / VS Codium Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
 | **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
 
 All three commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
@@ -89,12 +89,20 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 
 ## Scan VS Code Extensions (`Ctrl+Alt+X`)
 
-Scans the npm packages bundled inside your installed VS Code extensions (`~/.vscode/extensions`). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
+Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codium extensions (`~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` ). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
 
 **Report location**
 
 ```
 ~/.vscode/extensions/.ubel/reports/latest.html
+```
+or
+```
+~/.vscode-oss/extensions/.ubel/reports/latest.html
+```
+or
+```
+~/.cursor/extensions/.ubel/reports/latest.html
 ```
 
 ---
@@ -252,13 +260,15 @@ Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** re
 | Scan target | Report path |
 |---|---|
 | Workspace | `<project-root>/.ubel/reports/latest*` |
-| VS Code extensions | `~/.vscode/extensions/.ubel/reports/latest*` |
+| VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest*` or `~/.vscode-oss/extensions/.ubel/reports/latest*` or `~/.cursor/extensions/.ubel/reports/latest*` |
 | Host platform | `~/.ubel/reports/latest*` |
 
 Previous scans are retained under:
 
 - `<project-root>/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
 - `~/.vscode/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
+- `~/.vscode-oss/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
+- `~/.cursor/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
 - `~/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
 
 ---

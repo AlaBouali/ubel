@@ -9,7 +9,7 @@ import { evaluatePolicy }       from "./policy.js";
 import {TOOL_NAME, TOOL_LICENSE, TOOL_VERSION }   from "./info.js";
 import { dictToStr }            from "./utils.js";
 import {getOSMetadata}          from "./os_metadata.js";
-import {getGitMetadata, getvscodeversion}         from "./git_info.js";
+import {getGitMetadata, getEditorVersion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 import { CycloneDXBuilder } from "./sbom_builder.js";
 
@@ -2436,15 +2436,25 @@ export class UbelEngine {
       }
 
       if (options.is_vscanned_project) {
-        engine_info.name    = "vscode";
-        engine_info.version = getvscodeversion();
+        // editor_kind / editor_label / editor_version are injected by extension.js
+        // (resolved via vscode.version + detectEditor() where the vscode API is
+        // available). Fall back to shell exec via getEditorVersion() only for
+        // non-extension callers (MCP server, agent) that set is_vscanned_project
+        // without having access to the vscode module.
+        const editorKind    = options.editor_kind    ?? "vscode";
+        const editorVersion = options.editor_version ?? getEditorVersion(editorKind);
+
+        engine_info.name    = editorKind;
+        engine_info.version = editorVersion;
+
         for (const item of inventory) {
           item.scopes = ["dev"];
         }
-        // runtime was built before VS Code was detected — patch it now so the
-        // report reflects the host editor, not the embedded Node runtime.
-        runtime.environment = "vscode";
-        runtime.version     = getvscodeversion();
+
+        // runtime was built before editor detection — patch it now so the
+        // report reflects the actual host editor, not the embedded Node runtime.
+        runtime.environment = editorKind;
+        runtime.version     = editorVersion;
       }
       const finalJson = {
         generated_at: now.toISOString().replace("Z","") + "Z",

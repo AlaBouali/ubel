@@ -286,7 +286,7 @@ const report = await main({
   scan_os     : false,
   full_stack  : false,
   scan_node   : true,
-  scan_scope  : "repository",   // repository | agent | developer_platform | vs_code_extension
+  scan_scope  : "repository",   // repository | agent | developer_platform | editor_extension
 });
 // report is the full finalJson object (inventory, vulnerabilities, decision, …)
 ```

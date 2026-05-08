@@ -244,7 +244,7 @@ report = main({
     "scan_os":      False,         # include host OS packages
     "full_stack":   False,         # scan all ecosystems, not just Python venvs
     "scan_venv":    True,          # include Python venvs
-    "scan_scope":   "repository",  # repository | agent | developer_platform | vs_code_extension
+    "scan_scope":   "repository",  # repository | agent | developer_platform | editor_extension
 })
 # report is the full final_json object (inventory, vulnerabilities, decision, …)
 ```
