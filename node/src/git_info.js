@@ -14,11 +14,11 @@ function run(cmd) {
   try {
     return execSync(cmd, {
       shell: true,
-      //encoding: "utf8",
+      encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
   } catch {
-    return undefined;
+    return "";
   }
 }
 

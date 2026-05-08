@@ -164,6 +164,9 @@ function activate(context) {
       path.join(projectRoot, ".ubel", "reports", "latest.html")
     );
 
+    // Detect editor so the report can surface it as the host environment.
+    const editor = detectEditor();
+
     try {
       scanningProject = true;
       await runScan({
@@ -180,6 +183,9 @@ function activate(context) {
           scan_node          : true,
           is_vscanned_project: true,
           scan_scope         : "repository",
+          editor_kind        : editor.kind,
+          editor_label       : editor.label,
+          editor_version     : editor.version,
         },
         reportUri,
         title: "UBEL: Scanning project…",
@@ -274,21 +280,28 @@ function activate(context) {
       path.join(platformRoot, ".ubel", "reports", "latest.html")
     );
 
+    // Detect editor so the report can surface it as the host environment.
+    const editor = detectEditor();
+
     try {
       scanningPlatform = true;
       await runScan({
         main,
         PolicyViolationError,
         scanOptions: {
-          projectRoot : platformRoot,
-          engine      : "npm",
-          mode        : "health",
-          is_script   : true,
-          save_reports: true,
-          scan_os     : true,
-          full_stack  : false,
-          scan_node   : false,
-          scan_scope  : "developer_platform",
+          projectRoot        : platformRoot,
+          engine             : "npm",
+          mode               : "health",
+          is_script          : true,
+          save_reports       : true,
+          scan_os            : true,
+          full_stack         : false,
+          scan_node          : false,
+          is_vscanned_project: true,
+          scan_scope         : "developer_platform",
+          editor_kind        : editor.kind,
+          editor_label       : editor.label,
+          editor_version     : editor.version,
         },
         reportUri,
         title: "UBEL: Scanning host platform…",

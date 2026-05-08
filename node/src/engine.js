@@ -2442,19 +2442,37 @@ export class UbelEngine {
         // non-extension callers (MCP server, agent) that set is_vscanned_project
         // without having access to the vscode module.
         const editorKind    = options.editor_kind    ?? "vscode";
+        const editorLabel   = options.editor_label   ?? editorKind;
         const editorVersion = options.editor_version ?? getEditorVersion(editorKind);
 
-        engine_info.name    = editorKind;
-        engine_info.version = editorVersion;
+        const scanScope = options.scan_scope ?? "repository";
+
+        if (scanScope === "editor_extension") {
+          // Extensions scan: the editor IS the subject being scanned, so it
+          // replaces both engine_info and runtime (original behaviour).
+          engine_info.name    = editorKind;
+          engine_info.version = editorVersion;
+
+          runtime.environment = editorKind;
+          runtime.version     = editorVersion;
+        } else {
+          // Project / platform scans: show the editor as the engine (it launched
+          // the scan), but keep runtime.environment/version as-is (Node) so the
+          // execution context is still accurate. Store editor on runtime.editor
+          // as a secondary field for the report header.
+          engine_info.name    = editorKind;
+          engine_info.version = editorVersion;
+
+          runtime.editor = {
+            kind:    editorKind,
+            label:   editorLabel,
+            version: editorVersion,
+          };
+        }
 
         for (const item of inventory) {
           item.scopes = ["dev"];
         }
-
-        // runtime was built before editor detection — patch it now so the
-        // report reflects the actual host editor, not the embedded Node runtime.
-        runtime.environment = editorKind;
-        runtime.version     = editorVersion;
       }
       const finalJson = {
         generated_at: now.toISOString().replace("Z","") + "Z",
@@ -2463,7 +2481,7 @@ export class UbelEngine {
         os_metadata: { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
         git_metadata: git_metadata,
         tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository" },
+        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
         vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
         findings_summary: findingsSummary,
