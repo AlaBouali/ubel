@@ -83,7 +83,7 @@
       },
       {
         "command": "ubel.scanExtensions",
-        "title": "UBEL: Scan VS Code Extensions",
+        "title": "UBEL: Scan Code Editor's Extensions",
         "category": "UBEL"
       },
       {

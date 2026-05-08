@@ -37,7 +37,7 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 | Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
 |---|---|---|---|
 | **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder |
-| **UBEL: Scan VS Code / Cursor / VS Codium Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
+| **UBEL: Scan Code Editor's Extensions** | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
 | **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
 
 All three commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
