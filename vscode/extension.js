@@ -1,4 +1,5 @@
 // extension.js — UBEL VS Code Extension entry point (no bundler, pure CJS)
+// Modified to block any scan while another scan is in progress (global mutex).
 
 "use strict";
 
@@ -9,10 +10,8 @@ const os     = require("os");
 // Resolve ubel source relative to this file
 const ubelRoot = path.join(__dirname, "node", "src");
 
-// Per-scan-type flags to prevent concurrent scans of the same type
-let scanningProject     = false;
-let scanningExtensions  = false;
-let scanningPlatform    = false;
+// Global flag to prevent any two scans from running concurrently
+let scanningInProgress = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Editor Detection
@@ -137,8 +136,8 @@ function activate(context) {
   // Command 1: Scan current workspace
   // ─────────────────────────────────────────────
   const scanWorkspaceCmd = vscode.commands.registerCommand("ubel.scan", async () => {
-    if (scanningProject) {
-      vscode.window.showWarningMessage("UBEL: A project scan is already in progress. Please wait.");
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
       return;
     }
 
@@ -168,7 +167,7 @@ function activate(context) {
     const editor = detectEditor();
 
     try {
-      scanningProject = true;
+      scanningInProgress = true;
       await runScan({
         main,
         PolicyViolationError,
@@ -191,7 +190,7 @@ function activate(context) {
         title: "UBEL: Scanning project…",
       });
     } finally {
-      scanningProject = false;
+      scanningInProgress = false;
     }
   });
 
@@ -199,8 +198,8 @@ function activate(context) {
   // Command 2: Scan host editor's extensions
   // ─────────────────────────────────────────────
   const scanExtensionsCmd = vscode.commands.registerCommand("ubel.scanExtensions", async () => {
-    if (scanningExtensions) {
-      vscode.window.showWarningMessage("UBEL: An extensions scan is already in progress. Please wait.");
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
       return;
     }
 
@@ -224,7 +223,7 @@ function activate(context) {
     );
 
     try {
-      scanningExtensions = true;
+      scanningInProgress = true;
       await runScan({
         main,
         PolicyViolationError,
@@ -251,7 +250,7 @@ function activate(context) {
         title: `UBEL: Scanning ${editor.label} extensions…`,
       });
     } finally {
-      scanningExtensions = false;
+      scanningInProgress = false;
     }
   });
 
@@ -259,8 +258,8 @@ function activate(context) {
   // Command 3: Scan host platform (ctrl+alt+p)
   // ─────────────────────────────────────────────
   const scanPlatformCmd = vscode.commands.registerCommand("ubel.scanPlatform", async () => {
-    if (scanningPlatform) {
-      vscode.window.showWarningMessage("UBEL: A platform scan is already in progress. Please wait.");
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
       return;
     }
 
@@ -284,7 +283,7 @@ function activate(context) {
     const editor = detectEditor();
 
     try {
-      scanningPlatform = true;
+      scanningInProgress = true;
       await runScan({
         main,
         PolicyViolationError,
@@ -307,7 +306,7 @@ function activate(context) {
         title: "UBEL: Scanning host platform…",
       });
     } finally {
-      scanningPlatform = false;
+      scanningInProgress = false;
     }
   });
 

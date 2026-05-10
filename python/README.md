@@ -251,6 +251,12 @@ report = main({
 
 When called this way, the banner and interactive console output are suppressed. The return value is the same machine-readable report object written to disk.
 
+**IMPORTANT:** The programmatic API is primarily exposed for lightweight integrations and automation around UBEL's CLI and VS Code workflows. UBEL is designed first and foremost as a single-operation CLI/runtime scanner, not as a multi-tenant concurrent scanning library.
+
+`main()` is therefore currently not concurrency-safe. Do not invoke multiple `install`, `check`, or `health` operations in parallel within the same process, as report generation and internal scan state may overlap.
+
+Run operations sequentially until parallel execution support is introduced in a future release.
+
 ---
 
 ## Reports

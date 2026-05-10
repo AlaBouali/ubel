@@ -2583,13 +2583,13 @@ export class UbelEngine {
       const sarifData = sarifbuilder.generate();
 
 
-      const sbomPath = jsonPath.replace(/\.json$/, "_sbom.cdx.json");
+      const sbomPath = jsonPath.replace(/\.json$/, ".cdx.json");
       fs.writeFileSync(sbomPath, JSON.stringify(sbomData, null, 2));
 
       const sarifPath = jsonPath.replace(/\.json$/, ".sarif.json");
       fs.writeFileSync(sarifPath, JSON.stringify(sarifData, null, 2));
 
-      const latestSbom = path.join(latestDir, "latest_sbom.cdx.json");
+      const latestSbom = path.join(latestDir, "latest.cdx.json");
       fs.writeFileSync(latestSbom, JSON.stringify(sbomData, null, 2));
       
       const latestSarif = path.join(latestDir, "latest.sarif.json");
