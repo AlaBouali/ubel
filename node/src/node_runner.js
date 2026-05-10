@@ -457,6 +457,15 @@ export class NodeManager {
     const projectPath     = process.cwd();
     const packageJsonPath = path.join(projectPath, "package.json");
     const lockPath        = path.join(projectPath, cfg.lockfile);
+    const nodeModulesPath = path.join(projectPath, "node_modules");
+
+    // delete existing lockfile if node_modules does not exist
+    if (
+      fs.existsSync(lockPath) &&
+      !fs.existsSync(nodeModulesPath)
+    ) {
+      await fs.promises.unlink(lockPath);
+    }
 
     // ── 2. Backup originals ───────────────────────────────────────────────
 

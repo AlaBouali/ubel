@@ -190,7 +190,7 @@ export class RustCargoScanner {
         state:        "undetermined",
         scopes:       [],
         dependencies,
-        paths:        [isLocal ? projectRoot : pkg.source],
+        paths:        [ projectRoot],
         project_root: projectRoot,
         _source:      pkg.source
       });

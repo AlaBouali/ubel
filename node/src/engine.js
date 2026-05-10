@@ -12,6 +12,7 @@ import {getOSMetadata}          from "./os_metadata.js";
 import {getGitMetadata, getEditorVersion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 import { CycloneDXBuilder } from "./sbom_builder.js";
+import { SarifBuilder } from "./sarif_builder.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2578,11 +2579,22 @@ export class UbelEngine {
       const sbomBuilder = new CycloneDXBuilder(finalJson);
       const sbomData = sbomBuilder.generate();
 
+      const sarifbuilder = new SarifBuilder(finalJson);
+      const sarifData = sarifbuilder.generate();
+
+
       const sbomPath = jsonPath.replace(/\.json$/, "_sbom.cdx.json");
       fs.writeFileSync(sbomPath, JSON.stringify(sbomData, null, 2));
 
+      const sarifPath = jsonPath.replace(/\.json$/, ".sarif.json");
+      fs.writeFileSync(sarifPath, JSON.stringify(sarifData, null, 2));
+
       const latestSbom = path.join(latestDir, "latest_sbom.cdx.json");
       fs.writeFileSync(latestSbom, JSON.stringify(sbomData, null, 2));
+      
+      const latestSarif = path.join(latestDir, "latest.sarif.json");
+      fs.writeFileSync(latestSarif, JSON.stringify(sarifData, null, 2));
+      
       if (options.is_script==false){
       console.log(`Latest JSON report saved to: ${latestPath}`);
       console.log(`Latest HTML report saved to: ${lateshtmlpath}`);
