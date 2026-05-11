@@ -26,9 +26,10 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 - Policy engine — block/allow by severity threshold and unknown-severity packages
 - Malicious package (infection) detection — always blocked regardless of policy
 - Dependency graph with introduced-by and parent tracking
-- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX.
+- Complete compliant, and enriched SARIF v2.1.0 files.
 
 ---
 
@@ -82,7 +83,7 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 **Report location**
 
 ```
-<project-root>/.ubel/reports/latest.html
+<project-root>/.ubel/reports/latest.*
 ```
 
 ---
@@ -94,15 +95,15 @@ Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codiu
 **Report location**
 
 ```
-~/.vscode/extensions/.ubel/reports/latest.html
+~/.vscode/extensions/.ubel/reports/latest.*
 ```
 or
 ```
-~/.vscode-oss/extensions/.ubel/reports/latest.html
+~/.vscode-oss/extensions/.ubel/reports/latest.*
 ```
 or
 ```
-~/.cursor/extensions/.ubel/reports/latest.html
+~/.cursor/extensions/.ubel/reports/latest.*
 ```
 
 ---
@@ -137,10 +138,10 @@ This catches what dependency scanners miss: a vulnerable version of Git, an unpa
 
 **Report location**
 
-The report is always written to `~/.ubel/reports/latest.html`, independent of any open workspace.
+The report is always written to `~/.ubel/reports/latest.*`, independent of any open workspace.
 
 ```
-~/.ubel/reports/latest.html
+~/.ubel/reports/latest.*
 ```
 
 ---
@@ -255,7 +256,7 @@ Detected by reading the system package database directly.
 
 ## Reports
 
-Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** reports.
+Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** + **SARIF** reports.
 
 | Scan target | Report path |
 |---|---|

@@ -20,9 +20,10 @@ This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 - Atomic lockfile revert — originals are always restored on violation or error
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure
 - Dependency graph with introduced-by and parent tracking
-- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
-- Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX.
+- Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX.
+- Complete compliant, and enriched SARIF v2.1.0 files.
 
 ---
 
@@ -308,12 +309,14 @@ Every scan writes two files to a timestamped path and overwrites the `latest*` c
 ```
 .ubel/reports/latest.json          ← always current
 .ubel/reports/latest.html          ← always current
-.ubel/reports/latest_sbom.cdx.json          ← always current
+.ubel/reports/latest.cdx.json          ← always current
+.ubel/reports/latest.sarif.json          ← always current
 
 .ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
     <ecosystem>_<mode>_<engine>__<timestamp>.json
     <ecosystem>_<mode>_<engine>__<timestamp>.html
-    <ecosystem>_<mode>_<engine>__<timestamp>_sbom.cdx.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.cdx.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
 ```
 
 The HTML report is fully self-contained (no server required) and includes:

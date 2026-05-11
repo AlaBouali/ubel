@@ -21,9 +21,10 @@ This document covers the **Python** ecosystem (`ubel-pip`) and the **Linux host*
 - Version pinning — `health` and `install` modes rewrite `requirements.txt` with exact resolved versions after a clean scan
 - Full-stack monorepo scanning — walks the entire directory tree and collects packages across all supported ecosystems in a single pass
 - Linux host scanning — reads system package databases directly (no elevated privileges required)
-- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Python stdlib only)
 - Complete, compliant, and enriched SBOM CycloneDX v1.6 with full dependency graph and vulnerabilities in VEX format
+- Complete compliant, and enriched SARIF v2.1.0 files.
 - Programmatic API — doubles as a library entry-point for agents, CI tools, and the VS Code extension
 
 ---
@@ -266,12 +267,14 @@ Every scan writes three files to a timestamped path and overwrites the `latest*`
 ```
 .ubel/reports/latest.json              ← always current
 .ubel/reports/latest.html              ← always current
-.ubel/reports/latest_sbom.cdx.json    ← always current
+.ubel/reports/latest.cdx.json    ← always current
+.ubel/reports/latest.sarif.json    ← always current
 
 .ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
     <ecosystem>_<mode>_<engine>__<timestamp>.json
     <ecosystem>_<mode>_<engine>__<timestamp>.html
-    <ecosystem>_<mode>_<engine>__<timestamp>_sbom.cdx.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.cdx.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
 ```
 
 For the Linux host scanner (`ubel`), all reports and policy live under `~/.ubel/` to avoid requiring write access to the working directory.
