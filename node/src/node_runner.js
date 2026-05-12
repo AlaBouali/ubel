@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
-import { createHash } from "crypto"; // added for SHA-256 integrity checks
+import { createHash } from "crypto";
 
 import { LockfileParser } from "./lockfiles_parser.js";
 import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE } from "./info.js";
@@ -20,12 +20,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Engine configuration table
-//
-// Each entry describes how to interact with one package manager:
-//   lockfile     — filename produced / read by this engine
-//   dryRunCmd    — function(pkgArgs) → argv[] for a lockfile-only dry run
-//   installCmd   — argv[] for a clean / frozen install (real install)
-//   binary       — executable name (for PATH checks and spawnSync)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ENGINE_CONFIG = {
@@ -42,74 +36,51 @@ const ENGINE_CONFIG = {
       "--omit=optional",
       ...args,
     ],
-    // `npm ci` performs a clean install from the lockfile without modifying it.
     installCmd: ["ci", "--ignore-scripts"],
   },
 
   yarn: {
     lockfile:   "yarn.lock",
     binary:     "yarn",
-    // Yarn classic (v1):  `yarn install --frozen-lockfile` reads/updates yarn.lock
-    // but has no --package-lock-only analogue.  The closest safe equivalent is
-    // `yarn add --frozen-lockfile` which updates yarn.lock in-place without
-    // installing into node_modules when NODE_ENV=production is set with
-    // --ignore-scripts.  In practice we stage the mutation, read yarn.lock,
-    // then revert — which is the same pattern we use for all engines.
     dryRunCmd:  (args) => [
       "add",
       "--ignore-scripts",
       "--no-progress",
       ...args,
     ],
-    // Frozen install: installs exactly what yarn.lock specifies.
     installCmd: ["install", "--frozen-lockfile", "--ignore-scripts"],
   },
 
   pnpm: {
     lockfile:   "pnpm-lock.yaml",
     binary:     "pnpm",
-    // pnpm supports --lockfile-only which mirrors npm's --package-lock-only.
     dryRunCmd:  (args) => args.length
       ? ["add",     "--lockfile-only", "--ignore-scripts", "--no-optional", ...args]
       : ["install", "--lockfile-only", "--ignore-scripts", "--no-optional"],
-    // Frozen install via --frozen-lockfile.
     installCmd: ["install", "--frozen-lockfile", "--ignore-scripts"],
   },
 
   bun: {
     lockfile:   "bun.lock",
     binary:     "bun",
-    // Lockfile-only dry run — node_modules is never written.
-    // `--ignore-scripts` suppresses pre/post-install lifecycle hooks.
-    // Note: bun populates its global registry cache during this step.
-    //
-    // Two subcommands are needed because `bun install` does not accept package
-    // name arguments — it only reads package.json.  `bun add` does accept them.
-    //   • args present  → `bun add --lockfile-only`     (add new packages)
-    //   • args empty    → `bun install --lockfile-only` (resolve existing deps)
     dryRunCmd: (args) => args.length
       ? ["add",     "--lockfile-only", "--ignore-scripts", ...args]
       : ["install", "--lockfile-only", "--ignore-scripts"],
-    // Frozen install: installs exactly what bun.lock specifies.
     installCmd: ["install", "--frozen-lockfile", "--ignore-scripts"],
   },
 
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NodeModulesScanner
-// Walks node_modules on disk, resolves deps via Node's own resolution
-// algorithm (climb to root), and produces the flat package list that
-// NodeManager._scannerToTree() wraps into the nested tree shape.
+// NodeModulesScanner  (already instance-based — unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class NodeModulesScanner {
-  constructor(rootDir = process.cwd()) {
+  constructor(rootDir) {
     this.rootDir          = rootDir;
     this.nodeModulesPath  = path.join(rootDir, "node_modules");
     this.packages         = new Map();
     this.visitedPaths     = new Set();
-    
   }
 
   scan() {
@@ -174,7 +145,6 @@ class NodeModulesScanner {
     const version = pkgJson.version;
     if (!name || !version) return;
 
-    // Skip subpath-export stubs (pnpm materialises these as nested dirs)
     const parentDir         = path.dirname(pkgPath);
     const parentPkgJsonPath = path.join(parentDir, "package.json");
     if (fs.existsSync(parentPkgJsonPath)) {
@@ -194,7 +164,7 @@ class NodeModulesScanner {
         : "unknown");
 
     this.packages.set(key, {
-      purl:        NodeManager._npmPurl(name, version),
+      purl:        NodeManagerInstance._npmPurl(name, version),
       name,
       version,
       license,
@@ -216,8 +186,8 @@ class NodeModulesScanner {
         const resolved = this._findInstalledPackage(pkg.path, depName);
         deps.add(
           resolved
-            ? NodeManager._npmPurl(resolved.name, resolved.version)
-            : NodeManager._npmPurl(depName, "")
+            ? NodeManagerInstance._npmPurl(resolved.name, resolved.version)
+            : NodeManagerInstance._npmPurl(depName, "")
         );
       }
     }
@@ -257,90 +227,76 @@ class NodeModulesScanner {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NodeManager
+// NodeManagerInstance
+//
+// All state that was previously on static fields of NodeManager is now held
+// on instance fields.  One instance is created per scan invocation so there
+// is no shared mutable state between concurrent or sequential scans.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class NodeManager {
+export class NodeManagerInstance {
 
-  static inventoryData = [];
-  static currentLockFileContent = null;
+  constructor() {
+    this.inventoryData               = [];
+    this.currentLockFileContent      = null;
 
-  static _original_package_json  = null;
-  static _original_lockfile      = null;
-  static _lockfileBackupDir      = null;
-  
-  // NEW: original file hashes for integrity checks
-  static _original_package_json_hash = null;
-  static _original_lockfile_hash     = null;
+    this._original_package_json      = null;
+    this._original_lockfile          = null;
+    this._lockfileBackupDir          = null;
 
-  static engineVersion = null;
+    this._original_package_json_hash = null;
+    this._original_lockfile_hash     = null;
 
-  /**
-   * Candidate lockfile content produced by the last runDryRun call.
-   * Shape: parsed lockfile object (type depends on engine), or null.
-   */
-  static candidate_lockfile_content = null;
+    this.engineVersion               = null;
 
-  /**
-   * SHA-256 hex digest of the raw candidate lockfile bytes written to disk
-   * by runDryRun.  Used by verifyCandidateLockfileHash() to detect any
-   * on-disk mutation between the dry-run scan and the real install.
-   */
-  static _candidateLockfileHash = null;
+    this.candidate_lockfile_content  = null;
+    this._candidateLockfileHash      = null;
+    this._candidatePackageJsonHash   = null;
 
-  /**
-   * SHA-256 hex digest of the candidate package.json bytes as they exist on
-   * disk after the dry-run command completes (and after saveCandidateLockfile
-   * regenerates package.json for npm).  Used by verifyPackageJsonHash() to
-   * detect any mutation of package.json between the scan and the real install.
-   */
-  static _candidatePackageJsonHash = null;
-
-  static _captureEngineVersion(binary) {
-    try {
-      const r = spawnSync(binary, ["--version"], { encoding: "utf8", shell: true });
-      if (r.status === 0 && r.stdout) {
-        NodeManager.engineVersion = r.stdout.trim().replace(/^v/, "");
-      } else {
-        NodeManager.engineVersion = null;
-      }
-    } catch {
-      NodeManager.engineVersion = null;
-    }
   }
 
   // ─────────────────────────────
-  // Safe iterable helpers
-  // ─────────────────────────────
-
-  static _safeArray(v) {
-    if (!v) return [];
-    if (Array.isArray(v)) return v;
-    if (typeof v.values === "function") return [...v.values()];
-    return [];
-  }
-
-  static _safeObjectEntries(v) {
-    if (!v || typeof v !== "object") return [];
-    return Object.entries(v);
-  }
-
-  // ─────────────────────────────
-  // PURL construction
-  // Delegates to LockfileParser.purl so there is a single canonical impl.
+  // Static helpers (pure functions — no state, safe to keep static)
   // ─────────────────────────────
 
   static _npmPurl(name, version) {
     return LockfileParser.purl(name, version);
   }
 
+  _safeArray(v) {
+    if (!v) return [];
+    if (Array.isArray(v)) return v;
+    if (typeof v.values === "function") return [...v.values()];
+    return [];
+  }
+
+  _safeObjectEntries(v) {
+    if (!v || typeof v !== "object") return [];
+    return Object.entries(v);
+  }
+
+  // ─────────────────────────────
+  // Engine version capture
+  // ─────────────────────────────
+
+  _captureEngineVersion(binary) {
+    try {
+      const r = spawnSync(binary, ["--version"], { encoding: "utf8", shell: true });
+      if (r.status === 0 && r.stdout) {
+        this.engineVersion = r.stdout.trim().replace(/^v/, "");
+      } else {
+        this.engineVersion = null;
+      }
+    } catch {
+      this.engineVersion = null;
+    }
+  }
+
   // ─────────────────────────────
   // Scanner → component tree
   // ─────────────────────────────
 
-  static tree_data = null;
-
-  static _scannerToTree(rootDir) {
+  _scannerToTree(rootDir) {
     const scanner = new NodeModulesScanner(rootDir);
     const pkgs    = scanner.scan();
 
@@ -358,8 +314,8 @@ export class NodeManager {
     }));
 
     return {
-      id:           NodeManager._npmPurl("", ""),
-      base_id:      NodeManager._npmPurl("", ""),
+      id:           NodeManagerInstance._npmPurl("", ""),
+      base_id:      NodeManagerInstance._npmPurl("", ""),
       name:         "",
       version:      "",
       path:         rootDir,
@@ -372,21 +328,14 @@ export class NodeManager {
   }
 
   // ─────────────────────────────
-  // Lockfile → component list
-  //
-  // Delegates entirely to LockfileParser — the single source of truth for
-  // all lockfile parsing across every supported engine.
+  // Lockfile parsing
   // ─────────────────────────────
 
-  static scanLockfile(filename, content) {
+  scanLockfile(filename, content) {
     return LockfileParser.parse(filename, content);
   }
 
-  /**
-   * Legacy shim — callers that used scanPackageLock() directly still work.
-   * Internally delegates to LockfileParser.parseNpmLock.
-   */
-  static scanPackageLock(content) {
+  scanPackageLock(content) {
     return LockfileParser.parseNpmLock(content);
   }
 
@@ -394,8 +343,8 @@ export class NodeManager {
   // Validate package arg safety
   // ─────────────────────────────
 
-  static _validatePackageArgs(args) {
-    const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+  _validatePackageArgs(args) {
+    const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'\"<>]+)?$/i;
     for (const arg of args) {
       if (!PKG_ARG_RE.test(arg)) {
         throw new Error(
@@ -408,35 +357,29 @@ export class NodeManager {
 
   // ─────────────────────────────
   // Fast dry run  (all engines)
-  //
-  // HOW IT WORKS:
-  //   1. Reset shared static state.
-  //   2. Back up relevant files (package.json + lockfile) to memory + disk.
-  //   3. Validate package args against an allowlist regex.
-  //   4. Run the engine's lockfile-only command so only the lockfile is
-  //      mutated — node_modules is never touched.
-  //   5. Parse the candidate lockfile via LockfileParser.
-  //   6. Diff against the original lockfile to isolate net-new packages.
-  //   7. Normalise through mergeInventoryByPurl.
-  //
-  // The output shape is IDENTICAL regardless of which engine is used.
   // ─────────────────────────────
 
-  static async runDryRun(engine, initialArgs) {
+  /**
+   * @param {string} engine       - Package manager name ("npm", "pnpm", "bun")
+   * @param {string[]} initialArgs - Package specifiers for check/install mode
+   * @param {string} projectRoot  - Absolute path of the project being scanned.
+   *                                Passed explicitly so no process.chdir() is needed.
+   */
+  async runDryRun(engine, initialArgs, projectRoot) {
 
-    // ── 0. Reset static state ────────────────────────────────────────────
+    // ── 0. Reset instance state ──────────────────────────────────────────
+    // (Each NodeManagerInstance is constructed fresh per scan, so this is
+    // primarily a guard against accidental re-use of the same instance.)
 
-    NodeManager.inventoryData              = [];
-    NodeManager._original_package_json     = null;
-    NodeManager._original_lockfile         = null;
-    NodeManager._lockfileBackupDir         = null;
-    NodeManager.candidate_lockfile_content = null;
-    NodeManager._candidateLockfileHash     = null;
-    NodeManager._candidatePackageJsonHash  = null;
-    
-    // NEW: reset original file hashes
-    NodeManager._original_package_json_hash = null;
-    NodeManager._original_lockfile_hash     = null;
+    this.inventoryData               = [];
+    this._original_package_json      = null;
+    this._original_lockfile          = null;
+    this._lockfileBackupDir          = null;
+    this.candidate_lockfile_content  = null;
+    this._candidateLockfileHash      = null;
+    this._candidatePackageJsonHash   = null;
+    this._original_package_json_hash = null;
+    this._original_lockfile_hash     = null;
 
     // ── 1. Validate engine ───────────────────────────────────────────────
 
@@ -447,72 +390,68 @@ export class NodeManager {
       );
     }
 
-    if (!NodeManager.engineVersion) {
+    if (!this.engineVersion) {
       throw new Error(
         `Failed to determine version of '${engine}' (tried '${cfg.binary} --version'). ` +
         `Make sure '${cfg.binary}' is installed and on your PATH.`
       );
-    } 
+    }
 
-    const projectPath     = process.cwd();
+    // projectPath is the caller-supplied, pre-resolved absolute path.
+    // No process.chdir() is ever performed; all file operations below
+    // use this explicit path so the scan is fully isolated from the OS cwd.
+    const projectPath     = path.resolve(projectRoot);
     const packageJsonPath = path.join(projectPath, "package.json");
     const lockPath        = path.join(projectPath, cfg.lockfile);
     const nodeModulesPath = path.join(projectPath, "node_modules");
 
-    // delete existing lockfile if node_modules does not exist
-    if (
-      fs.existsSync(lockPath) &&
-      !fs.existsSync(nodeModulesPath)
-    ) {
+    // Delete stale lockfile when node_modules does not exist
+    if (fs.existsSync(lockPath) && !fs.existsSync(nodeModulesPath)) {
       await fs.promises.unlink(lockPath);
     }
 
     // ── 2. Backup originals ───────────────────────────────────────────────
 
-    NodeManager._original_package_json = fs.existsSync(packageJsonPath)
+    this._original_package_json = fs.existsSync(packageJsonPath)
       ? fs.readFileSync(packageJsonPath, "utf8")
       : null;
 
-    NodeManager._original_lockfile = fs.existsSync(lockPath)
+    this._original_lockfile = fs.existsSync(lockPath)
       ? fs.readFileSync(lockPath, "utf8")
       : null;
 
-    // NEW: compute and store original hashes
-    if (NodeManager._original_package_json !== null) {
-      NodeManager._original_package_json_hash = createHash("sha256")
-        .update(NodeManager._original_package_json, "utf8")
+    if (this._original_package_json !== null) {
+      this._original_package_json_hash = createHash("sha256")
+        .update(this._original_package_json, "utf8")
         .digest("hex");
     } else {
-      NodeManager._original_package_json_hash = "absent";
+      this._original_package_json_hash = "absent";
     }
 
-    if (NodeManager._original_lockfile !== null) {
-      NodeManager._original_lockfile_hash = createHash("sha256")
-        .update(NodeManager._original_lockfile, "utf8")
+    if (this._original_lockfile !== null) {
+      this._original_lockfile_hash = createHash("sha256")
+        .update(this._original_lockfile, "utf8")
         .digest("hex");
     } else {
-      NodeManager._original_lockfile_hash = "absent";
+      this._original_lockfile_hash = "absent";
     }
 
-    // Create an atomically-unique backup directory.  mkdtempSync appends a
-    // random suffix, so concurrent UBEL invocations in the same second cannot
-    // collide on the same path (unlike a plain timestamp directory).
     const backupParent = path.join(projectPath, ".ubel", "lockfiles");
     fs.mkdirSync(backupParent, { recursive: true });
     const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
 
-    if (NodeManager._original_package_json !== null) {
-      fs.writeFileSync(path.join(tmpDir, "package.json"), NodeManager._original_package_json, "utf8");
+    if (this._original_package_json !== null) {
+      fs.writeFileSync(path.join(tmpDir, "package.json"), this._original_package_json, "utf8");
     }
-    if (NodeManager._original_lockfile !== null) {
-      fs.writeFileSync(path.join(tmpDir, cfg.lockfile), NodeManager._original_lockfile, "utf8");
+    if (this._original_lockfile !== null) {
+      fs.writeFileSync(path.join(tmpDir, cfg.lockfile), this._original_lockfile, "utf8");
     }
 
-    NodeManager._lockfileBackupDir = tmpDir;
+    this._lockfileBackupDir = tmpDir;
 
     // ── 3. Validate package args ─────────────────────────────────────────
 
-    NodeManager._validatePackageArgs(initialArgs);
+    this._validatePackageArgs(initialArgs);
 
     // ── 4. Generate candidate lockfile ───────────────────────────────────
 
@@ -532,45 +471,33 @@ export class NodeManager {
     }
 
     // ── 4b. Hash candidate package.json (TOCTOU guard) ───────────────────
-    // For pnpm/bun/yarn the PM rewrites package.json in-place during the
-    // dry-run command (adding exact resolved versions).  Capture the digest
-    // now so we can detect any subsequent mutation before the real install.
-    // For npm, saveCandidateLockfile() regenerates package.json from the
-    // lockfile and must call _hashPackageJson() again after writing it.
-    {
-      if (fs.existsSync(packageJsonPath)) {
-        const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
-        NodeManager._candidatePackageJsonHash = createHash("sha256")
-          .update(pkgRaw, "utf8")
-          .digest("hex");
-      } else {
-        // No package.json on disk — record a sentinel so verification can
-        // distinguish "was absent" from "hash not yet captured".
-        NodeManager._candidatePackageJsonHash = "absent";
-      }
+
+    if (fs.existsSync(packageJsonPath)) {
+      const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
+      this._candidatePackageJsonHash = createHash("sha256")
+        .update(pkgRaw, "utf8")
+        .digest("hex");
+    } else {
+      this._candidatePackageJsonHash = "absent";
     }
 
     // ── 5. Parse candidate lockfile via LockfileParser ───────────────────
 
     const candidateRaw = fs.readFileSync(lockPath, "utf8");
-    NodeManager.candidate_lockfile_content = candidateRaw;
+    this.candidate_lockfile_content = candidateRaw;
 
-    // Hash the raw bytes so we can verify the file has not been tampered with
-    // between the dry-run scan and the real install (TOCTOU guard).
-    {
-      NodeManager._candidateLockfileHash = createHash("sha256")
-        .update(candidateRaw, "utf8")
-        .digest("hex");
-    }
+    this._candidateLockfileHash = createHash("sha256")
+      .update(candidateRaw, "utf8")
+      .digest("hex");
 
     const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
 
     // ── 6. Diff: isolate net-new packages ─────────────────────────────────
 
     const originalPurls = new Set();
-    if (NodeManager._original_lockfile) {
+    if (this._original_lockfile) {
       try {
-        for (const comp of LockfileParser.parse(cfg.lockfile, NodeManager._original_lockfile)) {
+        for (const comp of LockfileParser.parse(cfg.lockfile, this._original_lockfile)) {
           originalPurls.add(comp.id);
         }
       } catch {
@@ -582,57 +509,48 @@ export class NodeManager {
 
     // ── 7. Normalise ──────────────────────────────────────────────────────
 
-    const merged = NodeManager.mergeInventoryByPurl(newComponents);
-    NodeManager.inventoryData = merged;
-    if (NodeManager.engineVersion) {
+    const merged = this.mergeInventoryByPurl(newComponents);
+    this.inventoryData = merged;
+
+    if (this.engineVersion) {
       let engine_license = "MIT";
       if (["yarn"].includes(engine)) {
         engine_license = "BSD 2-Clause";
       }
-               NodeManager.inventoryData.push({
-                id: `pkg:npm/${engine}@${NodeManager.engineVersion}`,
-                name: engine,
-                version: NodeManager.engineVersion,
-                license: engine_license,
-                ecosystem: "npm",
-                state: "undetermined",
-                scopes: ["env"],
-                dependencies: [],
-                type: "library",
-                paths: [],
-              },
-              {
-                id: `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
-                name: TOOL_NAME,
-                version: TOOL_VERSION,
-                license: TOOL_LICENSE,
-                ecosystem: "npm",
-                state: "undetermined",
-                scopes: ["env"],
-                dependencies: [],
-                type: "library",
-                paths: [],
-              }
-              );
-            }
+      this.inventoryData.push(
+        {
+          id:        `pkg:npm/${engine}@${this.engineVersion}`,
+          name:      engine,
+          version:   this.engineVersion,
+          license:   engine_license,
+          ecosystem: "npm",
+          state:     "undetermined",
+          scopes:    ["env"],
+          dependencies: [],
+          type:      "library",
+          paths:     [],
+        },
+        {
+          id:        `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
+          name:      TOOL_NAME,
+          version:   TOOL_VERSION,
+          license:   TOOL_LICENSE,
+          ecosystem: "npm",
+          state:     "undetermined",
+          scopes:    ["env"],
+          dependencies: [],
+          type:      "library",
+          paths:     [],
+        }
+      );
+    }
 
     // ── 8. Assign scopes ──────────────────────────────────────────────────
-    // BFS scope propagation must run against the FULL candidate graph so it
-    // can traverse already-present transitive deps when diffing against an
-    // existing lockfile (e.g. pnpm install with a pre-existing pnpm-lock.yaml
-    // produces a near-empty newComponents diff, leaving the BFS with no graph
-    // to walk and all scopes empty).
-    //
-    // Strategy:
-    //   1. Run _assignScopes on allCandidateComponents (full graph).
-    //   2. Build a purl→scopes map from the result.
-    //   3. Copy computed scopes back onto inventoryData (new packages only).
-    //   Engine/tool entries already carry scopes: ["env"] and are left alone.
 
-    NodeManager._assignScopes(allCandidateComponents, packageJsonPath);
+    this._assignScopes(allCandidateComponents, packageJsonPath);
 
     const scopeMap = new Map(allCandidateComponents.map(c => [c.id, c.scopes]));
-    for (const comp of NodeManager.inventoryData) {
+    for (const comp of this.inventoryData) {
       if (!Array.isArray(comp.scopes) || comp.scopes.length === 0) {
         comp.scopes = scopeMap.get(comp.id) ?? [];
       }
@@ -645,34 +563,20 @@ export class NodeManager {
   // Revert lockfile + package.json to originals
   // ─────────────────────────────
 
-  static revert_lock_to_original(engine = "npm", projectPath = ".") {
-    // Revert logic is intentionally identical for npm, pnpm, and bun:
-    //   - npm  : restores package-lock.json + package.json
-    //   - pnpm : restores pnpm-lock.yaml    + package.json
-    //   - bun  : restores bun.lock          + package.json
-    // All three engines mutate both files during a dry-run (npm install
-    // --package-lock-only, pnpm add --lockfile-only, bun add --lockfile-only),
-    // so both must be reverted.  ENGINE_CONFIG supplies the correct lockfile
-    // name per engine; no per-engine special-casing is needed here.
-
+  revert_lock_to_original(engine = "npm", projectPath) {
     const cfg = ENGINE_CONFIG[engine];
     if (!cfg) {
       return {
         reverted:  false,
         reason:    `Unknown engine '${engine}' — cannot determine lockfile name`,
-        backupDir: NodeManager._lockfileBackupDir,
+        backupDir: this._lockfileBackupDir,
       };
     }
 
     const packageJsonPath = path.join(projectPath, "package.json");
     const lockPath        = path.join(projectPath, cfg.lockfile);
-    const tmpDir          = NodeManager._lockfileBackupDir;
+    const tmpDir          = this._lockfileBackupDir;
 
-    // Helper: verify a single file's integrity using its expected hash.
-    // At revert time the on-disk files are in *candidate* state (post-dry-run),
-    // so we compare against the candidate hashes, not the original ones.
-    // This catches any third-party mutation that occurred after the dry-run
-    // but before we restore the originals.
     const verifyFile = (filePath, expectedHash, fileLabel) => {
       const fileExists = fs.existsSync(filePath);
       if (expectedHash === "absent") {
@@ -693,36 +597,27 @@ export class NodeManager {
       const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
       if (currentHash !== expectedHash) {
         return {
-          ok: false,
+          ok:     false,
           reason: `${fileLabel} hash mismatch (expected ${expectedHash}, got ${currentHash})`,
         };
       }
       return { ok: true };
     };
 
-    // 1. Verify package.json is still in the candidate state we left it in.
-    //    If _candidatePackageJsonHash is null (runDryRun was never called or
-    //    did not touch package.json), fall back to the original hash so the
-    //    guard is still meaningful rather than vacuously passing.
-    const pkgExpectedHash = NodeManager._candidatePackageJsonHash ?? NodeManager._original_package_json_hash;
-    const pkgCheck = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
+    const pkgExpectedHash  = this._candidatePackageJsonHash ?? this._original_package_json_hash;
+    const pkgCheck         = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
     if (!pkgCheck.ok) {
       return { reverted: false, reason: pkgCheck.reason, backupDir: tmpDir };
     }
 
-    // 2. Verify lockfile is still in the candidate state we left it in.
-    const lockExpectedHash = NodeManager._candidateLockfileHash ?? NodeManager._original_lockfile_hash;
-    const lockCheck = verifyFile(lockPath, lockExpectedHash, cfg.lockfile);
+    const lockExpectedHash = this._candidateLockfileHash ?? this._original_lockfile_hash;
+    const lockCheck        = verifyFile(lockPath, lockExpectedHash, cfg.lockfile);
     if (!lockCheck.ok) {
       return { reverted: false, reason: lockCheck.reason, backupDir: tmpDir };
     }
 
-    // ──── Verification passed – proceed with actual revert ────
-
     try {
-      // Restore package.json — primary source is in-memory; disk backup is the
-      // safety net (e.g. after a process restart or if memory was cleared).
-      let pkgContent = NodeManager._original_package_json;
+      let pkgContent = this._original_package_json;
       if (pkgContent === null && tmpDir) {
         const disk = path.join(tmpDir, "package.json");
         if (fs.existsSync(disk)) pkgContent = fs.readFileSync(disk, "utf8");
@@ -730,13 +625,10 @@ export class NodeManager {
       if (pkgContent !== null) {
         fs.writeFileSync(packageJsonPath, pkgContent, "utf8");
       } else if (fs.existsSync(packageJsonPath)) {
-        // No original existed before the dry-run — remove the engine-created
-        // file so the project is left exactly as it was found.
         fs.unlinkSync(packageJsonPath);
       }
 
-      // Restore lockfile — same two-tier strategy as package.json above.
-      let lockContent = NodeManager._original_lockfile;
+      let lockContent = this._original_lockfile;
       if (lockContent === null && tmpDir) {
         const disk = path.join(tmpDir, cfg.lockfile);
         if (fs.existsSync(disk)) lockContent = fs.readFileSync(disk, "utf8");
@@ -744,7 +636,6 @@ export class NodeManager {
       if (lockContent !== null) {
         fs.writeFileSync(lockPath, lockContent, "utf8");
       } else if (fs.existsSync(lockPath)) {
-        // No lockfile existed before the dry-run — remove the generated one.
         fs.unlinkSync(lockPath);
       }
 
@@ -759,13 +650,13 @@ export class NodeManager {
   // Delete the tmp backup dir
   // ─────────────────────────────
 
-  static cleanupLockfileBackup() {
-    const tmpDir = NodeManager._lockfileBackupDir;
+  cleanupLockfileBackup() {
+    const tmpDir = this._lockfileBackupDir;
     if (!tmpDir) return { cleaned: false, reason: "no backup dir recorded" };
 
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
-      NodeManager._lockfileBackupDir = null;
+      this._lockfileBackupDir = null;
       return { cleaned: true };
     } catch (err) {
       return { cleaned: false, reason: err.message };
@@ -774,16 +665,14 @@ export class NodeManager {
 
   // ─────────────────────────────
   // Save candidate lockfile
-  // For npm: also regenerates package.json with exact pinned versions.
-  // For other engines: only writes back the raw lockfile text.
   // ─────────────────────────────
 
-  static async saveCandidateLockfile(engine = "npm", projectPath = process.cwd()) {
+  async saveCandidateLockfile(engine = "npm", projectPath) {
 
     const cfg          = ENGINE_CONFIG[engine] || ENGINE_CONFIG.npm;
     const lockfilePath = path.join(projectPath, cfg.lockfile);
 
-    if (!NodeManager.candidate_lockfile_content) {
+    if (!this.candidate_lockfile_content) {
       return {
         written:  false,
         filePath: lockfilePath,
@@ -792,22 +681,16 @@ export class NodeManager {
     }
 
     try {
-      // ── Write candidate lockfile ────────────────────────────────────────
       if (engine === "npm") {
-        // npm: content was stored as a parsed object → serialise
-        const raw = typeof NodeManager.candidate_lockfile_content === "string"
-          ? NodeManager.candidate_lockfile_content
-          : JSON.stringify(NodeManager.candidate_lockfile_content, null, 2);
+        const raw = typeof this.candidate_lockfile_content === "string"
+          ? this.candidate_lockfile_content
+          : JSON.stringify(this.candidate_lockfile_content, null, 2);
         fs.writeFileSync(lockfilePath, raw, "utf8");
 
-        // Parse a copy to read dependencies for package.json regeneration
-        const parsed = typeof NodeManager.candidate_lockfile_content === "string"
-          ? JSON.parse(NodeManager.candidate_lockfile_content)
-          : NodeManager.candidate_lockfile_content;
+        const parsed = typeof this.candidate_lockfile_content === "string"
+          ? JSON.parse(this.candidate_lockfile_content)
+          : this.candidate_lockfile_content;
 
-        // fs.writeFileSync(lockfilePath, JSON.stringify(parsed, null, 2), "utf8");
-
-        // Regenerate package.json with exact pinned versions from the lockfile
         const packageJsonPath = path.join(projectPath, "package.json");
         const packages        = parsed.packages || {};
         const rootMeta        = packages[""] || {};
@@ -835,12 +718,9 @@ export class NodeManager {
 
         fs.writeFileSync(packageJsonPath, JSON.stringify(pkgJson, null, 2), "utf8");
 
-        // Re-capture the package.json hash now that we've regenerated it from
-        // the lockfile.  The dry-run hash (captured before regeneration) would
-        // be stale and cause verifyPackageJsonHash() to fail in runRealInstall.
         {
           const written = fs.readFileSync(packageJsonPath, "utf8");
-          NodeManager._candidatePackageJsonHash = createHash("sha256")
+          this._candidatePackageJsonHash = createHash("sha256")
             .update(written, "utf8")
             .digest("hex");
         }
@@ -848,25 +728,14 @@ export class NodeManager {
         return { written: true, filePath: lockfilePath, packageJsonPath };
 
       } else {
-        // pnpm / bun / yarn: write raw lockfile text back verbatim.
-        //
-        // Unlike npm, these engines update package.json in-place during the
-        // dry-run (pnpm add / bun add both write exact resolved versions back).
-        // The on-disk package.json is therefore already in candidate state after
-        // runDryRun completes.  We read it here, write it back explicitly (so
-        // the operation is atomic and the return value is consistent with the
-        // npm branch), then persist the lockfile.
-        const raw = typeof NodeManager.candidate_lockfile_content === "string"
-          ? NodeManager.candidate_lockfile_content
-          : JSON.stringify(NodeManager.candidate_lockfile_content, null, 2);
+        const raw = typeof this.candidate_lockfile_content === "string"
+          ? this.candidate_lockfile_content
+          : JSON.stringify(this.candidate_lockfile_content, null, 2);
 
         const packageJsonPath = path.join(projectPath, "package.json");
 
-        // ── TOCTOU guard: verify package.json has not been mutated since the
-        // dry-run captured its hash.  We must do this *before* reading the
-        // file so we never launder tampered content into the real install.
-        if (NodeManager._candidatePackageJsonHash &&
-            NodeManager._candidatePackageJsonHash !== "absent") {
+        if (this._candidatePackageJsonHash &&
+            this._candidatePackageJsonHash !== "absent") {
           if (!fs.existsSync(packageJsonPath)) {
             return {
               written:  false,
@@ -876,26 +745,23 @@ export class NodeManager {
           }
           const onDisk     = fs.readFileSync(packageJsonPath, "utf8");
           const onDiskHash = createHash("sha256").update(onDisk, "utf8").digest("hex");
-          if (onDiskHash !== NodeManager._candidatePackageJsonHash) {
+          if (onDiskHash !== this._candidatePackageJsonHash) {
             return {
               written:  false,
               filePath: lockfilePath,
               reason:   `package.json integrity check FAILED — file was modified after scanning.\n` +
-                        `  Expected : ${NodeManager._candidatePackageJsonHash}\n` +
+                        `  Expected : ${this._candidatePackageJsonHash}\n` +
                         `  Got      : ${onDiskHash}\n` +
                         `  File     : ${packageJsonPath}`,
             };
           }
         }
 
-        // Read the candidate package.json that the dry-run already wrote (and
-        // that we just verified above).  Fall back to the in-memory original if
-        // the file is unexpectedly absent (project never had one before dry-run).
         let pkgJsonRaw = null;
         if (fs.existsSync(packageJsonPath)) {
           pkgJsonRaw = fs.readFileSync(packageJsonPath, "utf8");
-        } else if (NodeManager._original_package_json !== null) {
-          pkgJsonRaw = NodeManager._original_package_json;
+        } else if (this._original_package_json !== null) {
+          pkgJsonRaw = this._original_package_json;
         }
 
         fs.writeFileSync(lockfilePath, raw, "utf8");
@@ -914,31 +780,31 @@ export class NodeManager {
 
   // ─────────────────────────────
   // Export installed dependencies
-  // (disk scan via NodeModulesScanner)
   // ─────────────────────────────
 
-  static exportNpmDependencies(projectPath) {
-    return Promise.resolve(NodeManager._scannerToTree(projectPath));
+  exportNpmDependencies(projectPath) {
+    return this._scannerToTree(projectPath);
   }
 
   // ─────────────────────────────
   // Recursive project scanner
   // ─────────────────────────────
 
-  static async getInstalled(startDir = process.cwd(), options = { full_stack: false, scan_os: false, scan_node: true }) {
+  async getInstalled(startDir, options = { full_stack: false, scan_os: false, scan_node: true }) {
 
-    const visited = new Set();
-    const results = [];
+    const visited     = new Set();
+    const projectRoots = [];   // track every discovered project root for per-project scope assignment
 
-    NodeManager.inventoryData = []; // reset shared inventory state before scan
+    this.inventoryData = [];
 
-    async function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
       catch { return; }
 
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith(".")) continue;
 
         const fullPath = path.join(dir, entry.name);
 
@@ -949,57 +815,86 @@ export class NodeManager {
           visited.add(key);
 
           try {
-            const tree       = await NodeManager.exportNpmDependencies(projectRoot);
-            const components = NodeManager.getInstalledFromTree(tree);
-            NodeManager.inventoryData.push(...components);
-            results.push(...components.map(c => c.id));
-          } catch {}
+            const scanner    = new NodeModulesScanner(projectRoot);
+            const pkgs       = scanner.scan();
+
+            const components = pkgs.map(pkg => ({
+              id:           NodeManagerInstance._npmPurl(pkg.name, pkg.version),
+              name:         pkg.name,
+              version:      pkg.version,
+              type:         "library",
+              license:      pkg.license ?? "unknown",
+              ecosystem:    "npm",
+              state:        "undetermined",
+              scopes:       [],
+              dependencies: pkg.dependencies,
+              paths:        [pkg.path],
+            }));
+
+            this.inventoryData.push(...components);
+            projectRoots.push(projectRoot);
+          } catch (err) { console.log(err)}
 
           continue;
         }
 
-        if (entry.name.startsWith(".")) continue;
-        await walk(fullPath);
+        walk(fullPath);
       }
-    }
+    };
 
-    if (options.scan_node){
-      await walk(startDir);
+    if (options.scan_node) {
+      walk(startDir);
     }
 
     if (options.full_stack) {
+      const pythonScanner  = new PythonVenvScanner();
+      const phpScanner     = new PhpComposerScanner();
+      const rustScanner    = new RustCargoScanner();
+      const goScanner      = new GoModScanner();
+      const csharpScanner  = new CSharpNuGetScanner();
+      const javaScanner    = new JavaMavenScanner();
+      const rubyScanner    = new RubyBundlerScanner();
 
-    await PythonVenvScanner.getInstalled(startDir);
-    await PhpComposerScanner.getInstalled(startDir);
-    await RustCargoScanner.getInstalled(startDir);
-    await GoModScanner.getInstalled(startDir);
-    await CSharpNuGetScanner.getInstalled(startDir);
-    await JavaMavenScanner.getInstalled(startDir);
-    await RubyBundlerScanner.getInstalled(startDir);
-    NodeManager.inventoryData.push(...PythonVenvScanner.inventoryData);
-    NodeManager.inventoryData.push(...PhpComposerScanner.inventoryData);
-    NodeManager.inventoryData.push(...RustCargoScanner.inventoryData);
-    NodeManager.inventoryData.push(...GoModScanner.inventoryData);
-    NodeManager.inventoryData.push(...CSharpNuGetScanner.inventoryData);
-    NodeManager.inventoryData.push(...JavaMavenScanner.inventoryData);
-    NodeManager.inventoryData.push(...RubyBundlerScanner.inventoryData);
+      await pythonScanner.getInstalled(startDir);
+      await phpScanner.getInstalled(startDir);
+      await rustScanner.getInstalled(startDir);
+      await goScanner.getInstalled(startDir);
+      await csharpScanner.getInstalled(startDir);
+      await javaScanner.getInstalled(startDir);
+      await rubyScanner.getInstalled(startDir);
+
+      this.inventoryData.push(...pythonScanner.inventoryData);
+      this.inventoryData.push(...phpScanner.inventoryData);
+      this.inventoryData.push(...rustScanner.inventoryData);
+      this.inventoryData.push(...goScanner.inventoryData);
+      this.inventoryData.push(...csharpScanner.inventoryData);
+      this.inventoryData.push(...javaScanner.inventoryData);
+      this.inventoryData.push(...rubyScanner.inventoryData);
     }
+
     if (options.scan_os) {
       if (process.platform === "win32") {
-        await WindowsHostScanner.getInstalled();
-        NodeManager.inventoryData.push(...WindowsHostScanner.inventoryData);
+        const winScanner = new WindowsHostScanner();
+        await winScanner.getInstalled();
+        this.inventoryData.push(...winScanner.inventoryData);
       } else {
-        await LinuxHostScanner.getInstalled();
-        NodeManager.inventoryData.push(...LinuxHostScanner.inventoryData);
+        const linuxScanner = new LinuxHostScanner();
+        linuxScanner.getInstalled();
+        this.inventoryData.push(...linuxScanner.inventoryData);
       }
     }
 
-    const merged = NodeManager.mergeInventoryByPurl(NodeManager.inventoryData);
-    NodeManager.inventoryData = merged;
+    const merged = this.mergeInventoryByPurl(this.inventoryData);
+    this.inventoryData = merged;
 
-    // Assign pro/dev/env scopes from the project's package.json.
-    const pkgJsonPath = path.join(startDir, 'package.json');
-    NodeManager._assignScopes(NodeManager.inventoryData, pkgJsonPath);
+    // Assign scopes per project root so each project's own package.json is used,
+    // mirroring how PythonVenvScanner groups by venv_root.
+    // Fall back to startDir if no project roots were discovered (e.g. scan_node: false).
+    const roots = projectRoots.length ? projectRoots : [startDir];
+    for (const root of roots) {
+      const pkgJsonPath = path.join(root, "package.json");
+      this._assignScopes(this.inventoryData, pkgJsonPath);
+    }
 
     return merged.map(c => c.id);
   }
@@ -1008,12 +903,12 @@ export class NodeManager {
   // Flatten dependency tree
   // ─────────────────────────────
 
-  static getInstalledFromTree(tree) {
+  getInstalledFromTree(tree) {
     const map = new Map();
 
-    function walk(node) {
+    const walk = (node) => {
       if (node?.name && node?.version) {
-        const id           = NodeManager._npmPurl(node.name, node.version);
+        const id           = NodeManagerInstance._npmPurl(node.name, node.version);
         const pathLocation = node.path || null;
 
         if (!map.has(id)) {
@@ -1034,14 +929,14 @@ export class NodeManager {
         const comp = map.get(id);
         if (pathLocation && !comp.paths.includes(pathLocation)) comp.paths.push(pathLocation);
 
-        const deps = NodeManager._safeArray(node.dependencies);
+        const deps = this._safeArray(node.dependencies);
         comp.dependencies = deps.map(d => d.base_id || d.id || d);
       }
 
-      for (const child of NodeManager._safeArray(node?.dependencies)) {
+      for (const child of this._safeArray(node?.dependencies)) {
         walk(child);
       }
-    }
+    };
 
     walk(tree);
     return [...map.values()];
@@ -1049,33 +944,20 @@ export class NodeManager {
 
   // ─────────────────────────────
   // Scope assignment
-  //
-  // Reads package.json at pkgJsonPath to identify direct dev/pro roots, then
-  // walks the dependency graph propagating scopes transitively.
-  //
-  // Rules:
-  //   • listed in dependencies     → pro  (and all transitives)
-  //   • listed in devDependencies  → dev  (and all transitives)
-  //   • reachable from both roots  → both pro + dev
-  //   • engine binary entries      → env only (already set at creation)
-  //   • unreachable from any root  → scopes stays [] (unlisted transitive)
   // ─────────────────────────────
 
-  static _assignScopes(inventory, pkgJsonPath) {
-    // Build a PURL→component index for fast lookup.
+  _assignScopes(inventory, pkgJsonPath) {
     const byId = new Map();
     for (const comp of inventory) byId.set(comp.id, comp);
 
-    // Initialise scopes array on every component that does not have one yet.
     for (const comp of inventory) {
       if (!Array.isArray(comp.scopes)) comp.scopes = [];
     }
 
-    // Read package.json — if missing, nothing to do (scopes stay []).
     let pkgJson = null;
     try {
       if (fs.existsSync(pkgJsonPath)) {
-        pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+        pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
       }
     } catch { /* unparseable package.json — skip */ }
 
@@ -1084,16 +966,13 @@ export class NodeManager {
     const proDirect = new Set(Object.keys(pkgJson.dependencies    || {}));
     const devDirect = new Set(Object.keys(pkgJson.devDependencies || {}));
 
-    // Name index: name → comp[].  Needed because lockfile-resolved versions
-    // can differ from the range specifiers in package.json.
     const nameIndex = new Map();
     for (const comp of inventory) {
       if (!nameIndex.has(comp.name)) nameIndex.set(comp.name, []);
       nameIndex.get(comp.name).push(comp);
     }
 
-    // BFS: starting from each direct dep, tag every reachable node with scope.
-    function propagate(directNames, scope) {
+    const propagate = (directNames, scope) => {
       const queue = [];
       for (const name of directNames) {
         for (const comp of (nameIndex.get(name) || [])) queue.push(comp);
@@ -1109,12 +988,10 @@ export class NodeManager {
           if (depComp) {
             if (!visited.has(depComp.id)) queue.push(depComp);
           } else {
-            // Versionless PURL (pkg:npm/name@ or pkg:npm/%40scope/name@) —
-            // extract the package name and resolve via nameIndex.
             const plain  = depPurl.match(/^pkg:npm\/([^%@][^@/]*)@/);
             const scoped = depPurl.match(/^pkg:npm\/%40([^@/]+)\/([^@]+)@/);
             const depName = scoped
-              ? '@' + scoped[1] + '/' + scoped[2]
+              ? "@" + scoped[1] + "/" + scoped[2]
               : plain ? plain[1] : null;
             if (depName) {
               for (const c of (nameIndex.get(depName) || [])) {
@@ -1124,18 +1001,18 @@ export class NodeManager {
           }
         }
       }
-    }
+    };
 
-    propagate(proDirect, 'prod');
-    propagate(devDirect, 'dev');
+    propagate(proDirect, "prod");
+    propagate(devDirect, "dev");
   }
 
   // ─────────────────────────────
   // Merge inventory by PURL
   // ─────────────────────────────
 
-  static mergeInventoryByPurl(components) {
-    components = NodeManager._safeArray(components);
+  mergeInventoryByPurl(components) {
+    components = this._safeArray(components);
     const map  = new Map();
 
     for (const comp of components) {
@@ -1143,7 +1020,7 @@ export class NodeManager {
 
       if (!map.has(id)) {
         const clone  = { ...comp };
-        clone.paths  = NodeManager._safeArray(clone.paths);
+        clone.paths  = this._safeArray(clone.paths);
         if (clone.path && !clone.paths.includes(clone.path)) clone.paths.push(clone.path);
         delete clone.path;
         map.set(id, clone);
@@ -1157,7 +1034,6 @@ export class NodeManager {
           if (p && !existing.paths.includes(p)) existing.paths.push(p);
         }
       }
-      // Union-merge scopes — a package listed in both dev and prod gets both.
       if (Array.isArray(comp.scopes)) {
         if (!Array.isArray(existing.scopes)) existing.scopes = [];
         for (const s of comp.scopes) {
@@ -1170,25 +1046,17 @@ export class NodeManager {
   }
 
   // ─────────────────────────────
-  // Lockfile integrity check  (TOCTOU guard)
-  //
-  // Re-hashes the on-disk lockfile and compares it against the SHA-256
-  // digest captured at the end of runDryRun.  Must be called immediately
-  // before runRealInstall so that any mutation of the lockfile between the
-  // dry-run scan and the real install is detected and the install is aborted.
-  //
-  // Returns { ok: true } on success, or
-  //         { ok: false, reason: string } on any failure.
+  // Lockfile integrity check
   // ─────────────────────────────
 
-  static async verifyCandidateLockfileHash(engine = "npm", projectPath = process.cwd()) {
+  async verifyCandidateLockfileHash(engine = "npm", projectPath) {
     console.log(`Verifying lockfile integrity for engine '${engine}'...`);
     const cfg = ENGINE_CONFIG[engine];
     if (!cfg) {
       return { ok: false, reason: `Unknown engine '${engine}'` };
     }
 
-    if (!NodeManager._candidateLockfileHash) {
+    if (!this._candidateLockfileHash) {
       return { ok: false, reason: "No candidate lockfile hash recorded — runDryRun() must be called first" };
     }
 
@@ -1202,13 +1070,13 @@ export class NodeManager {
     }
 
     const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
-    if (currentHash !== NodeManager._candidateLockfileHash) {
+    if (currentHash !== this._candidateLockfileHash) {
       return {
-        ok:       false,
-        reason:   `Lockfile integrity check FAILED — the lockfile was modified after scanning.\n` +
-                  `  Expected : ${NodeManager._candidateLockfileHash}\n` +
-                  `  Got      : ${currentHash}\n` +
-                  `  File     : ${lockPath}`,
+        ok:     false,
+        reason: `Lockfile integrity check FAILED — the lockfile was modified after scanning.\n` +
+                `  Expected : ${this._candidateLockfileHash}\n` +
+                `  Got      : ${currentHash}\n` +
+                `  File     : ${lockPath}`,
       };
     }
 
@@ -1216,21 +1084,11 @@ export class NodeManager {
   }
 
   // ─────────────────────────────
-  // package.json integrity check  (TOCTOU guard)
-  //
-  // Re-hashes the on-disk package.json and compares it against the SHA-256
-  // digest captured at the end of runDryRun (and updated by
-  // saveCandidateLockfile for npm, which regenerates package.json from the
-  // lockfile).  Must be called immediately before runRealInstall so that any
-  // mutation of package.json between the scan and the real install is
-  // detected and the install is aborted.
-  //
-  // Returns { ok: true } on success, or
-  //         { ok: false, reason: string } on any failure.
+  // package.json integrity check
   // ─────────────────────────────
 
-  static async verifyPackageJsonHash(projectPath = process.cwd()) {
-    if (!NodeManager._candidatePackageJsonHash) {
+  async verifyPackageJsonHash(projectPath) {
+    if (!this._candidatePackageJsonHash) {
       return {
         ok:     false,
         reason: "No candidate package.json hash recorded — runDryRun() must be called first",
@@ -1239,9 +1097,7 @@ export class NodeManager {
 
     const pkgPath = path.join(projectPath, "package.json");
 
-    // Handle the "absent" sentinel: if no package.json existed after the
-    // dry-run, the file must still be absent now.
-    if (NodeManager._candidatePackageJsonHash === "absent") {
+    if (this._candidatePackageJsonHash === "absent") {
       if (fs.existsSync(pkgPath)) {
         return {
           ok:     false,
@@ -1265,11 +1121,11 @@ export class NodeManager {
 
     const currentHash = createHash("sha256").update(currentContent, "utf8").digest("hex");
 
-    if (currentHash !== NodeManager._candidatePackageJsonHash) {
+    if (currentHash !== this._candidatePackageJsonHash) {
       return {
         ok:     false,
         reason: `package.json integrity check FAILED — the file was modified after scanning.\n` +
-                `  Expected : ${NodeManager._candidatePackageJsonHash}\n` +
+                `  Expected : ${this._candidatePackageJsonHash}\n` +
                 `  Got      : ${currentHash}\n` +
                 `  File     : ${pkgPath}`,
       };
@@ -1277,22 +1133,18 @@ export class NodeManager {
 
     return { ok: true };
   }
-  //
-  // Runs the engine's frozen/clean install command so that node_modules
-  // exactly matches the committed lockfile.  Never modifies the lockfile.
+
+  // ─────────────────────────────
+  // Real install
   // ─────────────────────────────
 
-  static async runRealInstall(engine) {
-    // ── Integrity checks (TOCTOU guards) ─────────────────────────────────
-    // Both checks must pass before the package manager is allowed to run.
-    // Either failure aborts the install and throws so the caller can revert.
-
-    const lockfileCheck = await NodeManager.verifyCandidateLockfileHash(engine);
+  async runRealInstall(engine, projectPath) {
+    const lockfileCheck = await this.verifyCandidateLockfileHash(engine, projectPath);
     if (!lockfileCheck.ok) {
       throw new Error(`Lockfile integrity check failed: ${lockfileCheck.reason}`);
     }
 
-    const pkgJsonCheck = await NodeManager.verifyPackageJsonHash(process.cwd());
+    const pkgJsonCheck = await this.verifyPackageJsonHash(projectPath);
     if (!pkgJsonCheck.ok) {
       throw new Error(`package.json integrity check failed: ${pkgJsonCheck.reason}`);
     }
@@ -1305,16 +1157,17 @@ export class NodeManager {
     }
 
     return spawnSync(cfg.binary, cfg.installCmd, {
+      cwd:   projectPath,
       shell: true,
       stdio: "inherit",
     });
   }
 
   // ─────────────────────────────
-  // Graph comparison
+  // Graph utilities
   // ─────────────────────────────
 
-  static compareGraphs(expectedPurls, actualPurls) {
+  compareGraphs(expectedPurls, actualPurls) {
     const expected = new Set(expectedPurls);
     const actual   = new Set(actualPurls);
 
@@ -1327,11 +1180,7 @@ export class NodeManager {
     return { match: missing.length === 0 && extra.length === 0, missing, extra };
   }
 
-  // ─────────────────────────────
-  // Dependency sequences
-  // ─────────────────────────────
-
-  static buildDependencySequences(inventory) {
+  buildDependencySequences(inventory) {
     if (!Array.isArray(inventory)) inventory = Object.values(inventory || {});
 
     const byId    = new Map();
@@ -1374,58 +1223,80 @@ export class NodeManager {
     return inventory;
   }
 
-  static buildDependencyTree(inventory) {
-  const map = new Map(inventory.map(p => [p.id, p.dependencies || []]));
-  const memo = new Map();
+  buildDependencyTree(inventory) {
+    const map  = new Map(inventory.map(p => [p.id, p.dependencies || []]));
+    const memo = new Map();
 
-  function expand(id, path = new Set()) {
-    if (path.has(id)) return {};
+    function expand(id, visited = new Set()) {
+      if (visited.has(id)) return {};
+      if (memo.has(id)) return memo.get(id);
 
-    if (memo.has(id)) return memo.get(id);
+      const next = new Set(visited);
+      next.add(id);
 
-    const nextPath = new Set(path);
-    nextPath.add(id);
+      const deps = map.get(id) || [];
+      const node = {};
 
-    const deps = map.get(id) || {};
-    const node = {};
+      for (const dep of deps) {
+        node[dep] = expand(dep, next);
+      }
 
-    for (const dep of deps) {
-      node[dep] = expand(dep, nextPath);
+      memo.set(id, node);
+      return node;
     }
 
-    memo.set(id, node);
-    return node;
+    const result = {};
+    for (const pkg of inventory) {
+      result[pkg.id] = expand(pkg.id);
+    }
+
+    return result;
   }
 
-  const result = {};
-  for (const pkg of inventory) {
-    result[pkg.id] = expand(pkg.id);
+  buildIntroducedBy(inventory) {
+    const reverse = new Map();
+
+    for (const pkg of inventory) {
+      reverse.set(pkg.id, []);
+    }
+
+    for (const pkg of inventory) {
+      for (const dep of pkg.dependencies || []) {
+        if (!reverse.has(dep)) reverse.set(dep, []);
+        reverse.get(dep).push(pkg.id);
+      }
+    }
+
+    for (const pkg of inventory) {
+      pkg.introduced_by = reverse.get(pkg.id) || [];
+    }
+
+    return inventory;
   }
 
-  return result;
-}
-
-static buildIntroducedBy(inventory) {
-  const reverse = new Map();
-
-  for (const pkg of inventory) {
-    reverse.set(pkg.id, []);
-  }
-
-  for (const pkg of inventory) {
-    for (const dep of pkg.dependencies || []) {
-      if (!reverse.has(dep)) reverse.set(dep, []);
-      reverse.get(dep).push(pkg.id);
+  buildParents(inventory) {
+  const parents = new Map(inventory.map(c => [c.id, []]));
+  for (const comp of inventory) {
+    for (const depId of (comp.dependencies || [])) {
+      if (parents.has(depId)) {
+        parents.get(depId).push(comp.id);
+      }
     }
   }
-
-  for (const pkg of inventory) {
-    pkg.introduced_by = reverse.get(pkg.id) || [];
+  for (const comp of inventory) {
+    comp.parents = (parents.get(comp.id) || []).sort();
   }
-
   return inventory;
+};
 }
 
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy alias
+//
+// Code that still imports { NodeManager } continues to work.  Each property
+// access on the alias creates a fresh instance implicitly — callers that rely
+// on shared static state should migrate to NodeManagerInstance directly.
+// ─────────────────────────────────────────────────────────────────────────────
 
-export default NodeManager;
+export { NodeManagerInstance as NodeManager };
+export default NodeManagerInstance;

@@ -24,12 +24,14 @@ import path from "path";
  */
 export class GoModScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // ─────────────────────────────
-  static _goPurl(modulePath, version) {
+  _goPurl(modulePath, version) {
     // Strip leading "v" from semver tags for consistency; keep pseudo-versions as-is.
     const v = version ? version.replace(/^v/, "") : "";
     return `pkg:golang/${modulePath.toLowerCase()}@${v}`;
@@ -38,7 +40,7 @@ export class GoModScanner {
   // ─────────────────────────────
   // Detect Go module root
   // ─────────────────────────────
-  static _isGoRoot(dir) {
+  _isGoRoot(dir) {
     return (
       fs.existsSync(path.join(dir, "go.mod")) &&
       fs.existsSync(path.join(dir, "go.sum"))
@@ -53,7 +55,7 @@ export class GoModScanner {
   //   replaces: Map<lowercasePath, { original, replacement, version }>
   // }
   // ─────────────────────────────
-  static _parseGoMod(modPath) {
+  _parseGoMod(modPath) {
     const requires = new Map();
     const replaces = new Map();
     let moduleName = "";
@@ -130,7 +132,7 @@ export class GoModScanner {
   // We want the source-code hash lines (not /go.mod lines) to get the
   // actually-used modules.
   // ─────────────────────────────
-  static _parseGoSum(sumPath) {
+  _parseGoSum(sumPath) {
     const installed = new Map();   // lowercase path → { path, version }
 
     let content;
@@ -169,7 +171,7 @@ export class GoModScanner {
   // ─────────────────────────────
   // Scan a single Go module root
   // ─────────────────────────────
-  static _scanProject(projectRoot) {
+  _scanProject(projectRoot) {
     const { moduleName, requires, replaces } = this._parseGoMod(
       path.join(projectRoot, "go.mod")
     );
@@ -238,7 +240,7 @@ export class GoModScanner {
   // UBEL maps: direct → prod, indirect → prod (transitive)
   // Test-only packages (ending in /testing, /testutil, etc.) → dev heuristic.
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     for (const comp of inventory) {
       if (!Array.isArray(comp.scopes)) comp.scopes = [];
       if (comp.scopes.length > 0) continue;
@@ -258,7 +260,7 @@ export class GoModScanner {
   // ─────────────────────────────
   // Merge duplicates by PURL
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -277,13 +279,13 @@ export class GoModScanner {
   // ─────────────────────────────
   // ENTRY
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
+  async getInstalled(startDir) {
     this.inventoryData = [];
 
     const visited = new Set();
     const raw     = [];
 
-    function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -297,11 +299,11 @@ export class GoModScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (GoModScanner._isGoRoot(full)) {
+        if (this._isGoRoot(full)) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...GoModScanner._scanProject(full));
+            raw.push(...this._scanProject(full));
           }
           // Descend – Go workspaces (go.work) can nest multiple modules
         }
@@ -310,11 +312,11 @@ export class GoModScanner {
       }
     }
 
-    if (GoModScanner._isGoRoot(startDir)) {
+    if (this._isGoRoot(startDir)) {
       const key = path.resolve(startDir);
       if (!visited.has(key)) {
         visited.add(key);
-        raw.push(...GoModScanner._scanProject(startDir));
+        raw.push(...this._scanProject(startDir));
       }
     }
 

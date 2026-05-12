@@ -34,19 +34,21 @@ import path from "path";
  */
 export class RubyBundlerScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // ─────────────────────────────
-  static _gemPurl(name, version) {
+  _gemPurl(name, version) {
     return `pkg:gem/${name.toLowerCase()}@${version ?? ""}`;
   }
 
   // ─────────────────────────────
   // Detect Bundler project root
   // ─────────────────────────────
-  static _isBundlerRoot(dir) {
+  _isBundlerRoot(dir) {
     return (
       fs.existsSync(path.join(dir, "Gemfile")) &&
       fs.existsSync(path.join(dir, "Gemfile.lock"))
@@ -57,7 +59,7 @@ export class RubyBundlerScanner {
   // Parse Gemfile.lock
   // Returns Map<lowercaseName, { name, version, dependencies[] }>
   // ─────────────────────────────
-  static _parseGemfileLock(lockPath) {
+  _parseGemfileLock(lockPath) {
     let content;
     try {
       content = fs.readFileSync(lockPath, "utf8");
@@ -131,7 +133,7 @@ export class RubyBundlerScanner {
   // Returns { prod: Set<string>, dev: Set<string> }
   // (lowercase gem names)
   // ─────────────────────────────
-  static _parseGemfileGroups(gemfilePath) {
+  _parseGemfileGroups(gemfilePath) {
     const prod = new Set();
     const dev  = new Set();
 
@@ -195,7 +197,7 @@ export class RubyBundlerScanner {
   // ─────────────────────────────
   // Scan a single Bundler project
   // ─────────────────────────────
-  static _scanProject(projectRoot) {
+  _scanProject(projectRoot) {
     const index = this._parseGemfileLock(path.join(projectRoot, "Gemfile.lock"));
     if (!index.size) return [];
 
@@ -233,7 +235,7 @@ export class RubyBundlerScanner {
   // Assign scopes (prod / dev)
   // via BFS from Gemfile group declarations
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     const byId    = new Map(inventory.map(c => [c.id, c]));
     const nameIdx = new Map();
 
@@ -289,7 +291,7 @@ export class RubyBundlerScanner {
   // ─────────────────────────────
   // Merge duplicates by PURL
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -308,13 +310,13 @@ export class RubyBundlerScanner {
   // ─────────────────────────────
   // ENTRY
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
+  async getInstalled(startDir) {
     this.inventoryData = [];
 
     const visited = new Set();
     const raw     = [];
 
-    function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -328,11 +330,11 @@ export class RubyBundlerScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (RubyBundlerScanner._isBundlerRoot(full)) {
+        if (this._isBundlerRoot(full)) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...RubyBundlerScanner._scanProject(full));
+            raw.push(...this._scanProject(full));
           }
           continue;
         }
@@ -341,11 +343,11 @@ export class RubyBundlerScanner {
       }
     }
 
-    if (RubyBundlerScanner._isBundlerRoot(startDir)) {
+    if (this._isBundlerRoot(startDir)) {
       const key = path.resolve(startDir);
       if (!visited.has(key)) {
         visited.add(key);
-        raw.push(...RubyBundlerScanner._scanProject(startDir));
+        raw.push(...this._scanProject(startDir));
       }
     }
 

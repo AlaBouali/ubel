@@ -16,25 +16,6 @@ import { SarifBuilder } from "./sarif_builder.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ── buildParents — injected here so node_runner.js needs no edits ─────────────
-// Populates comp.parents: the list of packages that directly depend on this
-// node (one-hop reverse of comp.dependencies). Distinct from introduced_by,
-// which tracks root ancestors only.
-NodeManager.buildParents = function buildParents(inventory) {
-  const parents = new Map(inventory.map(c => [c.id, []]));
-  for (const comp of inventory) {
-    for (const depId of (comp.dependencies || [])) {
-      if (parents.has(depId)) {
-        parents.get(depId).push(comp.id);
-      }
-    }
-  }
-  for (const comp of inventory) {
-    comp.parents = (parents.get(comp.id) || []).sort();
-  }
-  return inventory;
-};
-
 const OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 
@@ -43,6 +24,7 @@ const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 // Synchronous version using the already-imported `os` module via dynamic import
 // isn't available at module level — we use Node's built-in synchronously:
 import os_module from "os";
+import { time } from "console";
 
 function getLocalIPsSync() {
   try {
@@ -2116,26 +2098,53 @@ function get_policy_violations(vulnerabilities) {
   return Array.from(uniqueViolationIds);
 }
 
-// ── Engine class ──────────────────────────────────────────────────────────────
-export class UbelEngine {
+// ── Engine class (instance-based) ────────────────────────────────────────────
+//
+// UbelEngineInstance replaces the old static UbelEngine class.
+// Each scan invocation creates a fresh instance, eliminating all shared
+// mutable state between concurrent or sequential scans.
+//
+// Constructor:
+//   new UbelEngineInstance(manager, projectRoot)
+//
+//   manager     — a NodeManagerInstance (created by main() per invocation)
+//   projectRoot — absolute path to the directory being scanned; replaces all
+//                 process.cwd() references inside the scan pipeline so no
+//                 process.chdir() is ever needed.
+//
+export class UbelEngineInstance {
 
-  static reportsLocation       = "./.ubel/local/reports";
-  static policyDir             = "./.ubel/local/policy";
-  static policyFilename        = "config.json";
-  static checkMode             = "health";
-  static systemType            = "npm";
-  static engine                = "npm";
-  static was_successful_scan = false;
+  // Policy file paths are relative to projectRoot (resolved in constructor).
 
-  static runtime_environment = "node"
-  static runtime_version = process.version.replace(/^v/, "").replace(/^V/, "");
+  constructor(manager, projectRoot) {
+    this.REPORTS_SUBDIR  = ".ubel/local/reports";
+    this.POLICY_SUBDIR   = ".ubel/local/policy";
+    this.POLICY_FILENAME = "config.json";
+    // ── per-instance mutable state ──────────────────────────────────────
+    this.manager          = manager;
+    this.projectRoot      = path.resolve(projectRoot);
 
-  static vulns_ids_found= new Set();
+    this.reportsLocation  = path.join(this.projectRoot, this.REPORTS_SUBDIR);
+    this.policyDir        = path.join(this.projectRoot, this.POLICY_SUBDIR);
 
-  static initiateLocalPolicy() {
-    fs.mkdirSync(UbelEngine.policyDir, { recursive: true });
-    const file = path.join(UbelEngine.policyDir, UbelEngine.policyFilename);
-    let needs = false;
+    this.checkMode        = "health";
+    this.systemType       = "npm";
+    this.engine           = "npm";
+    this.wasSuccessfulScan = false;
+
+    this.runtime_environment = "node";
+    this.runtime_version     = process.version.replace(/^v/, "").replace(/^V/, "");
+
+    this.vulns_ids_found  = new Set();
+
+  }
+
+  // ── Policy helpers ──────────────────────────────────────────────────────────
+
+  initiateLocalPolicy() {
+    fs.mkdirSync(this.policyDir, { recursive: true });
+    const file  = path.join(this.policyDir, this.POLICY_FILENAME);
+    let needs   = false;
     if (!fs.existsSync(file)) needs = true;
     else if (fs.statSync(file).size === 0) { fs.unlinkSync(file); needs = true; }
     if (needs) {
@@ -2143,49 +2152,68 @@ export class UbelEngine {
     }
   }
 
-  static loadPolicy() {
-    UbelEngine.initiateLocalPolicy();
-    const file = path.join(UbelEngine.policyDir, UbelEngine.policyFilename);
+  loadPolicy() {
+    this.initiateLocalPolicy();
+    const file = path.join(this.policyDir, this.POLICY_FILENAME);
     return JSON.parse(fs.readFileSync(file, "utf-8"));
   }
 
   /**
    * Set a single top-level policy field and persist it to disk.
-   * Replaces the old setPolicyRules(action, severities) API.
    *
    * @param {"severity_threshold"|"block_unknown_vulnerabilities"} key
    * @param {string|boolean} value
    */
-  static setPolicyField(key, value) {
-    const data = UbelEngine.loadPolicy();
-    data[key] = value;
-    const file = path.join(UbelEngine.policyDir, UbelEngine.policyFilename);
+  setPolicyField(key, value) {
+    const data = this.loadPolicy();
+    data[key]  = value;
+    const file = path.join(this.policyDir, this.POLICY_FILENAME);
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
-  static async scan(args, options = {current_dir: process.cwd(), is_script: false, save_reports: true, scan_os: false, full_stack: false, is_vscanned_project: false, scan_node:true, scan_scope: "repository" }) {
+  // ── scan ────────────────────────────────────────────────────────────────────
+
+  async scan(args, options = {}) {
+    const {
+      is_script           = false,
+      save_reports        = true,
+      scan_os             = false,
+      full_stack          = false,
+      scan_node           = true,
+      is_vscanned_project = false,
+      scan_scope          = "repository",
+    } = options;
+
+    const projectRoot = this.projectRoot;
+    const manager     = this.manager;
+
     const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
     if (args.length) {
-    const bad = args.filter(a => !PKG_ARG_RE.test(a));
-    if (bad.length) {
-      console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
-      console.error("[!] Expected format: name, name@version, or @scope/name@version");
-      process.exit(1);
+      const bad = args.filter(a => !PKG_ARG_RE.test(a));
+      if (bad.length) {
+        console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
+        console.error("[!] Expected format: name, name@version, or @scope/name@version");
+        process.exit(1);
+      }
     }
-  }
+
     const os_metadata_info = await getOSMetadata();
+
     const getinstalledoptions = {
-      full_stack: options.full_stack,
+      full_stack,
       scan_os: options.scan_os ?? options.os_scan,
       scan_node: options.scan_node ?? true,
-    }
+    };
+
     const ecosystems = new Set();
-    if (!options.is_script) {
-      NodeManager._captureEngineVersion(UbelEngine.engine);
-    }else{
-      UbelEngine.engine=TOOL_NAME;
-      NodeManager.engineVersion=TOOL_VERSION;
+
+    if (!is_script) {
+      manager._captureEngineVersion(this.engine);
+    } else {
+      this.engine           = TOOL_NAME;
+      manager.engineVersion = TOOL_VERSION;
     }
+
     const now       = new Date();
     const pad       = (n) => String(n).padStart(2, "0");
     const timestamp = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}__`
@@ -2193,76 +2221,72 @@ export class UbelEngine {
     const datePath  = `${now.getUTCFullYear()}/${pad(now.getUTCMonth()+1)}/${pad(now.getUTCDate())}`;
 
     const outputDir = path.join(
-      UbelEngine.reportsLocation,
-      UbelEngine.systemType,
-      UbelEngine.checkMode,
+      this.reportsLocation,
+      this.systemType,
+      this.checkMode,
       datePath
     );
     fs.mkdirSync(outputDir, { recursive: true });
 
-    const baseName    = `${UbelEngine.systemType}_${UbelEngine.checkMode}_${UbelEngine.engine}__${timestamp}`;
-    const jsonPath    = path.join(outputDir, `${encodeURIComponent(baseName)}.json`);
+    const baseName = `${this.systemType}_${this.checkMode}_${this.engine}__${timestamp}`;
+    const jsonPath = path.join(outputDir, `${encodeURIComponent(baseName)}.json`);
 
-    const policy = UbelEngine.loadPolicy();
-    let purls = [];
+    const policy     = this.loadPolicy();
+    let purls        = [];
     let reportContent = null;
-    // Tracks whether we entered a mode that mutated the lockfile on disk so
-    // the finally block knows whether a revert is needed.
+
     const needsRevert =
-      UbelEngine.checkMode === "check" || UbelEngine.checkMode === "install";
+      this.checkMode === "check" || this.checkMode === "install";
 
     try {
       // ── Collect packages ──────────────────────────────────────────────────
       if (needsRevert) {
-        purls         = await NodeManager.runDryRun(UbelEngine.engine, args);
-        for (const inventoryItem of NodeManager.inventoryData) {
-          inventoryItem.paths =  [];
+        purls         = await manager.runDryRun(this.engine, args, projectRoot);
+        for (const inventoryItem of manager.inventoryData) {
+          inventoryItem.paths = [];
         }
-        reportContent = NodeManager.currentLockFileContent;
-        // Tell the user where the originals are in case anything goes wrong.
-        if (NodeManager._lockfileBackupDir) {
-          if (options.is_script==false){
-          console.log(`[~] Original lockfiles backed up to: ${NodeManager._lockfileBackupDir}`);
+        reportContent = manager.currentLockFileContent;
+        if (manager._lockfileBackupDir && !is_script) {
+          console.log(`[~] Original lockfiles backed up to: ${manager._lockfileBackupDir}`);
           console.log();
-          }
         }
       } else {
         // health — scan installed packages
-        NodeManager.inventoryData = [];
-        purls = await NodeManager.getInstalled(options.current_dir,getinstalledoptions);
-        NodeManager.inventoryData.push(
-          {
-                id: `pkg:npm/${TOOL_NAME.replace('@', '%40')}@${TOOL_VERSION}`,
-                name: TOOL_NAME,
-                version: TOOL_VERSION,
-                license: TOOL_LICENSE,
-                ecosystem: "npm",
-                state: "undetermined",
-                scopes: ["env"],
-                dependencies: [],
-                type: "library",
-                paths: [],
-              }
-        )
+        manager.inventoryData = [];
+        purls = await manager.getInstalled(projectRoot, getinstalledoptions);
+        manager.inventoryData.push({
+          id:        `pkg:npm/${TOOL_NAME.replace("@", "%40")}@${TOOL_VERSION}`,
+          name:      TOOL_NAME,
+          version:   TOOL_VERSION,
+          license:   TOOL_LICENSE,
+          ecosystem: "npm",
+          state:     "undetermined",
+          scopes:    ["env"],
+          dependencies: [],
+          type:      "library",
+          paths:     [],
+        });
         reportContent = {};
       }
 
       for (const purl of purls) {
-        if (purl.split('@')[1] === "") {
+        if (purl.split("@")[1] === "") {
           purls = purls.filter(p => p !== purl);
         }
       }
-      purls = [...new Set(purls)]; 
-      let inventory = [...NodeManager.inventoryData];
+      purls = [...new Set(purls)];
+
+      let inventory = [...manager.inventoryData];
+
       // ── OSV query ─────────────────────────────────────────────────────────
       const vuln_ids = await submitToOsv(purls);
       matchDependenciesWithInventory(inventory);
 
       // ── Enrich vulnerabilities concurrently ───────────────────────────────
       let vulnerabilities = [];
-      const CONCURRENCY = 40;
+      const CONCURRENCY   = 40;
       for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
-        const batch = vuln_ids.slice(i, i + CONCURRENCY);
+        const batch   = vuln_ids.slice(i, i + CONCURRENCY);
         const results = await Promise.allSettled(batch.map(getVulnById));
         for (const r of results) {
           if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
@@ -2271,16 +2295,10 @@ export class UbelEngine {
         }
       }
 
-      // ── NVD query for CPE-based inventory items (host scanner) ────────────
+      // ── NVD query for CPE-based inventory items ────────────────────────────
       const nvdVulns = await submitToNvd(inventory);
       if (nvdVulns.length) {
-        // Apply processVulnerability + getFix to each NVD result so the
-        // severity/score fields go through the same normalisation pipeline.
         for (const v of nvdVulns) {
-          // Stash the CVSS fields extracted directly from NVD metrics before
-          // processVulnerability runs: that function reads the OSV severity[]
-          // array, which NVD records don't carry, so it would overwrite these
-          // with null/undefined.  We restore them afterward if it did.
           const nvdScore  = v.severity_score;
           const nvdVector = v.severity_vector;
           processVulnerability(v);
@@ -2292,7 +2310,6 @@ export class UbelEngine {
             delete v[key];
           }
         }
-        // Deduplicate: if OSV already found the same CVE for the same purl, skip.
         const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_purl}`));
         for (const v of nvdVulns) {
           if (!osvKeys.has(`${v.id}::${v.affected_purl}`)) {
@@ -2301,28 +2318,15 @@ export class UbelEngine {
         }
       }
 
-      inventory = NodeManager.buildDependencySequences(inventory);
-
-      inventory = NodeManager.buildIntroducedBy(inventory);
-      inventory = NodeManager.buildParents(inventory);
+      inventory = manager.buildDependencySequences(inventory);
+      inventory = manager.buildIntroducedBy(inventory);
+      inventory = manager.buildParents(inventory);
 
       // ── Second-pass scope propagation ─────────────────────────────────────
-      // _assignScopes runs inside runDryRun against the lockfile dep graph,
-      // but pnpm's lockfile often omits dependencies for packages that have
-      // no explicit dep block in the snapshots section (peer-only, platform
-      // optionals, etc.).  This leaves BFS blind past those nodes, so only
-      // direct deps get scoped.
-      //
-      // Fix: now that introduced_by is populated (a reliable reverse-edge map
-      // built from the actual inventory), propagate scopes forward through
-      // comp.dependencies using a BFS over the inventory itself.  This is
-      // engine-agnostic and requires no lockfile parsing.
       {
         const byId = new Map(inventory.map(c => [c.id, c]));
-        // Seed the queue with every already-scoped package (direct deps tagged
-        // by the first-pass _assignScopes).
         const queue = inventory.filter(c =>
-          Array.isArray(c.scopes) && c.scopes.some(s => s !== 'env')
+          Array.isArray(c.scopes) && c.scopes.some(s => s !== "env")
         );
         const visited = new Set(queue.map(c => c.id));
 
@@ -2331,10 +2335,9 @@ export class UbelEngine {
           for (const depPurl of (comp.dependencies || [])) {
             const dep = byId.get(depPurl);
             if (!dep) continue;
-            // Propagate all non-env scopes from parent to child.
             let changed = false;
             for (const s of comp.scopes) {
-              if (s === 'env') continue;
+              if (s === "env") continue;
               if (!dep.scopes.includes(s)) { dep.scopes.push(s); changed = true; }
             }
             if (!visited.has(dep.id)) {
@@ -2346,13 +2349,10 @@ export class UbelEngine {
       }
 
       // ── Network metadata ──────────────────────────────────────────────────
-      // Collect local IPs synchronously; fetch external IP asynchronously.
-      // Both are stored on os_metadata for traceability across hosts.
-      const localIPs      = getLocalIPsSync();
-      const externalIP    = await getExternalIP();
+      const localIPs       = getLocalIPsSync();
+      const externalIP     = await getExternalIP();
       const primaryLocalIP = Object.values(localIPs)[0] || "";
 
-      // ── Convert all path strings → SystemPath objects ─────────────────────
       normalizeInventoryPaths(inventory, primaryLocalIP);
 
       [vulnerabilities, inventory] = filterFalsePositiveInfections(inventory, vulnerabilities);
@@ -2364,7 +2364,7 @@ export class UbelEngine {
       let infectionCount    = 0;
 
       for (const v of vulnerabilities) {
-        UbelEngine.vulns_ids_found.add(v.id);
+        this.vulns_ids_found.add(v.id);
         if (v.is_infection) {
           infectionCount++;
           infectedPurls.add(v.affected_purl);
@@ -2379,7 +2379,7 @@ export class UbelEngine {
 
       const undeterminedCount = inventory.filter(c => c.version === "").length;
       if (undeterminedCount > 0) {
-        console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected. This may lead to false positives or negatives in the report. Please ensure all dependencies have resolvable versions for accurate scanning.`);
+        console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected.`);
         console.warn();
       }
 
@@ -2394,16 +2394,18 @@ export class UbelEngine {
 
       for (const inventoryItem of inventory) {
         ecosystems.add(getEcosystemFromPurl(inventoryItem.id));
-        inventoryItem.is_policy_violation = vulnerabilities.some(v => v.affected_purl === inventoryItem.id && v.policy_decision === "block");
+        inventoryItem.is_policy_violation = vulnerabilities.some(
+          v => v.affected_purl === inventoryItem.id && v.policy_decision === "block"
+        );
       }
 
       const stats = {
         inventory_size: inventory.length,
         inventory_stats: {
-          infected:   infectedPurls.size,
-          vulnerable: vulnerablePurls.size,
-          safe:       Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size - undeterminedCount),
-          undetermined: undeterminedCount
+          infected:      infectedPurls.size,
+          vulnerable:    vulnerablePurls.size,
+          safe:          Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size - undeterminedCount),
+          undetermined:  undeterminedCount,
         },
         total_vulnerabilities: vulnerabilities.length,
         vulnerabilities_stats: { severity: severityBuckets },
@@ -2411,17 +2413,17 @@ export class UbelEngine {
       };
 
       const runtime = {
-        environment: UbelEngine.runtime_environment,
-        version: UbelEngine.runtime_version,
-        platform: process.platform,
-        arch: process.arch,
-        cwd: process.cwd(),
+        environment: this.runtime_environment,
+        version:     this.runtime_version,
+        platform:    process.platform,
+        arch:        process.arch,
+        cwd:         projectRoot,
       };
 
-      const engine_info ={
-        name: UbelEngine.engine,
-        version: NodeManager.engineVersion,
-      }
+      const engine_info = {
+        name:    this.engine,
+        version: manager.engineVersion,
+      };
 
       const git_metadata = getGitMetadata();
 
@@ -2432,38 +2434,25 @@ export class UbelEngine {
           delete item.dependency_sequences;
         }
       }
-      if (UbelEngine.checkMode === "health") {
-        UbelEngine.engine = TOOL_NAME;
+
+      if (this.checkMode === "health") {
+        this.engine = TOOL_NAME;
       }
 
-      if (options.is_vscanned_project) {
-        // editor_kind / editor_label / editor_version are injected by extension.js
-        // (resolved via vscode.version + detectEditor() where the vscode API is
-        // available). Fall back to shell exec via getEditorVersion() only for
-        // non-extension callers (MCP server, agent) that set is_vscanned_project
-        // without having access to the vscode module.
+      if (is_vscanned_project) {
         const editorKind    = options.editor_kind    ?? "vscode";
         const editorLabel   = options.editor_label   ?? editorKind;
         const editorVersion = options.editor_version ?? getEditorVersion(editorKind);
-
-        const scanScope = options.scan_scope ?? "repository";
+        const scanScope     = options.scan_scope ?? "repository";
 
         if (scanScope === "editor_extension") {
-          // Extensions scan: the editor IS the subject being scanned, so it
-          // replaces both engine_info and runtime (original behaviour).
           engine_info.name    = editorKind;
           engine_info.version = editorVersion;
-
           runtime.environment = editorKind;
           runtime.version     = editorVersion;
         } else {
-          // Project / platform scans: show the editor as the engine (it launched
-          // the scan), but keep runtime.environment/version as-is (Node) so the
-          // execution context is still accurate. Store editor on runtime.editor
-          // as a secondary field for the report header.
           engine_info.name    = editorKind;
           engine_info.version = editorVersion;
-
           runtime.editor = {
             kind:    editorKind,
             label:   editorLabel,
@@ -2475,60 +2464,58 @@ export class UbelEngine {
           item.scopes = ["dev"];
         }
       }
+
       const finalJson = {
-        generated_at: now.toISOString().replace("Z","") + "Z",
+        generated_at:      now.toISOString().replace("Z", "") + "Z",
         runtime,
-        engine: engine_info,
-        os_metadata: { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
-        git_metadata: git_metadata,
-        tool_info:    { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:    { type: UbelEngine.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", ...(runtime.editor ? { editor: runtime.editor } : {}) },
+        engine:            engine_info,
+        os_metadata:       { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
+        git_metadata:      git_metadata,
+        tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
+        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
-        vulnerabilities_ids: Array.from(UbelEngine.vulns_ids_found),
-        findings_summary: findingsSummary,
-        vulnerabilities:  sortVulnerabilities(vulnerabilities),
+        vulnerabilities_ids: Array.from(this.vulns_ids_found),
+        findings_summary:  findingsSummary,
+        vulnerabilities:   sortVulnerabilities(vulnerabilities),
         inventory,
         policy,
-        dependencies_tree: NodeManager.buildDependencyTree(inventory),
+        dependencies_tree: manager.buildDependencyTree(inventory),
       };
-      
 
       const [allowed, reason] = evaluatePolicy(finalJson);
       finalJson.decision = { allowed, reason, policy_violations: policyViolations };
 
-      if (options.is_script==true&& options.save_reports === false) {
+      if (is_script && !save_reports) {
         return finalJson;
       }
 
       const htmlReport = generateHTMLReport(finalJson);
-      const htmlPath = jsonPath.replace(/\.json$/, ".html");
+      const htmlPath   = jsonPath.replace(/\.json$/, ".html");
       fs.writeFileSync(htmlPath, htmlReport);
-
       fs.writeFileSync(jsonPath, JSON.stringify(finalJson, null, 2));
-      if (options.is_script==false){
-      // ── Console output ─────────────────────────────────────────────────────
-      console.log();
-      console.log("Policy:");
-      console.log();
-      console.log(dictToStr(policy));
-      console.log();
-      console.log();
-      console.log("Findings:");
-      console.log();
-      console.log(dictToStr(stats));
-      console.log();
-      console.log();
+
+      if (!is_script) {
+        console.log();
+        console.log("Policy:");
+        console.log();
+        console.log(dictToStr(policy));
+        console.log();
+        console.log();
+        console.log("Findings:");
+        console.log();
+        console.log(dictToStr(stats));
+        console.log();
+        console.log();
       }
 
-      // ── Findings summary — one block per affected package ─────────────────
       const summaryEntries = Object.values(findingsSummary);
       if (summaryEntries.length > 0) {
-        if (options.is_script==false){
-        console.log("Findings Summary:");
-        console.log();
-          }
+        if (!is_script) {
+          console.log("Findings Summary:");
+          console.log();
+        }
         for (const pkg of summaryEntries) {
-          const s = pkg.stats;
+          const s      = pkg.stats;
           const counts = [];
           if (s.infection) counts.push(`${s.infection} infection(s)`);
           if (s.critical)  counts.push(`${s.critical} critical`);
@@ -2537,188 +2524,137 @@ export class UbelEngine {
           if (s.low)       counts.push(`${s.low} low`);
           if (s.unknown)   counts.push(`${s.unknown} unknown`);
 
-
-          if (options.is_script==false){
-          console.log(`  ${pkg.name}@${pkg.version}  [${counts.join(", ")}]`);
-            }
+          if (!is_script) {
+            console.log(`  ${pkg.name}@${pkg.version}  [${counts.join(", ")}]`);
+          }
 
           for (const vuln of pkg.vulnerabilities) {
             const label = vuln.is_infection ? "INFECTION" : vuln.severity.toUpperCase();
             const score = vuln.severity_score != null ? ` (${vuln.severity_score})` : "";
-            if (options.is_script==false){
-
-            console.log(`    \u2022 ${vuln.id}  ${label}${score}`);
-            for (const fix of (vuln.fixes || [])) {
-
-              console.log(`      fix: ${fix}`);
+            if (!is_script) {
+              console.log(`    \u2022 ${vuln.id}  ${label}${score}`);
+              for (const fix of (vuln.fixes || [])) {
+                console.log(`      fix: ${fix}`);
+              }
             }
           }
-          }
-          if (options.is_script==false){
-          console.log();
-          }
+
+          if (!is_script) console.log();
         }
       }
-      if (options.is_script==false){
-      console.log(`Policy Decision: ${allowed ? "ALLOW" : "BLOCK"}`);
-      console.log();
-      console.log();
+
+      if (!is_script) {
+        console.log(`Policy Decision: ${allowed ? "ALLOW" : "BLOCK"}`);
+        console.log();
+        console.log();
       }
-      /* console.log(`JSON report saved to: ${jsonPath}`);
-      console.log();
-      console.log(); */
 
-      // ── latest.json — always points to the most recent scan ───────────────
-      const latestDir  = path.join(".ubel", "reports");
-      const latestPath = path.join(latestDir, "latest.json");
+      // ── latest.{json,html} — always points to the most recent scan ─────────
+      const latestDir      = path.join(projectRoot, ".ubel", "reports");
+      const latestPath     = path.join(latestDir, "latest.json");
+      const latestHtmlPath = path.join(latestDir, "latest.html");
       fs.mkdirSync(latestDir, { recursive: true });
-      const lateshtmlpath=latestPath.replace(/\.json$/, ".html");
-      fs.writeFileSync(lateshtmlpath, htmlReport);
+      fs.writeFileSync(latestHtmlPath, htmlReport);
       fs.writeFileSync(latestPath, JSON.stringify(finalJson, null, 2));
-      // ── Generate CycloneDX SBOM ───────────────────────────────────
+
+      // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       const sbomBuilder = new CycloneDXBuilder(finalJson);
-      const sbomData = sbomBuilder.generate();
+      const sbomData    = sbomBuilder.generate();
 
-      const sarifbuilder = new SarifBuilder(finalJson);
-      const sarifData = sarifbuilder.generate();
+      const sarifBuilder = new SarifBuilder(finalJson);
+      const sarifData    = sarifBuilder.generate();
 
-
-      const sbomPath = jsonPath.replace(/\.json$/, ".cdx.json");
-      fs.writeFileSync(sbomPath, JSON.stringify(sbomData, null, 2));
-
+      const sbomPath  = jsonPath.replace(/\.json$/, ".cdx.json");
       const sarifPath = jsonPath.replace(/\.json$/, ".sarif.json");
+      fs.writeFileSync(sbomPath,  JSON.stringify(sbomData,  null, 2));
       fs.writeFileSync(sarifPath, JSON.stringify(sarifData, null, 2));
 
-      const latestSbom = path.join(latestDir, "latest.cdx.json");
-      fs.writeFileSync(latestSbom, JSON.stringify(sbomData, null, 2));
-      
+      const latestSbom  = path.join(latestDir, "latest.cdx.json");
       const latestSarif = path.join(latestDir, "latest.sarif.json");
+      fs.writeFileSync(latestSbom,  JSON.stringify(sbomData,  null, 2));
       fs.writeFileSync(latestSarif, JSON.stringify(sarifData, null, 2));
-      
-      if (options.is_script==false){
-      console.log(`Latest JSON report saved to: ${latestPath}`);
-      console.log(`Latest HTML report saved to: ${lateshtmlpath}`);
-      console.log();
-      console.log();
+
+      if (!is_script) {
+        console.log(`Latest JSON report saved to: ${latestPath}`);
+        console.log(`Latest HTML report saved to: ${latestHtmlPath}`);
+        console.log();
+        console.log();
       }
 
       if (!allowed) {
-        // Throw so the finally block runs and reverts the lockfile before we exit.
-        // main() catches PolicyViolationError and exits with code 1 silently
-        // (the messages below have already been printed).
-        if (options.is_script==false){
-        console.error("[!] Policy violation detected!");
-        console.log(`[!] ${reason}`);
+        if (!is_script) {
+          console.error("[!] Policy violation detected!");
+          console.log(`[!] ${reason}`);
         }
         throw new PolicyViolationError(reason);
       }
 
-      if (UbelEngine.checkMode === "health" && !options.is_script) {
+      if (this.checkMode === "health" && !is_script) {
         process.exit(0);
       }
-      if (UbelEngine.checkMode === "check") {
-        // check succeeded — finally will not revert (was_successful_scan=true),
-        // so we explicitly restore originals and clean up the backup here.
-        NodeManager.was_successful_scan = true;
-        NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
-        NodeManager.cleanupLockfileBackup();
-        if (options.is_script==false){
-        console.log("[+] Backup lockfiles removed.");
-        }
-        process.exit(0);
-      }
-      if (options.is_script==false){
-      console.log("[+] Policy passed. Installing dependencies...");
-      }
-      NodeManager.was_successful_scan = true;
 
-      const saveResult = await NodeManager.saveCandidateLockfile(UbelEngine.engine, process.cwd())
+      if (this.checkMode === "check") {
+        this.wasSuccessfulScan = true;
+        manager.revert_lock_to_original(this.engine, projectRoot);
+        manager.cleanupLockfileBackup();
+        if (!is_script) console.log("[+] Backup lockfiles removed.");
+        process.exit(0);
+      }
+
+      if (!is_script) console.log("[+] Policy passed. Installing dependencies...");
+      this.wasSuccessfulScan = true;
+
+      const saveResult = await manager.saveCandidateLockfile(this.engine, projectRoot);
       if (!saveResult.written) {
-        if (options.is_script==false){
-        console.error("[!] Could not write candidate lockfile:", saveResult.reason);
-        }
+        if (!is_script) console.error("[!] Could not write candidate lockfile:", saveResult.reason);
         process.exit(1);
       }
+
       try {
-        const installResult = await NodeManager.runRealInstall(UbelEngine.engine);
+        const installResult = await manager.runRealInstall(this.engine, projectRoot);
         if (installResult.status !== 0) {
-          if (options.is_script==false){
-          console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
-          }
-          // Restore originals so the project is left in a consistent state.
-          NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
+          if (!is_script) console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+          manager.revert_lock_to_original(this.engine, projectRoot);
           process.exit(1);
         }
       } catch (err) {
-        if (options.is_script==false){
-        console.error("[!] Failed to run npm ci:", err.message);
-        }
-        // Restore originals so the project is left in a consistent state.
-        NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
+        if (!is_script) console.error("[!] Failed to run npm ci:", err.message);
+        manager.revert_lock_to_original(this.engine, projectRoot);
         process.exit(1);
       }
 
-      /* console.log("[+] Verifying installed dependency graph...");
+      manager.cleanupLockfileBackup();
+      if (!is_script) console.log("[+] Backup lockfiles removed.");
 
-      // Reset inventory before re-scan so we get a clean actual state.
-      NodeManager.inventoryData = [];
-
-      const installedPurls = await NodeManager.getInstalled();
-
-      const verification = NodeManager.compareGraphs(purls, installedPurls);
-
-      if (!verification.match) {
-        console.error("[!] Dependency graph mismatch detected after install!");
-
-        if (verification.missing.length) {
-          console.error("[!] Missing packages (expected but not installed):");
-          for (const p of verification.missing) console.error("  -", p);
-        }
-
-        if (verification.extra.length) {
-          console.error("[!] Unexpected packages (installed but not scanned):");
-          for (const p of verification.extra) console.error("  -", p);
-        }
-
-        // Keep the backup — user may need it to recover manually.
-        if (NodeManager._lockfileBackupDir) {
-          console.error(`[~] Original lockfiles preserved at: ${NodeManager._lockfileBackupDir}`);
-        }
-
-        console.error("[!] Blocking due to non-deterministic install (possible PM drift or tampering)");
-        process.exit(1);
-      }
-
-      console.log("[+] Dependency graph verified: no drift detected."); */
-
-      // Everything succeeded — safe to remove the disk backup now.
-      NodeManager.cleanupLockfileBackup();
-      if (options.is_script==false){
-      console.log("[+] Backup lockfiles removed.");
-      }
+      return finalJson;
 
     } finally {
-      // Always restore the lockfile and package.json if a dry-run mutated them,
-      // regardless of whether the scan succeeded, was blocked, or threw.
-      if (!NodeManager.was_successful_scan && needsRevert) {
-        const revertResult = NodeManager.revert_lock_to_original(UbelEngine.engine, process.cwd());
+      if (!this.wasSuccessfulScan && needsRevert) {
+        const revertResult = manager.revert_lock_to_original(this.engine, projectRoot);
         if (!revertResult.reverted) {
-          if (options.is_script==false){
-          console.error("[!] Failed to restore original lockfiles:", revertResult.reason);
-          }
-          if (revertResult.backupDir) {
-            if (options.is_script==false){
-            console.error(`[~] Originals are preserved at: ${revertResult.backupDir}`);
-            console.error("[~] Restore them manually if needed.");
+          if (!is_script) {
+            console.error("[!] Failed to restore original lockfiles:", revertResult.reason);
+            if (revertResult.backupDir) {
+              console.error(`[~] Originals are preserved at: ${revertResult.backupDir}`);
+              console.error("[~] Restore them manually if needed.");
             }
           }
         } else {
-          NodeManager.cleanupLockfileBackup();
-          if (options.is_script==false){
-          console.log("[+] Backup lockfiles removed.");
-          }
+          manager.cleanupLockfileBackup();
+          if (!is_script) console.log("[+] Backup lockfiles removed.");
         }
       }
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy alias
+//
+// Code that still imports { UbelEngine } gets the instance-based class under
+// the old name.  The static-style API (UbelEngine.engine = ..., UbelEngine.scan)
+// no longer works — callers must construct an instance.  main() is the only
+// caller of scan() and has been updated.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { UbelEngineInstance as UbelEngine };

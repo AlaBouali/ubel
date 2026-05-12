@@ -36,10 +36,11 @@
  *   yarn — no   (no lockfile-only equivalent; yarn add always writes node_modules)
  */
 
-import { UbelEngine, PolicyViolationError } from "./engine.js";
-import { NodeManager }    from "./node_runner.js";
-import { banner }         from "./info.js";
-import { loadEnvironment } from "./utils.js";
+import path from "path";
+import { UbelEngineInstance, PolicyViolationError } from "./engine.js";
+import { NodeManagerInstance }  from "./node_runner.js";
+import { banner }               from "./info.js";
+import { loadEnvironment }       from "./utils.js";
 
 const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
@@ -50,19 +51,10 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
 /**
  * main() — unified entry point for CLI callers AND programmatic callers.
  *
- * Behaviour is determined by how it is called:
- *
- *   • No arguments (or called by a bin/* shim):
- *       Reads engine / mode / extra args from process.argv, prints the banner,
- *       handles policy-config modes (threshold / block-unknown / init), validates
- *       package args, then runs a scan.  This is the legacy CLI path — identical
- *       to the old main() behaviour.
- *
- *   • Called with a plain-object argument:
- *       Skips argv parsing, banner, and CLI-specific exits.  Sets engine state,
- *       chdirs into projectRoot, runs the scan, then restores cwd.  Returns the
- *       finalJson report object (same contract as the old scan_project()).
- *       This replaces scan_project() for agent, platform, and the VS Code extension.
+ * A fresh NodeManagerInstance + UbelEngineInstance is constructed for every
+ * invocation, so there is no shared mutable state between calls.  No
+ * process.chdir() is performed; projectRoot is resolved to an absolute path
+ * and threaded through the engine explicitly.
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
@@ -73,15 +65,15 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
  * @param {boolean} [programmaticOptions.scan_os=false]
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
- * @param {string[]} [programmaticOptions.packages=[]]           Package specifiers for check/install mode (e.g. ["requests==2.31.0", "flask"]). Ignored in health mode.
- * @param {string}  [programmaticOptions.scan_scope="repository"]  Scan context: repository | agent | developer_platform | editor_extension
+ * @param {string[]} [programmaticOptions.packages=[]]
+ * @param {string}  [programmaticOptions.scan_scope="repository"]
  * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
  */
 export async function main(programmaticOptions) {
 
   // ════════════════════════════════════════════════════════════════════════════
   // PROGRAMMATIC PATH
-  // Called by: agent.js, platform.js, extension.js
+  // Called by: agent.js, platform.js, extension.js, MCP server
   // ════════════════════════════════════════════════════════════════════════════
   if (programmaticOptions !== undefined && typeof programmaticOptions === "object") {
 
@@ -97,42 +89,37 @@ export async function main(programmaticOptions) {
       scan_node          = true,
       is_vscanned_project = false,
       scan_scope         = "repository",
-      ...rest                       // forward any extra options the caller passes
+      ...rest
     } = programmaticOptions;
 
-    const original_cwd = process.cwd();
-    if (projectRoot && projectRoot !== original_cwd) {
-      process.chdir(projectRoot);
-    }
+    // Resolve projectRoot to an absolute path.  When omitted, fall back to
+    // the current working directory.  This is the ONLY place cwd() is called
+    // in the programmatic path — the resolved absolute path is then passed
+    // explicitly everywhere so no chdir is ever needed.
+    const resolvedRoot = projectRoot
+      ? path.resolve(projectRoot)
+      : path.resolve(process.cwd());
 
-    try {
-      // Reset all static engine state so re-runs in the same process are clean.
-      UbelEngine.engine              = engine;
-      UbelEngine.systemType          = engine;
-      UbelEngine.checkMode           = mode;
-      UbelEngine.vulns_ids_found     = new Set();
+    // Construct fresh, isolated instances for this invocation.
+    const manager = new NodeManagerInstance();
+    const eng     = new UbelEngineInstance(manager, resolvedRoot);
 
-      NodeManager.inventoryData      = [];
+    eng.engine     = engine;
+    eng.systemType = engine;
+    eng.checkMode  = mode;
 
-      UbelEngine.initiateLocalPolicy();
+    eng.initiateLocalPolicy();
 
-      return await UbelEngine.scan(packages, {
-        current_dir: projectRoot || original_cwd,
-        is_script,
-        save_reports,
-        scan_os,
-        full_stack,
-        scan_node,
-        is_vscanned_project,
-        scan_scope,
-        ...rest,
-      });
-
-    } finally {
-      if (projectRoot && projectRoot !== original_cwd) {
-        process.chdir(original_cwd);
-      }
-    }
+    return await eng.scan(packages, {
+      is_script,
+      save_reports,
+      scan_os,
+      full_stack,
+      scan_node,
+      is_vscanned_project,
+      scan_scope,
+      ...rest,
+    });
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -147,22 +134,26 @@ export async function main(programmaticOptions) {
     process.exit(1);
   }
 
-  // Configure engine
-  UbelEngine.engine     = engine;
-  UbelEngine.systemType = "npm";
+  // The CLI always operates in the current working directory.
+  const resolvedRoot = path.resolve(process.cwd());
 
-  // Init policy dirs
-  UbelEngine.initiateLocalPolicy();
+  // Construct fresh instances for this CLI invocation.
+  const manager = new NodeManagerInstance();
+  const eng     = new UbelEngineInstance(manager, resolvedRoot);
 
-  // Print banner
+  eng.engine     = engine;
+  eng.systemType = "npm";
+
+  eng.initiateLocalPolicy();
+
   console.log(banner);
-  console.log(`Reports location: ${UbelEngine.reportsLocation}`);
+  console.log(`Reports location: ${eng.reportsLocation}`);
   console.log();
-  console.log(`Policy location: ${UbelEngine.policyDir}`);
+  console.log(`Policy location: ${eng.policyDir}`);
   console.log();
 
   const effectiveMode = VALID_MODES.includes(mode) ? mode : "health";
-  UbelEngine.checkMode = effectiveMode;
+  eng.checkMode = effectiveMode;
 
   // ── init ────────────────────────────────────────────────────────────────────
   if (effectiveMode === "init") {
@@ -177,7 +168,7 @@ export async function main(programmaticOptions) {
       console.error("[!] Example: ubel-npm threshold high");
       process.exit(1);
     }
-    UbelEngine.setPolicyField("severity_threshold", level);
+    eng.setPolicyField("severity_threshold", level);
     console.log(`[+] Policy updated: severity_threshold = ${level}`);
     console.log("[i] Infections are always blocked regardless of this setting.");
     process.exit(0);
@@ -192,7 +183,7 @@ export async function main(programmaticOptions) {
       process.exit(1);
     }
     const value = raw === "true";
-    UbelEngine.setPolicyField("block_unknown_vulnerabilities", value);
+    eng.setPolicyField("block_unknown_vulnerabilities", value);
     console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
     process.exit(0);
   }
@@ -219,7 +210,7 @@ export async function main(programmaticOptions) {
 
   // ── scan ─────────────────────────────────────────────────────────────────────
   try {
-    await UbelEngine.scan(pkgArgs, {
+    await eng.scan(pkgArgs, {
       is_script:    false,
       save_reports: true,
       scan_os:      false,
@@ -238,9 +229,6 @@ export async function main(programmaticOptions) {
 
 /**
  * @deprecated Use main({ projectRoot, ...options }) instead.
- *
- * Kept as a zero-cost shim so any existing callers that haven't been updated
- * yet continue to work without modification.
  */
 export async function scan_project(projectRoot, options = {}) {
   return main({ projectRoot, ...options });

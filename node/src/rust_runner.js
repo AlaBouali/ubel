@@ -24,19 +24,21 @@ import path from "path";
  */
 export class RustCargoScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // ─────────────────────────────
-  static _cargoPurl(name, version) {
+  _cargoPurl(name, version) {
     return `pkg:cargo/${name.toLowerCase()}@${version ?? ""}`;
   }
 
   // ─────────────────────────────
   // Detect Cargo project root
   // ─────────────────────────────
-  static _isCargoRoot(dir) {
+  _isCargoRoot(dir) {
     return (
       fs.existsSync(path.join(dir, "Cargo.toml")) &&
       fs.existsSync(path.join(dir, "Cargo.lock"))
@@ -47,7 +49,7 @@ export class RustCargoScanner {
   // Minimal TOML block parser for Cargo.lock
   // Returns array of { name, version, source, dependencies[] }
   // ─────────────────────────────
-  static _parseCargoLock(lockPath) {
+  _parseCargoLock(lockPath) {
     let content;
     try {
       content = fs.readFileSync(lockPath, "utf8");
@@ -97,7 +99,7 @@ export class RustCargoScanner {
   // Returns { prod: Set<string>, dev: Set<string>, build: Set<string> }
   // (all lowercase crate names)
   // ─────────────────────────────
-  static _readCargoTomlDeps(tomlPath) {
+  _readCargoTomlDeps(tomlPath) {
     const prod  = new Set();
     const dev   = new Set();
     const build = new Set();
@@ -145,7 +147,7 @@ export class RustCargoScanner {
   // ─────────────────────────────
   // Scan a single Cargo project
   // ─────────────────────────────
-  static _scanProject(projectRoot) {
+  _scanProject(projectRoot) {
     const lockPath = path.join(projectRoot, "Cargo.lock");
     const packages = this._parseCargoLock(lockPath);
     if (!packages.length) return [];
@@ -202,7 +204,7 @@ export class RustCargoScanner {
   // ─────────────────────────────
   // Assign scopes (prod / dev / build)
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     const byId    = new Map(inventory.map(c => [c.id, c]));
     const nameIdx = new Map();
 
@@ -260,7 +262,7 @@ export class RustCargoScanner {
   // ─────────────────────────────
   // Merge duplicates by PURL
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -279,13 +281,13 @@ export class RustCargoScanner {
   // ─────────────────────────────
   // ENTRY
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
+  async getInstalled(startDir) {
     this.inventoryData = [];
 
     const visited = new Set();
     const raw     = [];
 
-    function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -299,11 +301,11 @@ export class RustCargoScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (RustCargoScanner._isCargoRoot(full)) {
+        if (this._isCargoRoot(full)) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...RustCargoScanner._scanProject(full));
+            raw.push(...this._scanProject(full));
           }
           // Still descend – workspaces have nested member crates
           // BUT skip target/ which is handled above
@@ -313,11 +315,11 @@ export class RustCargoScanner {
       }
     }
 
-    if (RustCargoScanner._isCargoRoot(startDir)) {
+    if (this._isCargoRoot(startDir)) {
       const key = path.resolve(startDir);
       if (!visited.has(key)) {
         visited.add(key);
-        raw.push(...RustCargoScanner._scanProject(startDir));
+        raw.push(...this._scanProject(startDir));
       }
     }
 

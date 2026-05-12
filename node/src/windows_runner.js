@@ -797,9 +797,12 @@ function detectPerPathVersions(componentDef) {
 }
 
 export class WindowsHostScanner {
-  static inventoryData = [];
 
-  static async getInstalled() {
+  constructor() {
+    this.inventoryData = [];
+  }
+
+  async getInstalled() {
     this.inventoryData = [];
 
     // ── Detect one component, returns array of package objects (may be empty) ──

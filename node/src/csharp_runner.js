@@ -19,13 +19,15 @@ import path from "path";
  */
 export class CSharpNuGetScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // Omits @<version> when version is blank to avoid silent PURL collisions.
   // ─────────────────────────────
-  static _nugetPurl(name, version) {
+  _nugetPurl(name, version) {
     const base = `pkg:nuget/${name.toLowerCase()}`;
     return version ? `${base}@${version}` : base;
   }
@@ -33,7 +35,7 @@ export class CSharpNuGetScanner {
   // ─────────────────────────────
   // Detect .NET project root
   // ─────────────────────────────
-  static _isDotnetRoot(dir) {
+  _isDotnetRoot(dir) {
     try {
       return fs.readdirSync(dir).some(f => /\.(cs|fs|vb)proj$/.test(f));
     } catch {
@@ -45,7 +47,7 @@ export class CSharpNuGetScanner {
   // Walk ancestors for Directory.Packages.props (Central Package Management).
   // Returns Map<lowercaseName, version> or empty Map.
   // ─────────────────────────────
-  static _readCentralPackageProps(startDir) {
+  _readCentralPackageProps(startDir) {
     const versions = new Map();
     let dir = startDir;
 
@@ -76,7 +78,7 @@ export class CSharpNuGetScanner {
   // under multiple target frameworks.
   // Returns Map<lowercaseName, { name, version, type, dependencies[] }> or null.
   // ─────────────────────────────
-  static _readPackagesLock(projectRoot) {
+  _readPackagesLock(projectRoot) {
     const lockPath = path.join(projectRoot, "packages.lock.json");
     if (!fs.existsSync(lockPath)) return null;
 
@@ -119,7 +121,7 @@ export class CSharpNuGetScanner {
   // Simple semver-ish "greater than" for version tie-breaking across TFMs.
   // Falls back to lexicographic comparison for non-semver strings.
   // ─────────────────────────────
-  static _versionGt(a, b) {
+  _versionGt(a, b) {
     const parse = v => v.split(/[.\-]/).map(p => parseInt(p, 10) || 0);
     const pa = parse(a), pb = parse(b);
     for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
@@ -133,7 +135,7 @@ export class CSharpNuGetScanner {
   // Parse obj/project.assets.json (fallback).
   // Returns Map<lowercaseName, { name, version, type, dependencies[] }> or null.
   // ─────────────────────────────
-  static _readProjectAssets(projectRoot) {
+  _readProjectAssets(projectRoot) {
     const assetPath = path.join(projectRoot, "obj", "project.assets.json");
     if (!fs.existsSync(assetPath)) return null;
 
@@ -172,7 +174,7 @@ export class CSharpNuGetScanner {
   // Returns { prod: Set<string>, dev: Set<string> } (lowercase names).
   // Falls back to Directory.Packages.props for version resolution when needed.
   // ─────────────────────────────
-  static _readCsprojDeps(projectRoot) {
+  _readCsprojDeps(projectRoot) {
     const prod = new Set();
     const dev  = new Set();
 
@@ -216,7 +218,7 @@ export class CSharpNuGetScanner {
   // ─────────────────────────────
   // Scan a single .NET project directory.
   // ─────────────────────────────
-  static _scanProject(projectRoot) {
+  _scanProject(projectRoot) {
     const index =
       this._readPackagesLock(projectRoot) ??
       this._readProjectAssets(projectRoot);
@@ -260,7 +262,7 @@ export class CSharpNuGetScanner {
   // Key fix: nameIdx is built PER PROJECT inside the loop, so BFS can never
   // escape into a different project's components.
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     const byId = new Map(inventory.map(c => [c.id, c]));
 
     for (const comp of inventory) {
@@ -338,7 +340,7 @@ export class CSharpNuGetScanner {
   // ─────────────────────────────
   // Merge duplicates by PURL
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -358,20 +360,20 @@ export class CSharpNuGetScanner {
   // ENTRY
   // Walks startDir (and subdirs) for .NET project roots, then scans each.
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
+  async getInstalled(startDir) {
     this.inventoryData = [];
 
     const visited = new Set();
     const raw     = [];
 
     // Scan startDir itself if it is a .NET root
-    if (CSharpNuGetScanner._isDotnetRoot(startDir)) {
+    if (this._isDotnetRoot(startDir)) {
       const key = path.resolve(startDir);
       visited.add(key);
-      raw.push(...CSharpNuGetScanner._scanProject(startDir));
+      raw.push(...this._scanProject(startDir));
     }
 
-    function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -386,10 +388,10 @@ export class CSharpNuGetScanner {
         const full = path.join(dir, entry.name);
         const key  = path.resolve(full);
 
-        if (CSharpNuGetScanner._isDotnetRoot(full)) {
+        if (this._isDotnetRoot(full)) {
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...CSharpNuGetScanner._scanProject(full));
+            raw.push(...this._scanProject(full));
           }
           continue;
         }

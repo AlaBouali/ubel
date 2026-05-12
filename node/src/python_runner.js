@@ -4,12 +4,14 @@ import path from "path";
 
 export class PythonVenvScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // ─────────────────────────────
-  static _pypiPurl(name, version) {
+  _pypiPurl(name, version) {
     const normalised = name.toLowerCase().replace(/_/g, "-");
     return `pkg:pypi/${encodeURIComponent(normalised)}@${version ?? ""}`;
   }
@@ -17,7 +19,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // Detect venv (robust)
   // ─────────────────────────────
-  static _isVenvRoot(dir) {
+  _isVenvRoot(dir) {
     return (
       fs.existsSync(path.join(dir, "pyvenv.cfg")) ||
       fs.existsSync(path.join(dir, "bin", "activate")) ||
@@ -30,7 +32,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // site-packages
   // ─────────────────────────────
-  static _sitePackagesDirs(venvRoot) {
+  _sitePackagesDirs(venvRoot) {
     const results = [];
 
     const libDir = path.join(venvRoot, "lib");
@@ -50,7 +52,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // Read metadata
   // ─────────────────────────────
-  static _readDistInfo(metaDir) {
+  _readDistInfo(metaDir) {
     let raw = "";
     try {
       const metaPath = fs.existsSync(path.join(metaDir, "METADATA"))
@@ -95,7 +97,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // Scan venv
   // ─────────────────────────────
-  static _scanVenv(venvRoot) {
+  _scanVenv(venvRoot) {
     const sitePackagesDirs = this._sitePackagesDirs(venvRoot);
     if (!sitePackagesDirs.length) return [];
 
@@ -167,7 +169,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // Assign scopes (FIXED)
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     const byId = new Map(inventory.map(c => [c.id, c]));
     const nameIndex = new Map();
 
@@ -250,7 +252,7 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // Merge
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -276,14 +278,14 @@ export class PythonVenvScanner {
   // ─────────────────────────────
   // ENTRY
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
-
+  async getInstalled(startDir) {
     this.inventoryData = [];
 
     const visited = new Set();
     const raw = [];
 
-    function walk(dir) {
+    // ✅ arrow function – preserves `this`
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -297,27 +299,24 @@ export class PythonVenvScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (PythonVenvScanner._isVenvRoot(full)) {
+        if (this._isVenvRoot(full)) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...PythonVenvScanner._scanVenv(full));
+            raw.push(...this._scanVenv(full));
           }
           continue;
         }
 
         walk(full);
       }
-    }
+    };
 
     walk(startDir);
 
     const merged = this.mergeInventoryByPurl(raw);
-
     this._assignScopes(merged);
-
     this.inventoryData = merged;
-
     return merged.map(c => c.id);
   }
 }

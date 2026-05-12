@@ -4,12 +4,14 @@ import path from "path";
 
 export class PhpComposerScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   // ─────────────────────────────
   // PURL
   // ─────────────────────────────
-  static _composerPurl(name, version) {
+  _composerPurl(name, version) {
     // Composer package names are vendor/package, already lowercase by convention.
     // PURL spec: pkg:composer/vendor/package@version
     const clean = name.toLowerCase();
@@ -19,7 +21,7 @@ export class PhpComposerScanner {
   // ─────────────────────────────
   // Detect composer project root
   // ─────────────────────────────
-  static _isComposerRoot(dir) {
+  _isComposerRoot(dir) {
     return (
       fs.existsSync(path.join(dir, "composer.json")) &&
       fs.existsSync(path.join(dir, "vendor"))
@@ -30,7 +32,7 @@ export class PhpComposerScanner {
   // Read installed packages from
   // vendor/composer/installed.json  (Composer v1 & v2)
   // ─────────────────────────────
-  static _readInstalledJson(vendorDir) {
+  _readInstalledJson(vendorDir) {
     const installedPath = path.join(vendorDir, "composer", "installed.json");
     if (!fs.existsSync(installedPath)) return [];
 
@@ -50,7 +52,7 @@ export class PhpComposerScanner {
   // Normalise a version string
   // strips Composer's leading "v" or "V"
   // ─────────────────────────────
-  static _normaliseVersion(v) {
+  _normaliseVersion(v) {
     if (!v) return "";
     return v.replace(/^v/i, "");
   }
@@ -60,7 +62,7 @@ export class PhpComposerScanner {
   // metadata (field is an array or
   // a plain string depending on version)
   // ─────────────────────────────
-  static _extractLicense(pkg) {
+  _extractLicense(pkg) {
     const lic = pkg.license ?? pkg.licence ?? "unknown";
     if (Array.isArray(lic)) return lic.join(" OR ") || "unknown";
     return lic || "unknown";
@@ -69,7 +71,7 @@ export class PhpComposerScanner {
   // ─────────────────────────────
   // Scan a single composer project
   // ─────────────────────────────
-  static _scanProject(projectRoot) {
+  _scanProject(projectRoot) {
     const vendorDir = path.join(projectRoot, "vendor");
     const packages  = this._readInstalledJson(vendorDir);
     if (!packages.length) return [];
@@ -130,7 +132,7 @@ export class PhpComposerScanner {
   // Assign scopes from root
   // composer.json  require / require-dev
   // ─────────────────────────────
-  static _assignScopes(inventory) {
+  _assignScopes(inventory) {
     const byId    = new Map(inventory.map(c => [c.id, c]));
     const nameIdx = new Map();
 
@@ -209,7 +211,7 @@ export class PhpComposerScanner {
   // ─────────────────────────────
   // Merge duplicates by PURL
   // ─────────────────────────────
-  static mergeInventoryByPurl(components) {
+  mergeInventoryByPurl(components) {
     const map = new Map();
 
     for (const comp of components) {
@@ -235,14 +237,14 @@ export class PhpComposerScanner {
   // ─────────────────────────────
   // ENTRY
   // ─────────────────────────────
-  static async getInstalled(startDir = process.cwd()) {
+  async getInstalled(startDir) {
 
     this.inventoryData = [];
 
     const visited = new Set();
     const raw     = [];
 
-    function walk(dir) {
+    const walk = (dir) => {
       let entries;
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -256,11 +258,11 @@ export class PhpComposerScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (PhpComposerScanner._isComposerRoot(full)) {
+        if (this._isComposerRoot(full)) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...PhpComposerScanner._scanProject(full));
+            raw.push(...this._scanProject(full));
           }
           // Don't descend into a detected project root – its vendor/ is
           // already handled. Walk sibling dirs only.
@@ -274,11 +276,11 @@ export class PhpComposerScanner {
     }
 
     // Check startDir itself before walking children
-    if (PhpComposerScanner._isComposerRoot(startDir)) {
+    if (this._isComposerRoot(startDir)) {
       const key = path.resolve(startDir);
       if (!visited.has(key)) {
         visited.add(key);
-        raw.push(...PhpComposerScanner._scanProject(startDir));
+        raw.push(...this._scanProject(startDir));
       }
     }
 

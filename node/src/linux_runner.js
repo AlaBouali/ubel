@@ -536,14 +536,16 @@ function scanRpm(ecosystem) {
 
 export class LinuxHostScanner {
 
-  static inventoryData = [];
+  constructor() {
+    this.inventoryData = [];
+  }
 
   /**
    * Scan the running Linux host.
    * Returns an array of PURL id strings (same contract as the other scanners).
    * Full records are available on LinuxHostScanner.inventoryData.
    */
-  static getInstalled() {
+  getInstalled() {
 
     this.inventoryData = [];
 
