@@ -244,7 +244,6 @@ class JavaMavenScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
     def get_installed(self, start_dir: str = ".") -> List[str]:
         self.inventory_data = []
         start_dir = os.path.abspath(start_dir)

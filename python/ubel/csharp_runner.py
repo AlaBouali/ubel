@@ -32,7 +32,7 @@ class CSharpNuGetScanner:
     # Detect .NET root                                                     #
     # ------------------------------------------------------------------ #
 
-    def _is_dotnet_root(directory: str) -> bool:
+    def _is_dotnet_root(self,directory: str) -> bool:
         try:
             return any(
                 re.search(r"\.(cs|fs|vb)proj$", f)
@@ -45,7 +45,7 @@ class CSharpNuGetScanner:
     # Central Package Management (Directory.Packages.props)               #
     # ------------------------------------------------------------------ #
 
-    def _read_central_package_props(start_dir: str) -> Dict[str, str]:
+    def _read_central_package_props(self,start_dir: str) -> Dict[str, str]:
         versions: Dict[str, str] = {}
         directory = start_dir
         for _ in range(8):
@@ -72,7 +72,7 @@ class CSharpNuGetScanner:
     # Version comparison                                                   #
     # ------------------------------------------------------------------ #
 
-    def _version_gt(a: str, b: str) -> bool:
+    def _version_gt(self,a: str, b: str) -> bool:
         def parse(v: str) -> List[int]:
             return [int(p) if p.isdigit() else 0 for p in re.split(r"[.\-]", v)]
         pa, pb = parse(a), parse(b)
@@ -120,7 +120,7 @@ class CSharpNuGetScanner:
     # obj/project.assets.json                                              #
     # ------------------------------------------------------------------ #
 
-    def _read_project_assets(project_root: str) -> Optional[Dict[str, Any]]:
+    def _read_project_assets(self,project_root: str) -> Optional[Dict[str, Any]]:
         asset_path = os.path.join(project_root, "obj", "project.assets.json")
         if not os.path.exists(asset_path):
             return None

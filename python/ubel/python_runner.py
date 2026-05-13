@@ -226,12 +226,14 @@ class Pypi_Manager:
         for scanner_class in scanners:
             try:
                 scanner=scanner_class()
+                print(scanner)
                 scanner.get_installed(start_dir)
                 all_components.extend(scanner.inventory_data)
-            except Exception:
+                print(len(scanner.inventory_data))
+            except Exception as exx:
+                raise exx
                 # One failing ecosystem must not block the others
                 pass
-
         if scan_os:
             try:
                 from .linux_runner import Linux_Manager

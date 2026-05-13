@@ -208,7 +208,7 @@ def _run_mode(
     # ── scan ─────────────────────────────────────────────────────────────────
     UbelEngine.check_mode = mode
     try:
-        UbelEngine.scan(
+        return UbelEngine.scan(
             pkg_args,
             scan_scope=scan_scope,
             is_script=is_script,
@@ -275,7 +275,7 @@ def main(programmatic_options: dict | None = None) -> dict | None:
     scan_venv    : bool       Include Python venvs (set False to skip them).
     scan_scope   : str        Label written into scan_info.scan_scope.
     """
-    UbelEngine=UbelEngine_Class()
+    print(programmatic_options)
     if programmatic_options is not None and isinstance(programmatic_options, dict):
         opts = programmatic_options
 
@@ -286,13 +286,13 @@ def main(programmatic_options: dict | None = None) -> dict | None:
         is_script     = opts.get("is_script",    True)
         save_reports  = opts.get("save_reports", True)
         scan_os_opt   = opts.get("scan_os",      False)
-        full_stack    = opts.get("full_stack",   False)
+        full_stack    = opts.get("full_stack",   True)
         scan_venv     = opts.get("scan_venv",    True)
         scan_scope    = opts.get("scan_scope",   "repository")
 
         original_cwd = os.getcwd()
-        if project_root and project_root != original_cwd:
-            os.chdir(project_root)
+        UbelEngine=UbelEngine_Class(project_root)
+    
 
         try:
             UbelEngine.engine      = engine
@@ -313,8 +313,7 @@ def main(programmatic_options: dict | None = None) -> dict | None:
                 scan_venv=scan_venv,
             )
         finally:
-            if project_root and project_root != original_cwd:
-                os.chdir(original_cwd)
+            pass
 
     # CLI fallback — dispatch via sys.argv (legacy path)
     argv = sys.argv[1:]
@@ -336,31 +335,30 @@ def main(programmatic_options: dict | None = None) -> dict | None:
         sys.exit(1)
 
     sys.argv = [sys.argv[0]] + rest
-    dispatch[engine_arg]()
-    return None
+    return dispatch[engine_arg](project_path=os.getcwd())
 
 
 # ---------------------------------------------------------------------------
 # Per-ecosystem entry-points  (mirror the JS bin/* wrappers)
 # ---------------------------------------------------------------------------
 
-def pip_mode() -> None:
-    UbelEngine=UbelEngine_Class()
-    _run_mode(UbelEngine,"pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
+def pip_mode(project_path=os.getcwd()) -> None:
+    UbelEngine=UbelEngine_Class(project_path)
+    return _run_mode(UbelEngine,"pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
     
     
 
 
-def linux_mode() -> None:
+def linux_mode(project_path=os.getcwd()) -> None:
     # Linux reports & policy live under $HOME to avoid requiring sudo for writes.
     # These MUST be set before _run_mode() is called because _run_mode() calls
     # _initiate_local_policy(UbelEngine.policy_dir, …) as one of its first steps.
     home = Path.home()
-    UbelEngine=UbelEngine_Class()
+    UbelEngine=UbelEngine_Class(project_path)
     UbelEngine.reports_location = str(home / ".ubel" / "local" / "reports")
     UbelEngine.policy_dir       = str(home / ".ubel" / "local" / "policy")
     UbelEngine.system_type      = "linux"
-    _run_mode(UbelEngine,__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
+    return _run_mode(UbelEngine,__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
 
 
 # ---------------------------------------------------------------------------

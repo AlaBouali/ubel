@@ -368,13 +368,13 @@ def _get_git_metadata() -> Dict[str, Any]:
 # Runtime metadata
 # ---------------------------------------------------------------------------
 
-def _get_runtime() -> Dict[str, str]:
+def _get_runtime(cwd:str) -> Dict[str, str]:
     return {
         "environment": "python",
         "version":     platform.python_version(),
         "platform":    sys.platform,
         "arch":        platform.machine(),
-        "cwd":         os.getcwd(),
+        "cwd":         cwd,
     }
 
 
@@ -2148,9 +2148,9 @@ def _load_policy(policy_dir: str, policy_filename: str) -> Dict:
 
 class UbelEngine:
 
-    def __init__(self) -> None:
-        self.reports_location  = "./.ubel/local/reports"
-        self.policy_dir        = "./.ubel/local/policy"
+    def __init__(self,current_dir) -> None:
+        self.reports_location  = f"{current_dir}/.ubel/local/reports"
+        self.policy_dir        = f"{current_dir}/.ubel/local/policy"
         self.policy_filename   = "config.json"
         self.check_mode        = "health"       # health | check | install
         self.system_type       = "pypi"         # pypi | linux
@@ -2247,6 +2247,8 @@ class UbelEngine:
                         Forwarded to Pypi_Manager.get_installed(scan_venv=...).
         """
         bad_args=self.validate_pkg_args(args)
+
+        print(full_stack)
 
         Pypi_Manager = Pypi_Manager_Class()
         if bad_args!=[]:
@@ -2483,7 +2485,7 @@ class UbelEngine:
 
             final_json: Dict[str, Any] = {
                 "generated_at": now.isoformat().replace("+00:00","") + "Z",
-                "runtime":      _get_runtime(),
+                "runtime":      _get_runtime(current_dir),
                 "engine":       {
                     "name":    _engine_name,
                     "version": _engine_version,
@@ -2514,50 +2516,47 @@ class UbelEngine:
             }
 
             # ── Programmatic fast-return (no disk I/O) ────────────────────
-            # Mirrors: if (options.is_script==true && options.save_reports===false) return finalJson;
-            if is_script and not save_reports:
-                return final_json
+            if save_reports:
 
-            # ── Write reports ─────────────────────────────────────────────
-            html_report = generate_html_report(final_json)
-            html_path.write_text(html_report, encoding="utf-8")
-            with open(json_path, "w", encoding="utf-8") as jf:
-                json.dump(final_json, jf, indent=2)
+                # ── Write reports ─────────────────────────────────────────────
+                html_report = generate_html_report(final_json)
+                html_path.write_text(html_report, encoding="utf-8")
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump(final_json, jf, indent=2)
 
-            # ── Generate CycloneDX SBOM ───────────────────────────────────
-            try:
-                from .sbom_builder import CycloneDXBuilder
-            except ImportError:
+                # ── Generate CycloneDX SBOM ───────────────────────────────────
                 try:
-                    from sbom_builder import CycloneDXBuilder
-                except ImportError as exc:
-                    raise ImportError(
-                        "sbom_builder module not found. "
-                        "Ensure sbom_builder.py is present in the ubel package."
-                    ) from exc
+                    from .sbom_builder import CycloneDXBuilder
+                except ImportError:
+                    try:
+                        from sbom_builder import CycloneDXBuilder
+                    except ImportError as exc:
+                        raise ImportError(
+                            "sbom_builder module not found. "
+                            "Ensure sbom_builder.py is present in the ubel package."
+                        ) from exc
 
-            sbom_data = CycloneDXBuilder(final_json).generate()
+                sbom_data = CycloneDXBuilder(final_json).generate()
 
-            # Timestamped SBOM alongside the main report
-            sbom_path = output_dir / f"{base_name}_sbom.cdx.json"
-            with open(sbom_path, "w", encoding="utf-8") as sf:
-                json.dump(sbom_data, sf, indent=2)
+                # Timestamped SBOM alongside the main report
+                sbom_path = output_dir / f"{base_name}.cdx.json"
+                with open(sbom_path, "w", encoding="utf-8") as sf:
+                    json.dump(sbom_data, sf, indent=2)
 
-            # latest.* — always overwritten, lives at the root of reports_location
-            # latest.* — always overwritten, lives at .ubel/reports to match Node.js engine
-            latest_dir = Path(".ubel") / "reports"
-            if self.system_type== "linux":
-                latest_dir = Path.home() / latest_dir
-            latest_dir.mkdir(parents=True, exist_ok=True)
-            latest_json = latest_dir / "latest.json"
-            latest_html = latest_dir / "latest.html"
-            latest_sbom = latest_dir / "latest_sbom.cdx.json"
-            latest_html.write_text(html_report, encoding="utf-8")
-            with open(latest_json, "w", encoding="utf-8") as jf:
-                json.dump(final_json, jf, indent=2)
-            with open(latest_sbom, "w", encoding="utf-8") as sf:
-                json.dump(sbom_data, sf, indent=2)
-
+                # latest.* — always overwritten, lives at the root of reports_location
+                # latest.* — always overwritten, lives at .ubel/reports to match Node.js engine
+                latest_dir = Path(f"{current_dir}/.ubel") / "reports"
+                latest_dir.mkdir(parents=True, exist_ok=True)
+                latest_json = latest_dir / "latest.json"
+                latest_html = latest_dir / "latest.html"
+                latest_sbom = latest_dir / "latest.cdx.json"
+                latest_html.write_text(html_report, encoding="utf-8")
+                with open(latest_json, "w", encoding="utf-8") as jf:
+                    json.dump(final_json, jf, indent=2)
+                with open(latest_sbom, "w", encoding="utf-8") as sf:
+                    json.dump(sbom_data, sf, indent=2)
+            if is_script:
+                return final_json
             # ── Console output ────────────────────────────────────────────
             if not is_script:
                 print()
@@ -2611,12 +2610,12 @@ class UbelEngine:
                 if not is_script:
                     print("[!] Policy violation detected!")
                     print(f"[!] {reason}")
-                raise PolicyViolationError(reason)
+                    raise PolicyViolationError(reason)
 
             # ── Mode-specific post-scan actions ───────────────────────────
             if self.check_mode == "health":
-                self.pin_versions()
                 if not is_script:
+                    self.pin_versions()
                     sys.exit(0)
                 return final_json
 
@@ -2632,7 +2631,8 @@ class UbelEngine:
                 req_file = self._generate_requirements_file(purls)
                 venv_dir = self.venv_dir or "./venv"
                 Pypi_Manager.run_real_install(req_file, self.engine, venv_dir)
-                self.pin_versions()
+                if is_script==False:
+                    self.pin_versions()
             else:
                 packages_list = [get_dependency_from_purl(p) for p in purls if f"/{__tool_name__}@{__version__}" not in p]
                 Linux_Manager.run_real_install(packages_list)
@@ -2650,10 +2650,11 @@ class UbelEngine:
     
     
     def pin_versions(self):
-        PythonVenvScanner().get_installed(start_dir=".", is_recursive=False)
+        PythonVenvScannerInstance=PythonVenvScanner()
+        PythonVenvScannerInstance.get_installed(start_dir=".", is_recursive=False)
         installed = [
             f"{pkg['name']}=={pkg['version']}"
-            for pkg in PythonVenvScanner.inventory_data
+            for pkg in PythonVenvScannerInstance.inventory_data
             if pkg.get("name") and pkg.get("version")
         ]
 

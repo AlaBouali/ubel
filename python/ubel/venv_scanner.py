@@ -109,7 +109,10 @@ def _read_dist_info(meta_dir: str) -> Dict:
             if dep:
                 requires.append(dep)
         elif lower.startswith("classifier: license "):
-            license_ = line.split("::")[2].strip().replace("License", "") or "unknown"
+            try:
+                license_ = line.split("::")[2].strip().replace("License", "") or "unknown"
+            except:
+                license_ = "unknown"
         elif line.startswith("License-Expression:"):
             license_ = line[len("License-Expression:"):].strip() or "unknown"
 

@@ -209,7 +209,7 @@ class GoModScanner:
     # ------------------------------------------------------------------ #
 
     
-    def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
+    def _assign_scopes(self,inventory: List[Dict[str, Any]]) -> None:
         test_patterns = [
             "/testing", "/testutil", "/mock", "test", "gomock", "testify"
         ]
@@ -227,7 +227,7 @@ class GoModScanner:
     # ------------------------------------------------------------------ #
 
     
-    def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def merge_inventory_by_purl(self,components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
