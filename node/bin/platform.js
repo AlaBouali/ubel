@@ -11,7 +11,7 @@ async function run() {
       projectRoot : targetPath || homedir(),
       engine      : "npm",
       mode        : "health",
-      is_script   : true,
+      is_script   : false,
       save_reports: true,
       full_stack  : false,
       scan_os     : true,
