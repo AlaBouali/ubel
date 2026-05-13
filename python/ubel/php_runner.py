@@ -20,14 +20,12 @@ from typing import Any, Dict, List, Set
 
 class PhpComposerScanner:
 
-    inventory_data: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------ #
     # PURL                                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _composer_purl(name: str, version: str) -> str:
+    
+    def _composer_purl(self,name: str, version: str) -> str:
         clean = name.lower()
         return f"pkg:composer/{clean}@{version or ''}"
 
@@ -35,8 +33,8 @@ class PhpComposerScanner:
     # Detect Composer root                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _is_composer_root(directory: str) -> bool:
+    
+    def _is_composer_root(self,directory: str) -> bool:
         return (
             os.path.exists(os.path.join(directory, "composer.json")) and
             os.path.exists(os.path.join(directory, "vendor"))
@@ -46,8 +44,8 @@ class PhpComposerScanner:
     # Read installed.json                                                  #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _read_installed_json(vendor_dir: str) -> List[Dict[str, Any]]:
+    
+    def _read_installed_json(self,vendor_dir: str) -> List[Dict[str, Any]]:
         installed_path = os.path.join(vendor_dir, "composer", "installed.json")
         if not os.path.exists(installed_path):
             return []
@@ -62,8 +60,8 @@ class PhpComposerScanner:
     # Normalize version                                                    #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _normalise_version(v: str) -> str:
+    
+    def _normalise_version(self,v: str) -> str:
         if not v:
             return ""
         return v.lstrip("vV")
@@ -72,8 +70,8 @@ class PhpComposerScanner:
     # Extract license                                                      #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _extract_license(pkg: Dict[str, Any]) -> str:
+    
+    def _extract_license(self,pkg: Dict[str, Any]) -> str:
         lic = pkg.get("license") or pkg.get("licence") or "unknown"
         if isinstance(lic, list):
             return " OR ".join(lic) or "unknown"
@@ -83,10 +81,10 @@ class PhpComposerScanner:
     # Scan one Composer project                                            #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _scan_project(project_root: str) -> List[Dict[str, Any]]:
+    
+    def _scan_project(self,project_root: str) -> List[Dict[str, Any]]:
         vendor_dir = os.path.join(project_root, "vendor")
-        packages   = PhpComposerScanner._read_installed_json(vendor_dir)
+        packages   = self._read_installed_json(vendor_dir)
         if not packages:
             return []
 
@@ -97,7 +95,7 @@ class PhpComposerScanner:
             if not raw_name:
                 continue
             norm    = raw_name.lower()
-            version = PhpComposerScanner._normalise_version(
+            version = self._normalise_version(
                 pkg.get("version") or pkg.get("version_normalized") or ""
             )
             name_index[norm] = {"name": raw_name, "version": version, "pkg": pkg}
@@ -109,8 +107,8 @@ class PhpComposerScanner:
             name    = entry["name"]
             version = entry["version"]
             pkg     = entry["pkg"]
-            cid     = PhpComposerScanner._composer_purl(name, version)
-            license_ = PhpComposerScanner._extract_license(pkg)
+            cid     = self._composer_purl(name, version)
+            license_ = self._extract_license(pkg)
 
             require_map = pkg.get("require") or {}
             dependencies: List[str] = []
@@ -121,10 +119,10 @@ class PhpComposerScanner:
                 resolved = name_index.get(dep_lower)
                 if resolved:
                     dependencies.append(
-                        PhpComposerScanner._composer_purl(resolved["name"], resolved["version"])
+                        self._composer_purl(resolved["name"], resolved["version"])
                     )
                 else:
-                    dependencies.append(PhpComposerScanner._composer_purl(dep_lower, ""))
+                    dependencies.append(self._composer_purl(dep_lower, ""))
 
             install_path = os.path.join(vendor_dir, *name.split("/"))
 
@@ -154,8 +152,8 @@ class PhpComposerScanner:
     # Assign scopes                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
+    
+    def _assign_scopes(self,inventory: List[Dict[str, Any]]) -> None:
         by_id: Dict[str, Dict] = {c["id"]: c for c in inventory}
         name_idx: Dict[str, List[Dict]] = {}
 
@@ -215,8 +213,8 @@ class PhpComposerScanner:
     # Merge by PURL                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    
+    def merge_inventory_by_purl(self,components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -239,9 +237,8 @@ class PhpComposerScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
-        cls.inventory_data = []
+    def get_installed(self, start_dir: str = ".") -> List[str]:
+        self.inventory_data = []
         start_dir = os.path.abspath(start_dir)
 
         visited: Set[str] = set()
@@ -261,27 +258,27 @@ class PhpComposerScanner:
                     if entry.name in skip:
                         continue
                     full = entry.path
-                    if cls._is_composer_root(full):
+                    if self._is_composer_root(full):
                         key = os.path.realpath(full)
                         if key not in visited:
                             visited.add(key)
-                            raw.extend(cls._scan_project(full))
+                            raw.extend(self._scan_project(full))
                         continue
                     walk(full)
 
-        if cls._is_composer_root(start_dir):
+        if self._is_composer_root(start_dir):
             key = os.path.realpath(start_dir)
             if key not in visited:
                 visited.add(key)
-                raw.extend(cls._scan_project(start_dir))
+                raw.extend(self._scan_project(start_dir))
 
         walk(start_dir)
 
-        merged = cls.merge_inventory_by_purl(raw)
-        cls._assign_scopes(merged)
+        merged = self.merge_inventory_by_purl(raw)
+        self._assign_scopes(merged)
 
         for c in merged:
             c.pop("dev", None)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]

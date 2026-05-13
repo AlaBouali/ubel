@@ -20,22 +20,20 @@ from typing import Any, Dict, List, Set
 
 class RubyBundlerScanner:
 
-    inventory_data: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------ #
     # PURL                                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _gem_purl(name: str, version: str) -> str:
+    
+    def _gem_purl(self,name: str, version: str) -> str:
         return f"pkg:gem/{name.lower()}@{version or ''}"
 
     # ------------------------------------------------------------------ #
     # Detect Bundler root                                                  #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _is_bundler_root(directory: str) -> bool:
+    
+    def _is_bundler_root(self,directory: str) -> bool:
         return (
             os.path.exists(os.path.join(directory, "Gemfile")) and
             os.path.exists(os.path.join(directory, "Gemfile.lock"))
@@ -45,8 +43,8 @@ class RubyBundlerScanner:
     # Parse Gemfile.lock                                                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_gemfile_lock(lock_path: str) -> Dict[str, Any]:
+    
+    def _parse_gemfile_lock(self,lock_path: str) -> Dict[str, Any]:
         """Returns lowercase_name → { name, version, dependencies: [lowercase names] }"""
         try:
             content = Path(lock_path).read_text(encoding="utf-8")
@@ -109,8 +107,8 @@ class RubyBundlerScanner:
     # Parse Gemfile for group classification                               #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_gemfile_groups(gemfile_path: str) -> tuple:
+    
+    def _parse_gemfile_groups(self,gemfile_path: str) -> tuple:
         """Returns (prod: Set[str], dev: Set[str])"""
         prod: Set[str] = set()
         dev:  Set[str] = set()
@@ -168,9 +166,9 @@ class RubyBundlerScanner:
     # Scan one Bundler project                                             #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _scan_project(project_root: str) -> List[Dict[str, Any]]:
-        index = RubyBundlerScanner._parse_gemfile_lock(
+    
+    def _scan_project(self,project_root: str) -> List[Dict[str, Any]]:
+        index = self._parse_gemfile_lock(
             os.path.join(project_root, "Gemfile.lock")
         )
         if not index:
@@ -181,17 +179,17 @@ class RubyBundlerScanner:
         for key, entry in index.items():
             name    = entry["name"]
             version = entry["version"]
-            cid     = RubyBundlerScanner._gem_purl(name, version)
+            cid     = self._gem_purl(name, version)
 
             resolved_deps: List[str] = []
             for dep in entry["dependencies"]:
                 resolved = index.get(dep)
                 if resolved:
                     resolved_deps.append(
-                        RubyBundlerScanner._gem_purl(resolved["name"], resolved["version"])
+                        self._gem_purl(resolved["name"], resolved["version"])
                     )
                 else:
-                    resolved_deps.append(RubyBundlerScanner._gem_purl(dep, ""))
+                    resolved_deps.append(self._gem_purl(dep, ""))
 
             components.append({
                 "id":           cid,
@@ -213,8 +211,8 @@ class RubyBundlerScanner:
     # Assign scopes                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
+    
+    def _assign_scopes(self,inventory: List[Dict[str, Any]]) -> None:
         by_id: Dict[str, Dict] = {c["id"]: c for c in inventory}
         name_idx: Dict[str, List[Dict]] = {}
 
@@ -228,7 +226,7 @@ class RubyBundlerScanner:
             project_groups.setdefault(comp["project_root"], []).append(comp)
 
         for project_root, comps in project_groups.items():
-            prod, dev = RubyBundlerScanner._parse_gemfile_groups(
+            prod, dev = self._parse_gemfile_groups(
                 os.path.join(project_root, "Gemfile")
             )
 
@@ -263,8 +261,8 @@ class RubyBundlerScanner:
     # Merge by PURL                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    
+    def merge_inventory_by_purl(self,components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -287,9 +285,8 @@ class RubyBundlerScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
-        cls.inventory_data = []
+    def get_installed(self, start_dir: str = ".") -> List[str]:
+        self.inventory_data = []
         start_dir = os.path.abspath(start_dir)
 
         visited: Set[str] = set()
@@ -309,24 +306,24 @@ class RubyBundlerScanner:
                     if entry.name in skip:
                         continue
                     full = entry.path
-                    if cls._is_bundler_root(full):
+                    if self._is_bundler_root(full):
                         key = os.path.realpath(full)
                         if key not in visited:
                             visited.add(key)
-                            raw.extend(cls._scan_project(full))
+                            raw.extend(self._scan_project(full))
                         continue
                     walk(full)
 
-        if cls._is_bundler_root(start_dir):
+        if self._is_bundler_root(start_dir):
             key = os.path.realpath(start_dir)
             if key not in visited:
                 visited.add(key)
-                raw.extend(cls._scan_project(start_dir))
+                raw.extend(self._scan_project(start_dir))
 
         walk(start_dir)
 
-        merged = cls.merge_inventory_by_purl(raw)
-        cls._assign_scopes(merged)
+        merged = self.merge_inventory_by_purl(raw)
+        self._assign_scopes(merged)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]

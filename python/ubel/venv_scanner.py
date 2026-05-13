@@ -12,8 +12,8 @@ Usage
     from python_venv_scanner import PythonVenvScanner
     import asyncio
 
-    ids = asyncio.run(PythonVenvScanner.get_installed("/path/to/project"))
-    for rec in PythonVenvScanner.inventory_data:
+    ids = asyncio.run(self.get_installed("/path/to/project"))
+    for rec in self.inventory_data:
         print(rec)
 """
 
@@ -305,13 +305,10 @@ class PythonVenvScanner:
     installed packages.
     """
 
-    inventory_data: List[Dict] = []
-
-    @classmethod
-    def get_installed(cls, start_dir: str = ".", is_recursive: bool = True) -> List[str]:
+    def get_installed(self, start_dir: str = ".", is_recursive: bool = True) -> List[str]:
         """
         Entry-point that mirrors the JS API.  Returns a list of PURL id strings.
-        Full records are available on PythonVenvScanner.inventory_data.
+        Full records are available on self.inventory_data.
 
         Parameters
         ----------
@@ -322,12 +319,11 @@ class PythonVenvScanner:
             ``start_dir``.  When False only the immediate children of
             ``start_dir`` are inspected — no further descent is performed.
         """
-        return cls.scan(start_dir, is_recursive=is_recursive)
+        return self.scan(start_dir, is_recursive=is_recursive)
 
-    @classmethod
-    def scan(cls, start_dir: str = ".", is_recursive: bool = True) -> List[str]:
+    def scan(self, start_dir: str = ".", is_recursive: bool = True) -> List[str]:
         """Synchronous scan. Returns a list of PURL id strings."""
-        cls.inventory_data = []
+        self.inventory_data = []
 
         visited: set = set()
         raw: List[Dict] = []
@@ -369,5 +365,5 @@ class PythonVenvScanner:
         merged = _merge_inventory_by_purl(raw)
         _assign_scopes(merged)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]

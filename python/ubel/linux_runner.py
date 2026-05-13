@@ -1,5 +1,5 @@
 """
-linux_manager.py — Linux host package manager.
+self.py — Linux host package manager.
 
 Pure-Python, zero external dependencies.
   - OS detection via /etc/os-release (stdlib only, no `distro` package)
@@ -31,8 +31,8 @@ class Linux_Manager:
     # Dependency sequences                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def build_dependency_sequences(inventory: List[Dict]) -> List[Dict]:
+    
+    def build_dependency_sequences(self,inventory: List[Dict]) -> List[Dict]:
         by_id = {c["id"]: c for c in inventory}
 
         depended: set = set()
@@ -63,8 +63,8 @@ class Linux_Manager:
     # Merge                                                                #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict]) -> List[Dict]:
+    
+    def merge_inventory_by_purl(self,components: List[Dict]) -> List[Dict]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -83,12 +83,12 @@ class Linux_Manager:
     # Shell helpers                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def command_exists(cmd: str) -> bool:
+    
+    def command_exists(self,cmd: str) -> bool:
         return shutil.which(cmd) is not None
 
-    @staticmethod
-    def run_command(cmd: List[str]) -> str:
+    
+    def run_command(self,cmd: List[str]) -> str:
         try:
             result = subprocess.run(
                 cmd,
@@ -107,8 +107,8 @@ class Linux_Manager:
     # OS detection  (stdlib only — no `distro` package)                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_os_release() -> Dict[str, str]:
+    
+    def _parse_os_release(self) -> Dict[str, str]:
         """Parse /etc/os-release (or /usr/lib/os-release) into a plain dict."""
         data: Dict[str, str] = {}
         for candidate in ("/etc/os-release", "/usr/lib/os-release"):
@@ -127,8 +127,8 @@ class Linux_Manager:
                 continue
         return data
 
-    @staticmethod
-    def get_os_info() -> Dict[str, str]:
+    
+    def get_os_info(self) -> Dict[str, str]:
         """
         Return an OS information dict that mirrors the shape previously
         produced by the `distro` library, extended with raw os-release keys.
@@ -137,7 +137,7 @@ class Linux_Manager:
             id, name, version, like, package_manager
         All raw /etc/os-release keys are also included (lowercased).
         """
-        raw = Linux_Manager._parse_os_release()
+        raw = self._parse_os_release()
 
         os_id   = raw.get("id", "").replace(" ", "")
         name    = raw.get("pretty_name") or raw.get("name", os_id)
@@ -149,7 +149,7 @@ class Linux_Manager:
             "name":            name,
             "version":         version,
             "like":            like,
-            "package_manager": Linux_Manager.get_pkg_manager(),
+            "package_manager": self.get_pkg_manager(),
         }
         # Merge all raw os-release keys so callers that read e.g. info["id_like"]
         # directly continue to work.
@@ -160,15 +160,15 @@ class Linux_Manager:
     # Package manager detection                                            #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def get_pkg_manager() -> Optional[str]:
+    
+    def get_pkg_manager(self) -> Optional[str]:
         for pm in ("apt", "apt-get", "dnf", "yum"):
-            if Linux_Manager.command_exists(pm):
+            if self.command_exists(pm):
                 return pm
         return None
 
-    @staticmethod
-    def get_pkg_manager_version() -> str:
+    
+    def get_pkg_manager_version(self) -> str:
         """
         Return the installed version of the active package manager, or "unknown".
 
@@ -178,7 +178,7 @@ class Linux_Manager:
           dnf      → dnf --version   → "4.14.0\n  ..."               → "4.14.0"
           yum      → yum --version   → "4.14.0\nLoaded plugins:..."  → "4.14.0"
         """
-        pm = Linux_Manager.get_pkg_manager()
+        pm = self.get_pkg_manager()
         if pm is None:
             return "unknown"
         try:
@@ -203,8 +203,8 @@ class Linux_Manager:
     # PURL builder                                                         #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def package_to_purl(os_info: Dict[str, str], package: str, version: str) -> str:
+    
+    def package_to_purl(self,os_info: Dict[str, str], package: str, version: str) -> str:
         os_id      = os_info.get("id", "").replace(" ", "").lower()
         like       = os_info.get("like", "").lower()
         pkg_manager = os_info.get("package_manager", "")
@@ -231,16 +231,16 @@ class Linux_Manager:
     # get_linux_packages  (delegates scanning to LinuxHostScanner)        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def get_linux_packages() -> List[str]:
+    
+    def get_linux_packages(self) -> List[str]:
         """
         Inventory all installed system packages via LinuxHostScanner,
         annotate with dependency sequences, append the running kernel
         component (on apt-based systems), and return a list of PURL strings.
 
-        Full records are stored in Linux_Manager.inventory_data.
+        Full records are stored in self.inventory_data.
         """
-        system_info = Linux_Manager.get_os_info()
+        system_info = self.get_os_info()
 
         # LinuxHostScanner.scan() is synchronous; no event loop needed here.
         LinuxHostScanner.scan()
@@ -261,17 +261,17 @@ class Linux_Manager:
                 "state":        "undetermined",
             })
 
-        components = Linux_Manager.merge_inventory_by_purl(components)
-        components = Linux_Manager.build_dependency_sequences(components)
+        components = self.merge_inventory_by_purl(components)
+        components = self.build_dependency_sequences(components)
 
-        Linux_Manager.inventory_data = components
+        self.inventory_data = components
         purls = [c["id"] for c in components]
 
         # Kernel component (apt-based distros only, matching original behaviour)
         pkg_manager = system_info.get("package_manager")
         if pkg_manager in ("apt", "apt-get"):
             kernel_version = os.uname().release
-            kernel_purl = Linux_Manager.package_to_purl(
+            kernel_purl = self.package_to_purl(
                 system_info, "linux", kernel_version
             )
             kernel_component = {
@@ -295,8 +295,8 @@ class Linux_Manager:
     # resolve_packages  (dry-run via the native package manager)          #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def resolve_packages(packages: Any) -> List[Dict]:
+    
+    def resolve_packages(self,packages: Any) -> List[Dict]:
         """
         Simulate dependency resolution and return a list of package dicts:
             [{"name": "...", "version": "...", ...}, ...]
@@ -304,17 +304,17 @@ class Linux_Manager:
         if isinstance(packages, str):
             packages = [packages]
 
-        os_info = Linux_Manager.get_os_info()
-        pm      = Linux_Manager.get_pkg_manager()
+        os_info = self.get_os_info()
+        pm      = self.get_pkg_manager()
 
-        Linux_Manager.pkg_manager = pm  # Store for later use in real install
-        Linux_Manager.pkg_manager_version = Linux_Manager.get_pkg_manager_version()  # Probe version now while we have the PM detected
+        self.pkg_manager = pm  # Store for later use in real install
+        self.pkg_manager_version = self.get_pkg_manager_version()  # Probe version now while we have the PM detected
         resolved: List[Dict] = []
 
         # ── APT (Debian / Ubuntu) ─────────────────────────────────────────
         if pm in ("apt", "apt-get"):
             cmd    = ["apt-get", "-s", "--no-install-recommends", "install"] + packages
-            output = Linux_Manager.run_command(cmd)
+            output = self.run_command(cmd)
             # e.g. "Inst curl (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])"
             pattern = re.compile(r"^Inst\s+(\S+)\s+\(([^ ]+)")
             for line in output.splitlines():
@@ -334,7 +334,7 @@ class Linux_Manager:
         # ── DNF (RHEL 8+, AlmaLinux, Rocky) ──────────────────────────────
         if pm == "dnf":
             cmd    = ["dnf", "install", "--assumeno"] + packages
-            output = Linux_Manager.run_command(cmd)
+            output = self.run_command(cmd)
             capture = False
             for line in output.splitlines():
                 line = line.strip()
@@ -360,7 +360,7 @@ class Linux_Manager:
         # ── YUM (RHEL 7) ──────────────────────────────────────────────────
         if pm == "yum":
             cmd    = ["yum", "install", "--assumeno"] + packages
-            output = Linux_Manager.run_command(cmd)
+            output = self.run_command(cmd)
             capture = False
             for line in output.splitlines():
                 line = line.strip()
@@ -389,24 +389,24 @@ class Linux_Manager:
     # get_packages_purls                                                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def get_packages_purls(packages: Any) -> List[str]:
-        packages    = Linux_Manager.resolve_packages(packages)
-        system_info = Linux_Manager.get_os_info()
+    
+    def get_packages_purls(self,packages: Any) -> List[str]:
+        packages    = self.resolve_packages(packages)
+        system_info = self.get_os_info()
         identified  = [
-            {"id": Linux_Manager.package_to_purl(system_info, pkg["name"], pkg["version"])}
+            {"id": self.package_to_purl(system_info, pkg["name"], pkg["version"])}
             for pkg in packages
         ]
-        Linux_Manager.inventory_data = identified
+        self.inventory_data = identified
         return [pkg["id"] for pkg in identified]
 
     # ------------------------------------------------------------------ #
     # run_real_install                                                     #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def run_real_install(packages_list: List[Any]) -> subprocess.CompletedProcess:
-        pm = Linux_Manager.get_os_info()["package_manager"]
+    
+    def run_real_install(self,packages_list: List[Any]) -> subprocess.CompletedProcess:
+        pm = self.get_os_info()["package_manager"]
         if pm in ("apt", "apt-get"):
             pkgs = [f"{item[0]}={item[1]}" for item in packages_list]
         else:

@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .cvss_parser import process_vulnerability
-from .python_runner import Pypi_Manager, PythonVenvScanner
+from .python_runner import Pypi_Manager as Pypi_Manager_Class, PythonVenvScanner
 from .linux_runner import Linux_Manager
 
 try:
@@ -2148,29 +2148,30 @@ def _load_policy(policy_dir: str, policy_filename: str) -> Dict:
 
 class UbelEngine:
 
-    reports_location  = "./.ubel/local/reports"
-    policy_dir        = "./.ubel/local/policy"
-    policy_filename   = "config.json"
-    check_mode        = "health"       # health | check | install
-    system_type       = "pypi"         # pypi | linux
-    engine            = "pip"
+    def __init__(self) -> None:
+        self.reports_location  = "./.ubel/local/reports"
+        self.policy_dir        = "./.ubel/local/policy"
+        self.policy_filename   = "config.json"
+        self.check_mode        = "health"       # health | check | install
+        self.system_type       = "pypi"         # pypi | linux
+        self.engine            = "pip"
 
-    # Venv directory used when system_type == "pypi"
-    venv_dir: Optional[str] = None
+        # Venv directory used when system_type == "pypi"
+        self.venv_dir: Optional[str] = None
 
-    # Populated during scan for cross-module inventory merging
-    _vuln_ids_found: Set[str] = set()
+        # Populated during scan for cross-module inventory merging
+        self._vuln_ids_found: Set[str] = set()
 
     # ------------------------------------------------------------------
     # Policy helpers (public, mirrors JS setPolicyField)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def set_policy_field(key: str, value: Any) -> None:
-        data = _load_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
+    
+    def set_policy_field(self, key: str, value: Any) -> None:
+        data = _load_policy(self.policy_dir, self.policy_filename)
         data[key] = value
         with open(
-            os.path.join(UbelEngine.policy_dir, UbelEngine.policy_filename),
+            os.path.join(self.policy_dir, self.policy_filename),
             "w", encoding="utf-8",
         ) as fh:
             json.dump(data, fh, indent=4)
@@ -2179,8 +2180,8 @@ class UbelEngine:
     # Requirements file helper  (pypi install mode)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _generate_requirements_file(purls: List[str]) -> str:
+    
+    def _generate_requirements_file(self,purls: List[str]) -> str:
         deps_dir = "./.ubel/dependencies"
         os.makedirs(deps_dir, exist_ok=True)
         req_file = os.path.join(deps_dir, "requirements.txt")
@@ -2195,7 +2196,7 @@ class UbelEngine:
             fh.write("\n".join(lines))
         return req_file
     
-    def validate_pkg_args(pkg_args: list[str]) -> None:
+    def validate_pkg_args(self,pkg_args: list[str]) -> None:
         bad = [] #[a for a in pkg_args if not PKG_ARG_RE.match(a)]
         accepted_non_alphanumeric_characters ="=._+-@/~"
         for arg in pkg_args:
@@ -2213,8 +2214,8 @@ class UbelEngine:
     # Main scan
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def scan(
+    
+    def scan(self,
         args: List[str],
         *,
         scan_scope:   str  = "repository",
@@ -2245,10 +2246,12 @@ class UbelEngine:
         scan_venv     : Include Python venvs.  Set False to skip them entirely.
                         Forwarded to Pypi_Manager.get_installed(scan_venv=...).
         """
-        bad_args=UbelEngine.validate_pkg_args(args)
+        bad_args=self.validate_pkg_args(args)
+
+        Pypi_Manager = Pypi_Manager_Class()
         if bad_args!=[]:
             raise Exception(f"Rejected unsafe or malformed package argument(s): {', '.join(bad_args)}")
-        UbelEngine._vuln_ids_found = set()
+        self._vuln_ids_found = set()
 
         # ── Resolve working directory ──────────────────────────────────
         start_dir = os.path.abspath(current_dir) if current_dir else os.getcwd()
@@ -2259,16 +2262,16 @@ class UbelEngine:
         date_path = now.strftime("%Y/%m/%d")
 
         output_dir = Path(
-            f"{UbelEngine.reports_location}/"
-            f"{UbelEngine.system_type}/{UbelEngine.check_mode}/{date_path}"
+            f"{self.reports_location}/"
+            f"{self.system_type}/{self.check_mode}/{date_path}"
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        base_name  = f"{UbelEngine.system_type}_{UbelEngine.check_mode}_{UbelEngine.engine}__{timestamp}"
+        base_name  = f"{self.system_type}_{self.check_mode}_{self.engine}__{timestamp}"
         json_path  = output_dir / f"{base_name}.json"
         html_path  = output_dir / f"{base_name}.html"
 
-        policy = _load_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
+        policy = _load_policy(self.policy_dir, self.policy_filename)
 
         purls:           List[str]  = []
         report_content:  Any        = None
@@ -2278,14 +2281,14 @@ class UbelEngine:
 
         # True for check/install (dry-run or real install against candidate packages);
         # False for health (scan the already-installed environment).
-        is_dry_run = UbelEngine.check_mode in ("check", "install")
+        is_dry_run = self.check_mode in ("check", "install")
 
         try:
             # ── Collect packages ──────────────────────────────────────────
-            if UbelEngine.system_type == "pypi":
+            if self.system_type == "pypi":
                 if is_dry_run:
                     # Ensure a local venv exists
-                    venv_dir = UbelEngine.venv_dir or "./venv"
+                    venv_dir = self.venv_dir or "./venv"
                     python          = Pypi_Manager.init_venv(venv_dir)
                     _engine_version = Pypi_Manager.get_pip_version(python) or ""
                     purls           = Pypi_Manager.run_dry_run(args, venv_dir)
@@ -2334,11 +2337,10 @@ class UbelEngine:
 
             # ── Build inventory ───────────────────────────────────────────
             inventory: List[Dict] = []
-            if UbelEngine.system_type == "pypi":
+            if self.system_type == "pypi":
                 if is_dry_run:
                     inventory = list(Pypi_Manager.inventory_data)
                 else:
-                    from .venv_scanner import PythonVenvScanner
                     inventory = list(Pypi_Manager.inventory_data)
             else:
                 inventory = list(Linux_Manager.inventory_data)
@@ -2404,7 +2406,7 @@ class UbelEngine:
             severity_buckets  = {k: 0 for k in ("critical","high","medium","low","unknown")}
 
             for v in vulnerabilities:
-                UbelEngine._vuln_ids_found.add(v.get("id",""))
+                self._vuln_ids_found.add(v.get("id",""))
                 if v.get("is_infection"):
                     infection_count += 1
                     infected_purls.add(v["affected_purl"])
@@ -2490,13 +2492,13 @@ class UbelEngine:
                 "git_metadata": _get_git_metadata(),
                 "tool_info":    {"name": __tool_name__, "version": __version__, "license": __tool_license__},
                 "scan_info":    {
-                    "type":       UbelEngine.check_mode,
+                    "type":       self.check_mode,
                     "ecosystems": sorted(ecosystems),
                     "engine":     __tool_name__,
                     "scan_scope": scan_scope,
                 },
                 "stats":               stats,
-                "vulnerabilities_ids": sorted(UbelEngine._vuln_ids_found),
+                "vulnerabilities_ids": sorted(self._vuln_ids_found),
                 "findings_summary":    findings_summary,
                 "vulnerabilities":     sort_vulnerabilities(vulnerabilities),
                 "inventory":           inventory,
@@ -2544,7 +2546,7 @@ class UbelEngine:
             # latest.* — always overwritten, lives at the root of reports_location
             # latest.* — always overwritten, lives at .ubel/reports to match Node.js engine
             latest_dir = Path(".ubel") / "reports"
-            if UbelEngine.system_type== "linux":
+            if self.system_type== "linux":
                 latest_dir = Path.home() / latest_dir
             latest_dir.mkdir(parents=True, exist_ok=True)
             latest_json = latest_dir / "latest.json"
@@ -2612,13 +2614,13 @@ class UbelEngine:
                 raise PolicyViolationError(reason)
 
             # ── Mode-specific post-scan actions ───────────────────────────
-            if UbelEngine.check_mode == "health":
-                UbelEngine.pin_versions()
+            if self.check_mode == "health":
+                self.pin_versions()
                 if not is_script:
                     sys.exit(0)
                 return final_json
 
-            if UbelEngine.check_mode == "check":
+            if self.check_mode == "check":
                 if not is_script:
                     sys.exit(0)
                 return final_json
@@ -2626,11 +2628,11 @@ class UbelEngine:
             # install mode
             if not is_script:
                 print("[+] Policy passed. Installing dependencies...")
-            if UbelEngine.system_type == "pypi":
-                req_file = UbelEngine._generate_requirements_file(purls)
-                venv_dir = UbelEngine.venv_dir or "./venv"
-                Pypi_Manager.run_real_install(req_file, UbelEngine.engine, venv_dir)
-                UbelEngine.pin_versions()
+            if self.system_type == "pypi":
+                req_file = self._generate_requirements_file(purls)
+                venv_dir = self.venv_dir or "./venv"
+                Pypi_Manager.run_real_install(req_file, self.engine, venv_dir)
+                self.pin_versions()
             else:
                 packages_list = [get_dependency_from_purl(p) for p in purls if f"/{__tool_name__}@{__version__}" not in p]
                 Linux_Manager.run_real_install(packages_list)
@@ -2646,9 +2648,9 @@ class UbelEngine:
             print(f"[!] Scan failed: {exc}", file=sys.stderr)
             raise
     
-    @staticmethod
-    def pin_versions():
-        PythonVenvScanner.get_installed(start_dir=".", is_recursive=False)
+    
+    def pin_versions(self):
+        PythonVenvScanner().get_installed(start_dir=".", is_recursive=False)
         installed = [
             f"{pkg['name']}=={pkg['version']}"
             for pkg in PythonVenvScanner.inventory_data

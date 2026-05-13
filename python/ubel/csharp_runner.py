@@ -20,14 +20,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 class CSharpNuGetScanner:
 
-    inventory_data: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------ #
     # PURL                                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _nuget_purl(name: str, version: str) -> str:
+    def _nuget_purl(self,name: str, version: str) -> str:
         base = f"pkg:nuget/{name.lower()}"
         return f"{base}@{version}" if version else base
 
@@ -35,7 +32,6 @@ class CSharpNuGetScanner:
     # Detect .NET root                                                     #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
     def _is_dotnet_root(directory: str) -> bool:
         try:
             return any(
@@ -49,7 +45,6 @@ class CSharpNuGetScanner:
     # Central Package Management (Directory.Packages.props)               #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
     def _read_central_package_props(start_dir: str) -> Dict[str, str]:
         versions: Dict[str, str] = {}
         directory = start_dir
@@ -77,7 +72,6 @@ class CSharpNuGetScanner:
     # Version comparison                                                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
     def _version_gt(a: str, b: str) -> bool:
         def parse(v: str) -> List[int]:
             return [int(p) if p.isdigit() else 0 for p in re.split(r"[.\-]", v)]
@@ -93,8 +87,7 @@ class CSharpNuGetScanner:
     # packages.lock.json                                                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _read_packages_lock(project_root: str) -> Optional[Dict[str, Any]]:
+    def _read_packages_lock(self,project_root: str) -> Optional[Dict[str, Any]]:
         lock_path = os.path.join(project_root, "packages.lock.json")
         if not os.path.exists(lock_path):
             return None
@@ -118,7 +111,7 @@ class CSharpNuGetScanner:
                         "dependencies": [d.lower() for d in meta.get("dependencies", {})],
                     }
                 else:
-                    if CSharpNuGetScanner._version_gt(version, index[key]["version"]):
+                    if self._version_gt(version, index[key]["version"]):
                         index[key]["version"] = version
 
         return index if index else None
@@ -127,7 +120,6 @@ class CSharpNuGetScanner:
     # obj/project.assets.json                                              #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
     def _read_project_assets(project_root: str) -> Optional[Dict[str, Any]]:
         asset_path = os.path.join(project_root, "obj", "project.assets.json")
         if not os.path.exists(asset_path):
@@ -159,8 +151,7 @@ class CSharpNuGetScanner:
     # .csproj direct deps                                                  #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _read_csproj_deps(project_root: str) -> Tuple[Set[str], Set[str]]:
+    def _read_csproj_deps(self,project_root: str) -> Tuple[Set[str], Set[str]]:
         prod: Set[str] = set()
         dev:  Set[str] = set()
 
@@ -203,11 +194,10 @@ class CSharpNuGetScanner:
     # Scan one project                                                     #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _scan_project(project_root: str) -> List[Dict[str, Any]]:
+    def _scan_project(self,project_root: str) -> List[Dict[str, Any]]:
         index = (
-            CSharpNuGetScanner._read_packages_lock(project_root)
-            or CSharpNuGetScanner._read_project_assets(project_root)
+            self._read_packages_lock(project_root)
+            or self._read_project_assets(project_root)
         )
         if not index:
             return []
@@ -217,15 +207,15 @@ class CSharpNuGetScanner:
         for key, entry in index.items():
             name    = entry["name"]
             version = entry["version"]
-            cid     = CSharpNuGetScanner._nuget_purl(name, version)
+            cid     = self._nuget_purl(name, version)
 
             resolved_deps: List[str] = []
             for dep in entry["dependencies"]:
                 if dep in index:
                     d = index[dep]
-                    resolved_deps.append(CSharpNuGetScanner._nuget_purl(d["name"], d["version"]))
+                    resolved_deps.append(self._nuget_purl(d["name"], d["version"]))
                 else:
-                    resolved_deps.append(CSharpNuGetScanner._nuget_purl(dep, ""))
+                    resolved_deps.append(self._nuget_purl(dep, ""))
 
             components.append({
                 "id":           cid,
@@ -248,8 +238,7 @@ class CSharpNuGetScanner:
     # BFS scope propagation                                                #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
+    def _assign_scopes(self,inventory: List[Dict[str, Any]]) -> None:
         by_id: Dict[str, Dict] = {c["id"]: c for c in inventory}
 
         for comp in inventory:
@@ -267,7 +256,7 @@ class CSharpNuGetScanner:
             for c in comps:
                 name_idx.setdefault(c["name"], []).append(c)
 
-            prod, dev = CSharpNuGetScanner._read_csproj_deps(project_root)
+            prod, dev = self._read_csproj_deps(project_root)
 
             if not prod and not dev:
                 csproj_exists = False
@@ -309,8 +298,7 @@ class CSharpNuGetScanner:
     # Merge by PURL                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def merge_inventory_by_purl(self,components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -333,17 +321,16 @@ class CSharpNuGetScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
-        cls.inventory_data = []
+    def get_installed(self, start_dir: str = ".") -> List[str]:
+        self.inventory_data = []
         start_dir = os.path.abspath(start_dir)
 
         visited: Set[str] = set()
         raw: List[Dict[str, Any]] = []
 
-        if cls._is_dotnet_root(start_dir):
+        if self._is_dotnet_root(start_dir):
             visited.add(start_dir)
-            raw.extend(cls._scan_project(start_dir))
+            raw.extend(self._scan_project(start_dir))
 
         skip = {"node_modules", ".git", ".ubel", "obj", "bin", "packages"}
 
@@ -360,20 +347,20 @@ class CSharpNuGetScanner:
                         continue
                     full = entry.path
                     key  = os.path.realpath(full)
-                    if cls._is_dotnet_root(full):
+                    if self._is_dotnet_root(full):
                         if key not in visited:
                             visited.add(key)
-                            raw.extend(cls._scan_project(full))
+                            raw.extend(self._scan_project(full))
                         continue
                     walk(full)
 
         walk(start_dir)
 
-        merged = cls.merge_inventory_by_purl(raw)
-        cls._assign_scopes(merged)
+        merged = self.merge_inventory_by_purl(raw)
+        self._assign_scopes(merged)
 
         for c in merged:
             c.pop("_nuget_type", None)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]

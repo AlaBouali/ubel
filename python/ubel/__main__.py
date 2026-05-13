@@ -25,7 +25,8 @@ import sys
 import json
 from pathlib import Path
 
-from .ubel_engine import UbelEngine, PolicyViolationError, _initiate_local_policy, Pypi_Manager
+from .ubel_engine import UbelEngine as UbelEngine_Class, PolicyViolationError, _initiate_local_policy
+from .python_runner import Pypi_Manager
 from .info import banner                         # from the existing info module
 
 try:
@@ -81,7 +82,7 @@ def load_environment():
 # Banner / header
 # ---------------------------------------------------------------------------
 
-def _print_header() -> None:
+def _print_header(UbelEngine: UbelEngine_Class) -> None:
     print(banner)
     print()
     print(f"Reports location: {UbelEngine.reports_location}")
@@ -94,7 +95,7 @@ def _print_header() -> None:
 # Policy configuration helpers  (mirrors JS threshold / block-unknown modes)
 # ---------------------------------------------------------------------------
 
-def _cmd_threshold(level: str) -> None:
+def _cmd_threshold(UbelEngine: UbelEngine_Class,level: str) -> None:
     level = level.lower()
     if level not in VALID_SEVERITIES:
         print(
@@ -108,7 +109,7 @@ def _cmd_threshold(level: str) -> None:
     print("[i] Infections are always blocked regardless of this setting.")
 
 
-def _cmd_block_unknown(raw: str) -> None:
+def _cmd_block_unknown(UbelEngine: UbelEngine_Class,raw: str) -> None:
     raw = raw.lower()
     if raw not in ("true", "false"):
         print("[!] Provide true or false", file=sys.stderr)
@@ -128,6 +129,7 @@ def _cmd_block_unknown(raw: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_mode(
+    UbelEngine: UbelEngine_Class,
     engine:    str,
     ecosystem: str,
     description: str,
@@ -140,7 +142,7 @@ def _run_mode(
     scan_venv:    bool = True,
     current_dir:  str | None = None,
 ) -> None:
-    _print_header()
+    _print_header(UbelEngine)
 
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
@@ -172,19 +174,19 @@ def _run_mode(
 
     # ── init ────────────────────────────────────────────────────────────────
     if mode == "init":
-        Pypi_Manager.init_venv(venv_dir = UbelEngine.venv_dir or "./venv")
+        Pypi_Manager().init_venv(venv_dir = UbelEngine.venv_dir or "./venv")
         sys.exit(0)
 
     # ── threshold ────────────────────────────────────────────────────────────
     if mode == "threshold":
         level = extra_args[0] if extra_args else ""
-        _cmd_threshold(level)
+        _cmd_threshold(UbelEngine,level)
         sys.exit(0)
 
     # ── block-unknown ────────────────────────────────────────────────────────
     if mode == "block-unknown":
         raw = extra_args[0] if extra_args else ""
-        _cmd_block_unknown(raw)
+        _cmd_block_unknown(UbelEngine,raw)
         sys.exit(0)
 
     # ── collect package args ─────────────────────────────────────────────────
@@ -273,6 +275,7 @@ def main(programmatic_options: dict | None = None) -> dict | None:
     scan_venv    : bool       Include Python venvs (set False to skip them).
     scan_scope   : str        Label written into scan_info.scan_scope.
     """
+    UbelEngine=UbelEngine_Class()
     if programmatic_options is not None and isinstance(programmatic_options, dict):
         opts = programmatic_options
 
@@ -296,7 +299,6 @@ def main(programmatic_options: dict | None = None) -> dict | None:
             UbelEngine.system_type = "pypi" if engine == "pip" else engine
             UbelEngine.check_mode  = mode
             UbelEngine._vuln_ids_found = set()
-            Pypi_Manager.inventory_data = []
 
             _initiate_local_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
 
@@ -343,7 +345,8 @@ def main(programmatic_options: dict | None = None) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def pip_mode() -> None:
-    _run_mode("pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
+    UbelEngine=UbelEngine_Class()
+    _run_mode(UbelEngine,"pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
     
     
 
@@ -353,10 +356,11 @@ def linux_mode() -> None:
     # These MUST be set before _run_mode() is called because _run_mode() calls
     # _initiate_local_policy(UbelEngine.policy_dir, …) as one of its first steps.
     home = Path.home()
+    UbelEngine=UbelEngine_Class()
     UbelEngine.reports_location = str(home / ".ubel" / "local" / "reports")
     UbelEngine.policy_dir       = str(home / ".ubel" / "local" / "policy")
     UbelEngine.system_type      = "linux"
-    _run_mode(__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
+    _run_mode(UbelEngine,__tool_name__, "linux", "Safe Linux policy-driven supply-chain firewall", scan_scope="linux_machine")
 
 
 # ---------------------------------------------------------------------------

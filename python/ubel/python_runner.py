@@ -1,5 +1,5 @@
 """
-pypi_manager.py — PyPI package manager with local venv support.
+self.py — PyPI package manager with local venv support.
 
 Static methods:
     init_venv(venv_dir)              → create a venv at venv_dir (idempotent)
@@ -14,7 +14,7 @@ Static methods:
                                        (Python venvs, Node.js, C#, Go, Java,
                                         PHP, Ruby, Rust).  Returns list of
                                        PURL ids; full records in
-                                       Pypi_Manager.inventory_data.
+                                       self.inventory_data.
 """
 
 from __future__ import annotations
@@ -39,18 +39,16 @@ from .rust_runner           import RustCargoScanner
 
 class Pypi_Manager:
 
-    inventory_data: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _purl(name: str, version: str) -> str:
+    
+    def _purl(self,name: str, version: str) -> str:
         return f"pkg:pypi/{name.lower()}@{version}"
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict]) -> List[Dict]:
+    
+    def merge_inventory_by_purl(self,components: List[Dict]) -> List[Dict]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -69,8 +67,8 @@ class Pypi_Manager:
     # Dependency sequences                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def build_dependency_sequences(inventory: List[Dict]) -> List[Dict]:
+    
+    def build_dependency_sequences(self,inventory: List[Dict]) -> List[Dict]:
         by_id = {c["id"]: c for c in inventory}
 
         # Deduplicate each component's dependency list (extras/markers may
@@ -117,8 +115,8 @@ class Pypi_Manager:
     # Venv helpers                                                         #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _venv_python(venv_dir: str) -> str:
+    
+    def _venv_python(self,venv_dir: str) -> str:
         """Return the absolute path to the venv's Python interpreter."""
         venv_path = Path(venv_dir)
         # Unix
@@ -133,8 +131,8 @@ class Pypi_Manager:
             f"Cannot locate Python interpreter inside venv: {venv_dir}"
         )
     
-    @staticmethod
-    def get_pip_version(python: str) -> Optional[str]:
+    
+    def get_pip_version(self,python: str) -> Optional[str]:
         """Return the version of pip installed in the venv, or None if not found."""
         try:
             result = subprocess.run(
@@ -150,8 +148,8 @@ class Pypi_Manager:
             pass
         return None
 
-    @staticmethod
-    def _resolve_dep_purl(raw_dep_name: str, name_to_purl: Dict[str, str]) -> str:
+    
+    def _resolve_dep_purl(self,raw_dep_name: str, name_to_purl: Dict[str, str]) -> str:
         key = raw_dep_name.lower().replace("-", "_")
         return name_to_purl.get(key, f"pkg:pypi/{raw_dep_name.lower()}@")
 
@@ -159,8 +157,8 @@ class Pypi_Manager:
     # init_venv                                                            #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def init_venv(venv_dir: str) -> str:
+    
+    def init_venv(self,venv_dir: str) -> str:
         """
         Create a Python virtual environment at *venv_dir* if one does not
         already exist there.  Idempotent — safe to call on an existing venv.
@@ -179,11 +177,10 @@ class Pypi_Manager:
             )
             builder.create(str(venv_path))
 
-        return Pypi_Manager._venv_python(str(venv_path))
+        return self._venv_python(str(venv_path))
     
-    @classmethod
     def get_installed(
-        cls,
+        self,
         start_dir:  str  = ".",
         full_stack: bool = False,
         scan_venv:  bool = True,
@@ -204,7 +201,7 @@ class Pypi_Manager:
                      package-ecosystem sweep.  Default False.
 
         Returns a list of PURL id strings.
-        Full component records are stored in ``Pypi_Manager.inventory_data``.
+        Full component records are stored in ``self.inventory_data``.
         """
         start_dir = os.path.abspath(start_dir)
 
@@ -226,8 +223,9 @@ class Pypi_Manager:
 
         all_components: List[Dict[str, Any]] = []
 
-        for scanner in scanners:
+        for scanner_class in scanners:
             try:
+                scanner=scanner_class()
                 scanner.get_installed(start_dir)
                 all_components.extend(scanner.inventory_data)
             except Exception:
@@ -242,27 +240,27 @@ class Pypi_Manager:
             except Exception:
                 pass
 
-        merged = cls.merge_inventory_by_purl(all_components)
-        cls.inventory_data = merged
+        merged = self.merge_inventory_by_purl(all_components)
+        self.inventory_data = merged
         return [c["id"] for c in merged]
 
     # ------------------------------------------------------------------ #
     # run_dry_run                                                          #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def run_dry_run(initial_args: List[str], venv_dir: str) -> List[str]:
+    
+    def run_dry_run(self,initial_args: List[str], venv_dir: str) -> List[str]:
         """
         Run ``pip install --dry-run`` for *initial_args* inside *venv_dir*.
 
         The venv must already exist (call ``init_venv`` first).
 
         Returns a list of PURL id strings.
-        Full records are stored in ``Pypi_Manager.inventory_data``.
+        Full records are stored in ``self.inventory_data``.
         """
-        python = Pypi_Manager._venv_python(venv_dir)
+        python = self._venv_python(venv_dir)
 
-        pip_version = Pypi_Manager.get_pip_version(python)
+        pip_version = self.get_pip_version(python)
         if pip_version is None:
             raise RuntimeError(f"pip is not installed in the venv at {venv_dir}")
         args   = [a for a in initial_args if a != "--"]
@@ -303,7 +301,7 @@ class Pypi_Manager:
             v = meta.get("version")
             if n and v:
                 key = n.lower().replace("-", "_")
-                name_to_purl.setdefault(key, Pypi_Manager._purl(n, v))
+                name_to_purl.setdefault(key, self._purl(n, v))
 
         # ── Build components ──────────────────────────────────────────────
         components: List[Dict] = []
@@ -319,10 +317,10 @@ class Pypi_Manager:
             deps: List[str] = []
             for r in meta.get("requires_dist") or []:
                 dep_name = r.split()[0].rstrip(";")
-                deps.append(Pypi_Manager._resolve_dep_purl(dep_name, name_to_purl))
+                deps.append(self._resolve_dep_purl(dep_name, name_to_purl))
 
             components.append({
-                "id":           Pypi_Manager._purl(name, version),
+                "id":           self._purl(name, version),
                 "name":         name.lower(),
                 "version":      version,
                 "type":         "library",
@@ -349,18 +347,19 @@ class Pypi_Manager:
             }
         )
 
-        components = Pypi_Manager.merge_inventory_by_purl(components)
-        components = Pypi_Manager.build_dependency_sequences(components)
+        components = self.merge_inventory_by_purl(components)
+        components = self.build_dependency_sequences(components)
 
-        Pypi_Manager.inventory_data = components
+        self.inventory_data = components
         return [c["id"] for c in components]
 
     # ------------------------------------------------------------------ #
     # run_real_install                                                     #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
+    
     def run_real_install(
+            self,
         file_name: str,
         engine: str,
         venv_dir: str,
@@ -371,7 +370,7 @@ class Pypi_Manager:
         Currently only ``engine="pip"`` is supported.
         The venv must already exist (call ``init_venv`` first).
         """
-        python = Pypi_Manager._venv_python(venv_dir)
+        python = self._venv_python(venv_dir)
 
         if engine == "pip":
             cmd = [python, "-m", "pip", "install", "-r", file_name]

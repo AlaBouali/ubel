@@ -534,21 +534,17 @@ def _scan_rpm(ecosystem: str) -> List[Dict]:
 class LinuxHostScanner:
     """Scan the running Linux host for installed packages."""
 
-    inventory_data: List[Dict] = []
-
-    @classmethod
-    def get_installed(cls) -> List[str]:
+    def get_installed(self) -> List[str]:
         """
         Async entry-point (mirrors JS API).
         Returns a list of PURL id strings.
         Full records available on LinuxHostScanner.inventory_data.
         """
-        return cls.scan()
+        return self.scan()
 
-    @classmethod
-    def scan(cls) -> List[str]:
+    def scan(self) -> List[str]:
         """Synchronous scan. Returns a list of PURL id strings."""
-        cls.inventory_data = []
+        self.inventory_data = []
 
         ecosystem = _detect_host_ecosystem()
 
@@ -562,5 +558,5 @@ class LinuxHostScanner:
             raise RuntimeError(f"No scanner implemented for ecosystem: {ecosystem}")
 
         packages.sort(key=lambda p: p["name"])
-        cls.inventory_data = packages
+        self.inventory_data = packages
         return [p["id"] for p in packages]

@@ -21,22 +21,20 @@ from typing import Any, Dict, List, Set
 
 class RustCargoScanner:
 
-    inventory_data: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------ #
     # PURL                                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _cargo_purl(name: str, version: str) -> str:
+    
+    def _cargo_purl(self,name: str, version: str) -> str:
         return f"pkg:cargo/{name.lower()}@{version or ''}"
 
     # ------------------------------------------------------------------ #
     # Detect Cargo root                                                    #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _is_cargo_root(directory: str) -> bool:
+    
+    def _is_cargo_root(self,directory: str) -> bool:
         return (
             os.path.exists(os.path.join(directory, "Cargo.toml")) and
             os.path.exists(os.path.join(directory, "Cargo.lock"))
@@ -46,8 +44,8 @@ class RustCargoScanner:
     # Parse Cargo.lock                                                     #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_cargo_lock(lock_path: str) -> List[Dict[str, Any]]:
+    
+    def _parse_cargo_lock(self,lock_path: str) -> List[Dict[str, Any]]:
         try:
             content = Path(lock_path).read_text(encoding="utf-8")
         except OSError:
@@ -87,8 +85,8 @@ class RustCargoScanner:
     # Read Cargo.toml dep sections                                         #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _read_cargo_toml_deps(toml_path: str) -> tuple:
+    
+    def _read_cargo_toml_deps(self,toml_path: str) -> tuple:
         """Returns (prod: Set[str], dev: Set[str], build: Set[str])"""
         prod:  Set[str] = set()
         dev:   Set[str] = set()
@@ -134,9 +132,9 @@ class RustCargoScanner:
     # Scan one Cargo project                                               #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _scan_project(project_root: str) -> List[Dict[str, Any]]:
-        packages = RustCargoScanner._parse_cargo_lock(
+    
+    def _scan_project(self,project_root: str) -> List[Dict[str, Any]]:
+        packages = self._parse_cargo_lock(
             os.path.join(project_root, "Cargo.lock")
         )
         if not packages:
@@ -157,7 +155,7 @@ class RustCargoScanner:
 
         for pkg in packages:
             name    = pkg["name"].lower().replace("-", "_")
-            cid     = RustCargoScanner._cargo_purl(pkg["name"], pkg["version"])
+            cid     = self._cargo_purl(pkg["name"], pkg["version"])
             is_local = pkg["source"] == "local" or not pkg["source"].startswith("registry")
 
             dependencies: List[str] = []
@@ -167,10 +165,10 @@ class RustCargoScanner:
                 resolved = full_index.get(dep_key) or name_index.get(dep_name)
                 if resolved:
                     dependencies.append(
-                        RustCargoScanner._cargo_purl(resolved["name"], resolved["version"])
+                        self._cargo_purl(resolved["name"], resolved["version"])
                     )
                 else:
-                    dependencies.append(RustCargoScanner._cargo_purl(dep["name"], dep["version"]))
+                    dependencies.append(self._cargo_purl(dep["name"], dep["version"]))
 
             components.append({
                 "id":           cid,
@@ -193,8 +191,8 @@ class RustCargoScanner:
     # Assign scopes                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
+    
+    def _assign_scopes(self,inventory: List[Dict[str, Any]]) -> None:
         by_id: Dict[str, Dict] = {c["id"]: c for c in inventory}
         name_idx: Dict[str, List[Dict]] = {}
 
@@ -208,7 +206,7 @@ class RustCargoScanner:
             project_groups.setdefault(comp["project_root"], []).append(comp)
 
         for project_root, comps in project_groups.items():
-            prod, dev, build = RustCargoScanner._read_cargo_toml_deps(
+            prod, dev, build = self._read_cargo_toml_deps(
                 os.path.join(project_root, "Cargo.toml")
             )
 
@@ -243,8 +241,8 @@ class RustCargoScanner:
     # Merge by PURL                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    
+    def merge_inventory_by_purl(self,components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
             cid = comp["id"]
@@ -267,9 +265,8 @@ class RustCargoScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
-        cls.inventory_data = []
+    def get_installed(self, start_dir: str = ".") -> List[str]:
+        self.inventory_data = []
         start_dir = os.path.abspath(start_dir)
 
         visited: Set[str] = set()
@@ -289,27 +286,27 @@ class RustCargoScanner:
                     if entry.name in skip:
                         continue
                     full = entry.path
-                    if cls._is_cargo_root(full):
+                    if self._is_cargo_root(full):
                         key = os.path.realpath(full)
                         if key not in visited:
                             visited.add(key)
-                            raw.extend(cls._scan_project(full))
+                            raw.extend(self._scan_project(full))
                         # Still descend – workspace member crates live inside
                     walk(full)
 
-        if cls._is_cargo_root(start_dir):
+        if self._is_cargo_root(start_dir):
             key = os.path.realpath(start_dir)
             if key not in visited:
                 visited.add(key)
-                raw.extend(cls._scan_project(start_dir))
+                raw.extend(self._scan_project(start_dir))
 
         walk(start_dir)
 
-        merged = cls.merge_inventory_by_purl(raw)
-        cls._assign_scopes(merged)
+        merged = self.merge_inventory_by_purl(raw)
+        self._assign_scopes(merged)
 
         for c in merged:
             c.pop("_source", None)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]

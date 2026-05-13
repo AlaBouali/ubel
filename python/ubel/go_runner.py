@@ -20,14 +20,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 class GoModScanner:
 
-    inventory_data: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------ #
     # PURL                                                                 #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _go_purl(module_path: str, version: str) -> str:
+    
+    def _go_purl(self,module_path: str, version: str) -> str:
         v = version.lstrip("v") if version else ""
         return f"pkg:golang/{module_path.lower()}@{v}"
 
@@ -35,8 +34,8 @@ class GoModScanner:
     # Detect Go module root                                                #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _is_go_root(directory: str) -> bool:
+    
+    def _is_go_root(self,directory: str) -> bool:
         return (
             os.path.exists(os.path.join(directory, "go.mod")) and
             os.path.exists(os.path.join(directory, "go.sum"))
@@ -46,8 +45,8 @@ class GoModScanner:
     # Parse go.mod                                                         #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_go_mod(mod_path: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    
+    def _parse_go_mod(self,mod_path: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         """
         Returns (module_name, requires, replaces).
         requires: lowercase_path → { path, version, indirect }
@@ -112,8 +111,8 @@ class GoModScanner:
     # Parse go.sum                                                         #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _parse_go_sum(sum_path: str) -> Dict[str, Any]:
+    
+    def _parse_go_sum(self,sum_path: str) -> Dict[str, Any]:
         """Returns lowercase_path → { path, version }"""
         installed: Dict[str, Any] = {}
 
@@ -147,12 +146,12 @@ class GoModScanner:
     # Scan one Go module root                                              #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _scan_project(project_root: str) -> List[Dict[str, Any]]:
-        _, requires, replaces = GoModScanner._parse_go_mod(
+    
+    def _scan_project(self,project_root: str) -> List[Dict[str, Any]]:
+        _, requires, replaces = self._parse_go_mod(
             os.path.join(project_root, "go.mod")
         )
-        sum_entries = GoModScanner._parse_go_sum(
+        sum_entries = self._parse_go_sum(
             os.path.join(project_root, "go.sum")
         )
 
@@ -186,7 +185,7 @@ class GoModScanner:
         for entry in index.values():
             mp      = entry["path"]
             version = entry["version"]
-            cid     = GoModScanner._go_purl(mp, version)
+            cid     = self._go_purl(mp, version)
 
             components.append({
                 "id":           cid,
@@ -209,7 +208,7 @@ class GoModScanner:
     # Assign scopes                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
+    
     def _assign_scopes(inventory: List[Dict[str, Any]]) -> None:
         test_patterns = [
             "/testing", "/testutil", "/mock", "test", "gomock", "testify"
@@ -227,7 +226,7 @@ class GoModScanner:
     # Merge by PURL                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
+    
     def merge_inventory_by_purl(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict] = {}
         for comp in components:
@@ -251,9 +250,8 @@ class GoModScanner:
     # ENTRY                                                                #
     # ------------------------------------------------------------------ #
 
-    @classmethod
-    def get_installed(cls, start_dir: str = ".") -> List[str]:
-        cls.inventory_data = []
+    def get_installed(self, start_dir: str = ".") -> List[str]:
+        self.inventory_data = []
         start_dir = os.path.abspath(start_dir)
 
         visited: Set[str] = set()
@@ -273,26 +271,26 @@ class GoModScanner:
                     if entry.name in skip:
                         continue
                     full = entry.path
-                    if cls._is_go_root(full):
+                    if self._is_go_root(full):
                         key = os.path.realpath(full)
                         if key not in visited:
                             visited.add(key)
-                            raw.extend(cls._scan_project(full))
+                            raw.extend(self._scan_project(full))
                     walk(full)
 
-        if cls._is_go_root(start_dir):
+        if self._is_go_root(start_dir):
             key = os.path.realpath(start_dir)
             if key not in visited:
                 visited.add(key)
-                raw.extend(cls._scan_project(start_dir))
+                raw.extend(self._scan_project(start_dir))
 
         walk(start_dir)
 
-        merged = cls.merge_inventory_by_purl(raw)
-        cls._assign_scopes(merged)
+        merged = self.merge_inventory_by_purl(raw)
+        self._assign_scopes(merged)
 
         for c in merged:
             c.pop("_indirect", None)
 
-        cls.inventory_data = merged
+        self.inventory_data = merged
         return [c["id"] for c in merged]
