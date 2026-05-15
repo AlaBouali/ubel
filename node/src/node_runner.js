@@ -409,7 +409,17 @@ export class NodeManagerInstance {
     if (fs.existsSync(lockPath) && !fs.existsSync(nodeModulesPath)) {
       await fs.promises.unlink(lockPath);
     }
-
+    if (!fs.existsSync(packageJsonPath)) {
+      console.log(`No package.json found. Running 'npm init -y' in ${projectPath}`);
+      const initResult = spawnSync("npm", ["init", "-y"], {
+        cwd:   projectPath,
+        stdio: "inherit",
+        shell: true,
+      });
+      if (initResult.status !== 0) {
+        throw new Error(`npm init -y failed (exit ${initResult.status})`);
+      }
+    }
     // ── 2. Backup originals ───────────────────────────────────────────────
 
     this._original_package_json = fs.existsSync(packageJsonPath)

@@ -3,8 +3,8 @@ import { main } from "../node/src/main.js";
 const report = await main({
   projectRoot  : ".",
   engine       : "npm",
-  mode         : "install",
-  packages     : [],
+  mode         : "check",
+  packages     : ["tar@7.5.9"],
   is_script    : true,
   save_reports : true,
   scan_os      : false,
