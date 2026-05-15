@@ -141,7 +141,7 @@ export class CycloneDXBuilder {
       const isInf = !!v.is_infection;
       const sev = this._severityToCdx(isInf ? "critical" : v.severity);
       const method = this._normaliseCvssMethod(v.cvss_method);
-      const purl = v.affected_purl || "";
+      const purl = v.affected_package_id || "";
 
       let sources = v.source || [];
       if (typeof sources === "string") sources = [sources];
@@ -172,7 +172,10 @@ export class CycloneDXBuilder {
         id: vid,
         source: { name: sourceName, url: sourceUrl },
         ratings: [rating],
-        cwes: v.cwes || [],
+        cwes: (v.cwes || []).map(c => {
+          const n = typeof c === "number" ? c : parseInt(String(c).replace(/^CWE-/i, ""), 10);
+          return isNaN(n) ? null : n;
+        }).filter(n => n !== null),
         description: v.description || "",
         advisories,
         affects: purl ? [{ ref: purl }] : [],

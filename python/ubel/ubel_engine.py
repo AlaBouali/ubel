@@ -494,7 +494,7 @@ def get_vuln_by_id(vuln_ref: Dict) -> Optional[Dict]:
 
     process_vulnerability(data)
 
-    data["affected_purl"]               = purl
+    data["affected_package_id"]               = purl
     data["affected_dependency"]         = dep
     data["affected_dependency_version"] = version
     data["ecosystem"]                   = get_ecosystem_from_purl(purl)
@@ -502,6 +502,20 @@ def get_vuln_by_id(vuln_ref: Dict) -> Optional[Dict]:
     data["is_infection"]                = (data.get("id") or "").startswith("MAL-")
 
     _get_fix(data)
+
+    # Extract CWE integer IDs from OSV's database_specific before deleting it.
+    # OSV stores them as ["CWE-674", ...]; we normalise to plain ints [674, ...].
+    db_specific = data.get("database_specific") or {}
+    cwe_raw = db_specific.get("cwe_ids") if isinstance(db_specific, dict) else []
+    if not isinstance(cwe_raw, list):
+        cwe_raw = []
+    cwes = []
+    for c in cwe_raw:
+        try:
+            cwes.append(int(str(c).upper().replace("CWE-", "")))
+        except (ValueError, AttributeError):
+            pass
+    data["cwes"] = cwes
 
     for key in ("database_specific", "affected", "schema_version"):
         data.pop(key, None)
@@ -771,7 +785,7 @@ def summarize_vulnerabilities(
     for v in vulnerabilities:
         pkg      = v.get("affected_dependency", "?")
         version  = v.get("affected_dependency_version", "?")
-        purl     = v.get("affected_purl", "")
+        purl     = v.get("affected_package_id", "")
         eco      = get_ecosystem_from_purl(purl)
         inv_item = inv_by_id.get(purl, {})
 
@@ -1550,7 +1564,7 @@ def generate_html_report(data: Dict) -> str:
                 if (hit) {
                     canvas.style.cursor = dragging ? 'grabbing' : 'pointer';
                     const inv = reportData.inventory.find(x => x.id === hit.id);
-                    const vulns = reportData.vulnerabilities.filter(v => v.affected_purl === hit.id);
+                    const vulns = reportData.vulnerabilities.filter(v => v.affected_package_id === hit.id);
                     tooltip.textContent = [
                         hit.id,
                         `State: ${hit.state}`,
@@ -1982,7 +1996,7 @@ def generate_html_report(data: Dict) -> str:
             const item = reportData.inventory.find(x => x.id === id);
             if (!item) return;
 
-            const itemVulns = reportData.vulnerabilities.filter(v => v.affected_purl === item.id);
+            const itemVulns = reportData.vulnerabilities.filter(v => v.affected_package_id === item.id);
             const stateColor = item.state === 'safe' ? 'text-green-400'
                              : item.state === 'infected' ? 'text-red-400'
                              : 'text-yellow-400';
@@ -2093,6 +2107,7 @@ def generate_html_report(data: Dict) -> str:
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="${v.severity_vector}">${v.severity_vector}</p></div>
                     </div>
                     ${v.fixes.length > 0 ? `<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">${v.fixes.map(f => `<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">${f}</li>`).join('')}</ul></div>` : ''}
+                    ${(v.cwes && v.cwes.length > 0) ? `<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">${v.cwes.map(c => `<a href="https://cwe.mitre.org/data/definitions/${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-${c}</a>`).join('')}</div></div>` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">${v.references.map(r => `<a href="${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">${r.type}</a>`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">${v.description}</div></div>
                 </div>
@@ -2247,8 +2262,6 @@ class UbelEngine:
                         Forwarded to Pypi_Manager.get_installed(scan_venv=...).
         """
         bad_args=self.validate_pkg_args(args)
-
-        print(full_stack)
 
         Pypi_Manager = Pypi_Manager_Class()
         if bad_args!=[]:
@@ -2411,13 +2424,13 @@ class UbelEngine:
                 self._vuln_ids_found.add(v.get("id",""))
                 if v.get("is_infection"):
                     infection_count += 1
-                    infected_purls.add(v["affected_purl"])
+                    infected_purls.add(v["affected_package_id"])
                 else:
                     sev = (v.get("severity") or "unknown").lower()
                     if sev not in severity_buckets:
                         sev = "unknown"
                     severity_buckets[sev] += 1
-                    vulnerable_purls.add(v["affected_purl"])
+                    vulnerable_purls.add(v["affected_package_id"])
 
             set_inventory_state(infected_purls, vulnerable_purls, inventory)
 
@@ -2429,7 +2442,7 @@ class UbelEngine:
             for item in inventory:
                 ecosystems.add(get_ecosystem_from_purl(item["id"]))
                 item["is_policy_violation"] = any(
-                    v["affected_purl"] == item["id"] and v.get("policy_decision") == "block"
+                    v["affected_package_id"] == item["id"] and v.get("policy_decision") == "block"
                     for v in vulnerabilities
                 )
 
@@ -2538,23 +2551,42 @@ class UbelEngine:
 
                 sbom_data = CycloneDXBuilder(final_json).generate()
 
-                # Timestamped SBOM alongside the main report
-                sbom_path = output_dir / f"{base_name}.cdx.json"
+                # ── Generate SARIF 2.1.0 ──────────────────────────────────────
+                try:
+                    from .sarif_builder import SarifBuilder
+                except ImportError:
+                    try:
+                        from sarif_builder import SarifBuilder
+                    except ImportError as exc:
+                        raise ImportError(
+                            "sarif_builder module not found. "
+                            "Ensure sarif_builder.py is present in the ubel package."
+                        ) from exc
+
+                sarif_data = SarifBuilder(final_json).generate()
+
+                # Timestamped SBOM + SARIF alongside the main report
+                sbom_path  = output_dir / f"{base_name}.cdx.json"
+                sarif_path = output_dir / f"{base_name}.sarif.json"
                 with open(sbom_path, "w", encoding="utf-8") as sf:
                     json.dump(sbom_data, sf, indent=2)
+                with open(sarif_path, "w", encoding="utf-8") as sf:
+                    json.dump(sarif_data, sf, indent=2)
 
-                # latest.* — always overwritten, lives at the root of reports_location
                 # latest.* — always overwritten, lives at .ubel/reports to match Node.js engine
                 latest_dir = Path(f"{current_dir}/.ubel") / "reports"
                 latest_dir.mkdir(parents=True, exist_ok=True)
-                latest_json = latest_dir / "latest.json"
-                latest_html = latest_dir / "latest.html"
-                latest_sbom = latest_dir / "latest.cdx.json"
+                latest_json  = latest_dir / "latest.json"
+                latest_html  = latest_dir / "latest.html"
+                latest_sbom  = latest_dir / "latest.cdx.json"
+                latest_sarif = latest_dir / "latest.sarif.json"
                 latest_html.write_text(html_report, encoding="utf-8")
                 with open(latest_json, "w", encoding="utf-8") as jf:
                     json.dump(final_json, jf, indent=2)
                 with open(latest_sbom, "w", encoding="utf-8") as sf:
                     json.dump(sbom_data, sf, indent=2)
+                with open(latest_sarif, "w", encoding="utf-8") as sf:
+                    json.dump(sarif_data, sf, indent=2)
             if is_script:
                 return final_json
             # ── Console output ────────────────────────────────────────────
@@ -2603,6 +2635,7 @@ class UbelEngine:
                 print(f"Latest JSON report saved to: {latest_json}")
                 print(f"Latest HTML report saved to: {latest_html}")
                 print(f"Latest SBOM saved to:        {latest_sbom}")
+                print(f"Latest SARIF saved to:       {latest_sarif}")
                 print()
                 print()
 

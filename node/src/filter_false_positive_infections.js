@@ -23,10 +23,10 @@ export function filterFalsePositiveInfections(inventory, vulnerabilities) {
     const filteredVulnerabilities = [];
 
     for (const vuln of vulnerabilities) {
-        const IsPotentioalFalsePositive = vuln.id === "MAL-2022-4691" && vuln.affected_purl === "pkg:npm/monorepo-symlink-test@0.0.0";
+        const IsPotentioalFalsePositive = vuln.id === "MAL-2022-4691" && vuln.affected_package_id === "pkg:npm/monorepo-symlink-test@0.0.0";
         let isFalsePositive = false;
         for (const pkg of inventory) {
-            if (pkg.id === vuln.affected_purl) {
+            if (pkg.id === vuln.affected_package_id) {
                 if (IsPotentioalFalsePositive) {
                     for (const path of pkg.paths) {
                         if (path.text.includes("node_modules\\resolve\\test\\resolver\\multirepo")|| path.text.includes("node_modules/resolve/test/resolver/multirepo")) {
@@ -40,7 +40,7 @@ export function filterFalsePositiveInfections(inventory, vulnerabilities) {
         if (!isFalsePositive) {
             filteredVulnerabilities.push(vuln);
             for (const pkg of inventory) {
-                if (pkg.id === vuln.affected_purl) {
+                if (pkg.id === vuln.affected_package_id) {
                     pkg.state = "safe";
                     break;
                 }

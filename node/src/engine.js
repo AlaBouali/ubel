@@ -498,7 +498,7 @@ function generateHTMLReport(data) {
                 if (hit) {
                     canvas.style.cursor = dragging ? 'grabbing' : 'pointer';
                     const inv = reportData.inventory.find(x => x.id === hit.id);
-                    const vulns = reportData.vulnerabilities.filter(v => v.affected_purl === hit.id);
+                    const vulns = reportData.vulnerabilities.filter(v => v.affected_package_id === hit.id);
                     tooltip.textContent = [
                         hit.id,
                         \`State: \${hit.state}\`,
@@ -932,7 +932,7 @@ function generateHTMLReport(data) {
             const item = reportData.inventory.find(x => x.id === id);
             if (!item) return;
 
-            const itemVulns = reportData.vulnerabilities.filter(v => v.affected_purl === item.id);
+            const itemVulns = reportData.vulnerabilities.filter(v => v.affected_package_id === item.id);
             const stateColor = item.state === 'safe' ? 'text-green-400'
                              : item.state === 'infected' ? 'text-red-400'
                              : 'text-yellow-400';
@@ -1043,6 +1043,7 @@ function generateHTMLReport(data) {
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="\${v.severity_vector}">\${v.severity_vector}</p></div>
                     </div>
                     \${v.fixes.length > 0 ? \`<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">\${v.fixes.map(f => \`<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">\${f}</li>\`).join('')}</ul></div>\` : ''}
+                    \${(v.cwes && v.cwes.length > 0) ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">\${v.cwes.map(c => \`<a href="https://cwe.mitre.org/data/definitions/\${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-\${c}</a>\`).join('')}</div></div>\` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
                 </div>
@@ -1612,7 +1613,7 @@ function scoreToSeverity(score) {
  * rest of the pipeline (processVulnerability, getFix, etc.) consumes.
  *
  * @param {object} nvdItem   - One element from NVD response `.vulnerabilities[]`
- * @param {string} cpe       - The CPE string used to query NVD (used as affected_purl)
+ * @param {string} cpe       - The CPE string used to query NVD (used as affected_package_id)
  * @param {string} name      - Human-readable package name
  * @param {string} version   - Installed version string
  * @param {string} ecosystem - e.g. "windows"
@@ -1683,6 +1684,19 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
     versions: uniqueLastAffected.length ? uniqueLastAffected : [version],
   }];
 
+  // ── CWE extraction from NVD weaknesses ──────────────────────────────────
+  // NVD encodes CWEs under cve.weaknesses[].description[].value as "CWE-NNN".
+  const cweSet = new Set();
+  for (const weakness of (cveData.weaknesses || [])) {
+    for (const desc of (weakness.description || [])) {
+      if (desc.lang === "en" && typeof desc.value === "string") {
+        const n = parseInt(desc.value.replace(/^CWE-/i, ""), 10);
+        if (!isNaN(n)) cweSet.add(n);
+      }
+    }
+  }
+  const cwes = [...cweSet];
+
   return {
     id:           cveId,
     source:       "nvd",
@@ -1693,11 +1707,12 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
     severity:     scoreToSeverity(cvss.score),
     severity_score: cvss.score,
     severity_vector: cvss.vector,
+    cwes,
     references:   refs,
     affected,
 
     // pipeline fields populated later by getFix / processVulnerability
-    affected_purl:               cpe,
+    affected_package_id:               cpe,
     affected_dependency:         name,
     affected_dependency_version: version,
     ecosystem,
@@ -1903,7 +1918,7 @@ async function getVulnById({ vulnerability_id, purl, dependency, affected_versio
   const data = res.body;
   processVulnerability(data);
 
-  data.affected_purl              = purl;
+  data.affected_package_id              = purl;
   data.affected_dependency        = dependency;
   data.affected_dependency_version = affected_version;
   data.ecosystem                = getEcosystemFromPurl(purl);
@@ -1911,6 +1926,14 @@ async function getVulnById({ vulnerability_id, purl, dependency, affected_versio
   data.is_infection               = (data.id || "").startsWith("MAL-");
 
   getFix(data);
+
+  // Extract CWE integer IDs from OSV's database_specific before deleting it.
+  // OSV stores them as ["CWE-674", ...]; we normalise to plain ints [674, ...].
+  const dbSpecific = data.database_specific || {};
+  const cweRaw = Array.isArray(dbSpecific.cwe_ids) ? dbSpecific.cwe_ids : [];
+  data.cwes = cweRaw
+    .map(c => parseInt(String(c).replace(/^CWE-/i, ""), 10))
+    .filter(n => !isNaN(n));
 
   for (const key of ["database_specific", "affected", "schema_version"]) {
     delete data[key];
@@ -1948,7 +1971,7 @@ function summarizeVulnerabilities(vulnerabilities,inventory) {
   for (const v of vulnerabilities) {
     const pkg      = v.affected_dependency;
     const version  = v.affected_dependency_version;
-    const purl     = v.affected_purl || "";
+    const purl     = v.affected_package_id || "";
     const ecosystem = getEcosystemFromPurl(purl);
     const introducedBy = inventory.find((item) => item.id === purl)?.introduced_by || [];
     let affected_dep= inventory.find((item) => item.id === purl);
@@ -2184,6 +2207,10 @@ export class UbelEngineInstance {
       scan_scope          = "repository",
     } = options;
 
+    console.log(args)
+    console.log(options)
+    console.log(this.engine)
+
     const projectRoot = this.projectRoot;
     const manager     = this.manager;
 
@@ -2207,12 +2234,15 @@ export class UbelEngineInstance {
 
     const ecosystems = new Set();
 
-    if (!is_script) {
+    if (this.checkMode!=="health") {
       manager._captureEngineVersion(this.engine);
     } else {
       this.engine           = TOOL_NAME;
       manager.engineVersion = TOOL_VERSION;
     }
+
+    console.log(this.engine)
+    
 
     const now       = new Date();
     const pad       = (n) => String(n).padStart(2, "0");
@@ -2310,9 +2340,9 @@ export class UbelEngineInstance {
             delete v[key];
           }
         }
-        const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_purl}`));
+        const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_package_id}`));
         for (const v of nvdVulns) {
-          if (!osvKeys.has(`${v.id}::${v.affected_purl}`)) {
+          if (!osvKeys.has(`${v.id}::${v.affected_package_id}`)) {
             vulnerabilities.push(v);
           }
         }
@@ -2367,13 +2397,13 @@ export class UbelEngineInstance {
         this.vulns_ids_found.add(v.id);
         if (v.is_infection) {
           infectionCount++;
-          infectedPurls.add(v.affected_purl);
+          infectedPurls.add(v.affected_package_id);
         } else {
           const sev = ((v.severity || "unknown").toLowerCase()) in severityBuckets
             ? (v.severity || "unknown").toLowerCase()
             : "unknown";
           severityBuckets[sev]++;
-          vulnerablePurls.add(v.affected_purl);
+          vulnerablePurls.add(v.affected_package_id);
         }
       }
 
@@ -2395,7 +2425,7 @@ export class UbelEngineInstance {
       for (const inventoryItem of inventory) {
         ecosystems.add(getEcosystemFromPurl(inventoryItem.id));
         inventoryItem.is_policy_violation = vulnerabilities.some(
-          v => v.affected_purl === inventoryItem.id && v.policy_decision === "block"
+          v => v.affected_package_id === inventoryItem.id && v.policy_decision === "block"
         );
       }
 
@@ -2585,8 +2615,10 @@ export class UbelEngineInstance {
         if (!is_script) {
           console.error("[!] Policy violation detected!");
           console.log(`[!] ${reason}`);
+          throw new PolicyViolationError(reason);
+        }else{
+          return finalJson
         }
-        throw new PolicyViolationError(reason);
       }
 
       if (this.checkMode === "health" && !is_script) {

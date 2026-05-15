@@ -226,7 +226,7 @@ class CycloneDXBuilder:
             is_inf = bool(v.get("is_infection"))
             sev = self._severity_to_cdx("critical" if is_inf else v.get("severity"))
             method = self._normalise_cvss_method(v.get("cvss_method"))
-            purl = v.get("affected_purl", "")
+            purl = v.get("affected_package_id", "")
 
             # Source
             sources = v.get("source", []) or []
@@ -263,11 +263,21 @@ class CycloneDXBuilder:
             if vec:
                 rating["vector"] = vec
 
+            # Normalise CWEs to plain integers (CycloneDX 1.6 spec requires int[]).
+            # Handles pre-existing string forms ("CWE-674", "674") defensively.
+            raw_cwes = v.get("cwes") or []
+            cwes_int: List[int] = []
+            for c in raw_cwes:
+                try:
+                    cwes_int.append(int(str(c).upper().replace("CWE-", "")))
+                except (ValueError, AttributeError):
+                    pass
+
             entry: Dict[str, Any] = {
                 "id": vid,
                 "source": {"name": source_name, "url": source_url},
                 "ratings": [rating],
-                "cwes": v.get("cwes", []),
+                "cwes": cwes_int,
                 "description": v.get("description", ""),
                 "advisories": advisories,
                 "affects": [{"ref": purl}] if purl else [],

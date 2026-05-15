@@ -19,6 +19,15 @@ export class SarifBuilder {
     this._purlLocationIndex = null;
   }
 
+  getFirstNWords(obj,words_count) {
+    return (obj.description || "")
+      .replace(/[^a-zA-Z0-9\s]/g, " ") // remove non-alphanumerics
+      .trim()
+      .split(/\s+/)
+      .slice(0, words_count)
+      .join(" ");
+  }
+
   /** Clamp giant advisory texts (reduced to 10k for safety) */
   _truncate(text, max = 10000) {
     const s = String(text || "");
@@ -255,7 +264,7 @@ export class SarifBuilder {
 
     const affectedPurl =
       String(
-        v.affected_purl || ""
+        v.affected_package_id || ""
       ).trim();
 
     // purl-derived runtime paths
@@ -313,8 +322,53 @@ export class SarifBuilder {
     return v.url;
   }
 
+  /**
+   * Collect every unique CWE integer across all vulnerabilities.
+   * Used by buildTaxonomies() and buildRules().
+   */
+  _collectAllCwes() {
+    const all = new Set();
+    for (const v of this.data.vulnerabilities || []) {
+      for (const c of (Array.isArray(v.cwes) ? v.cwes : [])) {
+        if (Number.isInteger(c)) all.add(c);
+      }
+    }
+    return all;
+  }
+
+  /**
+   * Build the CWE taxonomy toolComponent for runs[0].taxonomies.
+   * Each unique CWE integer becomes a taxon with an id, name, and
+   * a helpUri pointing to the MITRE CWE page.
+   * Returns null when no CWEs are present (omit the field entirely).
+   */
+  buildTaxonomies() {
+    const cwes = this._collectAllCwes();
+    if (!cwes.size) return null;
+
+    const taxa = [...cwes].sort((a, b) => a - b).map(n => ({
+      id:      `CWE-${n}`,
+      name:    `CWE-${n}`,
+      helpUri: `https://cwe.mitre.org/data/definitions/${n}.html`,
+    }));
+
+    return [{
+      name:           "CWE",
+      version:        "4.16",
+      releaseDateUtc: "2024-03-25",
+      informationUri: "https://cwe.mitre.org",
+      downloadUri:    "https://cwe.mitre.org/data/xml/cwec_latest.xml.zip",
+      isComprehensive: false,
+      taxa,
+    }];
+  }
+
   /** Deduplicate SARIF rules */
   buildRules() {
+    // Pre-build a taxon index: cweInt -> taxon array index (within the taxa array)
+    const allCwes     = [...this._collectAllCwes()].sort((a, b) => a - b);
+    const taxonIndex  = new Map(allCwes.map((c, i) => [c, i]));
+
     const rulesMap = new Map();
 
     for (const v of this.data.vulnerabilities || []) {
@@ -349,12 +403,22 @@ export class SarifBuilder {
             : "No remediation guidance available."
         );
 
-      rulesMap.set(ruleId, {
+      // Build relationships[] pointing into the CWE taxonomy toolComponent.
+      // Each relationship says: "this rule is caused by CWE-NNN".
+      const ruleCwes = Array.isArray(v.cwes) ? v.cwes.filter(Number.isInteger) : [];
+      const relationships = ruleCwes.map(c => ({
+        target: {
+          id:            `CWE-${c}`,
+          index:         taxonIndex.get(c) ?? 0,
+          toolComponent: { name: "CWE", index: 0 },
+        },
+        kinds: ["relevant"],
+      }));
+
+      const rule = {
         id: ruleId,
 
-        name: this._toPascalCaseRuleName(
-          `${advisoryId} ${v.title || v.summary || advisoryId}`
-        ),
+        name: this._toPascalCaseRuleName(this.getFirstNWords(v,10)),
 
         shortDescription: {
           text: this._truncate(summary, 300),
@@ -393,23 +457,27 @@ export class SarifBuilder {
             v.cvss_method || null,
 
           cwes:
-            Array.isArray(v.cwes)
-              ? v.cwes
-              : [],
+            ruleCwes,
 
-          affected_purl:
-            v.affected_purl || null,
+          affected_package_id:
+            v.affected_package_id || null,
 
           package:
-            v.package || null,
+            v.affected_dependency || null,
 
           package_version:
-            v.package_version || null,
+            v.affected_dependency_version || null,
 
           is_infection:
             !!v.is_infection,
         },
-      });
+      };
+
+      if (relationships.length) {
+        rule.relationships = relationships;
+      }
+
+      rulesMap.set(ruleId, rule);
     }
 
     return [...rulesMap.values()];
@@ -467,20 +535,23 @@ export class SarifBuilder {
 
           affectedPurl:
             String(
-              v.affected_purl || ""
+              v.affected_package_id || ""
             ),
 
           primaryLocationLineHash:
-            `${v.id || ""}:${
-              v.affected_purl || ""
+            `${v.affected_package_id || ""}:${
+              v.id || ""
             }`,
         },
 
         fingerprints: {
+          // Deterministic, content-addressed ID: SHA-256( affected_package_id + ":" + vuln_id ).
+          // Formatted as a UUID-shaped hex string with version nibble "8" (distinct from the
+          // SHA-1 UUIDv5 used for rule IDs) so SARIF consumers deduplicate stably across re-runs.
           primary:
-            this._uuidFromString(
-              `${v.id || ""}:${
-                v.affected_purl || ""
+            this._sha256VulnId(
+              `${v.affected_package_id || ""}:${
+                v.id || ""
               }`
             ),
         },
@@ -499,13 +570,13 @@ export class SarifBuilder {
             v.severity_vector || null,
 
           package:
-            v.package || null,
+            v.affected_dependency || null,
 
           package_version:
-            v.package_version || null,
+            v.affected_dependency_version || null,
 
-          affected_purl:
-            v.affected_purl || null,
+          affected_package_id:
+            v.affected_package_id || null,
 
           fixed_versions:
             Array.isArray(v.fixes)
@@ -539,29 +610,34 @@ export class SarifBuilder {
     const toolInfo =
       this.data.tool_info || {};
 
-    return {
-      driver: {
-        fullName: `${TOOL_NAME} v${TOOL_VERSION}`,
+    const driver = {
+      fullName: `${TOOL_NAME} v${TOOL_VERSION}`,
 
-        name:
-          toolInfo.name ||
-          TOOL_NAME,
+      name:
+        toolInfo.name ||
+        TOOL_NAME,
 
-        version:
-          toolInfo.version ||
-          TOOL_VERSION,
+      version:
+        toolInfo.version ||
+        TOOL_VERSION,
 
-        semanticVersion:
-          toolInfo.version ||
-          TOOL_VERSION,
+      semanticVersion:
+        toolInfo.version ||
+        TOOL_VERSION,
 
-        informationUri:
-          "https://github.com/Arcane-Spark/UBEL",
+      informationUri:
+        "https://github.com/Arcane-Spark/UBEL",
 
-        rules:
-          this.buildRules(),
-      },
+      rules:
+        this.buildRules(),
     };
+
+    // Reference the CWE taxonomy toolComponent only when there are CWEs.
+    if (this._collectAllCwes().size) {
+      driver.supportedTaxonomies = [{ name: "CWE", index: 0 }];
+    }
+
+    return { driver };
   }
 
   /** Build invocation metadata */
@@ -676,6 +752,39 @@ export class SarifBuilder {
   }
 
   /** Deterministic UUIDv5-like generator */
+  /**
+   * Deterministic, content-addressed vuln ID.
+   *
+   * SHA-256( affected_package_id + ":" + vuln_id ) formatted as a
+   * UUID-shaped hex string with version nibble "8" (distinct from the
+   * SHA-1 UUIDv5 used for rule IDs) so SARIF consumers (GitHub, GitLab,
+   * VS Code SARIF Viewer) deduplicate stably across re-runs.
+   */
+  _sha256VulnId(compositeKey) {
+    const hash = crypto
+      .createHash("sha256")
+      .update(String(compositeKey))
+      .digest("hex");
+
+    return [
+      hash.slice(0, 8),
+      hash.slice(8, 12),
+      `8${hash.slice(13, 16)}`,
+      `${(
+        (
+          parseInt(
+            hash.slice(16, 17),
+            16
+          ) & 0x3
+        ) | 0x8
+      ).toString(16)}${hash.slice(
+        17,
+        20
+      )}`,
+      hash.slice(20, 32),
+    ].join("-");
+  }
+
   _uuidFromString(input) {
     const hash = crypto
       .createHash("sha1")
@@ -751,6 +860,64 @@ export class SarifBuilder {
       baseUri += "/";
     }
 
+    const taxonomies = this.buildTaxonomies();
+
+    const run = {
+      tool:
+        this.buildTool(),
+
+      automationDetails: {
+        id: "ubel",
+      },
+
+      originalUriBaseIds: {
+        "%SRCROOT%": {
+          uri: baseUri,
+        },
+      },
+
+      versionControlProvenance:
+        this.buildVersionControlProvenance(),
+
+      invocations:
+        this.buildInvocations(),
+
+      results:
+        this.buildResults(),
+
+      artifacts:
+        this.buildArtifacts(),
+
+      properties: {
+        generated_at:
+          this.data.generated_at ||
+          new Date()
+            .toISOString()
+            .replace(
+              /\.\d+Z$/,
+              "Z"
+            ),
+
+        scan_type:
+          this.data.scan_info
+            ?.type || "health",
+
+        scan_scope:
+          this.data.scan_info
+            ?.scan_scope ||
+          "repository",
+
+        ecosystems:
+          this.data.scan_info
+            ?.ecosystems || [],
+      },
+    };
+
+    // Only include taxonomies when there are CWEs to report.
+    if (taxonomies) {
+      run.taxonomies = taxonomies;
+    }
+
     return {
       $schema:
         this.SARIF_SCHEMA,
@@ -758,58 +925,7 @@ export class SarifBuilder {
       version:
         this.SARIF_VERSION,
 
-      runs: [
-        {
-          tool:
-            this.buildTool(),
-
-          automationDetails: {
-            id: "ubel",
-          },
-
-          originalUriBaseIds: {
-            "%SRCROOT%": {
-              uri: baseUri,
-            },
-          },
-
-          versionControlProvenance:
-            this.buildVersionControlProvenance(),
-
-          invocations:
-            this.buildInvocations(),
-
-          results:
-            this.buildResults(),
-
-          artifacts:
-            this.buildArtifacts(),
-
-          properties: {
-            generated_at:
-              this.data.generated_at ||
-              new Date()
-                .toISOString()
-                .replace(
-                  /\.\d+Z$/,
-                  "Z"
-                ),
-
-            scan_type:
-              this.data.scan_info
-                ?.type || "health",
-
-            scan_scope:
-              this.data.scan_info
-                ?.scan_scope ||
-              "repository",
-
-            ecosystems:
-              this.data.scan_info
-                ?.ecosystems || [],
-          },
-        },
-      ],
+      runs: [run],
     };
   }
 }
