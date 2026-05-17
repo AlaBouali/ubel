@@ -1,239 +1,314 @@
-# UBEL ( Unified Bill / Enforced Law ) – Multi‑Ecosystem Security & Policy Enforcement CLI
+# UBEL — Unified Bill / Enforced Law
+### Multi-Ecosystem Supply-Chain Security Platform
 
-Ubel is a fast, cross‑ecosystem security engine that resolves dependencies, generates PURLs, scans them through OSV.dev, and enforces security policies during installation to prevent supply-chain attacks. It works with:
+Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-- **PyPI** via: `ubel-pip`
-- **npm** via:  `ubel-npm` or `ubel-pnpm` or `ubel-bun` or `ubel-yarn`
-- **Linux distributions** via: `ubel` (Ubuntu-based, Debian-based, RHEL, AlmaLinux, Rocky-Linux, and Alpine)
-- **Docker** via: `ubel-docker` (if the image is based on one the mentioned Linux distros above)
-
-Ubel runs in **CLI**, **automation scripts**, and **CI/CD pipelines**, producing clean **JSON** and **PDF** reports.
-
----
-
-## ✨ Features
-- Full dependency resolution across ecosystems
-- OSV.dev vulnerability scanning (batch API)
-- Policy engine (block/allow by severity & infection)
-- Checking linux-package or node/python dependency or entire project (`check` mode)
-- Install‑time enforcement (`install` mode)
-- Project‑level/Host-level/kernal-level/Docker-level scanning (`health` mode)
-- Catches Non-CVEs
-- It is a supply-chain protection tool
-- Automatic report generation (JSON + PDF)
-- Extremely fast (seconds per scan)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-green)](LICENSE.md)
+[![PyPI](https://img.shields.io/badge/pypi-ubel--python-blue)](https://pypi.org/project/ubel-python/)
+[![npm](https://img.shields.io/badge/npm-%40arcane--spark%2Fubel--node-red)](https://www.npmjs.com/package/@arcane-spark/ubel-node)
+[![VS Code](https://img.shields.io/badge/vscode-Arcane--Spark.ubel-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
+[![GitHub](https://img.shields.io/badge/github-AlaBouali%2Fubel-lightgrey)](https://github.com/AlaBouali/ubel)
 
 ---
 
-## 📦 Installation
-```bash
-pip install ubel
-```
+## What is UBEL?
 
-If you are on Linux, you need to:
-- setup a virtual envirenment: `python3 -m venv venv`
-- run enable the virtual envirenment `source venv/bin/activate`
-- then run: `pip install ubel`
+UBEL is a **software composition analysis (SCA)** tool and **install-blocking firewall** built for developers and teams who care about what enters their supply chain at every layer. Unlike report-only scanners, UBEL enforces policy — if a scan fails, it blocks the operation and tells you exactly why.
 
-Ubel exposes binaries:
-
-- `ubel` (Linux package scanning and OS-level operations: Ubuntu-based , Debian-based, Red Hat, Almalinux, Rocky-Linux, and Alpine )
-- `ubel-pip` (Python ecosystem)
-- `ubel-npm` (Node.js ecosystem)
-- `ubel-pnpm` (Node.js ecosystem)
-- `ubel-bun` (Node.js ecosystem)
-- `ubel-yarn` (Node.js ecosystem)
-- `ubel-docker` (Docker)
+It spans the entire delivery chain: from the moment a developer adds a dependency, through CI validation, to what is running on a deployment server or inside an AI agent's runtime environment.
 
 ---
 
-# 🚀 Usage Overview
+## Repository Structure
 
-## Main CLI
 ```
-usage: ubel [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-
-## PyPI CLI
-```
-usage: ubel-pip [-h] {check,install,health,init,allow,block} [extra_args ...]
+ubel/
+├── python/          # Python CLI — ubel-pip, ubel (Linux host scanner)
+├── node/            # Node.js CLI — ubel-npm, ubel-pnpm, ubel-bun, ubel-agent, ubel-platform
+└── vscode/          # VS Code extension — bundles the node/ engine at package time
 ```
 
-## npm CLI
-```
-usage: ubel-npm [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-pnpm [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-bun [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-```
-usage: ubel-yarn [-h] {check,install,health,init,allow,block} [extra_args ...]
-```
-
-## docker CLI
-```
-usage: ubel-docker [-h] {health} <docker_image>
-```
+The VS Code extension imports the Node.js engine directly from `node/src/` at package time via the `prepackage` script — no separate install step required when building locally.
 
 ---
 
-# 🧠 Commands Explained
+## Features
 
-### **check**
-Resolve dependencies/linux-packages → generate report → exit.
-
-#### Python example:
-```bash
-ubel-pip check
-```
-If no extra arguments are passed, Ubel will:
-- Detect `requirements.txt`
-- Resolve all packages
-- Scan them
-- Output PDF + JSON
-
-#### npm example:
-```bash
-ubel-npm check flask==3.1.0
-```
-If no args are passed, it will detect `package.json` automatically.
+- Full dependency resolution with PURL generation across all supported ecosystems
+- Vulnerability scanning via batched queries to OSV.dev and NVD's APIs
+- Concurrent enrichment (CVSS, EPSS, fix recommendations, references) with up to 40 parallel threads
+- Policy engine — block/allow by severity threshold and unknown-severity packages
+- Malicious package detection (`MAL-*` advisories) — always blocked regardless of policy
+- `check` mode — dry-run resolution and scan with no side effects
+- `install` mode — scan-gate before installation; blocks if policy violated
+- `health` mode — scan the current project's installed dependencies
+- Full-stack monorepo scanning — all supported ecosystems in a single pass
+- Platform scanning — Linux (dpkg/apk/rpm) and Windows (registry/PowerShell), no elevated privileges required
+- Atomic lockfile revert with TOCTOU SHA-256 integrity protection (Node.js)
+- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
+- Zero external runtime dependencies (stdlib only, in both Python and Node.js)
+- Complete, compliant, and enriched SBOM CycloneDX v1.6 with full dependency graph and vulnerabilities in VEX format
+- Complete, compliant, and enriched SARIF v2.1.0 output
 
 ---
 
-### **install**
-Same as `check`, but enforces policies and either **blocks or allows** installation.
+## Supported Ecosystems
 
-#### Python example:
-```bash
-ubel-pip install flask==3.1.0
-```
-Or auto-detect project requirements:
-```bash
-ubel-pip install
-```
+### Project / Repository Scanning
 
-#### npm example:
-```bash
-ubel-npm install express@5.0.0
-```
-Or simply:
-```bash
-ubel-npm install
-```
-(uses `package.json` automatically)
+| Ecosystem | Package Manager | Resolved From |
+|---|---|---|
+| Node.js | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
+| Python | pip / virtualenv | `.dist-info` / `.egg-info` inside venv `site-packages/` |
+| PHP | Composer | `vendor/` |
+| Rust | Cargo | `Cargo.lock` |
+| Go | Go Modules | `go.sum` |
+| C# / .NET | NuGet | `packages.lock.json` / `obj/project.assets.json` |
+| Java / Kotlin | Maven | `pom.xml` resolved dependencies |
+| Ruby | Bundler | `Gemfile.lock` |
 
----
+Each discovered package is deduplicated by PURL before submission — packages shared across sub-projects are scanned exactly once.
 
-### **health**
-Scan the **entire machine** or **running project**, including:
-- Installed PyPI packages
-- Installed NPM packages
-- OS-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
-- Docker-level packages (Ubuntu-based/Debian-based/RHEL/AlmaLinux/Rocky-Linux/Alpine)
+### Platform Scanning (Linux)
 
-Example:
-( for linux )
-```bash
-ubel health
-```
-or ( for node.js app )
-```bash
-ubel-npm health
-```
-or ( for python app )
-```bash
-ubel-pip health
-```
+| Distribution | Package Manager | Source | PURL type |
+|---|---|---|---|
+| Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
+| Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
+| Alpine / Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
+| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
 
-This mode produces large, detailed inventories and vulnerability matrices.
+### Platform Scanning (Windows)
+
+Detected via registry probes and PowerShell — no elevated privileges required.
+
+| Category | Components |
+|---|---|
+| Operating system | Windows 10 / 11 (build-accurate CPE version) |
+| Security | Windows Defender |
+| Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
+| .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
+| Browsers | Chrome, Firefox, Microsoft Edge |
+| Developer tools | Git, Docker Desktop, VS Code, Cursor |
+| Shell | PowerShell |
+
+Vulnerabilities are matched using CPE 2.3 identifiers against the CVE/NVD database.
 
 ---
 
-### **init**
-Initialize a policy file for the project or system.
+## Components
 
-Example:
+### `python/` — Python CLI
+
 ```bash
-ubel init
+pip install ubel-python
 ```
-Creates default policy:
+
+| Binary | Purpose |
+|---|---|
+| `ubel-pip` | Python / PyPI ecosystem (virtualenv scanning, dry-run installs) |
+| `ubel` | Linux host OS package scanning (dpkg, apk, rpm) |
+
+**Requirements:** Python `>= 3.8`, `pip` available in the target virtual environment.
+
+See [`python/README.md`](python/README.md) for full documentation.
+
+---
+
+### `node/` — Node.js CLI
+
+```bash
+npm install -g @arcane-spark/ubel-node
+```
+
+| Binary | Purpose |
+|---|---|
+| `ubel-npm` | npm ecosystem |
+| `ubel-pnpm` | pnpm ecosystem |
+| `ubel-bun` | bun ecosystem |
+| `ubel-agent` | AI agent workspace scan (OS, runtimes, tools, dependencies) |
+| `ubel-platform` | Host platform scan (OS, runtimes, tools) |
+
+**Requirements:** Node.js `>= 18.0.0`, target package manager binary on `PATH`.
+
+> **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` mode only and cannot provide install-blocking firewall coverage for it.
+
+See [`node/README.md`](node/README.md) for full documentation.
+
+---
+
+### `vscode/` — VS Code Extension
+
+**From the Marketplace:**
+
+```
+ext install Arcane-Spark.ubel-vscode
+```
+
+**From VSIX:**
+
+1. Download `ubel-vscode-extension.vsix` from the [releases page](https://github.com/AlaBouali/ubel/releases).
+2. Open the Command Palette → **Extensions: Install from VSIX…**
+3. Select the downloaded file.
+
+**Requirements:** Node.js `>= 18.0.0`, VS Code `^1.85.0`.
+
+| Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
+|---|---|---|---|
+| UBEL: Scan Project | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder |
+| UBEL: Scan Code Editor's Extensions | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside installed VS Code / Cursor extensions |
+| UBEL: Scan Host Platform | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
+
+See [`vscode/README.md`](vscode/README.md) for full documentation.
+
+---
+
+## Firewall Mechanics (Node.js)
+
+`ubel-npm/pnpm/bun check` and `install` invoke the package manager's lockfile-only flag, resolving the full dependency tree and writing a candidate lockfile without touching `node_modules/`. UBEL scans the candidate lockfile, then makes a binary decision:
+
+- **Clean** — the candidate lockfile is accepted and the actual install proceeds.
+- **Violation** — the lockfile is reverted to its pre-scan state from the disk backup. `node_modules/` is never touched.
+
+Before any real install is allowed to proceed, SHA-256 digests of the candidate lockfile and `package.json` are re-verified to close the TOCTOU window between scan and install.
+
+All three package managers are invoked with `--ignore-scripts` to block malicious pre/post install scripts.
+
+---
+
+## Policy
+
+Policy is stored as JSON at `.ubel/local/policy/config.json` relative to the project root (Linux host scanner and the VS Code extension's host scan use `~/.ubel/`).
+
+Default policy created on first run:
+
+```json
+{
+    "severity_threshold": "high",
+    "block_unknown_vulnerabilities": true
+}
+```
+
+| Field | Values | Default | Behaviour |
+|---|---|---|---|
+| `severity_threshold` | `low` `medium` `high` `critical` `none` | `high` | Block packages at or above this severity |
+| `block_unknown_vulnerabilities` | `true` `false` | `true` | Block packages with CVEs but no CVSS score |
+| Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
+
+The threshold is inclusive — `high` blocks both `high` and `critical`. Setting `none` disables severity blocking but infections are still blocked.
+
+---
+
+## Reports
+
+Every scan writes files to a timestamped path and overwrites the `latest.*` convenience links:
+
+```
+.ubel/reports/latest.json
+.ubel/reports/latest.html
+.ubel/reports/latest.cdx.json
+.ubel/reports/latest.sarif.json
+
+.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
+    <ecosystem>_<mode>_<engine>__<timestamp>.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.html
+    <ecosystem>_<mode>_<engine>__<timestamp>.cdx.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
+```
+
+The HTML report is fully self-contained (no server required) and includes:
+
+- Dashboard with severity breakdown chart and policy decision
+- Searchable, filterable vulnerability table
+- Full inventory with state (safe / vulnerable / infected / undetermined)
+- Interactive force-directed dependency graph with vulnerable-subtree filter
+- Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV/NVD references)
+- System and runtime metadata
+
+The SBOM is a fully valid [CycloneDX v1.6](https://cyclonedx.org) document including all components, their dependency relationships, and enriched vulnerability data in VEX format. The SARIF output is a fully valid [SARIF v2.1.0](https://sarifweb.azurewebsites.net/) file with deterministic SHA-256 fingerprinting per finding.
+
+---
+
+## CI/CD Integration
+
+All CLI commands exit non-zero on policy violations:
+
 ```yaml
-infections: block
-severity:
-  critical: block
-  high: block
-  medium: allow
-  low: allow
-  unknown: allow
+# GitHub Actions
+- name: UBEL dependency scan
+  run: ubel-npm check          # or ubel-pip check
+
+- name: UBEL firewall-gated install
+  run: ubel-npm install        # or ubel-pip install
+```
+
+```dockerfile
+# Dockerfile
+RUN ubel-npm install
+RUN ubel-pip install
 ```
 
 ---
 
-### **allow / block**
-Override Ubel's decision from CI/CD or scripted pipelines.
+## Programmatic API
 
-The arguments can be: "low", "medium", "high", "critical".
+Both engines expose a `main()` entry point for agents, CI tools, and the VS Code extension.
 
-Example:
-```bash
-ubel block high critical
+**Node.js:**
+
+```js
+import { main } from "@arcane-spark/ubel-node";
+
+const report = await main({
+  projectRoot : "/abs/path/to/project",
+  engine      : "npm",
+  mode        : "health",
+  is_script   : true,
+  save_reports: true,
+  scan_os     : false,
+  full_stack  : false,
+  scan_node   : true,
+  scan_scope  : "repository",   // repository | agent | developer_platform | editor_extension
+});
 ```
----
 
-# 📁 Automatic Project Detection
+**Python:**
 
-For **npm** and **PyPI**, when running:
-- `install`
-- `check`
+```python
+from ubel.__main__ import main
 
-without arguments:
+report = main({
+    "project_root": "/abs/path/to/project",
+    "engine":       "pip",
+    "mode":         "health",
+    "packages":     [],
+    "is_script":    True,
+    "save_reports": True,
+    "scan_os":      False,
+    "full_stack":   False,
+    "scan_venv":    True,
+    "scan_scope":   "repository",
+})
+```
 
-### Ubel automatically loads:
-- `package.json` (for npm)
-- `requirements.txt` (for pip)
-
-This makes it ideal for CI/CD workflows.
-
----
-
-# 📤 Output
-Ubel generates:
-
-### **1. JSON report**
-Machine‑readable, includes:
-- dependency list
-- purls
-- vulnerabilities
-- severity
-- infection state
-- policy decision
-- Generate complete SBOM-like machine inventory
-
-### **2. PDF report**
-Human‑readable, includes:
-- summary statistics
-- per‑dependency vulnerability details
-- fix recommendations
-- tables
-- OSV reference links
-- Generate complete SBOM-like machine inventory
-
+When called this way, the banner and interactive console output are suppressed. The return value is the same machine-readable report object written to disk.
 
 ---
 
-# 🧩 Ecosystem Tools
-- `ubel` → system packages, Linux distros
-- `ubel-pip` → PyPI projects, virtual environments\
-- `ubel-npm` → Node.js, npm, package.json projects
-- `ubel-pnpm` → Node.js, npm, package.json projects
-- `ubel-bun` → Node.js, npm, package.json projects
-- `ubel-yarn` → Node.js, npm, package.json projects
-- `ubel-docker` → Docker
+## Privacy
 
+UBEL is fully local. The only external calls are to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receive package PURLs (name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere.
 
 ---
-Ubel – Secure every dependency, before it reaches production.
 
+## License
+
+AGPL-3.0-only — free for scanning your own projects and systems.  
+See [LICENSE.md](LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.
+
+---
+
+*Ubel — Secure every dependency, before it reaches production.*
