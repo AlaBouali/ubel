@@ -42,6 +42,17 @@ import { NodeManagerInstance }  from "./node_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 
+import fs from 'node:fs/promises';
+
+async function createTargetPath(dirPath) {
+  try {
+    await fs.mkdir(dirPath, { recursive: true });
+    console.log('Path created successfully!');
+  } catch (err) {
+    console.error('Error creating path:', err);
+  }
+}
+
 const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 
@@ -99,6 +110,8 @@ export async function main(programmaticOptions) {
     const resolvedRoot = projectRoot
       ? path.resolve(projectRoot)
       : path.resolve(process.cwd());
+
+    await createTargetPath(resolvedRoot)
 
     // Construct fresh, isolated instances for this invocation.
     const manager = new NodeManagerInstance();

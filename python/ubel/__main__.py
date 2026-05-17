@@ -302,6 +302,9 @@ def main(programmatic_options: dict | None = None) -> dict | None:
 
             _initiate_local_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
 
+            if project_root:
+                os.makedirs(project_root, exist_ok=True)
+
             return UbelEngine.scan(
                 packages,
                 scan_scope=scan_scope,
