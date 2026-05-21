@@ -290,6 +290,9 @@ def main(programmatic_options: dict | None = None) -> dict | None:
         scan_venv     = opts.get("scan_venv",    True)
         scan_scope    = opts.get("scan_scope",   "repository")
 
+        severity_threshold = opts.get("severity_threshold")
+        block_unknown_vulnerabilities = opts.get("block_unknown_vulnerabilities")
+
         original_cwd = os.getcwd()
         UbelEngine=UbelEngine_Class(project_root)
     
@@ -301,6 +304,21 @@ def main(programmatic_options: dict | None = None) -> dict | None:
             UbelEngine._vuln_ids_found = set()
 
             _initiate_local_policy(UbelEngine.policy_dir, UbelEngine.policy_filename)
+            if severity_threshold is not None:
+                level = severity_threshold.lower()
+                if level not in VALID_SEVERITIES:
+                    raise ValueError(
+                        f"Invalid severity_threshold: {severity_threshold}. "
+                        f"Must be one of: {', '.join(VALID_SEVERITIES)}"
+                    )
+                UbelEngine.set_policy_field("severity_threshold", level)
+
+            if block_unknown_vulnerabilities is not None:
+                if not isinstance(block_unknown_vulnerabilities, bool):
+                    raise ValueError(
+                        f"block_unknown_vulnerabilities must be a boolean, got {type(block_unknown_vulnerabilities).__name__}"
+                    )
+                UbelEngine.set_policy_field("block_unknown_vulnerabilities", block_unknown_vulnerabilities)
 
             if project_root:
                 os.makedirs(project_root, exist_ok=True)

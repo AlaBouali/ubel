@@ -100,6 +100,8 @@ export async function main(programmaticOptions) {
       scan_node          = true,
       is_vscanned_project = false,
       scan_scope         = "repository",
+      severity_threshold = undefined,
+      block_unknown_vulnerabilities = undefined,
       ...rest
     } = programmaticOptions;
 
@@ -122,6 +124,21 @@ export async function main(programmaticOptions) {
     eng.checkMode  = mode;
 
     eng.initiateLocalPolicy();
+    // Apply policy overrides if provided
+    if (severity_threshold !== undefined) {
+      const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
+      if (!VALID_SEVERITIES.has(severity_threshold)) {
+        throw new Error(`Invalid severity_threshold: ${severity_threshold}. Must be one of: low, medium, high, critical, none`);
+      }
+      eng.setPolicyField("severity_threshold", severity_threshold);
+    }
+
+    if (block_unknown_vulnerabilities !== undefined) {
+      if (typeof block_unknown_vulnerabilities !== "boolean") {
+        throw new Error(`block_unknown_vulnerabilities must be a boolean, got ${typeof block_unknown_vulnerabilities}`);
+      }
+      eng.setPolicyField("block_unknown_vulnerabilities", block_unknown_vulnerabilities);
+    }
 
     return await eng.scan(packages, {
       is_script,

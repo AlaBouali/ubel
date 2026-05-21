@@ -2207,10 +2207,6 @@ export class UbelEngineInstance {
       scan_scope          = "repository",
     } = options;
 
-    console.log(args)
-    console.log(options)
-    console.log(this.engine)
-
     const projectRoot = this.projectRoot;
     const manager     = this.manager;
 
@@ -2240,8 +2236,6 @@ export class UbelEngineInstance {
       this.engine           = TOOL_NAME;
       manager.engineVersion = TOOL_VERSION;
     }
-
-    console.log(this.engine)
     
 
     const now       = new Date();
