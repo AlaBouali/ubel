@@ -13,6 +13,7 @@ import {getGitMetadata, getEditorVersion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
+import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -721,7 +722,7 @@ function generateHTMLReport(data) {
             });
         }
 
-        function renderVulnerabilities(filter = '', severity = 'all') {
+        function renderVulnerabilities(filter = '', severity = 'all', reachability = 'all') {
             const tbody = document.getElementById('vuln-table-body');
             tbody.innerHTML = '';
 
@@ -729,7 +730,13 @@ function generateHTMLReport(data) {
                 const matchesSearch = v.id.toLowerCase().includes(filter.toLowerCase()) || 
                                      v.affected_dependency.toLowerCase().includes(filter.toLowerCase());
                 const matchesSeverity = severity === 'all' || v.severity === severity;
-                return matchesSearch && matchesSeverity;
+                let matchesReachability = true;
+                if (reachability !== 'all' && v.reachability) {
+                    if (reachability === 'reachable')        matchesReachability = v.reachability.reachable === true;
+                    else if (reachability === 'unreachable') matchesReachability = v.reachability.reachable === false;
+                    else                                     matchesReachability = v.reachability.level === reachability;
+                }
+                return matchesSearch && matchesSeverity && matchesReachability;
             });
 
             if (filtered.length === 0) {
@@ -749,6 +756,7 @@ function generateHTMLReport(data) {
                     <td class="px-6 py-4">\${v.has_fix ? '<span class="text-green-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}</td>
                     <td class="px-6 py-4">\${v.is_policy_violation ? '<span class="text-red-400 flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> Yes</span>' : '<span class="text-neutral-500">No</span>'}</td>
                     <td class="px-6 py-4 text-neutral-400 text-xs">\${v.fixed_versions.join('<br>')}</td>
+                    <td class="px-6 py-4">\${renderReachabilityBadge(v.reachability)}</td>
                     <td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>
                 \`;
                 tbody.appendChild(row);
@@ -914,12 +922,10 @@ function generateHTMLReport(data) {
         }
 
         function setupFilters() {
-            document.getElementById('vuln-search').addEventListener('input', (e) => {
-                renderVulnerabilities(e.target.value, document.getElementById('vuln-filter-severity').value);
-            });
-            document.getElementById('vuln-filter-severity').addEventListener('change', (e) => {
-                renderVulnerabilities(document.getElementById('vuln-search').value, e.target.value);
-            });
+            const gf=()=>[document.getElementById('vuln-search').value,document.getElementById('vuln-filter-severity').value,document.getElementById('vuln-filter-reachability').value];
+            document.getElementById('vuln-search').addEventListener('input',()=>renderVulnerabilities(...gf()));
+            document.getElementById('vuln-filter-severity').addEventListener('change',()=>renderVulnerabilities(...gf()));
+            document.getElementById('vuln-filter-reachability').addEventListener('change',()=>renderVulnerabilities(...gf()));
             document.getElementById('inv-search').addEventListener('input', (e) => {
                 renderInventory(e.target.value, document.getElementById('inv-filter-state').value);
             });
@@ -1046,11 +1052,49 @@ function generateHTMLReport(data) {
                     \${(v.cwes && v.cwes.length > 0) ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">\${v.cwes.map(c => \`<a href="https://cwe.mitre.org/data/definitions/\${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-\${c}</a>\`).join('')}</div></div>\` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
+                    <div>
+                        <h4 class=\"text-sm font-semibold mb-3 text-neutral-300\">Reachability Analysis</h4>
+                        \${renderReachabilitySection(v.reachability)}
+                    </div>
                 </div>
             \`;
 
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
+        }
+
+
+        // Reachability helpers
+        function renderReachabilityBadge(r) {
+            if (!r) return '<span class="text-neutral-600 text-[10px] italic">-</span>';
+            const lc={total:'text-purple-400 border-purple-400',high:'text-red-400 border-red-400',medium:'text-orange-400 border-orange-400',low:'text-blue-400 border-blue-400'}[r.level]||'text-neutral-400 border-neutral-400';
+            const cc={high:'text-green-400',medium:'text-yellow-400',low:'text-neutral-500'}[r.confidence]||'text-neutral-500';
+            const dot=r.reachable?'[R]':'[U]';
+            return \`<div class="flex flex-col gap-0.5"><span class="inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] uppercase font-bold \${lc}">\${dot} \${r.level}</span><span class="text-[9px] \${cc}">conf: \${r.confidence}</span></div>\`;
+        }
+
+        function renderReachabilitySection(r) {
+            if (!r) return '<div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800"><p class="text-xs text-neutral-500 italic">Reachability analysis not available.</p></div>';
+            const lc={total:'#c084fc',high:'#f87171',medium:'#fb923c',low:'#60a5fa'}[r.level]||'#737373';
+            const cc={high:'#4ade80',medium:'#facc15',low:'#737373'}[r.confidence]||'#737373';
+            const s=r.signals||{},imp=s.import_scan||{};
+            let isHtml='';
+            if(imp.searched){
+                if(imp.skipped_no_source){isHtml='<span class="text-neutral-500 italic text-[10px]">No source files found</span>';}
+                else if(imp.found){
+                    const files=(imp.matched_files||[]).slice(0,4).map(f=>\`<span class="mono text-[10px] bg-neutral-800 px-2 py-0.5 rounded border border-neutral-700 text-green-300">\${f}</span>\`).join('');
+                    const extra=imp.matched_files.length>4?\`<span class="text-neutral-500 text-[10px]">+\${imp.matched_files.length-4} more</span>\`:'';
+                    isHtml=\`<div class="flex flex-wrap gap-1 mt-1">\${files}\${extra}</div>\`;
+                }else{
+                    const pe=Object.entries(imp.parent_scans||{}).filter(([,ps])=>ps.found);
+                    if(pe.length){
+                        const pi=pe.slice(0,3).map(([purl,ps])=>\`<div class="text-[10px] bg-neutral-800 px-2 py-1 rounded border border-orange-500/30"><span class="text-orange-300 font-medium">\${purl.split('/').pop().split('@')[0]}</span><span class="text-neutral-500 ml-1">via \${(ps.matched_files||[]).slice(0,2).join(', ')}</span></div>\`).join('');
+                        isHtml=\`<div class="mt-1 space-y-1"><p class="text-[10px] text-neutral-400 mb-1">Direct import not found - reachable via parent(s):</p>\${pi}</div>\`;
+                    }else{isHtml=\`<span class="text-neutral-500 italic text-[10px]">Not imported in \${imp.files_scanned} file(s) scanned</span>\`;}
+                }
+            }else{isHtml='<span class="text-neutral-600 italic text-[10px]">Source scan not performed</span>';}
+            const tags=(r.tags||[]).map(t=>\`<span class="mono text-[9px] bg-neutral-800 px-1.5 py-0.5 rounded border border-neutral-700 text-neutral-400">\${t}</span>\`).join('');
+            return \`<div class="space-y-3"><div class="flex flex-wrap gap-4"><span class="text-[10px] uppercase text-neutral-500 font-bold">Reachable: </span><span class="font-bold text-sm" style="color:\${r.reachable?'#f87171':'#4ade80'}">\${r.reachable?'YES':'NO'}</span><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold mono" style="color:\${lc};border-color:\${lc}">\${r.level}</span><span class="text-[10px] font-semibold" style="color:\${cc}">\${r.confidence.toUpperCase()} confidence</span></div><div class="grid grid-cols-3 md:grid-cols-6 gap-2 text-[10px]"><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Depth</p><p class="mono">\${s.depth!=null?s.depth:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">AV</p><p class="mono">\${s.attack_vector||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Scope</p><p class="mono">\${s.scope||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Orphan</p><p class="mono">\${s.is_orphan_tool?'yes':'no'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Paths</p><p class="mono">\${s.num_paths!=null?s.num_paths:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Non-Lib</p><p class="mono">\${s.is_non_library?'yes':'no'}</p></div></div><div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Import Scan</p>\${isHtml}</div><p class="text-xs text-neutral-300 bg-neutral-900/50 px-3 py-2 rounded border border-neutral-800 italic">\${r.rationale}</p>\${tags?'<div class="flex flex-wrap gap-1">'+tags+'</div>':''}</div>\`;
         }
 
         function closeModal() {
@@ -1125,8 +1169,8 @@ function generateHTMLReport(data) {
         </section>
         <!-- Vulnerabilities Section -->
         <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select></div></div>
-            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select><select id="vuln-filter-reachability" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Reachability</option><option value="reachable">Reachable</option><option value="unreachable">Unreachable</option><option value="total">Total</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th>Reachability</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Inventory Section -->
         <section id="section-inventory" class="hidden space-y-6">
@@ -2505,6 +2549,9 @@ export class UbelEngineInstance {
         policy,
         dependencies_tree: manager.buildDependencyTree(inventory),
       };
+
+      // Reachability
+      try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
 
       const [allowed, reason] = evaluatePolicy(finalJson);
       finalJson.decision = { allowed, reason, policy_violations: policyViolations };

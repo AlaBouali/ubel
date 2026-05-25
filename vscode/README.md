@@ -28,8 +28,9 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 - Dependency graph with introduced-by and parent tracking
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
-- Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX.
-- Complete compliant, and enriched SARIF v2.1.0 files.
+- Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
+- Complete compliant, and enriched SARIF v2.1.0 files
+- **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
 
 ---
 
@@ -90,7 +91,7 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 
 ## Scan VS Code Extensions (`Ctrl+Alt+X`)
 
-Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codium extensions (`~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` ). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
+Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codium extensions (`~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions`). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
 
 **Report location**
 
@@ -167,7 +168,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | Tab | Contents |
 |---|---|
 | **Dashboard** | Vulnerability counts by severity, policy decision summary, scan metadata |
-| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, and policy decision |
+| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, reachability level, and policy decision |
 | **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, and vulnerability count |
 | **Graph** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
@@ -175,6 +176,58 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 
 ---
 
+## Reachability Analysis
+
+Every vulnerability in the report is annotated with a reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and performs a source-level import scan over the workspace files to confirm or refute whether the vulnerable package is actually used by application code.
+
+The goal is prioritization: to separate vulnerabilities in packages your code actively exercises from those in packages that are installed but unreachable from any production code path.
+
+### Decision ladder
+
+Signals are evaluated in strict priority order. The first matching rule wins.
+
+| Priority | Signal | Reachability | Confidence |
+|---|---|---|---|
+| 0a | Vuln ID starts with `MAL-` | `total` | high |
+| 0b | Package scope includes `env` | `total` | high |
+| 1 | Package type is non-library (app, framework, plugin, OS package, …) | `total` | high |
+| 2 | Scope is `dev` or `test` | `unreachable` | high |
+| 3 | Import scan: package imported in source files | `high` or `medium` | high |
+| 4a | Import scan: direct import absent, but importing parent found | `medium` or `low` | medium |
+| 4b | Import scan: no direct or parent import found | `unreachable` | medium |
+| 5 | Orphan tool (no dependents in graph, no import scan available) | `unreachable` | medium |
+| 6 | Depth + attack vector heuristics | `medium` or `low` | low |
+
+**Priority 0a (MAL-)** — Malware advisories represent active supply-chain infections. The vulnerable code *is* the infection vector; reachability is unconditional regardless of how or whether the package is imported.
+
+**Priority 0b (env scope)** — Packages carrying the `env` scope are part of the execution environment itself — OS packages, system libraries, runtimes, container-layer components. They are not imported by application code; they *are* the environment. Reachability is unconditional.
+
+**Priority 1 (non-library type)** — Frameworks, applications, plugins, and OS-level packages have no meaningful import boundary. The component itself is the attack surface.
+
+**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes.
+
+**Priorities 3–4 (import scan)** — UBEL scans workspace source files for import statements matching the package. For transitive dependencies where the package itself is not directly imported, it checks whether any of the package's parents in the dependency graph are imported — confirming that the transitive path is exercised.
+
+**Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools not called by application code.
+
+**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies.
+
+### Import scan coverage
+
+| Ecosystem | Extensions | Patterns matched |
+|---|---|---|
+| Node.js | `.js` `.ts` `.mjs` `.cjs` `.jsx` `.tsx` | `require('<pkg>')`, `from '<pkg>'` |
+| Python | `.py` | `import <pkg>`, `from <pkg>` |
+| Java / Kotlin | `.java` `.kt` `.groovy` `.scala` | `import <group>.<artifact>` |
+| C# / .NET | `.cs` `.vb` `.fs` | `using <Namespace>` |
+| PHP | `.php` | `use <Vendor>\\`, `require '<pkg>'` |
+| Go | `.go` | `"<module-path>"` |
+| Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
+| Ruby | `.rb` | `require '<gem>'` |
+
+Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field.
+
+---
 
 ## Policy
 
@@ -277,14 +330,13 @@ Previous scans are retained under:
 ## Requirements
 
 - Node.js `>=18.0.0`
-- Python `>=3.9` (for `ubel-pip`, `ubel-apt`, `ubel-dnf`)
 - VS Code `^1.85.0` (extension only)
 
 ---
 
 ## Privacy
 
-UBEL is fully local. The only external call is to [osv.dev's public API](https://osv.dev/) and [NVD's API] (https://nvd.nist.gov/) , which receives package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere.
+UBEL is fully local. The only external call is to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receives package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere.
 
 ---
 

@@ -325,6 +325,15 @@ class SarifBuilder:
             if relationships:
                 rule["relationships"] = relationships
 
+            # Attach reachability summary to the rule so scanners surface it
+            # at the rule level (e.g. GitHub Advanced Security "reachability" tag).
+            v_reach = v.get("reachability") or None
+            if v_reach:
+                rule["properties"]["reachability_level"]      = v_reach.get("level")
+                rule["properties"]["reachability_confidence"] = v_reach.get("confidence")
+                rule["properties"]["reachability_reachable"]  = v_reach.get("reachable")
+                rule["properties"]["reachability_tags"]       = v_reach.get("tags") or []
+
             rules_map[rule_id] = rule
 
         return list(rules_map.values())
@@ -342,6 +351,17 @@ class SarifBuilder:
         for v in self.data.get("vulnerabilities") or []:
             rule_id      = self._rule_id(v)
             is_infection = bool(v.get("is_infection"))
+
+            # Downgrade non-infections to "none" when reachability analysis
+            # confidently determines the vulnerable code is unreachable.
+            reach = v.get("reachability") or None
+            is_unreachable = (
+                not is_infection
+                and reach is not None
+                and reach.get("reachable") is False
+                and reach.get("confidence") in ("high", "medium")
+            )
+
             message      = (
                 v.get("summary") or
                 v.get("title") or
@@ -364,7 +384,7 @@ class SarifBuilder:
             results.append({
                 "ruleId":    rule_id,
                 "ruleIndex": rule_index_map.get(rule_id),
-                "level":     self._severity_to_level(v.get("severity"), is_infection),
+                "level":     "none" if is_unreachable else self._severity_to_level(v.get("severity"), is_infection),
                 "message": {
                     "text": self._truncate(message, 2_000),
                 },
@@ -391,6 +411,14 @@ class SarifBuilder:
                     "published":            v.get("published") or None,
                     "modified":             v.get("modified") or None,
                     "exploitability":       "active-infection" if is_infection else "vulnerable",
+                    "reachability": {
+                        "reachable":  reach.get("reachable"),
+                        "level":      reach.get("level"),
+                        "confidence": reach.get("confidence"),
+                        "rationale":  reach.get("rationale"),
+                        "tags":       reach.get("tags") or [],
+                        "signals":    reach.get("signals") or {},
+                    } if reach else None,
                 },
             })
 

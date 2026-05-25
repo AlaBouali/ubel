@@ -24,7 +24,8 @@ This document covers the **Python** ecosystem (`ubel-pip`) and the **Linux host*
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Python stdlib only)
 - Complete, compliant, and enriched SBOM CycloneDX v1.6 with full dependency graph and vulnerabilities in VEX format
-- Complete compliant, and enriched SARIF v2.1.0 files.
+- Complete compliant, and enriched SARIF v2.1.0 files
+- **Reachability analysis** — each vulnerability is annotated with a reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
 - Programmatic API — doubles as a library entry-point for agents, CI tools, and the VS Code extension
 
 ---
@@ -204,6 +205,103 @@ Default policy created on first run:
 **Block unknown** — when `true`, any vulnerability whose severity cannot be determined also causes a block.
 
 **Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to either setting above.
+
+---
+
+## Reachability Analysis
+
+Every vulnerability in the report is annotated with a reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and optionally performs a source-level import scan over the project files to confirm or refute whether the vulnerable package is actually used by application code.
+
+The goal is prioritization: to separate vulnerabilities in packages your code actively exercises from those in packages that are installed but unreachable from any production code path.
+
+### Decision ladder
+
+Signals are evaluated in strict priority order. The first matching rule wins.
+
+| Priority | Signal | Reachability | Confidence |
+|---|---|---|---|
+| 0a | Vuln ID starts with `MAL-` | `total` | high |
+| 0b | Package scope includes `env` | `total` | high |
+| 1 | Package type is non-library (app, framework, plugin, OS package, …) | `total` | high |
+| 2 | Scope is `dev` or `test` | `unreachable` | high |
+| 3 | Import scan: package imported in source files | `high` or `medium` | high |
+| 4a | Import scan: direct import absent, but importing parent found | `medium` or `low` | medium |
+| 4b | Import scan: no direct or parent import found | `unreachable` | medium |
+| 5 | Orphan tool (no dependents in graph, no import scan available) | `unreachable` | medium |
+| 6 | Depth + attack vector heuristics | `medium` or `low` | low |
+
+**Priority 0a (MAL-)** — Malware advisories represent active supply-chain infections. The vulnerable code *is* the infection vector; reachability is unconditional regardless of how or whether the package is imported.
+
+**Priority 0b (env scope)** — Packages carrying the `env` scope are part of the execution environment itself — OS packages, system libraries, runtimes, container-layer components. They are not imported by application code; they *are* the environment. Reachability is unconditional.
+
+**Priority 1 (non-library type)** — Frameworks, applications, plugins, and OS-level packages have no meaningful import boundary. The component itself is the attack surface.
+
+**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes. Scope is derived from requirements files and propagated through the dependency graph via BFS.
+
+**Priorities 3–4 (import scan)** — When a project root is provided, UBEL scans source files for import statements matching the package. For transitive dependencies where the package itself is not directly imported, it checks whether any of the package's parents in the dependency graph are imported — confirming that the transitive path is exercised.
+
+**Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools included in the environment but not called by application code.
+
+**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. Network-reachable (`AV:N`) and shallow (`depth ≤ 1`) packages score higher.
+
+### Import scan coverage
+
+Source files are scanned for ecosystem-appropriate import patterns:
+
+| Ecosystem | Extensions | Patterns matched |
+|---|---|---|
+| Python | `.py` | `import <pkg>`, `from <pkg>` |
+| Node.js | `.js` `.ts` `.mjs` `.cjs` `.jsx` `.tsx` | `require('<pkg>')`, `from '<pkg>'` |
+| Java / Kotlin | `.java` `.kt` `.groovy` `.scala` | `import <group>.<artifact>` |
+| C# / .NET | `.cs` `.vb` `.fs` | `using <Namespace>` |
+| PHP | `.php` | `use <Vendor>\\`, `require '<pkg>'` |
+| Go | `.go` | `"<module-path>"` |
+| Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
+| Ruby | `.rb` | `require '<gem>'` |
+
+### Output fields
+
+Each vulnerability record in the enriched report includes a `reachability` object:
+
+```json
+{
+  "reachability": {
+    "reachable": true,
+    "level": "high",
+    "confidence": "high",
+    "rationale": "Import of this package was found in project source code. Found in 3 source file(s): src/app.py, src/utils.py, tests/test_app.py. Depth=0, AV=N.",
+    "tags": ["import_confirmed", "network_av"],
+    "signals": {
+      "depth": 0,
+      "attack_vector": "N",
+      "is_orphan_tool": false,
+      "scope": "prod",
+      "num_paths": 2,
+      "introduced_by_count": 1,
+      "pkg_type": "library",
+      "is_non_library": false,
+      "is_malware": false,
+      "has_env_scope": false,
+      "import_scan": {
+        "searched": true,
+        "found": true,
+        "files_scanned": 42,
+        "matched_files": ["src/app.py", "src/utils.py", "tests/test_app.py"],
+        "skipped_no_source": false
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `reachable` | `true` if the vulnerable code is considered reachable from production |
+| `level` | `total`, `high`, `medium`, or `low` |
+| `confidence` | `high`, `medium`, or `low` — reflects how much evidence backs the verdict |
+| `rationale` | Human-readable explanation of which signal drove the decision |
+| `tags` | Machine-readable labels identifying which signals fired (e.g. `import_confirmed`, `dev_scope`, `malware`, `env_scope`) |
+| `signals` | Full signal snapshot — all inputs that were considered, regardless of which rule fired |
 
 ---
 

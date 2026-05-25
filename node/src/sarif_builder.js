@@ -477,6 +477,15 @@ export class SarifBuilder {
         rule.relationships = relationships;
       }
 
+      // Attach reachability summary to the rule so scanners surface it
+      // at the rule level (e.g. GitHub Advanced Security "reachability" tag).
+      if (v.reachability) {
+        rule.properties.reachability_level      = v.reachability.level || null;
+        rule.properties.reachability_confidence = v.reachability.confidence || null;
+        rule.properties.reachability_reachable  = v.reachability.reachable;
+        rule.properties.reachability_tags       = v.reachability.tags || [];
+      }
+
       rulesMap.set(ruleId, rule);
     }
 
@@ -501,6 +510,14 @@ export class SarifBuilder {
       const isInfection =
         !!v.is_infection;
 
+      // Downgrade non-infections to "none" when reachability analysis
+      // confidently determines the vulnerable code is unreachable.
+      const isUnreachable =
+        !isInfection &&
+        v.reachability &&
+        v.reachability.reachable === false &&
+        (v.reachability.confidence === "high" || v.reachability.confidence === "medium");
+
       const message =
         v.summary ||
         v.title ||
@@ -514,10 +531,9 @@ export class SarifBuilder {
         ruleIndex:
           ruleIndexMap.get(ruleId),
 
-        level: this._severityToLevel(
-          v.severity,
-          isInfection
-        ),
+        level: isUnreachable
+          ? "none"
+          : this._severityToLevel(v.severity, isInfection),
 
         message: {
           text: this._truncate(
@@ -598,6 +614,17 @@ export class SarifBuilder {
             isInfection
               ? "active-infection"
               : "vulnerable",
+
+          reachability: v.reachability
+            ? {
+                reachable:   v.reachability.reachable,
+                level:       v.reachability.level,
+                confidence:  v.reachability.confidence,
+                rationale:   v.reachability.rationale,
+                tags:        v.reachability.tags || [],
+                signals:     v.reachability.signals || {},
+              }
+            : null,
         },
       });
     }

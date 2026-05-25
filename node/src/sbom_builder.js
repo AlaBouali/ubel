@@ -156,9 +156,32 @@ export class CycloneDXBuilder {
       const fixes = v.fixes || [];
       const recommendation = fixes.join("\n");
 
-      const analysis = isInf
-        ? { state: "exploitable", response: ["rollback", "can_not_fix"] }
-        : { state: "exploitable", response: ["update"] };
+      // Reachability-aware VEX analysis state:
+      //   confirmed-unreachable (high/medium confidence) -> "not_affected"
+      //   reachable + import confirmed                   -> "exploitable"
+      //   reachable + low confidence / no data           -> "exploitable" (default)
+      const reach = v.reachability || null;
+      let analysisState;
+      let analysisResponse;
+      if (isInf) {
+        analysisState    = "exploitable";
+        analysisResponse = ["rollback", "can_not_fix"];
+      } else if (
+        reach &&
+        reach.reachable === false &&
+        (reach.confidence === "high" || reach.confidence === "medium")
+      ) {
+        analysisState    = "not_affected";
+        analysisResponse = ["will_not_fix"];
+      } else {
+        analysisState    = "exploitable";
+        analysisResponse = ["update"];
+      }
+      const analysis = {
+        state:    analysisState,
+        response: analysisResponse,
+        ...(reach && reach.rationale ? { detail: reach.rationale } : {}),
+      };
 
       const rating = { severity: sev, method };
       const score = v.severity_score;
@@ -184,6 +207,27 @@ export class CycloneDXBuilder {
       };
       if (v.published) entry.published = v.published;
       if (v.modified) entry.updated = v.modified;
+
+      // Reachability findings as CycloneDX vulnerability properties.
+      if (reach) {
+        entry.properties = [
+          { name: "reachability.reachable",   value: String(reach.reachable) },
+          { name: "reachability.level",        value: String(reach.level || "") },
+          { name: "reachability.confidence",   value: String(reach.confidence || "") },
+          { name: "reachability.rationale",    value: String(reach.rationale || "") },
+          { name: "reachability.tags",         value: JSON.stringify(reach.tags || []) },
+          ...(reach.signals ? [
+            { name: "reachability.signals.depth",              value: String(reach.signals.depth ?? "") },
+            { name: "reachability.signals.attack_vector",      value: String(reach.signals.attack_vector || "") },
+            { name: "reachability.signals.scope",              value: String(reach.signals.scope || "") },
+            { name: "reachability.signals.is_orphan_tool",     value: String(reach.signals.is_orphan_tool ?? "") },
+            { name: "reachability.signals.is_non_library",     value: String(reach.signals.is_non_library ?? "") },
+            { name: "reachability.signals.num_paths",          value: String(reach.signals.num_paths ?? "") },
+            { name: "reachability.signals.introduced_by_count",value: String(reach.signals.introduced_by_count ?? "") },
+          ] : []),
+        ];
+      }
+
       out.push(entry);
     }
     return out;

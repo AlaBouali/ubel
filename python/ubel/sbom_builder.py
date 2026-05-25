@@ -246,11 +246,23 @@ class CycloneDXBuilder:
             fixes = v.get("fixes") or []
             recommendation = "\n".join(fixes) if fixes else ""
 
-            # VEX analysis
+            # Reachability-aware VEX analysis state:
+            #   confirmed-unreachable (high/medium confidence) -> "not_affected"
+            #   reachable + import confirmed                   -> "exploitable"
+            #   reachable + low confidence / no data           -> "exploitable" (default)
+            reach = v.get("reachability") or None
             if is_inf:
-                analysis = {"state": "exploitable", "response": ["rollback", "can_not_fix"]}
+                analysis: Dict[str, Any] = {"state": "exploitable", "response": ["rollback", "can_not_fix"]}
+            elif (
+                reach is not None
+                and reach.get("reachable") is False
+                and reach.get("confidence") in ("high", "medium")
+            ):
+                analysis = {"state": "not_affected", "response": ["will_not_fix"]}
             else:
                 analysis = {"state": "exploitable", "response": ["update"]}
+            if reach and reach.get("rationale"):
+                analysis["detail"] = reach["rationale"]
 
             rating: Dict[str, Any] = {"severity": sev, "method": method}
             score = v.get("severity_score")
@@ -289,6 +301,30 @@ class CycloneDXBuilder:
                 entry["published"] = v["published"]
             if v.get("modified"):
                 entry["updated"] = v["modified"]
+
+            # Reachability findings as CycloneDX vulnerability properties.
+            if reach:
+                signals = reach.get("signals") or {}
+                reach_props: List[Dict[str, str]] = [
+                    {"name": "reachability.reachable",    "value": str(reach.get("reachable", "")).lower()},
+                    {"name": "reachability.level",        "value": str(reach.get("level") or "")},
+                    {"name": "reachability.confidence",   "value": str(reach.get("confidence") or "")},
+                    {"name": "reachability.rationale",    "value": str(reach.get("rationale") or "")},
+                    {"name": "reachability.tags",         "value": json.dumps(reach.get("tags") or [])},
+                ]
+                if signals:
+                    for sig_key in (
+                        "depth", "attack_vector", "scope",
+                        "is_orphan_tool", "is_non_library",
+                        "num_paths", "introduced_by_count",
+                    ):
+                        val = signals.get(sig_key)
+                        if val is not None:
+                            reach_props.append({
+                                "name":  f"reachability.signals.{sig_key}",
+                                "value": str(val),
+                            })
+                entry["properties"] = reach_props
 
             out.append(entry)
 
