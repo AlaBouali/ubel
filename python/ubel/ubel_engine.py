@@ -1029,7 +1029,7 @@ def generate_html_report(data: Dict) -> str:
         </section>
         <!-- Vulnerabilities Section -->
         <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option><select id="vuln-filter-reachability" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Reachability</option><option value="reachable">Reachable</option><option value="unreachable">Unreachable</option><option value="total">Total</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select><select id="vuln-filter-reachability" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Reachability</option><option value="reachable">Reachable</option><option value="unreachable">Unreachable</option><option value="total">Total</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
             <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th>Reachability</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Inventory Section -->
@@ -2013,6 +2013,7 @@ def generate_html_report(data: Dict) -> str:
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
+            // Local IPs — render one line per interface
             const localIpsEl = document.getElementById('os-local-ips');
             const localIPs = os.local_ips || {};
             const ifaceEntries = Object.entries(localIPs);
@@ -2021,12 +2022,13 @@ def generate_html_report(data: Dict) -> str:
                     `<div class="flex justify-between gap-4"><span class="text-neutral-500">${iface}</span><span>${ip}</span></div>`
                   ).join('')
                 : '<span class="text-neutral-600 italic">none detected</span>';
+
             document.getElementById('os-external-ip').textContent = os.external_ip || 'unavailable';
 
-            document.getElementById('git-version').textContent = git.version || 'N/A';
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
+            document.getElementById('git-version').textContent = git.version || 'N/A';
         }
 
         function setupFilters() {
