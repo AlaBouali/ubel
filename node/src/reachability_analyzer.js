@@ -30,7 +30,7 @@ import path from "path";
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Package types that are NOT pure libraries. Any vuln in these is "total". */
+/** Package types that are NOT pure libraries. Any vuln in these is "critical". */
 const NON_LIBRARY_TYPES = new Set([
   "application", "app",
   "framework",
@@ -533,7 +533,7 @@ function computeReachability(signals) {
   if (isMalware) {
     tags.push("malware");
     return {
-      reachable: true, level: "total", confidence: "high", tags,
+      reachable: true, level: "critical", confidence: "high", tags,
       rationale: "Vulnerability ID carries the MAL- prefix — this is a malware record "
                + "representing an active supply-chain infection. "
                + "Reachability is unconditional.",
@@ -544,7 +544,7 @@ function computeReachability(signals) {
   if (envScope) {
     tags.push("env_scope");
     return {
-      reachable: true, level: "total", confidence: "high", tags,
+      reachable: true, level: "critical", confidence: "high", tags,
       rationale: "Package scope includes 'env' — this component is part of the execution "
                + "environment itself (OS package, system library, runtime, or container layer). "
                + "Reachability is unconditional.",
@@ -555,7 +555,7 @@ function computeReachability(signals) {
   if (isNonLibrary) {
     tags.push("non_library_type", `type:${pkgType}`);
     return {
-      reachable: true, level: "total", confidence: "high", tags,
+      reachable: true, level: "critical", confidence: "high", tags,
       rationale: `Package type is '${pkgType}' — not a passive library. `
                + `The vulnerable component IS the executable/framework/service being run; `
                + `reachability is unconditional.`,
@@ -871,7 +871,7 @@ function printSummary(results) {
 
   const reachableCount   = results.filter(r => r.reachable).length;
   const unreachableCount = results.length - reachableCount;
-  const totalCount       = results.filter(r => r.level === "total").length;
+  const totalCount       = results.filter(r => r.level === "critical").length;
 
   console.log(`${BOLD}${"─".repeat(76)}${RESET}`);
   console.log(`  Total vulns : ${results.length}  │  ${MAGENTA}Total: ${totalCount}${RESET}  │  ${RED}Reachable: ${reachableCount}${RESET}  │  ${GREEN}Unreachable: ${unreachableCount}${RESET}`);

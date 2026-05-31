@@ -27,6 +27,24 @@ const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
 import os_module from "os";
 import { time } from "console";
 
+function safeWriteJson(filePath, data, maxSizeMb = 100) {
+  const json = JSON.stringify(data, null);
+  if (json.length > maxSizeMb * 1024 * 1024) {
+    console.warn(`[!] JSON report too large (${(json.length / (1024*1024)).toFixed(1)} MB). Truncating...`);
+    // Remove the heaviest field and retry
+    const trimmed = { ...data };
+    delete trimmed.dependencies_tree;
+    delete trimmed.reachability;
+    for (const item of trimmed.inventory) {
+      if (Array.isArray(item.paths) && item.paths.length > 50) {
+        item.paths = item.paths.slice(0, 50);
+      }
+    }
+    return safeWriteJson(filePath, trimmed, maxSizeMb);
+  }
+  fs.writeFileSync(filePath, json);
+}
+
 function getLocalIPsSync() {
   try {
     const ifaces = os_module.networkInterfaces();
@@ -2006,6 +2024,70 @@ function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   }
 }
 
+// ── Impact-only dependency tree ───────────────────────────────────────────────
+//
+// Builds the nested-dict tree passed to the HTML graph renderer, but only
+// includes nodes that are 'vulnerable' or 'infected' plus every ancestor
+// (package that transitively depends on them) so impact chains stay connected.
+// Safe-only subtrees are omitted entirely, keeping the report size proportional
+// to the number of findings rather than the full inventory.
+//
+function buildImpactDependencyTree(inventory) {
+  const byId = new Map(inventory.map(c => [c.id, c]));
+
+  // Build reverse map: child → Set of direct parents
+  const parents = new Map(inventory.map(c => [c.id, new Set()]));
+  for (const comp of inventory) {
+    for (const dep of (comp.dependencies || [])) {
+      if (parents.has(dep)) parents.get(dep).add(comp.id);
+    }
+  }
+
+  // Seeds: all vulnerable / infected nodes
+  const seeds = new Set(
+    inventory
+      .filter(c => c.state === "vulnerable" || c.state === "infected")
+      .map(c => c.id)
+  );
+
+  // BFS upward to collect every ancestor of a seed
+  const keep = new Set(seeds);
+  const queue = [...seeds];
+  while (queue.length) {
+    const node = queue.shift();
+    for (const parent of (parents.get(node) || [])) {
+      if (!keep.has(parent)) {
+        keep.add(parent);
+        queue.push(parent);
+      }
+    }
+  }
+
+  // Roots within the kept set: nodes not depended-on by any other kept node
+  const dependedInKeep = new Set();
+  for (const nodeId of keep) {
+    for (const dep of (byId.get(nodeId)?.dependencies || [])) {
+      if (keep.has(dep)) dependedInKeep.add(dep);
+    }
+  }
+  const roots = [...keep].filter(n => !dependedInKeep.has(n));
+
+  // Recursively build subtrees, pruning safe-only branches
+  function buildSubtree(nodeId, visited) {
+    if (visited.has(nodeId)) return {};
+    const next = new Set(visited).add(nodeId);
+    const subtree = {};
+    for (const dep of (byId.get(nodeId)?.dependencies || [])) {
+      if (keep.has(dep)) subtree[dep] = buildSubtree(dep, next);
+    }
+    return subtree;
+  }
+
+  const tree = {};
+  for (const root of roots) tree[root] = buildSubtree(root, new Set());
+  return tree;
+}
+
 // ── Summary helpers ───────────────────────────────────────────────────────────
 const SEV_ORDER = { infection: -1, critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
 
@@ -2136,9 +2218,24 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
   const blockUnknown = policy.block_unknown_vulnerabilities === true;
 
   for (const v of vulnerabilities) {
-    // Infections are always blocked — no policy toggle.
+    // Confirmed unreachable by static analysis → never block on policy.
+    // Reachable or unanalysed (no reachability key, or reachable=true) still
+    // go through normal policy evaluation.  Infections are always blocked
+    // regardless of reachability.
+    const reachability       = v.reachability || {};
+    const confirmedUnreachable = (
+      typeof reachability === "object" &&
+      reachability.reachable === false
+    );
+
+    // Infections are unconditionally blocked — reachability is irrelevant.
     if (v.is_infection) {
       v.policy_decision = "block";
+      continue;
+    }
+
+    if (confirmedUnreachable) {
+      v.policy_decision = "allow";
       continue;
     }
 
@@ -2547,7 +2644,7 @@ export class UbelEngineInstance {
         vulnerabilities:   sortVulnerabilities(vulnerabilities),
         inventory,
         policy,
-        dependencies_tree: manager.buildDependencyTree(inventory),
+        dependencies_tree: buildImpactDependencyTree(inventory),
       };
 
       // Reachability
@@ -2563,7 +2660,7 @@ export class UbelEngineInstance {
       const htmlReport = generateHTMLReport(finalJson);
       const htmlPath   = jsonPath.replace(/\.json$/, ".html");
       fs.writeFileSync(htmlPath, htmlReport);
-      fs.writeFileSync(jsonPath, JSON.stringify(finalJson, null, 2));
+      safeWriteJson(jsonPath, finalJson, 1000);
 
       if (!is_script) {
         console.log();
@@ -2626,7 +2723,7 @@ export class UbelEngineInstance {
       const latestHtmlPath = path.join(latestDir, "latest.html");
       fs.mkdirSync(latestDir, { recursive: true });
       fs.writeFileSync(latestHtmlPath, htmlReport);
-      fs.writeFileSync(latestPath, JSON.stringify(finalJson, null, 2));
+      safeWriteJson(latestPath, finalJson, 1000);
 
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       const sbomBuilder = new CycloneDXBuilder(finalJson);
@@ -2637,13 +2734,13 @@ export class UbelEngineInstance {
 
       const sbomPath  = jsonPath.replace(/\.json$/, ".cdx.json");
       const sarifPath = jsonPath.replace(/\.json$/, ".sarif.json");
-      fs.writeFileSync(sbomPath,  JSON.stringify(sbomData,  null, 2));
-      fs.writeFileSync(sarifPath, JSON.stringify(sarifData, null, 2));
+      safeWriteJson(sbomPath, sbomData, 1000);
+      safeWriteJson(sarifPath, sarifData, 1000);
 
       const latestSbom  = path.join(latestDir, "latest.cdx.json");
       const latestSarif = path.join(latestDir, "latest.sarif.json");
-      fs.writeFileSync(latestSbom,  JSON.stringify(sbomData,  null, 2));
-      fs.writeFileSync(latestSarif, JSON.stringify(sarifData, null, 2));
+      safeWriteJson(latestSbom, sbomData, 1000);
+      safeWriteJson(latestSarif, sarifData, 1000);
 
       if (!is_script) {
         console.log(`Latest JSON report saved to: ${latestPath}`);

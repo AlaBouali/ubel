@@ -40,7 +40,7 @@ from typing import Optional
 
 # Package types that are NOT pure libraries — the vulnerable code is the
 # product itself (a binary, framework, plugin, application, OS package, etc.)
-# Any vuln in these is "total" — the whole thing is the attack surface.
+# Any vuln in these is "critical" — the whole thing is the attack surface.
 NON_LIBRARY_TYPES = {
     "application", "app",
     "framework",
@@ -597,7 +597,7 @@ def _compute_reachability(
     if signals.is_malware:
         tags.append("malware")
         return (
-            True, "total", "high",
+            True, "critical", "high",
             "Vulnerability ID carries the MAL- prefix — this is a malware record "
             "representing an active supply-chain infection. "
             "Reachability is unconditional.",
@@ -608,7 +608,7 @@ def _compute_reachability(
     if signals.has_env_scope:
         tags.append("env_scope")
         return (
-            True, "total", "high",
+            True, "critical", "high",
             "Package scope includes 'env' — this component is part of the execution "
             "environment itself (OS package, system library, runtime, or container layer). "
             "Reachability is unconditional.",
@@ -620,7 +620,7 @@ def _compute_reachability(
         tags.append("non_library_type")
         tags.append(f"type:{signals.pkg_type}")
         return (
-            True, "total", "high",
+            True, "critical", "high",
             f"Package type is '{signals.pkg_type}' — not a passive library. "
             "The vulnerable component IS the executable/framework/service being run; "
             "reachability is unconditional.",
@@ -975,7 +975,7 @@ def _print_summary(results: list[ReachabilityResult]) -> None:
     DIM    = "\033[2m"
 
     level_color = {
-        "total":  MAGENTA,
+        "critical":  MAGENTA,
         "high":   RED,
         "medium": YELLOW,
         "low":    GREEN,
@@ -1031,7 +1031,7 @@ def _print_summary(results: list[ReachabilityResult]) -> None:
 
     reachable_count   = sum(1 for r in results if r.reachable)
     unreachable_count = len(results) - reachable_count
-    total_count       = sum(1 for r in results if r.level == "total")
+    total_count       = sum(1 for r in results if r.level == "critical")
 
     print(f"{BOLD}{'─' * 76}{RESET}")
     print(f"  Total vulns : {len(results)}  │  "

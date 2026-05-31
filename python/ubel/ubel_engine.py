@@ -651,24 +651,55 @@ def build_parents(inventory: List[Dict]) -> List[Dict]:
 def build_dependency_tree(inventory: List[Dict]) -> Dict:
     """
     Build a nested dict tree used by the HTML graph renderer.
-    Mirrors NodeManager.buildDependencyTree.
+
+    Only nodes that are 'vulnerable' or 'infected' are included, plus every
+    ancestor (package that transitively depends on them) so the impact chains
+    remain connected.  Safe-only subtrees are omitted entirely, keeping the
+    report size proportional to the number of findings rather than the total
+    inventory.
     """
     by_id: Dict[str, Dict] = {c["id"]: c for c in inventory}
 
-    depended: Set[str] = set()
+    # ── Build reverse map: child → set of direct parents ─────────────────────
+    parents: Dict[str, Set[str]] = {c["id"]: set() for c in inventory}
     for comp in inventory:
         for dep in comp.get("dependencies", []):
-            depended.add(dep)
+            if dep in parents:
+                parents[dep].add(comp["id"])
 
-    roots = [c["id"] for c in inventory if c["id"] not in depended]
+    # ── Seeds: all vulnerable / infected nodes ────────────────────────────────
+    seeds: Set[str] = {
+        c["id"] for c in inventory
+        if c.get("state") in ("vulnerable", "infected")
+    }
 
+    # ── BFS upward to collect every ancestor of a seed ────────────────────────
+    keep: Set[str] = set(seeds)
+    queue = list(seeds)
+    while queue:
+        node = queue.pop(0)
+        for parent in parents.get(node, set()):
+            if parent not in keep:
+                keep.add(parent)
+                queue.append(parent)
+
+    # ── Identify roots within the kept set ───────────────────────────────────
+    depended_in_keep: Set[str] = set()
+    for node_id in keep:
+        for dep in by_id.get(node_id, {}).get("dependencies", []):
+            if dep in keep:
+                depended_in_keep.add(dep)
+
+    roots = [n for n in keep if n not in depended_in_keep]
+
+    # ── Recursively build subtrees, pruning safe-only branches ───────────────
     def build_subtree(node: str, visited: Set[str]) -> Dict:
         if node in visited:
             return {}
         visited = visited | {node}
         subtree: Dict[str, Any] = {}
         for dep in by_id.get(node, {}).get("dependencies", []):
-            if dep in by_id:
+            if dep in keep and dep in by_id:
                 subtree[dep] = build_subtree(dep, visited)
         return subtree
 
@@ -726,8 +757,23 @@ def tag_vulnerabilities_with_policy_decisions(
     block_unknown = policy.get("block_unknown_vulnerabilities") is True
 
     for v in vulnerabilities:
+        # Confirmed unreachable by static analysis → never block on policy.
+        # Reachable or unanalysed (no reachability key, or reachable=True) still
+        # go through normal policy evaluation.  Infections are always blocked
+        # regardless of reachability.
+        reachability = v.get("reachability") or {}
+        confirmed_unreachable = (
+            isinstance(reachability, dict)
+            and reachability.get("reachable") is False
+        )
+
         if v.get("is_infection"):
+            # Infections are unconditionally blocked — reachability is irrelevant.
             v["policy_decision"] = "block"
+            continue
+
+        if confirmed_unreachable:
+            v["policy_decision"] = "allow"
             continue
 
         sev     = (v.get("severity") or "unknown").lower()
