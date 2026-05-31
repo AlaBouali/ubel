@@ -464,20 +464,31 @@ export class NodeManagerInstance {
     this._validatePackageArgs(initialArgs);
 
     // ── 4. Generate candidate lockfile ───────────────────────────────────
+    //
+    // Skip the shell-out entirely when no package arguments were supplied and
+    // a lockfile already exists on disk.  In that case the existing lockfile
+    // IS the candidate — there is nothing new to resolve.
 
-    const argv   = cfg.dryRunCmd(initialArgs);
-    const result = spawnSync(cfg.binary, argv, {
-      cwd:   projectPath,
-      stdio: "inherit",
-      shell: true,
-    });
+    const lockfileAlreadyPresent = fs.existsSync(lockPath);
+    const skipDryRun = initialArgs.length === 0 && lockfileAlreadyPresent;
 
-    if (result.status !== 0) {
-      throw new Error(`${engine} failed to generate lockfile (exit ${result.status})`);
-    }
+    if (skipDryRun) {
+      console.log(`Skipping dry-run shell-out: no arguments supplied and lockfile already exists at ${lockPath}`);
+    } else {
+      const argv   = cfg.dryRunCmd(initialArgs);
+      const result = spawnSync(cfg.binary, argv, {
+        cwd:   projectPath,
+        stdio: "inherit",
+        shell: true,
+      });
 
-    if (!fs.existsSync(lockPath)) {
-      throw new Error(`${engine} did not produce a lockfile at ${lockPath}`);
+      if (result.status !== 0) {
+        throw new Error(`${engine} failed to generate lockfile (exit ${result.status})`);
+      }
+
+      if (!fs.existsSync(lockPath)) {
+        throw new Error(`${engine} did not produce a lockfile at ${lockPath}`);
+      }
     }
 
     // ── 4b. Hash candidate package.json (TOCTOU guard) ───────────────────
