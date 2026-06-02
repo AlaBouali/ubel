@@ -2040,8 +2040,9 @@ class UbelEngine:
                     _engine_version = Linux_Manager.pkg_manager_version
                     _engine_name    = Linux_Manager.pkg_manager
                 else:
-                    purls           = Linux_Manager.get_linux_packages()
-                    system_info     = Linux_Manager.get_os_info()
+                    linux_manager   = Linux_Manager()
+                    purls           = linux_manager.get_linux_packages()
+                    system_info     = linux_manager.get_os_info()
                     report_content  = {"system_info": system_info}
 
             # Strip version-less PURLs

@@ -234,9 +234,10 @@ class Pypi_Manager:
                 pass
         if scan_os:
             try:
-                from .linux_runner import Linux_Manager
-                Linux_Manager.get_linux_packages()
-                all_components.extend(Linux_Manager.inventory_data)
+                from .os_health import LinuxHostScanner
+                linux_scanner = LinuxHostScanner()
+                linux_scanner.get_installed(start_dir)
+                all_components.extend(linux_scanner.inventory_data)
             except Exception:
                 pass
 
