@@ -243,8 +243,9 @@ class Linux_Manager:
         system_info = self.get_os_info()
 
         # LinuxHostScanner.scan() is synchronous; no event loop needed here.
-        LinuxHostScanner.scan()
-        raw_packages = LinuxHostScanner.inventory_data
+        LinuxHostScannerInstance = LinuxHostScanner()
+        LinuxHostScannerInstance.get_installed()
+        raw_packages = LinuxHostScannerInstance.inventory_data
 
         components: List[Dict] = []
         for pkg in raw_packages:
