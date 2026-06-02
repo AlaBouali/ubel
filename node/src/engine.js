@@ -151,526 +151,135 @@ function generateHTMLReport(data) {
     let safeJson = JSON.stringify(reportData).replace(/</g, '\\u003c');
     safeJson = safeJson.replace(/`/g, '\\u0060');
 
-    // The complete client-side script
+    // The complete client-side script (NEW: graph shows dependency sequences via autocomplete)
     const clientScript = `
         // --- DATA ---
         const reportData = ${safeJson};
 
-        // ── Dependency Graph (force-directed, shows only impact chains) ────────────────
-        let graphState = null;
+        // Helper: get package display name from inventory
+        function getPackageDisplay(purl) {
+            const inv = reportData.inventory.find(x => x.id === purl);
+            if (inv) return \`\${inv.name}@\${inv.version}\`;
+            const parts = purl.split('/').pop();
+            return parts || purl;
+        }
 
-        function initGraph() {
-            const canvas = document.getElementById('dep-graph-canvas');
-            if (!canvas) return;
+        // Build list of vulnerable/infected packages from findings_summary
+        function getVulnerableInfectedPackages() {
+            const summary = reportData.findings_summary || {};
+            return Object.values(summary).map(pkg => ({
+                id: pkg.name + '@' + pkg.version,
+                name: pkg.name,
+                version: pkg.version,
+                ecosystem: pkg.ecosystem,
+                sequences: pkg.affected_dependency_sequences || []
+            }));
+        }
 
-            const tree = reportData.dependencies_tree || {};
-            if (!Object.keys(tree).length) {
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#737373';
-                ctx.font = '14px Inter, sans-serif';
-                ctx.textAlign = 'center';
-                ctx.fillText('No dependency tree data available.', canvas.width / 2, canvas.height / 2);
+        let currentSelectedPkg = null;
+
+        // Render all sequences for a selected package
+        function renderSequences(pkg) {
+            const container = document.getElementById('sequences-container');
+            if (!container) return;
+
+            if (!pkg || !pkg.sequences || pkg.sequences.length === 0) {
+                container.innerHTML = '<div class="text-neutral-500 italic text-center p-8">No dependency sequences available for this package.</div>';
                 return;
             }
 
-            // ---------- Build full graph (all nodes & edges) ----------
-            const fullNodeMap = {};
-            const allEdges = [];
+            let html = '<div class="space-y-6">';
+            pkg.sequences.forEach((sequence, idx) => {
+                html += '<div class="border border-neutral-700 rounded-lg p-4 bg-neutral-900/30">';
+                html += \`<div class="text-xs text-neutral-400 mb-3 font-mono">Sequence #\${idx+1}</div>\`;
+                html += '<div class="flex flex-wrap items-center gap-2">';
 
-            const getOrCreate = (id) => {
-                if (!fullNodeMap[id]) {
-                    const inv = reportData.inventory.find(x => x.id === id);
-                    fullNodeMap[id] = {
-                        id,
-                        label: inv ? inv.name + '@' + inv.version : id.split('/').pop(),
-                        fullLabel: id,
-                        state: inv ? (inv.state || 'unknown') : 'unknown',
-                        x: 0, y: 0, vx: 0, vy: 0,
-                        fx: null, fy: null,
-                        radius: 0,
-                    };
-                }
-                return fullNodeMap[id];
-            };
-
-            const walk = (nodeId, children) => {
-                getOrCreate(nodeId);
-                for (const [childId, grandChildren] of Object.entries(children || {})) {
-                    getOrCreate(childId);
-                    allEdges.push({ source: nodeId, target: childId });
-                    walk(childId, grandChildren);
-                }
-            };
-
-            for (const [rootId, children] of Object.entries(tree)) {
-                walk(rootId, children);
-            }
-
-            const allNodes = Object.values(fullNodeMap);
-            // Deduplicate edges
-            const edgeSet = new Set();
-            const allUniqueEdges = allEdges.filter(e => {
-                const key = e.source + '||' + e.target;
-                if (edgeSet.has(key)) return false;
-                edgeSet.add(key);
-                return true;
-            });
-
-            // Build reverse adjacency: for each node, which nodes depend on it (incoming edges)
-            const reverseAdj = new Map(); // id -> Set of ids that depend on it
-            for (const n of allNodes) reverseAdj.set(n.id, new Set());
-            for (const e of allUniqueEdges) {
-                // e.source depends on e.target
-                reverseAdj.get(e.target).add(e.source);
-            }
-
-            // Node sizing (based on out‑degree in full graph)
-            const childCount = {};
-            for (const e of allUniqueEdges) {
-                childCount[e.source] = (childCount[e.source] || 0) + 1;
-            }
-            for (const n of allNodes) {
-                const c = childCount[n.id] || 0;
-                n.radius = c > 10 ? 18 : c > 4 ? 14 : c > 1 ? 11 : 8;
-            }
-
-            // ----- FILTER LOGIC: ancestors (dependents) of vulnerable/infected nodes -----
-            let currentFilter = 'all';   // 'all', 'vulnerable', 'infected'
-            let visibleNodeIds = new Set();
-            let visibleEdges = [];
-
-            function computeVisibleNodesAndEdges() {
-                if (currentFilter === 'all') {
-                    visibleNodeIds.clear();
-                    for (const n of allNodes) visibleNodeIds.add(n.id);
-                    visibleEdges = [...allUniqueEdges];
-                    return;
-                }
-
-                const targetStates = currentFilter === 'vulnerable' ? new Set(['vulnerable']) : new Set(['infected']);
-                // Seeds: all nodes that match the target state
-                const seeds = allNodes.filter(n => targetStates.has(n.state)).map(n => n.id);
-                if (seeds.length === 0) {
-                    visibleNodeIds.clear();
-                    visibleEdges = [];
-                    return;
-                }
-
-                // BFS on reverse graph to collect all ancestors (nodes that depend on the seeds)
-                const keep = new Set(seeds);
-                const queue = [...seeds];
-                while (queue.length) {
-                    const id = queue.shift();
-                    for (const depender of reverseAdj.get(id) || []) {
-                        if (!keep.has(depender)) {
-                            keep.add(depender);
-                            queue.push(depender);
-                        }
+                sequence.forEach((node, i) => {
+                    const display = getPackageDisplay(node);
+                    const isLast = i === sequence.length - 1;
+                    html += \`
+                        <div class="bg-neutral-800 px-3 py-1.5 rounded-lg border border-neutral-700 text-sm font-mono hover:bg-neutral-700 transition-colors cursor-pointer" onclick="showPackageDetails('\${escapeHtml(node)}')">
+                            \${escapeHtml(display)}
+                        </div>
+                    \`;
+                    if (!isLast) {
+                        html += '<span class="text-neutral-500 text-lg">→</span>';
                     }
-                }
-
-                visibleNodeIds = keep;
-                // Keep only edges where both ends are in the set
-                visibleEdges = allUniqueEdges.filter(e => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
-            }
-
-            // Create a working set of nodes (subset of allNodes) and edges from visibleNodeIds
-            function getCurrentNodesAndEdges() {
-                const nodes = allNodes.filter(n => visibleNodeIds.has(n.id));
-                return { nodes, edges: visibleEdges };
-            }
-
-            // ---- Force simulation state for the current visible graph ----
-            let simTick = 0;
-            const MAX_SIM = 300;
-            const SIM_COOLDOWN = 0.92;
-            let simRunning = true;
-            let animId = null;
-
-            let visibleNodes = [];
-            let visibleEdgesList = [];
-            let nodeMap = new Map(); // id -> node object reference
-
-            // Rebuild simulation after filter change
-            function rebuildFromFilter() {
-                computeVisibleNodesAndEdges();
-                const { nodes, edges } = getCurrentNodesAndEdges();
-                visibleNodes = nodes;
-                visibleEdgesList = edges;
-                nodeMap.clear();
-                for (const n of visibleNodes) nodeMap.set(n.id, n);
-
-                // Reset forces
-                for (const n of visibleNodes) {
-                    n.vx = 0; n.vy = 0;
-                    if (n.fx !== null) { n.fx = n.x; n.fy = n.y; }
-                }
-                simRunning = true;
-                simTick = 0;
-            }
-
-            // Initial build (all nodes)
-            currentFilter = 'vulnerable';
-            rebuildFromFilter();
-
-            // ---- Helper: initial positions (circular layout) ----
-            function setInitialPositions() {
-                const cx = 0, cy = 0, R = Math.max(150, visibleNodes.length * 9);
-                visibleNodes.forEach((n, i) => {
-                    const angle = (2 * Math.PI * i) / visibleNodes.length;
-                    n.x = cx + R * Math.cos(angle) + (Math.random() - 0.5) * 40;
-                    n.y = cy + R * Math.sin(angle) + (Math.random() - 0.5) * 40;
                 });
+
+                html += '</div></div>';
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function showPackageDetails(purl) {
+            const item = reportData.inventory.find(x => x.id === purl);
+            if (item) {
+                openInvModal(item.id);
+            } else {
+                // try to find by name@version
+                const [name, version] = purl.split('@');
+                const match = reportData.inventory.find(x => x.name === name && x.version === version);
+                if (match) openInvModal(match.id);
             }
-            setInitialPositions();
+        }
 
-            // ---- Force simulation (works on visibleNodes & visibleEdgesList) ----
-            const simulate = () => {
-                if (!simRunning) return;
-                if (visibleNodes.length === 0) return;
+        // Populate autocomplete datalist
+        function populatePackageSelect() {
+            const pkgs = getVulnerableInfectedPackages();
+            const datalist = document.getElementById('pkg-options');
+            const selectInput = document.getElementById('pkg-select-input');
+            if (!datalist || !selectInput) return;
 
-                // Repulsion
-                for (let i = 0; i < visibleNodes.length; i++) {
-                    for (let j = i + 1; j < visibleNodes.length; j++) {
-                        const a = visibleNodes[i], b = visibleNodes[j];
-                        const dx = b.x - a.x, dy = b.y - a.y;
-                        const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
-                        const force = Math.min(8000 / (dist * dist), 60);
-                        const fx = (dx / dist) * force, fy = (dy / dist) * force;
-                        a.vx -= fx; a.vy -= fy;
-                        b.vx += fx; b.vy += fy;
-                    }
-                }
-
-                // Spring (edges)
-                for (const e of visibleEdgesList) {
-                    const a = nodeMap.get(e.source);
-                    const b = nodeMap.get(e.target);
-                    if (!a || !b) continue;
-                    const dx = b.x - a.x, dy = b.y - a.y;
-                    const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
-                    const ideal = (a.radius + b.radius) * 5 + 30;
-                    const force = (dist - ideal) * 0.04;
-                    const fx = (dx / dist) * force, fy = (dy / dist) * force;
-                    a.vx += fx; a.vy += fy;
-                    b.vx -= fx; b.vy -= fy;
-                }
-
-                // Center gravity
-                for (const n of visibleNodes) {
-                    n.vx += -n.x * 0.004;
-                    n.vy += -n.y * 0.004;
-                }
-
-                // Integrate + dampen
-                for (const n of visibleNodes) {
-                    if (n.fx !== null) { n.x = n.fx; n.y = n.fy; n.vx = 0; n.vy = 0; continue; }
-                    n.vx *= SIM_COOLDOWN; n.vy *= SIM_COOLDOWN;
-                    n.x += n.vx; n.y += n.vy;
-                }
-
-                simTick++;
-                if (simTick > MAX_SIM) simRunning = false;
-            };
-
-            // ---- Viewport & interaction variables ----
-            let scale = 1, panX = 0, panY = 0;
-            let dragging = null;
-            let isPanning = false, panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
-            let highlightId = null;
-            let searchMatches = new Set();
-
-            const stateColor = (state) => ({
-                safe:       { fill: '#16a34a', stroke: '#4ade80', text: '#f0fdf4' },
-                vulnerable: { fill: '#ca8a04', stroke: '#fbbf24', text: '#fefce8' },
-                infected:   { fill: '#dc2626', stroke: '#f87171', text: '#fef2f2' },
-                unknown:    { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' },
-            }[state] || { fill: '#525252', stroke: '#a3a3a3', text: '#f5f5f5' });
-
-            // ---- Render (only visible nodes & edges) ----
-            const render = () => {
-                const dpr = window.devicePixelRatio || 1;
-                const rect = canvas.getBoundingClientRect();
-                if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
-                    canvas.width = rect.width * dpr;
-                    canvas.height = rect.height * dpr;
-                }
-                const ctx = canvas.getContext('2d');
-                ctx.setTransform(1, 0, 0, 1, 0, 0);
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.scale(dpr, dpr);
-
-                const W = rect.width, H = rect.height;
-                const tx = W / 2 + panX, ty = H / 2 + panY;
-
-                ctx.save();
-                ctx.translate(tx, ty);
-                ctx.scale(scale, scale);
-
-                // Edges
-                ctx.lineWidth = 0.8;
-                for (const e of visibleEdgesList) {
-                    const a = nodeMap.get(e.source), b = nodeMap.get(e.target);
-                    if (!a || !b) continue;
-                    const isHighlighted = highlightId && (e.source === highlightId || e.target === highlightId);
-                    const isSearchMatch = searchMatches.size > 0 && (searchMatches.has(e.source) || searchMatches.has(e.target));
-                    const dimmed = (highlightId && !isHighlighted) || (searchMatches.size > 0 && !isSearchMatch);
-                    ctx.globalAlpha = dimmed ? 0.08 : isHighlighted ? 0.9 : 0.25;
-                    ctx.strokeStyle = isHighlighted ? '#ef4444' : '#525252';
-                    ctx.beginPath();
-                    ctx.moveTo(a.x, a.y);
-                    ctx.lineTo(b.x, b.y);
-                    ctx.stroke();
-
-                    if (isHighlighted || !dimmed) {
-                        const ang = Math.atan2(b.y - a.y, b.x - a.x);
-                        const ex = b.x - Math.cos(ang) * (b.radius + 3);
-                        const ey = b.y - Math.sin(ang) * (b.radius + 3);
-                        ctx.globalAlpha = dimmed ? 0.08 : 0.5;
-                        ctx.fillStyle = isHighlighted ? '#ef4444' : '#737373';
-                        ctx.beginPath();
-                        ctx.moveTo(ex, ey);
-                        ctx.lineTo(ex - Math.cos(ang - 0.4) * 6, ey - Math.sin(ang - 0.4) * 6);
-                        ctx.lineTo(ex - Math.cos(ang + 0.4) * 6, ey - Math.sin(ang + 0.4) * 6);
-                        ctx.closePath();
-                        ctx.fill();
-                    }
-                }
-
-                // Nodes
-                for (const n of visibleNodes) {
-                    const c = stateColor(n.state);
-                    const isHl = n.id === highlightId;
-                    const isMatch = searchMatches.has(n.id);
-                    const dimmed = (highlightId && !isHl) || (searchMatches.size > 0 && !isMatch && !isHl);
-
-                    ctx.globalAlpha = dimmed ? 0.15 : 1;
-
-                    if (isMatch || isHl) {
-                        ctx.beginPath();
-                        ctx.arc(n.x, n.y, n.radius + 5, 0, Math.PI * 2);
-                        ctx.fillStyle = isHl ? '#ef4444' : c.stroke;
-                        ctx.globalAlpha = 0.25;
-                        ctx.fill();
-                        ctx.globalAlpha = dimmed ? 0.15 : 1;
-                    }
-
-                    ctx.beginPath();
-                    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-                    ctx.fillStyle = c.fill;
-                    ctx.fill();
-                    ctx.strokeStyle = isHl ? '#ffffff' : c.stroke;
-                    ctx.lineWidth = isHl ? 2.5 : 1.5;
-                    ctx.stroke();
-
-                    const showLabel = scale > 0.7 || isHl || isMatch;
-                    if (showLabel) {
-                        ctx.globalAlpha = dimmed ? 0.15 : isHl ? 1 : 0.85;
-                        ctx.fillStyle = '#e5e5e5';
-                        ctx.font = \`\${isHl ? 'bold ' : ''}\${Math.max(9, Math.min(11, n.radius * 0.9))}px JetBrains Mono, monospace\`;
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'middle';
-                        const labelY = n.y + n.radius + 9;
-                        ctx.fillStyle = 'rgba(0,0,0,0.8)';
-                        ctx.fillText(n.label, n.x + 0.5, labelY + 0.5);
-                        ctx.fillStyle = isHl ? '#ffffff' : '#d4d4d4';
-                        ctx.fillText(n.label, n.x, labelY);
-                    }
-                }
-
-                ctx.globalAlpha = 1;
-                ctx.restore();
-            };
-
-            const loop = () => {
-                simulate();
-                render();
-                animId = requestAnimationFrame(loop);
-            };
-            loop();
-
-            // ---- Interaction helpers (unchanged) ----
-            const toWorld = (cx, cy) => {
-                const rect = canvas.getBoundingClientRect();
-                const W = rect.width, H = rect.height;
-                return {
-                    x: (cx - W / 2 - panX) / scale,
-                    y: (cy - H / 2 - panY) / scale,
-                };
-            };
-
-            const hitTest = (wx, wy) => {
-                let best = null, bestDist = Infinity;
-                for (const n of visibleNodes) {
-                    const d = Math.sqrt((wx - n.x) ** 2 + (wy - n.y) ** 2);
-                    if (d < n.radius + 4 && d < bestDist) { best = n; bestDist = d; }
-                }
-                return best;
-            };
-
-            const tooltip = document.getElementById('graph-tooltip');
-            canvas.addEventListener('mousemove', (e) => {
-                const r = canvas.getBoundingClientRect();
-                const mx = e.clientX - r.left, my = e.clientY - r.top;
-                const { x: wx, y: wy } = toWorld(mx, my);
-                const hit = hitTest(wx, wy);
-                if (hit) {
-                    canvas.style.cursor = dragging ? 'grabbing' : 'pointer';
-                    const inv = reportData.inventory.find(x => x.id === hit.id);
-                    const vulns = reportData.vulnerabilities.filter(v => v.affected_package_id === hit.id);
-                    tooltip.textContent = [
-                        hit.id,
-                        \`State: \${hit.state}\`,
-                        inv ? \`License: \${inv.license || 'unknown'}\` : '',
-                        inv ? \`Scopes: \${(inv.scopes || []).join(', ') || '—'}\` : '',
-                        vulns.length ? \`Vulns: \${vulns.length} (\${vulns.map(v=>v.severity).join(', ')})\` : 'No vulnerabilities',
-                    ].filter(Boolean).join('\\n');
-                    tooltip.style.display = 'block';
-                    tooltip.style.left = (mx + 14) + 'px';
-                    tooltip.style.top = (my - 10) + 'px';
-                } else {
-                    canvas.style.cursor = isPanning ? 'grabbing' : 'grab';
-                    tooltip.style.display = 'none';
-                }
-
-                if (dragging) {
-                    dragging.fx = (mx - canvas.getBoundingClientRect().left - canvas.getBoundingClientRect().width / 2 - panX) / scale;
-                    dragging.fy = (my - canvas.getBoundingClientRect().top - canvas.getBoundingClientRect().height / 2 - panY) / scale;
-                    dragging.x = dragging.fx;
-                    dragging.y = dragging.fy;
-                }
-
-                if (isPanning) {
-                    panX = panOriginX + (e.clientX - panStartX);
-                    panY = panOriginY + (e.clientY - panStartY);
-                }
+            datalist.innerHTML = '';
+            pkgs.forEach(pkg => {
+                const option = document.createElement('option');
+                option.value = pkg.id;
+                option.textContent = \`\${pkg.name}@\${pkg.version} (\${pkg.ecosystem})\`;
+                datalist.appendChild(option);
             });
 
-            canvas.addEventListener('mousedown', (e) => {
-                const r = canvas.getBoundingClientRect();
-                const mx = e.clientX - r.left, my = e.clientY - r.top;
-                const { x: wx, y: wy } = toWorld(mx, my);
-                const hit = hitTest(wx, wy);
-                if (hit) {
-                    dragging = hit;
-                    hit.fx = hit.x; hit.fy = hit.y;
-                    simRunning = true; simTick = 0;
-                } else {
-                    isPanning = true;
-                    panStartX = e.clientX; panStartY = e.clientY;
-                    panOriginX = panX; panOriginY = panY;
-                    canvas.style.cursor = 'grabbing';
-                }
-            });
-
-            canvas.addEventListener('mouseup', () => {
-                if (dragging) { dragging.fx = null; dragging = null; }
-                isPanning = false;
-                canvas.style.cursor = 'grab';
-            });
-
-            canvas.addEventListener('click', (e) => {
-                if (isPanning) return;
-                const r = canvas.getBoundingClientRect();
-                const mx = e.clientX - r.left, my = e.clientY - r.top;
-                const { x: wx, y: wy } = toWorld(mx, my);
-                const hit = hitTest(wx, wy);
-                if (hit) {
-                    highlightId = hit.id === highlightId ? null : hit.id;
-                    if (hit.id) openInvModal(hit.id);
-                } else {
-                    highlightId = null;
-                }
-            });
-
-            // Touch & zoom
-            let lastTouchDist = null;
-            canvas.addEventListener('touchstart', (e) => {
-                if (e.touches.length === 2) {
-                    lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-                }
-            }, { passive: true });
-            canvas.addEventListener('touchmove', (e) => {
-                if (e.touches.length === 2) {
-                    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-                    if (lastTouchDist) scale = Math.max(0.1, Math.min(5, scale * (d / lastTouchDist)));
-                    lastTouchDist = d;
-                    e.preventDefault();
-                }
-            }, { passive: false });
-            canvas.addEventListener('wheel', (e) => {
-                e.preventDefault();
-                const delta = e.deltaY > 0 ? -0.1 : 0.1;
-                const r = canvas.getBoundingClientRect();
-                const mx = e.clientX - r.left, my = e.clientY - r.top;
-                const W = r.width, H = r.height;
-                const wxBefore = (mx - W/2 - panX) / scale;
-                const wyBefore = (my - H/2 - panY) / scale;
-                scale = Math.max(0.08, Math.min(5, scale + delta * scale));
-                panX = mx - W/2 - wxBefore * scale;
-                panY = my - H/2 - wyBefore * scale;
-            }, { passive: false });
-
-            // Search
-            document.getElementById('graph-search').addEventListener('input', (e) => {
-                const q = e.target.value.trim().toLowerCase();
-                searchMatches.clear();
-                if (q.length >= 2) {
-                    for (const n of visibleNodes) {
-                        if (n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q)) {
-                            searchMatches.add(n.id);
-                        }
-                    }
-                }
-                simRunning = true; simTick = Math.max(0, MAX_SIM - 60);
-            });
-
-            // ---- FILTER DROPDOWN handler ----
-            const filterSelect = document.getElementById('graph-filter');
-            if (filterSelect) {
-                filterSelect.addEventListener('change', (e) => {
-                    currentFilter = e.target.value;
-                    rebuildFromFilter();
-                    setInitialPositions();
-                    simRunning = true;
-                    simTick = 0;
-                    highlightId = null;
-                    searchMatches.clear();
-                    if (document.getElementById('graph-search')) document.getElementById('graph-search').value = '';
-                });
+            // Auto-select first package if any
+            if (pkgs.length > 0 && !currentSelectedPkg) {
+                selectInput.value = pkgs[0].id;
+                handlePackageSelect(pkgs[0].id);
+            } else if (pkgs.length === 0) {
+                const container = document.getElementById('sequences-container');
+                if (container) container.innerHTML = '<div class="text-neutral-500 italic text-center p-8">No vulnerable or infected packages found.</div>';
             }
-
-            graphState = {
-                reset: () => {
-                    scale = 1; panX = 0; panY = 0;
-                    for (const n of visibleNodes) { n.fx = null; n.fy = null; }
-                    simRunning = true; simTick = 0;
-                },
-                stop: () => { if (animId) cancelAnimationFrame(animId); },
-            };
         }
 
-        function graphZoom(delta) {
-            if (!graphState) return;
-            const canvas = document.getElementById('dep-graph-canvas');
-            if (!canvas) return;
-            // We'll handle zoom via the existing wheel event – the buttons are just for convenience.
-            // Simulate a small wheel delta
-            const event = new WheelEvent('wheel', { deltaY: delta > 0 ? -30 : 30 });
-            canvas.dispatchEvent(event);
+        function handlePackageSelect(selectedValue) {
+            if (!selectedValue) return;
+            const pkgs = getVulnerableInfectedPackages();
+            const pkg = pkgs.find(p => p.id === selectedValue);
+            if (pkg) {
+                currentSelectedPkg = pkg;
+                renderSequences(pkg);
+            } else {
+                // fallback: try to parse name@version
+                const [name, version] = selectedValue.split('@');
+                const fallback = pkgs.find(p => p.name === name && p.version === version);
+                if (fallback) {
+                    currentSelectedPkg = fallback;
+                    renderSequences(fallback);
+                }
+            }
         }
 
-        function graphReset() {
-            if (graphState) graphState.reset();
-        }
-
-        // --- CORE LOGIC (existing - unchanged except for graph init) ---
+        // --- Existing functions (unchanged except graph tab modifications) ---
         function init() {
-            if (reportData.inventory.length < reportData.stats.inventory_size) {
-                const currentCount = reportData.inventory.length;
-                const needed = reportData.stats.inventory_size - currentCount;
-            }
-
             closeModal();
             renderDashboard();
             renderVulnerabilities();
@@ -678,6 +287,21 @@ function generateHTMLReport(data) {
             renderStats();
             renderSystem();
             setupFilters();
+            populatePackageSelect();
+
+            // Listen for selection changes
+            const selectInput = document.getElementById('pkg-select-input');
+            if (selectInput) {
+                selectInput.addEventListener('change', (e) => {
+                    handlePackageSelect(e.target.value);
+                });
+                // Also allow manual entry (if matches exactly)
+                selectInput.addEventListener('blur', () => {
+                    if (selectInput.value && !currentSelectedPkg) {
+                        handlePackageSelect(selectInput.value);
+                    }
+                });
+            }
         }
 
         function switchTab(tabId) {
@@ -685,9 +309,7 @@ function generateHTMLReport(data) {
             document.getElementById(\`tab-\${tabId}\`).classList.add('tab-active');
             document.querySelectorAll('main section').forEach(sec => sec.classList.add('hidden'));
             document.getElementById(\`section-\${tabId}\`).classList.remove('hidden');
-            if (tabId === 'graph' && !graphState) {
-                setTimeout(initGraph, 50);
-            }
+            // No graph init needed anymore
         }
 
         function renderDashboard() {
@@ -1126,7 +748,7 @@ function generateHTMLReport(data) {
         init();
     `;
 
-    // HTML output (same as before, with the filter dropdown already present)
+    // HTML output (graph section completely redesigned)
     return `<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -1151,7 +773,6 @@ function generateHTMLReport(data) {
         .tab-active { border-bottom: 2px solid var(--accent); color: white; }
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 50; backdrop-filter: blur(4px); }
         .modal-content { max-height: 90vh; overflow-y: auto; }
-        #graph-tooltip { position: fixed; background: rgba(20,20,20,0.95); border: 1px solid #404040; border-radius: 8px; padding: 8px 12px; font-size: 11px; font-family: 'JetBrains Mono', monospace; color: #e5e5e5; pointer-events: none; max-width: 280px; z-index: 100; line-height: 1.6; white-space: pre-wrap; word-break: break-all; display: none; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -1166,7 +787,7 @@ function generateHTMLReport(data) {
             <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
             <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities</button>
             <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory</button>
-            <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Graph</button>
+            <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Sequences</button>
             <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
             <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
         </div>
@@ -1187,7 +808,7 @@ function generateHTMLReport(data) {
         </section>
         <!-- Vulnerabilities Section -->
         <section id="section-vulnerabilities" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select><select id="vuln-filter-reachability" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Reachability</option><option value="reachable">Reachable</option><option value="unreachable">Unreachable</option><option value="total">Total</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="vuln-search" placeholder="Search ID or package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64"><select id="vuln-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="unknown">Unknown</option></select><select id="vuln-filter-reachability" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All Reachability</option><option value="reachable">Reachable</option><option value="unreachable">Unreachable</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></div>
             <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">ID</th><th>Severity</th><th>Package</th><th>Version</th><th>Fix Available</th><th>Policy Violation</th><th>Fixed Versions</th><th>Reachability</th><th class="text-right">Action</th></tr></thead><tbody id="vuln-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Inventory Section -->
@@ -1195,31 +816,19 @@ function generateHTMLReport(data) {
             <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option><option value="undetermined">Undetermined</option></select></div></div>
             <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th>Name</th><th>Version</th><th>State</th><th>Policy Violation</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
-        <!-- Dependency Graph Section with filter dropdown -->
-        <section id="section-graph" class="hidden space-y-4" style="height: calc(100vh - 220px); min-height: 500px;">
-            <div class="flex flex-col md:flex-row gap-3 justify-between items-start md:items-center">
-                <h2 class="text-xl font-bold">Dependency Graph</h2>
-                <div class="flex gap-2 w-full md:w-auto items-center flex-wrap">
-                    <input type="text" id="graph-search" placeholder="Search by package ID..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-72">
-                    <select id="graph-filter" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
-                        <option value="all">All graphs</option>
-                        <option value="vulnerable" selected>Vulnerable graphs</option>
-                        <option value="infected">Infected graphs</option>
-                    </select>
-                    <button onclick="graphZoom(0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">＋</button>
-                    <button onclick="graphZoom(-0.2)" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">－</button>
-                    <button onclick="graphReset()" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm hover:bg-neutral-700">Reset</button>
-                    <div class="flex items-center gap-3 text-[10px] mono text-neutral-500">
-                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500"></span>safe</span>
-                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-yellow-500"></span>vulnerable</span>
-                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500"></span>infected</span>
-                        <span class="flex items-center gap-1"><span class="inline-block w-2.5 h-2.5 rounded-full bg-neutral-500"></span>unknown</span>
-                    </div>
+        <!-- Dependency Sequences Section (replaces old graph) -->
+        <section id="section-graph" class="hidden space-y-6">
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
+                <h2 class="text-xl font-bold">Dependency Sequences for Vulnerable/Infected Packages</h2>
+                <div class="flex gap-2 w-full md:w-auto items-center">
+                    <input type="text" id="pkg-select-input" list="pkg-options" placeholder="Select vulnerable/infected package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-80" autocomplete="off">
+                    <datalist id="pkg-options"></datalist>
                 </div>
             </div>
-            <div class="glass rounded-xl overflow-hidden relative" style="height: calc(100% - 56px);">
-                <canvas id="dep-graph-canvas" style="width:100%;height:100%;cursor:grab;display:block;"></canvas>
-                <div id="graph-tooltip" style="display:none;position:absolute;background:rgba(20,20,20,0.95);border:1px solid #404040;border-radius:8px;padding:8px 12px;font-size:11px;font-family:'JetBrains Mono',monospace;color:#e5e5e5;pointer-events:none;max-width:280px;z-index:10;line-height:1.6;white-space:pre-wrap;"></div>
+            <div class="glass rounded-xl p-6">
+                <div id="sequences-container" class="space-y-4">
+                    <div class="text-neutral-500 italic text-center p-8">Select a package from the list to view its dependency sequences.</div>
+                </div>
             </div>
         </section>
         <!-- Detailed Stats Section -->
@@ -2024,7 +1633,7 @@ function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   }
 }
 
-// ── Impact-only dependency tree ───────────────────────────────────────────────
+// ── Impact-only dependency tree (kept for backwards compatibility but not used in graph)
 //
 // Builds the nested-dict tree passed to the HTML graph renderer, but only
 // includes nodes that are 'vulnerable' or 'infected' plus every ancestor
@@ -2644,7 +2253,7 @@ export class UbelEngineInstance {
         vulnerabilities:   sortVulnerabilities(vulnerabilities),
         inventory,
         policy,
-        dependencies_tree: buildImpactDependencyTree(inventory),
+        //dependencies_tree: buildImpactDependencyTree(inventory),  // kept for compatibility but not used in new graph
       };
 
       // Reachability
