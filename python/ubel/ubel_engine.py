@@ -2018,16 +2018,17 @@ class UbelEngine:
                     _engine_version = __version__
 
             else:  # linux
+                Linux_Manager_instance = Linux_Manager()
                 if is_dry_run:
-                    packages       = Linux_Manager.resolve_packages(args)
-                    system_info    = Linux_Manager.get_os_info()
+                    packages       = Linux_Manager_instance.resolve_packages(args)
+                    system_info    = Linux_Manager_instance.get_os_info()
                     report_content = {"packages": packages, "system_info": system_info}
                     purls          = [
-                        Linux_Manager.package_to_purl(system_info, p["name"], p["version"])
+                        Linux_Manager_instance.package_to_purl(system_info, p["name"], p["version"])
                         for p in packages
                     ]
                     # Populate inventory_data so the inventory build step below has data.
-                    Linux_Manager.inventory_data = [
+                    Linux_Manager_instance.inventory_data = [
                         {
                             **pkg,
                             "id":    purl,
@@ -2037,12 +2038,11 @@ class UbelEngine:
                         }
                         for pkg, purl in zip(packages, purls)
                     ]
-                    _engine_version = Linux_Manager.pkg_manager_version
-                    _engine_name    = Linux_Manager.pkg_manager
+                    _engine_version = Linux_Manager_instance.pkg_manager_version
+                    _engine_name    = Linux_Manager_instance.pkg_manager
                 else:
-                    linux_manager   = Linux_Manager()
-                    purls           = linux_manager.get_linux_packages()
-                    system_info     = linux_manager.get_os_info()
+                    purls           = Linux_Manager_instance.get_linux_packages()
+                    system_info     = Linux_Manager_instance.get_os_info()
                     report_content  = {"system_info": system_info}
 
             # Strip version-less PURLs
@@ -2056,7 +2056,7 @@ class UbelEngine:
                 else:
                     inventory = list(Pypi_Manager.inventory_data)
             else:
-                inventory = list(Linux_Manager.inventory_data)
+                inventory = list(Linux_Manager_instance.inventory_data)
                 for item in inventory:
                     item["scopes"] = ["prod"]
             
