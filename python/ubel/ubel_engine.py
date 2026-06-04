@@ -1038,9 +1038,14 @@ def generate_html_report(data: Dict) -> str:
         <section id="section-graph" class="hidden space-y-6">
             <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
                 <h2 class="text-xl font-bold">Dependency Sequences for Vulnerable/Infected Packages</h2>
-                <div class="flex gap-2 w-full md:w-auto items-center">
-                    <input type="text" id="pkg-select-input" list="pkg-options" placeholder="Select vulnerable/infected package..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-80" autocomplete="off">
-                    <datalist id="pkg-options"></datalist>
+                <div class="relative w-full md:w-auto" id="pkg-dropdown-wrapper">
+                    <div class="relative">
+                        <input type="text" id="pkg-select-input" placeholder="Search package…" autocomplete="off" spellcheck="false"
+                            class="bg-neutral-800 border border-neutral-700 hover:border-neutral-500 focus:border-red-500 rounded-lg pl-4 pr-8 py-2 text-sm w-full md:w-72 focus:outline-none focus:ring-2 focus:ring-red-500/30 transition-colors placeholder-neutral-500 text-white"
+                            oninput="filterPkgDropdown(this.value)" onfocus="openPkgDropdown()" onblur="closePkgDropdown()" />
+                        <svg id="pkg-chevron" class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 transition-transform duration-200" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <ul id="pkg-options-list" class="hidden absolute right-0 mt-1 w-full md:w-72 max-h-64 overflow-y-auto bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl z-50 py-1" role="listbox"></ul>
                 </div>
             </div>
             <div class="glass rounded-xl p-6">
@@ -1250,6 +1255,7 @@ def generate_html_report(data: Dict) -> str:
                 name: pkg.name,
                 version: pkg.version,
                 ecosystem: pkg.ecosystem,
+                stats: pkg.stats || {},
                 sequences: pkg.affected_dependency_sequences || []
             }));
         }
@@ -1313,46 +1319,121 @@ def generate_html_report(data: Dict) -> str:
             }
         }
 
-        // Populate autocomplete datalist
-        function populatePackageSelect() {
-            const pkgs = getVulnerableInfectedPackages();
-            const datalist = document.getElementById('pkg-options');
-            const selectInput = document.getElementById('pkg-select-input');
-            if (!datalist || !selectInput) return;
+        // Build elegant display label: name ( ecosystem ) [vuln/inf]
+        function pkgDisplayLabel(pkg) {
+            const s = pkg.stats || {};
+            const vulnCount = (s.critical||0)+(s.high||0)+(s.medium||0)+(s.low||0)+(s.unknown||0);
+            const infCount = s.infection || 0;
+            const badge = vulnCount > 0 && infCount > 0 ? `${vulnCount} vuln / ${infCount} inf`
+                        : vulnCount > 0 ? `${vulnCount} vuln`
+                        : infCount > 0  ? `${infCount} inf`
+                        : '0 vuln';
+            return `${pkg.name} ( ${pkg.ecosystem} ) [${badge}]`;
+        }
 
-            datalist.innerHTML = '';
-            pkgs.forEach(pkg => {
-                const option = document.createElement('option');
-                option.value = pkg.id;
-                option.textContent = `${pkg.name}@${pkg.version} (${pkg.ecosystem})`;
-                datalist.appendChild(option);
+        // Sorted: infected first, then by total vuln count desc
+        function getSortedPackages() {
+            return getVulnerableInfectedPackages().slice().sort((a, b) => {
+                const aInf = (a.stats || {}).infection || 0;
+                const bInf = (b.stats || {}).infection || 0;
+                if (aInf !== bInf) return bInf - aInf;
+                const vuln = s => ((s.critical||0)+(s.high||0)+(s.medium||0)+(s.low||0)+(s.unknown||0));
+                return vuln(b.stats||{}) - vuln(a.stats||{});
             });
+        }
 
-            // Auto-select first package if any
+        // Custom dropdown helpers
+        function openPkgDropdown() {
+            const list = document.getElementById('pkg-options-list');
+            const chevron = document.getElementById('pkg-chevron');
+            if (!list) return;
+            list.classList.remove('hidden');
+            if (chevron) chevron.style.transform = 'rotate(180deg)';
+        }
+
+        function closePkgDropdown() {
+            const list = document.getElementById('pkg-options-list');
+            const chevron = document.getElementById('pkg-chevron');
+            if (list) list.classList.add('hidden');
+            if (chevron) chevron.style.transform = '';
+        }
+
+        function renderPkgList(pkgs) {
+            const list = document.getElementById('pkg-options-list');
+            if (!list) return;
+            list.innerHTML = '';
+            if (pkgs.length === 0) {
+                list.innerHTML = '<li class="px-4 py-3 text-xs text-neutral-500 italic">No matches found.</li>';
+                return;
+            }
+            pkgs.forEach(pkg => {
+                const label = pkgDisplayLabel(pkg);
+                const s = pkg.stats || {};
+                const vulnCount = (s.critical||0)+(s.high||0)+(s.medium||0)+(s.low||0)+(s.unknown||0);
+                const infCount = s.infection || 0;
+                const badgeColor = infCount > 0 ? 'text-red-400 bg-red-500/10 border-red-500/30'
+                                 : vulnCount > 0 ? 'text-orange-400 bg-orange-500/10 border-orange-500/30'
+                                 : 'text-neutral-500 bg-neutral-800 border-neutral-700';
+                const badgeText = infCount > 0 && vulnCount > 0 ? `${vulnCount}v ${infCount}i`
+                                : vulnCount > 0 ? `${vulnCount} vuln`
+                                : `${infCount} inf`;
+                const li = document.createElement('li');
+                li.role = 'option';
+                li.className = 'flex items-center justify-between px-4 py-2.5 text-sm cursor-pointer hover:bg-neutral-800 transition-colors gap-3';
+                li.innerHTML = `
+                    <div class="flex flex-col min-w-0">
+                        <span class="font-medium text-white truncate">${escapeHtml(pkg.name)}</span>
+                        <span class="text-xs text-neutral-500 mono">${escapeHtml(pkg.ecosystem)}</span>
+                    </div>
+                    <span class="shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded border ${badgeColor}">${badgeText}</span>
+                `;
+                li.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    selectPkgOption(pkg.id, label);
+                });
+                list.appendChild(li);
+            });
+        }
+
+        function filterPkgDropdown(query) {
+            const q = query.trim().toLowerCase();
+            const all = getSortedPackages();
+            const filtered = q ? all.filter(p =>
+                p.name.toLowerCase().includes(q) || p.ecosystem.toLowerCase().includes(q)
+            ) : all;
+            renderPkgList(filtered);
+            openPkgDropdown();
+        }
+
+        function selectPkgOption(pkgId, label) {
+            const input = document.getElementById('pkg-select-input');
+            if (input) input.value = label;
+            closePkgDropdown();
+            currentSelectedPkg = null;
+            handlePackageSelect(pkgId);
+        }
+
+        function populatePackageSelect() {
+            const pkgs = getSortedPackages();
+            renderPkgList(pkgs);
             if (pkgs.length > 0 && !currentSelectedPkg) {
-                selectInput.value = pkgs[0].id;
-                handlePackageSelect(pkgs[0].id);
+                const first = pkgs[0];
+                const input = document.getElementById('pkg-select-input');
+                if (input) input.value = pkgDisplayLabel(first);
+                handlePackageSelect(first.id);
             } else if (pkgs.length === 0) {
                 const container = document.getElementById('sequences-container');
                 if (container) container.innerHTML = '<div class="text-neutral-500 italic text-center p-8">No vulnerable or infected packages found.</div>';
             }
         }
 
-        function handlePackageSelect(selectedValue) {
-            if (!selectedValue) return;
+        function handlePackageSelect(pkgId) {
+            if (!pkgId) return;
             const pkgs = getVulnerableInfectedPackages();
-            const pkg = pkgs.find(p => p.id === selectedValue);
+            const pkg = pkgs.find(p => p.id === pkgId);
             if (pkg) {
                 currentSelectedPkg = pkg;
                 renderSequences(pkg);
-            } else {
-                // fallback: try to parse name@version
-                const [name, version] = selectedValue.split('@');
-                const fallback = pkgs.find(p => p.name === name && p.version === version);
-                if (fallback) {
-                    currentSelectedPkg = fallback;
-                    renderSequences(fallback);
-                }
             }
         }
 
@@ -1367,18 +1448,11 @@ def generate_html_report(data: Dict) -> str:
             setupFilters();
             populatePackageSelect();
 
-            // Listen for selection changes
-            const selectInput = document.getElementById('pkg-select-input');
-            if (selectInput) {
-                selectInput.addEventListener('change', (e) => {
-                    handlePackageSelect(e.target.value);
-                });
-                selectInput.addEventListener('blur', () => {
-                    if (selectInput.value && !currentSelectedPkg) {
-                        handlePackageSelect(selectInput.value);
-                    }
-                });
-            }
+            // Close dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                const wrapper = document.getElementById('pkg-dropdown-wrapper');
+                if (wrapper && !wrapper.contains(e.target)) closePkgDropdown();
+            });
         }
 
         function switchTab(tabId) {
