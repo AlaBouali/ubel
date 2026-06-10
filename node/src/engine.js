@@ -238,17 +238,7 @@ function generateHTMLReport(data) {
 
         // Build the elegant display label: name ( ecosystem ) [vuln/inf]
         function pkgDisplayLabel(pkg) {
-            const s = pkg.stats || {};
-            const vulnCount = (s.critical || 0) + (s.high || 0) + (s.medium || 0) + (s.low || 0) + (s.unknown || 0);
-            const infCount  = s.infection || 0;
-            const badge = vulnCount > 0 && infCount > 0
-                ? \`\${vulnCount} vuln / \${infCount} inf\`
-                : vulnCount > 0
-                ? \`\${vulnCount} vuln\`
-                : infCount > 0
-                ? \`\${infCount} inf\`
-                : '0 vuln';
-            return \`\${pkg.name} ( \${pkg.ecosystem} ) [\${badge}]\`;
+            return \`\${pkg.name}\`;
         }
 
         // Sorted package list: infected first, then by vuln count desc
@@ -301,10 +291,7 @@ function generateHTMLReport(data) {
                 li.role = 'option';
                 li.className = 'flex items-center justify-between px-4 py-2.5 text-sm cursor-pointer hover:bg-neutral-800 transition-colors gap-3';
                 li.innerHTML = \`
-                    <div class="flex flex-col min-w-0">
-                        <span class="font-medium text-white truncate">\${escapeHtml(pkg.name)}</span>
-                        <span class="text-xs text-neutral-500 mono">\${escapeHtml(pkg.ecosystem)}</span>
-                    </div>
+                    <span class="font-medium text-white truncate">\${escapeHtml(pkg.name)} ( \${escapeHtml(pkg.ecosystem)} )</span>
                     <span class="shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded border \${badgeColor}">\${badgeText}</span>
                 \`;
                 li.addEventListener('mousedown', (e) => {
