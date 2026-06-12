@@ -39,6 +39,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .cvss_parser import process_vulnerability
+try:
+    from .version_recommender import find_closest_fix_versions, Ecosystem as VrEcosystem
+except ImportError:
+    find_closest_fix_versions = None
+    VrEcosystem = None
 from .python_runner import Pypi_Manager as Pypi_Manager_Class, PythonVenvScanner
 from .linux_runner import Linux_Manager
 
@@ -75,6 +80,16 @@ SEV_ORDER: Dict[str, int] = {
 }
 
 SEVERITY_ORDER_POLICY = ["low", "medium", "high", "critical"]
+
+def _purl_to_vr_ecosystem(purl: str) -> str:
+    """Map a PURL prefix to the version_recommender ecosystem string."""
+    if not purl:
+        return "semver"
+    if purl.startswith("pkg:pypi/"):   return "pep440"
+    if purl.startswith("pkg:maven/"):  return "maven"
+    if purl.startswith("pkg:golang/"): return "go"
+    return "semver"  # npm, cargo, nuget, gem, composer → semver
+
 
 DEFAULT_POLICY: Dict[str, Any] = {
     "severity_threshold":            "high",
@@ -429,7 +444,7 @@ def _generate_fix(ranges: List[Dict], versions: List[str], pkg_name: str, ecosys
             if "fixed"         in event: fixed.append(event["fixed"])
             if "last_affected" in event: last_affected.append(event["last_affected"])
 
-    fallback = last_affected or versions
+    fallback = last_affected # or versions
     if fixed:
         return f"Upgrade {pkg_name} ( {ecosystem} ) to: {' or '.join(fixed)}"
     if fallback:
@@ -450,6 +465,19 @@ def _get_fixed_versions(vuln: Dict) -> List[str]:
     return fixed
 
 
+def _get_last_affected_versions(vuln: Dict) -> List[str]:
+    last_affected: List[str] = []
+    dep = (vuln.get("affected_dependency") or "").lower()
+    for item in vuln.get("affected", []):
+        if (item.get("package", {}).get("name") or "").lower() != dep:
+            continue
+        for r in item.get("ranges", []):
+            for event in r.get("events", []):
+                if "last_affected" in event:
+                    last_affected.append(event["last_affected"])
+    return list(dict.fromkeys(last_affected))  # deduplicate, preserve order
+
+
 def _get_fix(vuln: Dict) -> None:
     dep  = vuln.get("affected_dependency", "")
     remediations: List[str] = []
@@ -467,14 +495,41 @@ def _get_fix(vuln: Dict) -> None:
             )
         )
 
-    vuln["fixed_versions"] = _get_fixed_versions(vuln)
-    vuln["fixes"]          = remediations
-    vuln["has_fix"]        = len(vuln["fixed_versions"]) > 0
-    vuln["description"]    = (
+    vuln["fixed_versions"]        = _get_fixed_versions(vuln)
+    vuln["last_affected_versions"] = _get_last_affected_versions(vuln)
+    vuln["fixes"]                 = remediations
+    vuln["has_fix"]               = len(vuln["fixed_versions"]) > 0
+    vuln["description"]           = (
         vuln.get("description") or vuln.get("details") or vuln.get("summary") or ""
     ).strip()
     vuln.pop("details",  None)
     vuln.pop("summary",  None)
+
+    # Ranked fix versions for the modal upgrade table
+    if find_closest_fix_versions is not None and vuln["fixed_versions"]:
+        _vr_eco = _purl_to_vr_ecosystem(vuln.get("affected_package_id", ""))
+        vuln["fix_versions_ranked"] = find_closest_fix_versions(
+            vuln.get("affected_dependency_version", "") or "",
+            vuln["fixed_versions"],
+            _vr_eco,
+        )
+    else:
+        vuln["fix_versions_ranked"] = []
+
+    # Last-affected ranked table — shown only when no fixed versions exist
+    if (
+        find_closest_fix_versions is not None
+        and not vuln["has_fix"]
+        and vuln["last_affected_versions"]
+    ):
+        _vr_eco = _purl_to_vr_ecosystem(vuln.get("affected_package_id", ""))
+        vuln["last_affected_ranked"] = find_closest_fix_versions(
+            vuln.get("affected_dependency_version", "") or "",
+            vuln["last_affected_versions"],
+            _vr_eco,
+        )
+    else:
+        vuln["last_affected_ranked"] = []
 
 
 def get_vuln_by_id(vuln_ref: Dict) -> Optional[Dict]:
@@ -521,6 +576,51 @@ def get_vuln_by_id(vuln_ref: Dict) -> Optional[Dict]:
         data.pop(key, None)
 
     return data
+
+
+
+def _deduplicate_vulnerabilities_by_alias(vulns: List[Dict]) -> List[Dict]:
+    """Deduplicate OSV entries per PURL using alias chains.
+
+    OSV entries that describe the same underlying issue carry each other's IDs
+    in their ``aliases`` list (e.g. a GHSA entry lists the CVE as an alias and
+    vice versa). Within each PURL group we walk the list in arrival order and
+    build a running set of "seen IDs". For each candidate we check whether its
+    own ``id`` already appears in that set — if it does, the entry is a duplicate
+    of something we already have and is dropped. Otherwise we admit it and add
+    both its ``id`` and all of its ``aliases`` to the seen set so later entries
+    that are aliases of this one are also suppressed.
+
+    Scoped per PURL so an alias chain for one package never suppresses a real
+    finding for a different package that happens to share an ID or alias.
+    """
+    from collections import defaultdict
+
+    by_purl: dict[str, list] = defaultdict(list)
+    for v in vulns:
+        by_purl[v.get("affected_package_id") or ""].append(v)
+
+    kept: List[Dict] = []
+    for group in by_purl.values():
+        # MAL-* entries (malware/infection) must win over any alias that arrives
+        # earlier in the batch. Sort them to the front before the forward pass so
+        # their ID is added to seen_ids first, which prevents a GHSA/CVE alias of
+        # the same issue from being kept instead.
+        sorted_group = sorted(
+            group,
+            key=lambda v: (0 if (v.get("id") or "").startswith("MAL-") else 1),
+        )
+        seen_ids: set[str] = set()
+        for v in sorted_group:
+            vid = v.get("id") or ""
+            if vid in seen_ids:
+                continue                                    # alias of a prior entry
+            kept.append(v)
+            seen_ids.add(vid)
+            for alias in (v.get("aliases") or []):          # mark all aliases as seen
+                seen_ids.add(alias)
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -1829,7 +1929,73 @@ def generate_html_report(data: Dict) -> str:
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p><p class="text-xs mono">${new Date(v.modified).toLocaleDateString()}</p></div>
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="${v.severity_vector}">${v.severity_vector}</p></div>
                     </div>
-                    ${v.fixes.length > 0 ? `<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">${v.fixes.map(f => `<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">${f}</li>`).join('')}</ul></div>` : ''}
+                    ${(v.fix_versions_ranked && v.fix_versions_ranked.length > 0) ? `
+                    <div>
+                        <h4 class="text-sm font-semibold mb-3 text-green-400">Fix Version Recommendations</h4>
+                        <div class="overflow-x-auto rounded-lg border border-neutral-800">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-neutral-800/60 text-neutral-400 uppercase text-[10px] tracking-widest">
+                                <tr>
+                                    <th class="px-4 py-2">Version</th>
+                                    <th class="px-4 py-2">Compatibility</th>
+                                    <th class="px-4 py-2">Recommended</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-neutral-800">
+                                ${v.fix_versions_ranked.map(r => `
+                                <tr class="hover:bg-neutral-800/30 transition-colors ${r.recommended ? 'bg-green-500/5' : ''}">
+                                    <td class="px-4 py-2 mono font-medium text-white">${r.version}</td>
+                                    <td class="px-4 py-2">
+                                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ${
+                                            r.compatibility_level === 'high'   ? 'text-green-400 border-green-400' :
+                                            r.compatibility_level === 'medium' ? 'text-yellow-400 border-yellow-400' :
+                                                                                  'text-red-400 border-red-400'
+                                        }">${r.compatibility_level}</span>
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        ${r.recommended
+                                            ? `<span class="flex items-center gap-1 text-green-400 font-semibold"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>`
+                                            : `<span class="text-neutral-500">—</span>`}
+                                    </td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>` : (v.fixes && v.fixes.length > 0 ? `<div><h4 class="text-sm font-semibold mb-2 text-green-400">Recommended Fixes</h4><ul class="space-y-2">${v.fixes.map(f => `<li class="text-xs bg-green-500/10 border border-green-500/20 p-3 rounded-lg text-green-300 mono">${f}</li>`).join('')}</ul></div>` : '')}
+                    ${(v.last_affected_ranked && v.last_affected_ranked.length > 0) ? `
+                    <div class="mt-4">
+                        <h4 class="text-sm font-semibold mb-1 text-orange-400">Last Affected Versions</h4>
+                        <p class="text-xs text-neutral-500 mb-3">No fixed version is available. These are the last known affected versions — upgrade to any version strictly above the highest entry shown.</p>
+                        <div class="overflow-x-auto rounded-lg border border-neutral-800">
+                        <table class="w-full text-xs text-left">
+                            <thead class="bg-neutral-800/60 text-neutral-400 uppercase text-[10px] tracking-widest">
+                                <tr>
+                                    <th class="px-4 py-2">Last Affected Version</th>
+                                    <th class="px-4 py-2">Compatibility</th>
+                                    <th class="px-4 py-2">Closest to Installed</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-neutral-800">
+                                ${v.last_affected_ranked.map(r => `
+                                <tr class="hover:bg-neutral-800/30 transition-colors ${r.recommended ? 'bg-orange-500/5' : ''}">
+                                    <td class="px-4 py-2 mono font-medium text-white">${r.version}</td>
+                                    <td class="px-4 py-2">
+                                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ${
+                                            r.compatibility_level === 'high'   ? 'text-green-400 border-green-400' :
+                                            r.compatibility_level === 'medium' ? 'text-yellow-400 border-yellow-400' :
+                                                                                  'text-red-400 border-red-400'
+                                        }">${r.compatibility_level}</span>
+                                    </td>
+                                    <td class="px-4 py-2">
+                                        ${r.recommended
+                                            ? `<span class="flex items-center gap-1 text-orange-400 font-semibold"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>`
+                                            : `<span class="text-neutral-500">—</span>`}
+                                    </td>
+                                </tr>`).join('')}
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>` : ''}
                     ${(v.cwes && v.cwes.length > 0) ? `<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">${v.cwes.map(c => `<a href="https://cwe.mitre.org/data/definitions/${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-${c}</a>`).join('')}</div></div>` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">${v.references.map(r => `<a href="${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">${r.type}</a>`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">${v.description}</div></div>
@@ -2168,6 +2334,8 @@ class UbelEngine:
                             vulnerabilities.append(result)
                     except Exception as exc:
                         print(f"[!] Failed to fetch vulnerability: {exc}", file=sys.stderr)
+
+            vulnerabilities = _deduplicate_vulnerabilities_by_alias(vulnerabilities)
 
             # ── Policy tagging ────────────────────────────────────────────
             tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy)

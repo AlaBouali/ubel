@@ -14,12 +14,238 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
-import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch";
 const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
+
+// ── Version recommender (ported from version_recommender.js) ─────────────────
+// Zero dependencies. Maps each ecosystem's version format to a ranked list of
+// fix candidates so the vuln modal can show a structured upgrade table.
+
+const ECOSYSTEMS_VR = {
+  semver: { parse: _vr_parseSemver,  gt: _vr_semverGt,  distance: _vr_semverDistance  },
+  pep440: { parse: _vr_parsePep440,  gt: _vr_pep440Gt,  distance: _vr_pep440Distance  },
+  maven:  { parse: _vr_parseMaven,   gt: _vr_mavenGt,   distance: _vr_mavenDistance   },
+  go:     { parse: _vr_parseGo,      gt: _vr_goGt,      distance: _vr_goDistance      },
+};
+
+function _vr_purlToEcosystem(purl) {
+  if (!purl) return "semver";
+  if (purl.startsWith("pkg:pypi/"))    return "pep440";
+  if (purl.startsWith("pkg:maven/"))   return "maven";
+  if (purl.startsWith("pkg:golang/"))  return "go";
+  return "semver"; // npm, cargo, nuget, gem, composer, unknown → semver
+}
+
+function _vr_compareDistances(a, b) {
+  if (a.isBreaking !== b.isBreaking) return a.isBreaking ? 1 : -1;
+  if (a.majorDiff  !== b.majorDiff)  return a.majorDiff - b.majorDiff;
+  if (a.minorDiff  !== b.minorDiff)  return a.minorDiff - b.minorDiff;
+  if (a.patchDiff  !== b.patchDiff)  return a.patchDiff - b.patchDiff;
+  if ((a.postRank ?? 0) !== (b.postRank ?? 0)) return (a.postRank ?? 0) - (b.postRank ?? 0);
+  if (a.isPreRelease !== b.isPreRelease) return a.isPreRelease ? 1 : -1;
+  if ((a.qualifierRank ?? 0) !== (b.qualifierRank ?? 0)) return (a.qualifierRank ?? 0) - (b.qualifierRank ?? 0);
+  return 0;
+}
+
+function _vr_compatLevel(dist) {
+  if (dist.isBreaking) return "low";
+  let level = dist.majorDiff > 0 ? "low" : dist.minorDiff > 0 ? "medium" : "high";
+  if (dist.isPreRelease) {
+    if (level === "high")   return "medium";
+    if (level === "medium") return "low";
+  }
+  return level;
+}
+
+// ── semver ──
+// optional v prefix, relaxed minor/patch, 4th security segment for Ruby gems (e.g. rack 2.2.6.3)
+const _VR_SEMVER_RE = /^[vV]?(?<major>\d+)(?:\.(?<minor>\d+))?(?:\.(?<patch>\d+))?(?:\.(?<security>\d+))?(?:-(?<pre>[a-zA-Z0-9._-]+))?(?:\+(?<build>[^\s]+))?$/;
+function _vr_parseSemver(v) {
+  const m = _VR_SEMVER_RE.exec(v.trim());
+  if (!m || !m.groups) return null;
+  const { major, minor, patch, security, pre } = m.groups;
+  const patchNum    = patch    !== undefined ? parseInt(patch,    10) : 0;
+  const securityNum = security !== undefined ? parseInt(security, 10) : 0;
+  return { major: parseInt(major,10), minor: minor !== undefined ? parseInt(minor,10) : 0,
+           patch: patchNum * 1000 + securityNum, pre: pre ?? "" };
+}
+function _vr_cmpPre(a, b) {
+  const ap = a.split("."), bp = b.split(".");
+  for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+    const ai = ap[i], bi = bp[i];
+    if (ai === undefined) return -1;
+    if (bi === undefined) return  1;
+    const an = /^\d+$/.test(ai), bn = /^\d+$/.test(bi);
+    if (an && bn) { const d = parseInt(ai,10) - parseInt(bi,10); if (d) return d; }
+    else if (an) return -1;
+    else if (bn) return  1;
+    else { if (ai < bi) return -1; if (ai > bi) return 1; }
+  }
+  return 0;
+}
+function _vr_semverGt(a, b) {
+  if (a.major !== b.major) return a.major > b.major;
+  if (a.minor !== b.minor) return a.minor > b.minor;
+  if (a.patch !== b.patch) return a.patch > b.patch;
+  if (a.pre && !b.pre) return false;
+  if (!a.pre && b.pre) return true;
+  return _vr_cmpPre(a.pre, b.pre) > 0;
+}
+function _vr_semverDistance(cur, can) {
+  const sm = can.major === cur.major, si = sm && can.minor === cur.minor;
+  return { isBreaking: false,
+    majorDiff: can.major - cur.major,
+    minorDiff: sm ? can.minor - cur.minor : can.minor,
+    patchDiff: si ? can.patch - cur.patch : can.patch,
+    isPreRelease: Boolean(can.pre) && !Boolean(cur.pre) };
+}
+
+// ── pep440 ──
+const _VR_PEP440_RE = new RegExp(
+  "^(?:(?<epoch>\\d+)!)?" +
+  "(?<release>\\d+(?:\\.\\d+)*)" +
+  "(?:[-_.]?(?<pre>a|alpha|b|beta|c|rc|preview)[-_.]?(?<pre_n>\\d+)?)?" +
+  "(?:[-_.]?(?:post|rev|r)[-_.]?(?<post>\\d+)?)?" +
+  "(?:[-_.]?dev[-_.]?(?<dev>\\d+)?)?$", "i");
+const _VR_PRE_ALIASES = { alpha:"a",a:"a",beta:"b",b:"b",preview:"rc",c:"rc",rc:"rc" };
+function _vr_parsePep440(v) {
+  const m = _VR_PEP440_RE.exec(v.trim());
+  if (!m || !m.groups) return null;
+  const { epoch, release, pre, pre_n, post, dev } = m.groups;
+  const vl = v.toLowerCase();
+  const preTag = pre ? _VR_PRE_ALIASES[pre.toLowerCase()] : null;
+  return {
+    epoch:   parseInt(epoch ?? "0", 10),
+    release: release.split(".").map(n => parseInt(n, 10)),
+    pre:     preTag ? [preTag, parseInt(pre_n ?? "0", 10)] : null,
+    post:    post !== undefined ? parseInt(post,10) : (vl.includes("post")||vl.includes("rev") ? 0 : null),
+    dev:     dev  !== undefined ? parseInt(dev, 10) : (vl.includes("dev") ? 0 : null),
+  };
+}
+function _vr_pep440Key(v) {
+  const [maj=0,min=0,pat=0] = v.release;
+  const prk = v.pre === null ? 0 : ({a:-3,b:-2,rc:-1}[v.pre[0]]??0);
+  const prn = v.pre === null ? 0 : v.pre[1];
+  return [v.epoch, maj, min, pat, prk, prn, v.post !== null ? v.post : -1, v.dev !== null ? v.dev : Infinity];
+}
+function _vr_cmpArrays(a, b) {
+  for (let i=0; i<Math.max(a.length,b.length); i++) {
+    const ai=a[i]??0, bi=b[i]??0;
+    if (ai<bi) return -1; if (ai>bi) return 1;
+  }
+  return 0;
+}
+function _vr_pep440Gt(a, b) { return _vr_cmpArrays(_vr_pep440Key(a), _vr_pep440Key(b)) > 0; }
+function _vr_pep440Distance(cur, can) {
+  const [cm=0,cmin=0,cp=0] = cur.release;
+  const [nm=0,nmin=0,np=0] = can.release;
+  const se = can.epoch === cur.epoch, sm = se && nm===cm, si = sm && nmin===cmin;
+  const postRank = can.post === null ? 0 : can.post + 1;
+  return { isBreaking: can.epoch !== cur.epoch,
+    majorDiff: se ? Math.abs(nm-cm) : 999+(can.epoch-cur.epoch),
+    minorDiff: sm ? Math.abs(nmin-cmin) : nmin,
+    patchDiff: si ? Math.abs(np-cp) : np,
+    postRank,
+    isPreRelease: (can.pre !== null || can.dev !== null) && (cur.pre === null && cur.dev === null) };
+}
+
+// ── maven ──
+const _VR_QUAL_ORDER = { alpha:-5,a:-5,beta:-4,b:-4,milestone:-3,m:-3,cr:-2,rc:-2,snapshot:-1,"":0,ga:0,final:0,release:0,sp:1 };
+const _VR_MAVEN_RE = /^(?<major>\d+)(?:\.(?<minor>\d+))?(?:\.(?<patch>\d+))?(?:\.(?<incr>\d+))?(?:[.\-](?<qual>[a-zA-Z][a-zA-Z0-9\-]*))?$/;
+function _vr_splitQual(q) {
+  if (!q) return ["", 0];
+  const m = /^([a-zA-Z]+(?:-[a-zA-Z]+)*)[-.]?(\d+)?$/.exec(q);
+  if (!m) return [q.toLowerCase(), 0];
+  const prefix = m[1].toLowerCase().replace(/-$/, "").replace(/\d+$/, "");
+  return [prefix, m[2] !== undefined ? parseInt(m[2],10) : 0];
+}
+function _vr_qualRank(q) {
+  const tier = q.toLowerCase().split("-")[0].replace(/\d+$/,"");
+  return _VR_QUAL_ORDER[tier] ?? 0;
+}
+function _vr_parseMaven(v) {
+  const m = _VR_MAVEN_RE.exec(v.trim());
+  if (!m || !m.groups) return null;
+  const { major, minor, patch, incr, qual } = m.groups;
+  return { major: parseInt(major,10), minor: minor!==undefined?parseInt(minor,10):0,
+           patch: patch!==undefined?parseInt(patch,10):0, incr: incr!==undefined?parseInt(incr,10):0,
+           qualifier: qual ?? "" };
+}
+function _vr_mavenGt(a, b) {
+  for (const [av,bv] of [[a.major,b.major],[a.minor,b.minor],[a.patch,b.patch],[a.incr,b.incr]]) {
+    if (av !== bv) return av > bv;
+  }
+  const ar = _vr_qualRank(a.qualifier), br = _vr_qualRank(b.qualifier);
+  if (ar !== br) return ar > br;
+  const [,an] = _vr_splitQual(a.qualifier), [,bn] = _vr_splitQual(b.qualifier);
+  return an > bn;
+}
+function _vr_mavenDistance(cur, can) {
+  const sm = can.major===cur.major, si = sm && can.minor===cur.minor;
+  const [,qn] = _vr_splitQual(can.qualifier);
+  return { isBreaking: false,
+    majorDiff: can.major-cur.major,
+    minorDiff: sm ? can.minor-cur.minor : can.minor,
+    patchDiff: si ? can.patch-cur.patch : can.patch,
+    isPreRelease: _vr_qualRank(can.qualifier)<0 && _vr_qualRank(cur.qualifier)>=0,
+    qualifierRank: _vr_qualRank(can.qualifier) + qn*0.001 };
+}
+
+// ── go ──
+// optional v prefix — OSV stores installed versions without it
+const _VR_GO_RE = /^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?:-(?<pre>[a-zA-Z0-9.]+))?$/;
+function _vr_parseGo(v) {
+  const m = _VR_GO_RE.exec(v.trim());
+  if (!m || !m.groups) return null;
+  const { major, minor, patch, pre } = m.groups;
+  return { major: parseInt(major,10), minor: parseInt(minor,10), patch: parseInt(patch,10), pre: pre ?? "" };
+}
+function _vr_goGt(a, b) {
+  if (a.major!==b.major) return a.major>b.major;
+  if (a.minor!==b.minor) return a.minor>b.minor;
+  if (a.patch!==b.patch) return a.patch>b.patch;
+  if (a.pre && !b.pre) return false; if (!a.pre && b.pre) return true;
+  return a.pre > b.pre;
+}
+function _vr_goDistance(cur, can) {
+  const isBreaking = can.major > 1 && can.major !== cur.major;
+  const sm = can.major===cur.major, si = sm && can.minor===cur.minor;
+  return { isBreaking,
+    majorDiff: can.major-cur.major,
+    minorDiff: sm ? can.minor-cur.minor : can.minor,
+    patchDiff: si ? can.patch-cur.patch : can.patch,
+    isPreRelease: Boolean(can.pre) && !Boolean(cur.pre) };
+}
+
+/**
+ * Given an installed vulnerable version and candidate fix versions from OSV,
+ * return an array of result objects sorted closest-first.
+ * @param {string}   currentVersion
+ * @param {string[]} candidateVersions
+ * @param {string}   ecosystem  - "semver" | "pep440" | "maven" | "go"
+ * @returns {{ version: string, recommended: boolean, compatibility_level: "low"|"medium"|"high" }[]}
+ */
+export default function findClosestFixVersions(currentVersion, candidateVersions, ecosystem = "semver") {
+  const eco = ECOSYSTEMS_VR[ecosystem] || ECOSYSTEMS_VR.semver;
+  const current = eco.parse(currentVersion);
+  if (!current) return [];
+  const ranked = [];
+  for (const raw of candidateVersions) {
+    const parsed = eco.parse(raw);
+    if (!parsed || !eco.gt(parsed, current)) continue;
+    ranked.push({ dist: eco.distance(current, parsed), raw });
+  }
+  ranked.sort((a, b) => _vr_compareDistances(a.dist, b.dist));
+  return ranked.map(({ dist, raw }, idx) => ({
+    version:             raw,
+    recommended:         idx === 0,
+    compatibility_level: _vr_compatLevel(dist),
+  }));
+}
+
 
 
 // ── Network metadata helpers ──────────────────────────────────────────────────
@@ -1508,8 +1734,6 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
 
   return {
     id:           cveId,
-    aliases:      [],
-    related:      [],
     source:       "nvd",
     published:    cveData.published    || "",
     modified:     cveData.lastModified || "",
@@ -1676,7 +1900,7 @@ function generateFix(ranges, versions, pkgName, ecosystem) {
     }
   }
 
-  const fallback = lastAffected;//.length ? lastAffected : versions;
+  const fallback = lastAffected.length ? lastAffected : versions;
 
   if (fixed.length)
     return `Upgrade ${pkgName} ( ${ecosystem} ) to: ${fixed.join(" or ")}`;
@@ -2374,7 +2598,7 @@ export class UbelEngineInstance {
 
       const undeterminedCount = inventory.filter(c => c.version === "").length;
       if (undeterminedCount > 0) {
-        console.warn(`[!] Warning: ${undeterminedCount} package(s) with undetermined versions were detected.`);
+        console.warn(`[!] Warning: ${undeterminedCount} vulnerable package(s) with undetermined versions were detected.`);
         console.warn();
       }
 
@@ -2657,4 +2881,4 @@ export class UbelEngineInstance {
 // caller of scan() and has been updated.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export { UbelEngineInstance as UbelEngine };
+export { UbelEngineInstance as UbelEngine, findClosestFixVersions, _vr_purlToEcosystem  };

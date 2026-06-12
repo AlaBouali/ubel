@@ -862,7 +862,7 @@ export class NodeManagerInstance {
         walk(fullPath);
       }
     };
-
+    console.log(`Scanning for Node.js projects in ${startDir}...`);
     if (options.scan_node) {
       walk(startDir);
     }
@@ -876,13 +876,44 @@ export class NodeManagerInstance {
       const javaScanner    = new JavaMavenScanner();
       const rubyScanner    = new RubyBundlerScanner();
 
-      await pythonScanner.getInstalled(startDir);
-      await phpScanner.getInstalled(startDir);
-      await rustScanner.getInstalled(startDir);
-      await goScanner.getInstalled(startDir);
-      await csharpScanner.getInstalled(startDir);
-      await javaScanner.getInstalled(startDir);
-      await rubyScanner.getInstalled(startDir);
+      console.log(`Scanning for projects in ${startDir}...`);
+
+await Promise.all([
+  (async () => {
+    console.log(`Scanning for Python projects in ${startDir}...`);
+    await pythonScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for PHP projects in ${startDir}...`);
+    await phpScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for Rust projects in ${startDir}...`);
+    await rustScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for Go projects in ${startDir}...`);
+    await goScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for C# projects in ${startDir}...`);
+    await csharpScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for Java projects in ${startDir}...`);
+    await javaScanner.getInstalled(startDir);
+  })(),
+
+  (async () => {
+    console.log(`Scanning for Ruby projects in ${startDir}...`);
+    await rubyScanner.getInstalled(startDir);
+  })(),
+]);
 
       this.inventoryData.push(...pythonScanner.inventoryData);
       this.inventoryData.push(...phpScanner.inventoryData);

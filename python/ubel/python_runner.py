@@ -19,6 +19,7 @@ Static methods:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import subprocess
@@ -223,15 +224,23 @@ class Pypi_Manager:
 
         all_components: List[Dict[str, Any]] = []
 
-        for scanner_class in scanners:
-            try:
-                scanner=scanner_class()
-                scanner.get_installed(start_dir)
-                all_components.extend(scanner.inventory_data)
-            except Exception as exx:
-                raise exx
-                # One failing ecosystem must not block the others
-                pass
+        with ThreadPoolExecutor(max_workers=len(scanners)) as executor:
+        # Submit all scan tasks
+            future_to_scanner = {
+                executor.submit(lambda sc=sc: sc().get_installed(start_dir)): sc
+                for sc in scanners
+            }
+
+            for future in as_completed(future_to_scanner):
+                scanner_class = future_to_scanner[future]
+                try:
+                    scanner = scanner_class()
+                    # The synchronous get_installed method populates scanner.inventory_data
+                    future.result()  # re‑raise any exception inside the thread
+                    all_components.extend(scanner.inventory_data)
+                except Exception:
+                    # One failing ecosystem must not block the others
+                    pass
         if scan_os:
             try:
                 from .os_health import LinuxHostScanner
