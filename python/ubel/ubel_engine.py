@@ -2231,9 +2231,12 @@ class UbelEngine:
                 if is_dry_run:
                     # Ensure a local venv exists
                     venv_dir = self.venv_dir or "./venv"
-                    python          = Pypi_Manager.init_venv(venv_dir)
-                    _engine_version = Pypi_Manager.get_pip_version(python) or ""
-                    purls           = Pypi_Manager.run_dry_run(args, venv_dir)
+                    if self.engine == "pip":
+                        python          = Pypi_Manager.init_venv(venv_dir)
+                        _engine_version = Pypi_Manager.get_pip_version(python) or ""
+                        purls           = Pypi_Manager.run_dry_run(args, venv_dir)
+                    elif self.engine == "pipx":
+                        purls           = Pypi_Manager.dry_run_cli(args[0])
                     report_content  = Pypi_Manager.inventory_data
                 else:
                     # health — delegate entirely to Pypi_Manager.get_installed()
@@ -2605,8 +2608,11 @@ class UbelEngine:
             if self.system_type == "pypi":
                 req_file = self._generate_requirements_file(purls)
                 venv_dir = self.venv_dir or "./venv"
-                Pypi_Manager.run_real_install(req_file, self.engine, venv_dir)
-                if is_script==False:
+                if self.engine == "pip":
+                    Pypi_Manager.run_real_install(req_file, self.engine, venv_dir)
+                elif self.engine == "pipx":
+                    Pypi_Manager.install_cli(args[0])
+                if is_script==False or self.engine=="pip":
                     self.pin_versions()
             else:
                 packages_list = [get_dependency_from_purl(p) for p in purls if f"/{__tool_name__}@{__version__}" not in p]
@@ -2616,12 +2622,12 @@ class UbelEngine:
 
         except PolicyViolationError:
             if is_script:
-                raise
+                raise Exception("Policy violation: " + reason)
             sys.exit(1)
 
         except Exception as exc:
             print(f"[!] Scan failed: {exc}", file=sys.stderr)
-            raise
+            raise exc
     
     
     def pin_versions(self):

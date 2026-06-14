@@ -15,4 +15,5 @@ packages = ["ubel"]
 
 [project.scripts]
 ubel-pip = "ubel.__main__:pip_mode"
+ubel-pipx = "ubel.__main__:pipx_mode"
 ubel = "ubel.__main__:linux_mode"

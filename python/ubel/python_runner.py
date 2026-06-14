@@ -15,6 +15,18 @@ Static methods:
                                         PHP, Ruby, Rust).  Returns list of
                                        PURL ids; full records in
                                        self.inventory_data.
+    dry_run_cli(package_spec,        → pip dry-run for a CLI package inside a
+                base_dir)              throw-away isolated venv; returns the
+                                       same PURL list / inventory_data as
+                                       run_dry_run without touching the real
+                                       install location.
+    install_cli(package_spec,        → create an isolated venv under base_dir,
+                base_dir,              install the package into it, detect its
+                bin_dir)               console-script entry-points, and write
+                                       platform-appropriate shims into bin_dir
+                                       so the CLI is available globally.
+                                       Returns a dict with keys:
+                                         tool_dir, venv_dir, shims, entry_points
 """
 
 from __future__ import annotations
@@ -43,6 +55,8 @@ class Pypi_Manager:
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
+
+    package_manager = "pip"
 
     
     def _purl(self,name: str, version: str) -> str:
@@ -272,7 +286,13 @@ class Pypi_Manager:
 
         pip_version = self.get_pip_version(python)
         if pip_version is None:
-            raise RuntimeError(f"pip is not installed in the venv at {venv_dir}")
+            if os.path.exists(venv_dir):
+                os.remove(venv_dir)
+                python = self._venv_python(venv_dir)
+
+                pip_version = self.get_pip_version(python)
+                if pip_version is None:
+                    raise RuntimeError(f"pip is not installed in the venv at {venv_dir} after re-creation")
         args   = [a for a in initial_args if a != "--"]
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tmp:
@@ -391,3 +411,386 @@ class Pypi_Manager:
                 raise
 
         raise ValueError(f"Unsupported engine: {engine!r}")
+
+    # ------------------------------------------------------------------ #
+    # CLI isolation helpers                                                #
+    # ------------------------------------------------------------------ #
+
+    def _tool_dirs(self, package_spec: str, base_dir: str) -> tuple[Path, Path]:
+        """
+        Return (tool_dir, venv_dir) for *package_spec* rooted at *base_dir*.
+
+        The package name is normalised (lowercased, hyphens → underscores) so
+        that ``Black``, ``black``, and ``black[d]`` all land in the same slot.
+        The version pin, extras, and URL markers are stripped before the name
+        is used as a directory component.
+        """
+        # Strip extras [foo], version pins (==, >=, …), and URL markers (@)
+        raw_name = package_spec.split("[")[0].split("@")[0]
+        for op in ("==", "!=", ">=", "<=", ">", "<", "~="):
+            raw_name = raw_name.split(op)[0]
+        norm_name = raw_name.strip().lower().replace("-", "_")
+
+        tool_dir = Path(base_dir).expanduser().resolve() / norm_name
+        venv_dir = tool_dir / ".venv"
+        return tool_dir, venv_dir
+
+    # ------------------------------------------------------------------ #
+    # PATH persistence                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _ubel_bin_dir(self) -> Path:
+        """
+        Return the canonical UBEL bin directory for the current platform.
+
+        Linux/macOS : ~/.ubel/bin
+        Windows     : %APPDATA%\\ubel\\bin
+        """
+        if os.name == "nt":
+            appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+            return Path(appdata) / "ubel" / "bin"
+        return Path.home() / ".ubel" / "bin"
+
+    def _ensure_bin_in_path(self, bin_dir: Path) -> None:
+        """
+        Persistently add *bin_dir* to the user PATH so every new terminal
+        session picks it up automatically.  Idempotent — does nothing if the
+        directory is already registered.
+
+        Windows : writes to HKCU\\Environment via the registry and broadcasts
+                  WM_SETTINGCHANGE so running Explorer/shells notice without a
+                  reboot.
+        Linux   : appends an export line to the first rc file found among
+                  ~/.bashrc, ~/.zshrc, ~/.profile.  Falls back to ~/.profile.
+        """
+        bin_str = str(bin_dir)
+
+        if os.name == "nt":
+            # ── Windows: persist via user registry ───────────────────────
+            try:
+                import winreg  # only available on Windows
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Environment",
+                    0,
+                    winreg.KEY_READ | winreg.KEY_WRITE,
+                )
+                try:
+                    current, reg_type = winreg.QueryValueEx(key, "PATH")
+                except FileNotFoundError:
+                    current, reg_type = ("", winreg.REG_EXPAND_SZ)
+
+                entries = [e for e in current.split(os.pathsep) if e]
+                if bin_str not in entries:
+                    entries.append(bin_str)
+                    new_value = os.pathsep.join(entries)
+                    winreg.SetValueEx(key, "PATH", 0, reg_type, new_value)
+                    winreg.CloseKey(key)
+
+                    # Broadcast the change so new cmd/PowerShell windows
+                    # inherit the updated PATH without a logoff/reboot.
+                    try:
+                        import ctypes
+                        HWND_BROADCAST   = 0xFFFF
+                        WM_SETTINGCHANGE = 0x001A
+                        ctypes.windll.user32.SendMessageTimeoutW(
+                            HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                            "Environment", 0, 1000, None,
+                        )
+                    except Exception:
+                        pass  # broadcast is best-effort
+
+                    print(
+                        f"[ubel] Added {bin_str} to your user PATH (registry).\n"
+                        f"       Open a new terminal for the change to take effect.",
+                        file=sys.stderr,
+                    )
+                else:
+                    winreg.CloseKey(key)
+
+            except Exception as exc:
+                print(
+                    f"[ubel] Could not update the registry PATH automatically: {exc}\n"
+                    f"       Add this manually via System Properties → Environment Variables:\n"
+                    f"         {bin_str}",
+                    file=sys.stderr,
+                )
+
+        else:
+            # ── Linux / macOS: append export to shell rc file ─────────────
+            rc_candidates = [
+                Path.home() / ".bashrc",
+                Path.home() / ".zshrc",
+                Path.home() / ".profile",
+            ]
+            # Pick the first rc file that already exists; fall back to ~/.profile.
+            rc_file = next((p for p in rc_candidates if p.exists()), Path.home() / ".profile")
+
+            export_line = f'\nexport PATH="{bin_str}:$PATH"  # added by ubel\n'
+
+            # Check whether it's already there (avoid duplicates across runs).
+            existing = rc_file.read_text(encoding="utf-8") if rc_file.exists() else ""
+            if bin_str not in existing:
+                with rc_file.open("a", encoding="utf-8") as fh:
+                    fh.write(export_line)
+                print(
+                    f"[ubel] Added {bin_str} to PATH in {rc_file}.\n"
+                    f"       Run:  source {rc_file}  (or open a new terminal).",
+                    file=sys.stderr,
+                )
+
+    def _detect_entry_points(self, package_spec: str, venv_dir: Path) -> Dict[str, Path]:
+        """
+        Return a mapping of ``{script_name: absolute_path}`` for every
+        console-script entry-point that belongs to *package_spec*.
+
+        Strategy
+        --------
+        1. Ask ``importlib.metadata`` (via the venv's Python) for the
+           distribution's entry-points in the ``console_scripts`` group.
+        2. Fall back to diffing the venv's bin/Scripts directory against a
+           known baseline of always-present files if step 1 yields nothing.
+        """
+        python = self._venv_python(str(venv_dir))
+        bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
+        # Normalise to bare distribution name (no extras / pins)
+        raw_name = package_spec.split("[")[0].split("@")[0]
+        for op in ("==", "!=", ">=", "<=", ">", "<", "~="):
+            raw_name = raw_name.split(op)[0]
+        dist_name = raw_name.strip()
+
+        # ── 1. importlib.metadata query ──────────────────────────────────
+        # entry_points(group=..., package=...) filters by distribution directly.
+        # dist_name is passed as a repr'd string literal so it is always valid
+        # Python inside the one-liner regardless of the package name.
+        probe = (
+            "import json, importlib.metadata as m; "
+            f"eps = m.entry_points(group='console_scripts', package={dist_name!r}); "
+            "print(json.dumps([ep.name for ep in eps]))"
+        )
+        entry_names: List[str] = []
+        try:
+            result = subprocess.run(
+                [python, "-c", probe],
+                capture_output=True, text=True, check=True,
+            )
+            entry_names = json.loads(result.stdout.strip())
+        except Exception:
+            pass
+
+        # ── 2. Fallback: diff the bin dir ─────────────────────────────────
+        # Exclude anything that starts with a known venv-baseline prefix so
+        # that versioned variants (pip3.11, wheel3, python3.12, activate.fish,
+        # easy_install-3.x, …) are all caught without enumerating them.
+        _VENV_BASELINE_PREFIXES = (
+            "python", "pip", "wheel", "activate", "deactivate", "easy_install",
+        )
+        if not entry_names and bin_dir.is_dir():
+            for p in bin_dir.iterdir():
+                stem = p.stem if os.name == "nt" else p.name
+                if any(stem.startswith(pfx) for pfx in _VENV_BASELINE_PREFIXES):
+                    continue
+                if os.name != "nt" and p.stat().st_mode & 0o111:
+                    entry_names.append(p.name)
+                elif os.name == "nt" and p.suffix.lower() in (".exe", ".cmd", ""):
+                    entry_names.append(stem)
+
+        # Build the final map: name → absolute Path inside the venv
+        result_map: Dict[str, Path] = {}
+        for name in entry_names:
+            candidates = [bin_dir / name]
+            if os.name == "nt":
+                candidates += [bin_dir / f"{name}.exe", bin_dir / f"{name}.cmd"]
+            for candidate in candidates:
+                if candidate.exists():
+                    result_map[name] = candidate
+                    break
+
+        return result_map
+
+    def _write_shim(self, shim_path: Path, target: Path) -> None:
+        """
+        Write a thin wrapper at *shim_path* that exec-delegates to *target*.
+
+        On POSIX a shell shim is used (fastest, no extra process).
+        On Windows a .cmd wrapper is written alongside a .py launcher as
+        fallback because .cmd files are first-class on the PATH.
+        """
+        if os.name == "nt":
+            # .cmd shim — works from cmd.exe and PowerShell
+            cmd_path = shim_path.with_suffix(".cmd")
+            cmd_path.write_text(
+                f'@echo off\r\n"{target}" %*\r\n',
+                encoding="utf-8",
+            )
+            # Also write a .py shim as a universal fallback
+            shim_path.with_suffix(".py").write_text(
+                f"import subprocess, sys, os\n"
+                f"sys.exit(subprocess.call(\n"
+                f"    [{str(target)!r}] + sys.argv[1:]\n"
+                f"))\n",
+                encoding="utf-8",
+            )
+        else:
+            shim_path.write_text(
+                f"#!/bin/sh\nexec {str(target)!r} \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim_path.chmod(shim_path.stat().st_mode | 0o111)  # +x
+
+    # ------------------------------------------------------------------ #
+    # dry_run_cli                                                          #
+    # ------------------------------------------------------------------ #
+
+    def dry_run_cli(
+        self,
+        package_spec: str,
+        base_dir: str = f"{Path.home()}/.ubel/tools/python",
+    ) -> List[str]:
+        """
+        Perform a pip dry-run for *package_spec* inside a throw-away isolated
+        venv located at ``<base_dir>/<normalised_name>/.venv``.
+
+        The venv is created if it does not exist yet (idempotent), but nothing
+        is actually installed — this is a pure resolution / inventory step.
+
+        Parameters
+        ----------
+        package_spec : Anything ``pip install`` accepts: bare name, name with
+                       version pin, name with extras, or a PEP 440 URL.
+                       Examples: ``"black"``, ``"black==24.3.0"``,
+                       ``"black[d]>=24"``.
+        base_dir     : Root directory under which per-tool folders are created.
+                       Defaults to ``~/.ubel/tools/python``.
+
+        Returns
+        -------
+        List of PURL id strings (same shape as ``run_dry_run``).
+        Full component records are stored in ``self.inventory_data``.
+        """
+        _, venv_dir = self._tool_dirs(package_spec, base_dir)
+        self.init_venv(str(venv_dir))
+        return self.run_dry_run([package_spec], str(venv_dir))
+
+    # ------------------------------------------------------------------ #
+    # install_cli                                                          #
+    # ------------------------------------------------------------------ #
+
+    def install_cli(
+        self,
+        package_spec: str,
+        base_dir: str = f"{Path.home()}/.ubel/tools/python",
+        bin_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Install *package_spec* into an isolated venv and expose its
+        console-script entry-points as global shims.
+
+        Layout
+        ------
+        ``~/.ubel/tools/python/<normalised_name>/``   (Linux)
+        ``%APPDATA%\\ubel\\tools\\python\\<name>\\``  (Windows)
+            ``metadata.json``          ← install record written by this method
+            ``.venv/``                 ← isolated virtual environment
+
+        ``~/.ubel/bin/<entry-point>``           (Linux)
+        ``%APPDATA%\\ubel\\bin\\<entry-point>`` (Windows)
+            ← thin shim(s) pointing into the venv
+
+        The ubel bin directory is registered in the user PATH automatically
+        on first use (registry on Windows, rc file on Linux/macOS) so shims
+        are immediately callable from any new terminal without manual setup.
+
+        Parameters
+        ----------
+        package_spec : Anything ``pip install`` accepts.
+        base_dir     : Root for per-tool folders.
+                       Default: ``~/.ubel/tools`` (Linux) /
+                                ``%APPDATA%\\ubel\\tools`` (Windows).
+        bin_dir      : Directory where shims are written.  Must be on the
+                       user's PATH.  Defaults to the ubel-owned bin dir:
+                         Linux/macOS → ``~/.ubel/bin``
+                         Windows     → ``%APPDATA%\\ubel\\bin``
+
+        Returns
+        -------
+        A dict with keys:
+            ``tool_dir``     – absolute Path of the tool's home directory
+            ``venv_dir``     – absolute Path of the isolated venv
+            ``entry_points`` – mapping of ``{script_name: venv_binary_path}``
+            ``shims``        – list of absolute Paths of written shim files
+            ``bin_dir``      – resolved Path where shims were placed
+        """
+        # ── Resolve directories ───────────────────────────────────────────
+        tool_dir, venv_dir = self._tool_dirs(package_spec, base_dir)
+
+        # Remove any previous installation unconditionally so stale venv
+        # state, old entry-points, or version mismatches can never persist.
+        if tool_dir.exists():
+            import shutil
+            shutil.rmtree(tool_dir)
+
+        tool_dir.mkdir(parents=True, exist_ok=True)
+
+        if bin_dir is None:
+            resolved_bin = self._ubel_bin_dir()
+        else:
+            resolved_bin = Path(bin_dir).expanduser().resolve()
+
+        resolved_bin.mkdir(parents=True, exist_ok=True)
+
+        # ── Ensure ubel bin dir is on the persistent user PATH ────────────
+        self._ensure_bin_in_path(resolved_bin)
+
+        # ── Create venv and install ───────────────────────────────────────
+        self.init_venv(str(venv_dir))
+        python = self._venv_python(str(venv_dir))
+
+        cmd = [python, "-m", "pip", "install", "--quiet", package_spec]
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"pip install failed (exit {exc.returncode}): {' '.join(cmd)}"
+            ) from exc
+
+        # ── Detect entry-points ───────────────────────────────────────────
+        entry_points = self._detect_entry_points(package_spec, venv_dir)
+
+        if not entry_points:
+            print(
+                f"[ubel] No console-script entry-points found for {package_spec!r}.\n"
+                f"       The package was installed at {venv_dir} but no global\n"
+                f"       shim was created.  You can invoke it directly via:\n"
+                f"         {python}",
+                file=sys.stderr,
+            )
+
+        # ── Write shims ───────────────────────────────────────────────────
+        shims: List[Path] = []
+        for script_name, venv_bin in entry_points.items():
+            shim_path = resolved_bin / script_name
+            self._write_shim(shim_path, venv_bin)
+            shims.append(shim_path)
+
+        # ── Persist a metadata record inside the tool dir ─────────────────
+        # Useful for UBEL's own uninstall / list / upgrade commands later.
+        metadata: Dict[str, Any] = {
+            "package_spec": package_spec,
+            "venv_dir":     str(venv_dir),
+            "bin_dir":      str(resolved_bin),
+            "entry_points": {k: str(v) for k, v in entry_points.items()},
+            "shims":        [str(s) for s in shims],
+        }
+        (tool_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2), encoding="utf-8"
+        )
+
+        return {
+            "tool_dir":     tool_dir,
+            "venv_dir":     venv_dir,
+            "entry_points": entry_points,
+            "shims":        shims,
+            "bin_dir":      resolved_bin,
+        }

@@ -275,7 +275,6 @@ def main(programmatic_options: dict | None = None) -> dict | None:
     scan_venv    : bool       Include Python venvs (set False to skip them).
     scan_scope   : str        Label written into scan_info.scan_scope.
     """
-    print(programmatic_options)
     if programmatic_options is not None and isinstance(programmatic_options, dict):
         opts = programmatic_options
 
@@ -348,6 +347,7 @@ def main(programmatic_options: dict | None = None) -> dict | None:
 
     dispatch = {
         "pip":   pip_mode,
+        "pipx":  pipx_mode,
         "linux": linux_mode,
     }
 
@@ -366,8 +366,11 @@ def main(programmatic_options: dict | None = None) -> dict | None:
 def pip_mode(project_path=os.getcwd()) -> None:
     UbelEngine=UbelEngine_Class(project_path)
     return _run_mode(UbelEngine,"pip", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="repository")
-    
-    
+
+def pipx_mode(project_path=os.getcwd()) -> None:
+    UbelEngine=UbelEngine_Class(project_path)
+    return _run_mode(UbelEngine,"pipx", "pypi", "Safe Python policy-driven supply-chain firewall", scan_scope="cli_tool")
+
 
 
 def linux_mode(project_path=os.getcwd()) -> None:
