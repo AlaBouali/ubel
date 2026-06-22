@@ -6,15 +6,19 @@ The licenses are extracted raw whenever available. The tool hasn't yet implement
 
 Package hashes are not consistently available across all supported ecosystems and package managers at scan time. It is impossible to provide the hashes consistently for all detected packages/dependencies across all stacks. So, for the sake of consistency, I chose to remove them entirely instead of generated inconsistent outputs across scans.
 
-# Disclaimer for the SARIF files generated outside the scopes of repositories/Code editors:
+# Disclaimer for the SARIF files generated outside the scopes of repositories/Code editors ( specifically host scanning ) :
 
 The vulnerability/rules data are generated correctly, but some metadata like the `%SRCROOT%` and `originalUriBaseIds` can't be generated consistently since the scanned binaries are spread across the whole machine's filesystem. The vulnerability and rule data, CVSS vectors, affected package PURLs, etc.. are still valid.
 
-# Disclaimer for `MAL-2022-4691` and `monorepo-symlink-test@0.0.0`
+# Disclaimer for `MAL-2022-4691` and `monorepo-symlink-test@0.0.0` ( a well-known false positive ) :
 
 The function `filterFalsePositiveInfections` in this project suppresses
 the detection of MAL-2022-4691 for `monorepo-symlink-test@0.0.0` when found
-under specific path: `node_modules/resolve/test/resolver/multirepo`
+under specific path: `node_modules/resolve/test/resolver/multirepo` because it is a well-known false positive:
+
+https://github.com/Unitech/pm2/issues/5669
+https://github.com/browserify/resolve/issues?q=is%3Aissue%20monorepo-symlink-test
+
 
 THIS FILTER IS PROVIDED “AS IS” AND WITHOUT ANY WARRANTY OF ANY KIND,
 EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
