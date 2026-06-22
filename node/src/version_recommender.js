@@ -44,6 +44,10 @@ function _vr_compareDistances(a, b) {
   if (a.majorDiff  !== b.majorDiff)  return a.majorDiff - b.majorDiff;
   if (a.minorDiff  !== b.minorDiff)  return a.minorDiff - b.minorDiff;
   if (a.patchDiff  !== b.patchDiff)  return a.patchDiff - b.patchDiff;
+  // securityDiff only ever set by the semver path's 4th-segment (Ruby gem
+  // security release) comparison; ?? 0 makes this a no-op for maven/go,
+  // which never populate it.
+  if ((a.securityDiff ?? 0) !== (b.securityDiff ?? 0)) return (a.securityDiff ?? 0) - (b.securityDiff ?? 0);
   if ((a.postRank ?? 0) !== (b.postRank ?? 0)) return (a.postRank ?? 0) - (b.postRank ?? 0);
   if (a.isPreRelease !== b.isPreRelease) return a.isPreRelease ? 1 : -1;
   if ((a.qualifierRank ?? 0) !== (b.qualifierRank ?? 0)) return (a.qualifierRank ?? 0) - (b.qualifierRank ?? 0);
@@ -67,10 +71,20 @@ function _vr_parseSemver(v) {
   const m = _VR_SEMVER_RE.exec(v.trim());
   if (!m || !m.groups) return null;
   const { major, minor, patch, security, pre } = m.groups;
-  const patchNum    = patch    !== undefined ? parseInt(patch,    10) : 0;
-  const securityNum = security !== undefined ? parseInt(security, 10) : 0;
+  // `patch` and `security` (the optional 4th segment used by Ruby gem
+  // security releases, e.g. rack 2.2.6.3) are kept as SEPARATE fields and
+  // compared as a true two-level tuple in _vr_semverGt/_vr_semverDistance
+  // below — never combined into one number. An earlier version encoded
+  // them as `patch * 1000 + security`, which silently inverts ordering as
+  // soon as `security` reaches 1000 (e.g. 2.2.6.1000 encoded to the same
+  // value as 2.2.7.0), which would have corrupted the fix-recommendation
+  // comparison this function feeds. There is no upper bound on a version
+  // segment, so any fixed-width encoding has the same failure mode —
+  // comparing the fields directly removes the bound entirely.
   return { major: parseInt(major,10), minor: minor !== undefined ? parseInt(minor,10) : 0,
-           patch: patchNum * 1000 + securityNum, pre: pre ?? "" };
+           patch: patch !== undefined ? parseInt(patch,10) : 0,
+           security: security !== undefined ? parseInt(security,10) : 0,
+           pre: pre ?? "" };
 }
 function _vr_cmpPre(a, b) {
   const ap = a.split("."), bp = b.split(".");
@@ -90,16 +104,23 @@ function _vr_semverGt(a, b) {
   if (a.major !== b.major) return a.major > b.major;
   if (a.minor !== b.minor) return a.minor > b.minor;
   if (a.patch !== b.patch) return a.patch > b.patch;
+  if (a.security !== b.security) return a.security > b.security;
   if (a.pre && !b.pre) return false;
   if (!a.pre && b.pre) return true;
   return _vr_cmpPre(a.pre, b.pre) > 0;
 }
 function _vr_semverDistance(cur, can) {
   const sm = can.major === cur.major, si = sm && can.minor === cur.minor;
+  const sp = si && can.patch === cur.patch;
   return { isBreaking: false,
     majorDiff: can.major - cur.major,
     minorDiff: sm ? can.minor - cur.minor : can.minor,
     patchDiff: si ? can.patch - cur.patch : can.patch,
+    // securityDiff carries the 4th-segment delta (e.g. Ruby gem security
+    // releases) once major/minor/patch are already equal, so a recommender
+    // sorting by "closest fix" still prefers 2.2.6.4 over 2.2.7.0 when both
+    // are valid fix candidates for a version pinned at 2.2.6.3.
+    securityDiff: sp ? can.security - cur.security : can.security,
     isPreRelease: Boolean(can.pre) && !Boolean(cur.pre) };
 }
 
