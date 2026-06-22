@@ -1,51 +1,51 @@
-Copyright (c) 2026 Arcane-Spark / Ala Bouali
+Copyright (c) 2026 Ala Bouali
 
-Licensed under the GNU Affero General Public License v3.0 with Commons Clause
-(the "License"); you may not use this file except in compliance with the License.
-You may obtain a copy of the AGPL-3.0 at:
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use
+the Software solely for internal business operations, subject to the following
+conditions:
 
-    https://www.gnu.org/licenses/agpl-3.0.html
+1.  **Internal Use Only.** The Software may be installed, executed, and used
+    exclusively within your own organization, your own infrastructure, your own
+    CI/CD pipelines, and your own products (whether commercial or not). The
+    Software may not be exposed, offered, or made accessible to any third party
+    over a network or via an API.
 
-Commons Clause Restriction
+2.  **Modification Permitted.** You may modify the Software for your internal
+    needs. However, any modified version remains subject to all terms of this
+    license.
 
-The Software is provided to you by Arcane-Spark under the AGPL-3.0 ("License"),
-subject to the following additional condition:
+3.  **No Redistribution or Wrapping.** You may not distribute, sublicense, rent,
+    lease, lend, transfer, sell, wrap, embed, or make available the Software,
+    or any modified version thereof, to any third party—whether for free or for
+    compensation, whether in source code or binary form, and whether as a
+    standalone tool or as an integrated feature of another product.
 
-Without limiting other conditions in the License, the grant of rights under the
-License will not include, and the License does not grant to you, the right to
-Sell the Software.
+4.  **No Hosted or Automated Service.** You may not use the Software, directly
+    or indirectly, to provide scanning, vulnerability assessment, software
+    composition analysis, or substantially similar services to third parties
+    over a network, whether as a hosted, managed, automated, on-demand, or
+    API-driven service.
 
-For purposes of the foregoing, "Sell" means operating a service in which third
-parties submit their projects, repositories, or systems to be scanned by UBEL,
-and receiving compensation — monetary or otherwise — for that service.
+5.  **Consultant Exception.** Security consultants or contractors may use the
+    Software manually as an internal assessment tool during direct client
+    engagements, provided the Software is not left behind, automated, embedded,
+    or made available to the client as a platform.
 
-Internal use of UBEL within your own infrastructure, CI/CD pipelines, or
-products, regardless of whether those products are commercial, is explicitly
-permitted and not subject to this restriction.
+6.  **License Grant.** This license is non-exclusive, non-transferable, and
+    revocable. It grants no rights to use Ala Bouali's trademarks or brand names.
 
-This restriction does not apply to:
+7.  **Contribution Exception.** Publicly hosting a fork of the Software on a
+    public code-hosting platform (e.g., GitHub) is permitted solely for the
+    purpose of submitting contributions (e.g., pull requests) back to the
+    original repository. Such forks must not be used to provide services,
+    redistribute, wrap, or operate as a substitute for the original Software.
 
-- Using UBEL within your own organization's CI/CD pipelines
-- Using UBEL to scan your own projects, repositories, or systems
-- Using UBEL in commercial products or workflows to protect your own
-  software supply chain
-- Security consultants or contractors using UBEL as a tool in direct
-  client engagements
-- Distributing UBEL as part of a development environment or toolchain
-  where the scanning functionality serves the recipient's own projects
-- Forking and modifying UBEL for internal use, provided all modifications
-  are distributed under these same terms as required by AGPL-3.0
+8.  **Disclaimer.** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+    KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
-Copyleft Notice
-
-This software is licensed under AGPL-3.0. Any modifications to this software
-that are distributed or made available over a network must be released under
-the same AGPL-3.0 + Commons Clause terms. You may not relicense, sublicense,
-or redistribute this software under terms that remove or weaken the Commons
-Clause restriction or the AGPL-3.0 copyleft requirement.
-
-For commercial licenses that remove the Commons Clause restriction — including
-for building competing hosted services — contact:
-
+For commercial licenses that permit redistribution, hosting, or embedding in
+third-party platforms, contact:
 ala.bouali.1997@gmail.com
 https://github.com/AlaBouali/ubel
