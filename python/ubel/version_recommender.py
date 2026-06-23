@@ -37,10 +37,11 @@ class VersionDistance:
     major_diff:     int
     minor_diff:     int
     patch_diff:     int
+    security_diff:  int     # 4th segment delta (Ruby gem security releases, e.g. rack 2.2.6.3)
     is_pre_release: bool    # stable versions sort before pre-releases
     is_breaking:    bool    # e.g. Go v2+ requires import-path change
 
-    def __lt__(self, other: VersionDistance) -> bool:
+    def __lt__(self, other: "VersionDistance") -> bool:
         return self._tuple() < other._tuple()
 
     def _tuple(self):
@@ -51,6 +52,7 @@ class VersionDistance:
             self.major_diff,
             self.minor_diff,
             self.patch_diff,
+            self.security_diff,
             self.is_pre_release,
         )
 
@@ -61,23 +63,26 @@ class VersionDistance:
 
 @dataclass
 class SemverVersion:
-    major: int
-    minor: int
-    patch: int
-    pre:   str   # empty string = stable
-    build: str   # build metadata — ignored for ordering per spec
+    major:    int
+    minor:    int
+    patch:    int
+    security: int  # 4th segment — Ruby gem security releases (e.g. rack 2.2.6.3)
+    pre:      str  # empty string = stable
+    build:    str  # build metadata — ignored for ordering per spec
 
     @property
     def is_pre_release(self) -> bool:
         return bool(self.pre)
 
-    def __gt__(self, other: SemverVersion) -> bool:
+    def __gt__(self, other: "SemverVersion") -> bool:
         if self.major != other.major:
             return self.major > other.major
         if self.minor != other.minor:
             return self.minor > other.minor
         if self.patch != other.patch:
             return self.patch > other.patch
+        if self.security != other.security:
+            return self.security > other.security
         # pre-release has lower precedence than release
         if self.pre and not other.pre:
             return False
@@ -111,18 +116,20 @@ def parse_semver(v: str) -> Optional[SemverVersion]:
     m = _SEMVER_RELAXED_RE.match(v.strip())
     if not m:
         return None
-    # The 4th segment (security) is folded into patch as a decimal fraction so
-    # that 2.2.6.3 > 2.2.6 and 2.2.6.3 > 2.2.6.2 under normal numeric comparison.
-    # We encode it as patch = patch * 1000 + security, which preserves ordering
-    # for all realistic Ruby gem version numbers.
-    major    = int(m.group("major") or 0)
-    minor    = int(m.group("minor") or 0)
-    patch    = int(m.group("patch") or 0)
-    security = int(m.group("security") or 0)
+    # `patch` and `security` (the optional 4th segment used by Ruby gem security
+    # releases, e.g. rack 2.2.6.3) are kept as SEPARATE fields and compared as a
+    # true two-level tuple in __gt__ and _semver_distance — never combined into one
+    # number.  An earlier version encoded them as patch * 1000 + security, which
+    # silently inverts ordering as soon as `security` reaches 1000 (e.g.
+    # 2.2.6.1000 encodes to the same value as 2.2.7.0), corrupting fix-recommendation
+    # comparisons.  There is no upper bound on a version segment, so any fixed-width
+    # encoding has the same failure mode — comparing the fields directly removes the
+    # bound entirely.
     return SemverVersion(
-        major=major,
-        minor=minor,
-        patch=patch * 1000 + security,  # encode 4th segment
+        major=int(m.group("major") or 0),
+        minor=int(m.group("minor") or 0),
+        patch=int(m.group("patch") or 0),
+        security=int(m.group("security") or 0),
         pre=m.group("pre") or "",
         build=m.group("build") or "",
     )
@@ -151,10 +158,18 @@ def _compare_pre_release_identifiers(a: str, b: str) -> int:
 
 
 def _semver_distance(current: SemverVersion, candidate: SemverVersion) -> VersionDistance:
+    same_major = candidate.major == current.major
+    same_minor = same_major and candidate.minor == current.minor
+    same_patch = same_minor and candidate.patch == current.patch
     return VersionDistance(
         major_diff=candidate.major - current.major,
-        minor_diff=candidate.minor - current.minor if candidate.major == current.major else candidate.minor,
-        patch_diff=candidate.patch - current.patch if (candidate.major == current.major and candidate.minor == current.minor) else candidate.patch,
+        minor_diff=candidate.minor - current.minor if same_major else candidate.minor,
+        patch_diff=candidate.patch - current.patch if same_minor else candidate.patch,
+        # security_diff carries the 4th-segment delta (e.g. Ruby gem security
+        # releases) once major/minor/patch are already equal, so a recommender
+        # sorting by "closest fix" still prefers 2.2.6.4 over 2.2.7.0 when both
+        # are valid fix candidates for a version pinned at 2.2.6.3.
+        security_diff=candidate.security - current.security if same_patch else candidate.security,
         is_pre_release=candidate.is_pre_release and not current.is_pre_release,
         is_breaking=False,
     )
@@ -269,9 +284,9 @@ def _pep440_distance(current: Pep440Version, candidate: Pep440Version) -> Pep440
     # post=None -> rank 0 (plain release), post=0 -> rank 1, post=N -> rank N+1
     post_rank = 0 if candidate.post is None else candidate.post + 1
     return Pep440VersionDistance(
-        major_diff=abs(candidate.major - current.major) if same_epoch else 999 + candidate.epoch - current.epoch,
-        minor_diff=abs(candidate.minor - current.minor) if same_major else candidate.minor,
-        patch_diff=abs(candidate.patch - current.patch) if same_minor else candidate.patch,
+        major_diff=candidate.major - current.major if same_epoch else 999 + candidate.epoch - current.epoch,
+        minor_diff=candidate.minor - current.minor if same_major else candidate.minor,
+        patch_diff=candidate.patch - current.patch if same_minor else candidate.patch,
         post_rank=post_rank,
         is_pre_release=candidate.is_pre_release and not current.is_pre_release,
         is_breaking=candidate.epoch != current.epoch,
@@ -462,6 +477,7 @@ def _go_distance(current: GoVersion, candidate: GoVersion) -> VersionDistance:
         major_diff=candidate.major - current.major,
         minor_diff=candidate.minor - current.minor if same_major else candidate.minor,
         patch_diff=candidate.patch - current.patch if same_minor else candidate.patch,
+        security_diff=0,  # Go versions have no 4th segment
         is_pre_release=candidate.is_pre_release and not current.is_pre_release,
         is_breaking=is_breaking,
     )
@@ -471,11 +487,30 @@ def _go_distance(current: GoVersion, candidate: GoVersion) -> VersionDistance:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _compat_level(dist) -> str:
+    """
+    Map a distance object to a compatibility confidence level.
+    Mirrors JS _vr_compatLevel: breaking → low; major bump → low;
+    minor bump → medium; patch only → high. Pre-releases demote by one tier.
+    """
+    if dist.is_breaking:
+        return "low"
+    major_diff = dist.major_diff
+    minor_diff = dist.minor_diff
+    level = "low" if major_diff > 0 else ("medium" if minor_diff > 0 else "high")
+    if dist.is_pre_release:
+        if level == "high":
+            return "medium"
+        if level == "medium":
+            return "low"
+    return level
+
+
 def find_closest_fix_versions(
     current_version: str,
     candidate_versions: list[str],
-    ecosystem: Ecosystem | str = Ecosystem.SEMVER,
-) -> list[str]:
+    ecosystem: "Ecosystem | str" = Ecosystem.SEMVER,
+) -> list[dict]:
     """
     Given an installed (vulnerable) version and a list of candidate fix
     versions from an OSV advisory, return the candidates sorted from
@@ -491,8 +526,11 @@ def find_closest_fix_versions(
 
     Returns
     -------
-    List of version strings sorted closest-first. Pre-releases and
-    breaking upgrades (Go v2+) are pushed to the end.
+    List of dicts sorted closest-first, each with:
+      - version            : str  — the candidate version string
+      - recommended        : bool — True only for the single closest candidate
+      - compatibility_level: str  — "high" | "medium" | "low"
+    Pre-releases and breaking upgrades (Go v2+) are pushed to the end.
     """
     eco = Ecosystem(ecosystem) if isinstance(ecosystem, str) else ecosystem
 
@@ -508,7 +546,7 @@ def find_closest_fix_versions(
     if current is None:
         return []
 
-    ranked: list[tuple[VersionDistance, str]] = []
+    ranked: list[tuple] = []
     for raw in candidate_versions:
         parsed = parse_fn(raw)
         if parsed is None:
@@ -519,7 +557,14 @@ def find_closest_fix_versions(
         ranked.append((dist, raw))
 
     ranked.sort(key=lambda x: x[0])
-    return [v for _, v in ranked]
+    return [
+        {
+            "version":             raw,
+            "recommended":         idx == 0,
+            "compatibility_level": _compat_level(dist),
+        }
+        for idx, (dist, raw) in enumerate(ranked)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -531,20 +576,26 @@ def _run_tests() -> None:
     FAIL = "\033[91m✗\033[0m"
     failures = 0
 
-    def check(label: str, got: list[str], expected_first: str) -> None:
+    def _versions(results: list[dict]) -> list[str]:
+        """Unwrap version strings from find_closest_fix_versions result dicts."""
+        return [r["version"] for r in results]
+
+    def check(label: str, got: list[dict], expected_first: str) -> None:
         nonlocal failures
-        ok = bool(got) and got[0] == expected_first
+        vs = _versions(got)
+        ok = bool(vs) and vs[0] == expected_first
         print(f"  {PASS if ok else FAIL} {label}")
         if not ok:
-            print(f"      expected first={expected_first!r}, got={got!r}")
+            print(f"      expected first={expected_first!r}, got={vs!r}")
             failures += 1
 
-    def check_order(label: str, got: list[str], expected: list[str]) -> None:
+    def check_order(label: str, got: list[dict], expected: list[str]) -> None:
         nonlocal failures
-        ok = got == expected
+        vs = _versions(got)
+        ok = vs == expected
         print(f"  {PASS if ok else FAIL} {label}")
         if not ok:
-            print(f"      expected={expected!r}\n      got    ={got!r}")
+            print(f"      expected={expected!r}\n      got    ={vs!r}")
             failures += 1
 
     # ---- semver -----------------------------------------------------------
@@ -699,8 +750,8 @@ if __name__ == "__main__":
         Ecosystem.SEMVER,
     )
     print(f"  Input  : 1.2.3  candidates: ['1.4.0', '2.1.0', '1.2.5']")
-    print(f"  Sorted : {result}")
-    print(f"  Pick   : {result[0]}")
+    print(f"  Sorted : {[r['version'] for r in result]}")
+    print(f"  Pick   : {result[0]['version']}  (recommended={result[0]['recommended']}, compat={result[0]['compatibility_level']})")
 
     print("\nExample — PyPI (pep440):")
     result = find_closest_fix_versions(
@@ -708,7 +759,8 @@ if __name__ == "__main__":
         ["1.2.4a1", "1.2.4.post1", "1!2.0.0", "1.2.4"],
         Ecosystem.PEP440,
     )
-    print(f"  Sorted : {result}")
+    for r in result:
+        print(f"  {r['version']:20s}  recommended={r['recommended']}  compat={r['compatibility_level']}")
 
     print("\nExample — Go (breaking v2 pushed last):")
     result = find_closest_fix_versions(
@@ -716,4 +768,5 @@ if __name__ == "__main__":
         ["v2.1.0", "v1.4.0", "v1.2.5"],
         Ecosystem.GO,
     )
-    print(f"  Sorted : {result}")
+    for r in result:
+        print(f"  {r['version']:20s}  recommended={r['recommended']}  compat={r['compatibility_level']}")
