@@ -9,7 +9,7 @@ const ECOSYSTEMS_VR = {
   go:     { parse: _vr_parseGo,      gt: _vr_goGt,      distance: _vr_goDistance      },
 };
 
-function _vr_purlToEcosystem(purl) {
+export function _vr_purlToEcosystem(purl) {
   if (!purl) return "semver";
   if (purl.startsWith("pkg:pypi/"))    return "pep440";
   if (purl.startsWith("pkg:maven/"))   return "maven";
@@ -227,7 +227,7 @@ function _vr_goDistance(cur, can) {
  * @param {string}   ecosystem  - "semver" | "pep440" | "maven" | "go"
  * @returns {{ version: string, recommended: boolean, compatibility_level: "low"|"medium"|"high" }[]}
  */
-export default function findClosestFixVersions(currentVersion, candidateVersions, ecosystem = "semver") {
+export function findClosestFixVersions(currentVersion, candidateVersions, ecosystem = "semver") {
   const eco = ECOSYSTEMS_VR[ecosystem] || ECOSYSTEMS_VR.semver;
   const current = eco.parse(currentVersion);
   if (!current) return [];
