@@ -1929,6 +1929,10 @@ def generate_html_report(data: Dict) -> str:
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p><p class="text-xs mono">${new Date(v.modified).toLocaleDateString()}</p></div>
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="${v.severity_vector}">${v.severity_vector}</p></div>
                     </div>
+                    <div>
+                        <h4 class=\"text-sm font-semibold mb-3 text-neutral-300\">Reachability Analysis</h4>
+                        ${renderReachabilitySection(v.reachability)}
+                    </div>
                     ${(v.fix_versions_ranked && v.fix_versions_ranked.length > 0) ? `
                     <div>
                         <h4 class="text-sm font-semibold mb-3 text-green-400">Fix Version Recommendations</h4>
@@ -1999,10 +2003,6 @@ def generate_html_report(data: Dict) -> str:
                     ${(v.cwes && v.cwes.length > 0) ? `<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">${v.cwes.map(c => `<a href="https://cwe.mitre.org/data/definitions/${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-${c}</a>`).join('')}</div></div>` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">${v.references.map(r => `<a href="${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">${r.type}</a>`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">${v.description}</div></div>
-                    <div>
-                        <h4 class=\"text-sm font-semibold mb-3 text-neutral-300\">Reachability Analysis</h4>
-                        ${renderReachabilitySection(v.reachability)}
-                    </div>
                 </div>
             `;
 
@@ -2300,6 +2300,8 @@ class UbelEngine:
                 if "venv_root" in item:
                     item.pop("venv_root", None)
                 item["dependencies"] = list(set(item.get("dependencies", [])))
+                if item.get("scopes",[]) == []:
+                    item["scopes"] = ["prod"]
                 
             
             inventory.append(

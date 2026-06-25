@@ -330,7 +330,20 @@ async function runScan({ main, PolicyViolationError, scanOptions, reportUri, tit
     },
     async () => {
       try {
-        await main(scanOptions);
+        const result = await main(scanOptions);
+
+        if (result && result.decision && result.decision.allowed === false) {
+          const choice = await vscode.window.showWarningMessage(
+            `⚠️ UBEL: ${result.decision.reason}`,
+            "Open Report"
+          );
+
+          if (choice === "Open Report") {
+            await vscode.env.openExternal(reportUri);
+          }
+
+          return;
+        }
 
         const choice = await vscode.window.showInformationMessage(
           "✅ UBEL scan complete — no policy violations.",

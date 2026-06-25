@@ -19,6 +19,12 @@ async function run() {
     });
 
     console.log(JSON.stringify(result, null, 2));
+
+    if (result && result.decision && result.decision.allowed === false) {
+      console.error("[!] Agent scan blocked by policy:", result.decision.reason);
+      process.exit(1);
+    }
+
     process.exit(0);
 
   } catch (err) {

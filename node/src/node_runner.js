@@ -367,218 +367,198 @@ export class NodeManagerInstance {
    */
   async runDryRun(engine, initialArgs, projectRoot) {
 
-    // ── 0. Reset instance state ──────────────────────────────────────────
-    // (Each NodeManagerInstance is constructed fresh per scan, so this is
-    // primarily a guard against accidental re-use of the same instance.)
+  // ── 0. Reset instance state ──────────────────────────────────────────
+  this.inventoryData               = [];
+  this._original_package_json      = null;
+  this._original_lockfile          = null;
+  this._lockfileBackupDir          = null;
+  this.candidate_lockfile_content  = null;
+  this._candidateLockfileHash      = null;
+  this._candidatePackageJsonHash   = null;
+  this._original_package_json_hash = null;
+  this._original_lockfile_hash     = null;
 
-    this.inventoryData               = [];
-    this._original_package_json      = null;
-    this._original_lockfile          = null;
-    this._lockfileBackupDir          = null;
-    this.candidate_lockfile_content  = null;
-    this._candidateLockfileHash      = null;
-    this._candidatePackageJsonHash   = null;
-    this._original_package_json_hash = null;
-    this._original_lockfile_hash     = null;
-
-    // ── 1. Validate engine ───────────────────────────────────────────────
-
-    const cfg = ENGINE_CONFIG[engine];
-    if (!cfg) {
-      throw new Error(
-        `Invalid engine '${engine}'. Must be one of: ${Object.keys(ENGINE_CONFIG).join(", ")}`
-      );
-    }
-
-    if (!this.engineVersion) {
-      throw new Error(
-        `Failed to determine version of '${engine}' (tried '${cfg.binary} --version'). ` +
-        `Make sure '${cfg.binary}' is installed and on your PATH.`
-      );
-    }
-
-    // projectPath is the caller-supplied, pre-resolved absolute path.
-    // No process.chdir() is ever performed; all file operations below
-    // use this explicit path so the scan is fully isolated from the OS cwd.
-    const projectPath     = path.resolve(projectRoot);
-    const packageJsonPath = path.join(projectPath, "package.json");
-    const lockPath        = path.join(projectPath, cfg.lockfile);
-    const nodeModulesPath = path.join(projectPath, "node_modules");
-
-    // Delete stale lockfile when node_modules does not exist
-    if (fs.existsSync(lockPath) && !fs.existsSync(nodeModulesPath)) {
-      await fs.promises.unlink(lockPath);
-    }
-    if (!fs.existsSync(packageJsonPath)) {
-      console.log(`No package.json found. Running 'npm init -y' in ${projectPath}`);
-      const initResult = spawnSync("npm", ["init", "-y"], {
-        cwd:   projectPath,
-        stdio: "inherit",
-        shell: true,
-      });
-      if (initResult.status !== 0) {
-        throw new Error(`npm init -y failed (exit ${initResult.status})`);
-      }
-    }
-    // ── 2. Backup originals ───────────────────────────────────────────────
-
-    this._original_package_json = fs.existsSync(packageJsonPath)
-      ? fs.readFileSync(packageJsonPath, "utf8")
-      : null;
-
-    this._original_lockfile = fs.existsSync(lockPath)
-      ? fs.readFileSync(lockPath, "utf8")
-      : null;
-
-    if (this._original_package_json !== null) {
-      this._original_package_json_hash = createHash("sha256")
-        .update(this._original_package_json, "utf8")
-        .digest("hex");
-    } else {
-      this._original_package_json_hash = "absent";
-    }
-
-    if (this._original_lockfile !== null) {
-      this._original_lockfile_hash = createHash("sha256")
-        .update(this._original_lockfile, "utf8")
-        .digest("hex");
-    } else {
-      this._original_lockfile_hash = "absent";
-    }
-
-    const backupParent = path.join(projectPath, ".ubel", "lockfiles");
-    fs.mkdirSync(backupParent, { recursive: true });
-    const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
-
-    if (this._original_package_json !== null) {
-      fs.writeFileSync(path.join(tmpDir, "package.json"), this._original_package_json, "utf8");
-    }
-    if (this._original_lockfile !== null) {
-      fs.writeFileSync(path.join(tmpDir, cfg.lockfile), this._original_lockfile, "utf8");
-    }
-
-    this._lockfileBackupDir = tmpDir;
-
-    // ── 3. Validate package args ─────────────────────────────────────────
-
-    this._validatePackageArgs(initialArgs);
-
-    // ── 4. Generate candidate lockfile ───────────────────────────────────
-    //
-    // Skip the shell-out entirely when no package arguments were supplied and
-    // a lockfile already exists on disk.  In that case the existing lockfile
-    // IS the candidate — there is nothing new to resolve.
-
-    const lockfileAlreadyPresent = fs.existsSync(lockPath);
-    const skipDryRun = initialArgs.length === 0 && lockfileAlreadyPresent;
-
-    if (skipDryRun) {
-      console.log(`Skipping dry-run shell-out: no arguments supplied and lockfile already exists at ${lockPath}`);
-    } else {
-      const argv   = cfg.dryRunCmd(initialArgs);
-      const result = spawnSync(cfg.binary, argv, {
-        cwd:   projectPath,
-        stdio: "inherit",
-        shell: true,
-      });
-
-      if (result.status !== 0) {
-        throw new Error(`${engine} failed to generate lockfile (exit ${result.status})`);
-      }
-
-      if (!fs.existsSync(lockPath)) {
-        throw new Error(`${engine} did not produce a lockfile at ${lockPath}`);
-      }
-    }
-
-    // ── 4b. Hash candidate package.json (TOCTOU guard) ───────────────────
-
-    if (fs.existsSync(packageJsonPath)) {
-      const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
-      this._candidatePackageJsonHash = createHash("sha256")
-        .update(pkgRaw, "utf8")
-        .digest("hex");
-    } else {
-      this._candidatePackageJsonHash = "absent";
-    }
-
-    // ── 5. Parse candidate lockfile via LockfileParser ───────────────────
-
-    const candidateRaw = fs.readFileSync(lockPath, "utf8");
-    this.candidate_lockfile_content = candidateRaw;
-
-    this._candidateLockfileHash = createHash("sha256")
-      .update(candidateRaw, "utf8")
-      .digest("hex");
-
-    const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
-
-    // ── 6. Diff: isolate net-new packages ─────────────────────────────────
-
-    const originalPurls = new Set();
-    if (this._original_lockfile) {
-      try {
-        for (const comp of LockfileParser.parse(cfg.lockfile, this._original_lockfile)) {
-          originalPurls.add(comp.id);
-        }
-      } catch {
-        // Original lockfile unparseable → treat all candidates as new
-      }
-    }
-
-    const newComponents = allCandidateComponents.filter(c => !originalPurls.has(c.id));
-
-    // ── 7. Normalise ──────────────────────────────────────────────────────
-
-    const merged = this.mergeInventoryByPurl(newComponents);
-    this.inventoryData = merged;
-
-    if (this.engineVersion) {
-      let engine_license = "MIT";
-      if (["yarn"].includes(engine)) {
-        engine_license = "BSD 2-Clause";
-      }
-      this.inventoryData.push(
-        {
-          id:        `pkg:npm/${engine}@${this.engineVersion}`,
-          name:      engine,
-          version:   this.engineVersion,
-          license:   engine_license,
-          ecosystem: "npm",
-          state:     "undetermined",
-          scopes:    ["env"],
-          dependencies: [],
-          type:      "library",
-          paths:     [],
-        },
-        {
-          id:        `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
-          name:      TOOL_NAME,
-          version:   TOOL_VERSION,
-          license:   TOOL_LICENSE,
-          ecosystem: "npm",
-          state:     "undetermined",
-          scopes:    ["env"],
-          dependencies: [],
-          type:      "library",
-          paths:     [],
-        }
-      );
-    }
-
-    // ── 8. Assign scopes ──────────────────────────────────────────────────
-
-    this._assignScopes(allCandidateComponents, packageJsonPath);
-
-    const scopeMap = new Map(allCandidateComponents.map(c => [c.id, c.scopes]));
-    for (const comp of this.inventoryData) {
-      if (!Array.isArray(comp.scopes) || comp.scopes.length === 0) {
-        comp.scopes = scopeMap.get(comp.id) ?? [];
-      }
-    }
-
-    return merged.map(c => c.id);
+  // ── 1. Validate engine ───────────────────────────────────────────────
+  const cfg = ENGINE_CONFIG[engine];
+  if (!cfg) {
+    throw new Error(
+      `Invalid engine '${engine}'. Must be one of: ${Object.keys(ENGINE_CONFIG).join(", ")}`
+    );
   }
+
+  if (!this.engineVersion) {
+    throw new Error(
+      `Failed to determine version of '${engine}' (tried '${cfg.binary} --version'). ` +
+      `Make sure '${cfg.binary}' is installed and on your PATH.`
+    );
+  }
+
+  const projectPath     = path.resolve(projectRoot);
+  const packageJsonPath = path.join(projectPath, "package.json");
+  const lockPath        = path.join(projectPath, cfg.lockfile);
+  const nodeModulesPath = path.join(projectPath, "node_modules");
+
+  // ── 2. Determine if we can skip the dry‑run shell command ──────────
+  const lockfileAlreadyPresent = fs.existsSync(lockPath);
+  const skipDryRun = initialArgs.length === 0 && lockfileAlreadyPresent;
+
+  // ── 3. Ensure a package.json exists (if missing, run npm init) ────
+  if (!fs.existsSync(packageJsonPath)) {
+    console.log(`No package.json found. Running 'npm init -y' in ${projectPath}`);
+    const initResult = spawnSync("npm", ["init", "-y"], {
+      cwd:   projectPath,
+      stdio: "inherit",
+      shell: true,
+    });
+    if (initResult.status !== 0) {
+      throw new Error(`npm init -y failed (exit ${initResult.status})`);
+    }
+  }
+
+  // ── 4. Backup originals ─────────────────────────────────────────────
+  this._original_package_json = fs.existsSync(packageJsonPath)
+    ? fs.readFileSync(packageJsonPath, "utf8")
+    : null;
+
+  this._original_lockfile = fs.existsSync(lockPath)
+    ? fs.readFileSync(lockPath, "utf8")
+    : null;
+
+  if (this._original_package_json !== null) {
+    this._original_package_json_hash = createHash("sha256")
+      .update(this._original_package_json, "utf8")
+      .digest("hex");
+  } else {
+    this._original_package_json_hash = "absent";
+  }
+
+  if (this._original_lockfile !== null) {
+    this._original_lockfile_hash = createHash("sha256")
+      .update(this._original_lockfile, "utf8")
+      .digest("hex");
+  } else {
+    this._original_lockfile_hash = "absent";
+  }
+
+  const backupParent = path.join(projectPath, ".ubel", "lockfiles");
+  fs.mkdirSync(backupParent, { recursive: true });
+  const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
+
+  if (this._original_package_json !== null) {
+    fs.writeFileSync(path.join(tmpDir, "package.json"), this._original_package_json, "utf8");
+  }
+  if (this._original_lockfile !== null) {
+    fs.writeFileSync(path.join(tmpDir, cfg.lockfile), this._original_lockfile, "utf8");
+  }
+
+  this._lockfileBackupDir = tmpDir;
+
+  // ── 5. Validate package args ─────────────────────────────────────────
+  this._validatePackageArgs(initialArgs);
+
+  // ── 6. Generate candidate lockfile (only if NOT skipping) ───────────
+  if (skipDryRun) {
+    console.log(`Skipping dry-run shell-out: no arguments supplied and lockfile already exists at ${lockPath}`);
+  } else {
+    const argv   = cfg.dryRunCmd(initialArgs);
+    const result = spawnSync(cfg.binary, argv, {
+      cwd:   projectPath,
+      stdio: "inherit",
+      shell: true,
+    });
+
+    if (result.status !== 0) {
+      throw new Error(`${engine} failed to generate lockfile (exit ${result.status})`);
+    }
+
+    if (!fs.existsSync(lockPath)) {
+      throw new Error(`${engine} did not produce a lockfile at ${lockPath}`);
+    }
+  }
+
+  // ── 7. Hash candidate package.json (TOCTOU guard) ──────────────────
+  if (fs.existsSync(packageJsonPath)) {
+    const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
+    this._candidatePackageJsonHash = createHash("sha256")
+      .update(pkgRaw, "utf8")
+      .digest("hex");
+  } else {
+    this._candidatePackageJsonHash = "absent";
+  }
+
+  // ── 8. Parse candidate lockfile via LockfileParser ─────────────────
+  const candidateRaw = fs.readFileSync(lockPath, "utf8");
+  this.candidate_lockfile_content = candidateRaw;
+
+  this._candidateLockfileHash = createHash("sha256")
+    .update(candidateRaw, "utf8")
+    .digest("hex");
+
+  const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
+
+  // ── 9. Diff: isolate net‑new packages ──────────────────────────────
+  const originalPurls = new Set();
+  if (this._original_lockfile) {
+    try {
+      for (const comp of LockfileParser.parse(cfg.lockfile, this._original_lockfile)) {
+        originalPurls.add(comp.id);
+      }
+    } catch {
+      // Original lockfile unparseable → treat all candidates as new
+    }
+  }
+
+  const newComponents = allCandidateComponents.filter(c => !originalPurls.has(c.id));
+
+  // ── 10. Normalise ─────────────────────────────────────────────────────
+  const merged = this.mergeInventoryByPurl(newComponents);
+  this.inventoryData = merged;
+
+  if (this.engineVersion) {
+    let engine_license = "MIT";
+    if (["yarn"].includes(engine)) {
+      engine_license = "BSD 2-Clause";
+    }
+    this.inventoryData.push(
+      {
+        id:        `pkg:npm/${engine}@${this.engineVersion}`,
+        name:      engine,
+        version:   this.engineVersion,
+        license:   engine_license,
+        ecosystem: "npm",
+        state:     "undetermined",
+        scopes:    ["env"],
+        dependencies: [],
+        type:      "library",
+        paths:     [],
+      },
+      {
+        id:        `pkg:npm/${TOOL_NAME}@${TOOL_VERSION}`,
+        name:      TOOL_NAME,
+        version:   TOOL_VERSION,
+        license:   TOOL_LICENSE,
+        ecosystem: "npm",
+        state:     "undetermined",
+        scopes:    ["env"],
+        dependencies: [],
+        type:      "library",
+        paths:     [],
+      }
+    );
+  }
+
+  // ── 11. Assign scopes ─────────────────────────────────────────────────
+  this._assignScopes(allCandidateComponents, packageJsonPath);
+
+  const scopeMap = new Map(allCandidateComponents.map(c => [c.id, c.scopes]));
+  for (const comp of this.inventoryData) {
+    if (!Array.isArray(comp.scopes) || comp.scopes.length === 0) {
+      comp.scopes = scopeMap.get(comp.id) ?? [];
+    }
+  }
+
+  return merged.map(c => c.id);
+}
 
   // ─────────────────────────────
   // Revert lockfile + package.json to originals
@@ -813,10 +793,17 @@ export class NodeManagerInstance {
 
   async getInstalled(startDir, options = { full_stack: false, scan_os: false, scan_node: true }) {
 
-    const visited     = new Set();
-    const projectRoots = [];   // track every discovered project root for per-project scope assignment
+  // ── Helper: scan Node.js projects ──────────────────────────────────────────
+  const scanNodeProjects = () => {
+    const inventory = [];
+    const projectRoots = [];
+    const visitedPaths = new Set();
 
-    this.inventoryData = [];
+    if (!options.scan_node) {
+      return { inventory, projectRoots };
+    }
+
+    console.log(`Scanning for Node.js projects in ${startDir}...`);
 
     const walk = (dir) => {
       let entries;
@@ -832,8 +819,8 @@ export class NodeManagerInstance {
         if (entry.name === "node_modules") {
           const projectRoot = dir;
           const key = path.resolve(projectRoot);
-          if (visited.has(key)) continue;
-          visited.add(key);
+          if (visitedPaths.has(key)) continue;
+          visitedPaths.add(key);
 
           try {
             const scanner    = new NodeModulesScanner(projectRoot);
@@ -852,9 +839,9 @@ export class NodeManagerInstance {
               paths:        [pkg.path],
             }));
 
-            this.inventoryData.push(...components);
+            inventory.push(...components);
             projectRoots.push(projectRoot);
-          } catch (err) { console.log(err)}
+          } catch (err) { console.log(err) }
 
           continue;
         }
@@ -862,68 +849,32 @@ export class NodeManagerInstance {
         walk(fullPath);
       }
     };
-    console.log(`Scanning for Node.js projects in ${startDir}...`);
-    if (options.scan_node) {
-      walk(startDir);
+
+    walk(startDir);
+    return { inventory, projectRoots };
+  };
+
+  // ── Main logic ────────────────────────────────────────────────────────────────
+  this.inventoryData = [];
+
+  if (!options.full_stack) {
+    // Non‑full‑stack: run Node.js scan synchronously
+    const result = scanNodeProjects();
+    this.inventoryData = result.inventory;
+    const nodeProjectRoots = result.projectRoots;
+
+    // Merge by PURL
+    const merged = this.mergeInventoryByPurl(this.inventoryData);
+    this.inventoryData = merged;
+
+    // Assign scopes
+    const roots = nodeProjectRoots.length ? nodeProjectRoots : [startDir];
+    for (const root of roots) {
+      const pkgJsonPath = path.join(root, "package.json");
+      this._assignScopes(this.inventoryData, pkgJsonPath);
     }
 
-    if (options.full_stack) {
-      const pythonScanner  = new PythonVenvScanner();
-      const phpScanner     = new PhpComposerScanner();
-      const rustScanner    = new RustCargoScanner();
-      const goScanner      = new GoModScanner();
-      const csharpScanner  = new CSharpNuGetScanner();
-      const javaScanner    = new JavaMavenScanner();
-      const rubyScanner    = new RubyBundlerScanner();
-
-      console.log(`Scanning for projects in ${startDir}...`);
-
-await Promise.all([
-  (async () => {
-    console.log(`Scanning for Python projects in ${startDir}...`);
-    await pythonScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for PHP projects in ${startDir}...`);
-    await phpScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for Rust projects in ${startDir}...`);
-    await rustScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for Go projects in ${startDir}...`);
-    await goScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for C# projects in ${startDir}...`);
-    await csharpScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for Java projects in ${startDir}...`);
-    await javaScanner.getInstalled(startDir);
-  })(),
-
-  (async () => {
-    console.log(`Scanning for Ruby projects in ${startDir}...`);
-    await rubyScanner.getInstalled(startDir);
-  })(),
-]);
-
-      this.inventoryData.push(...pythonScanner.inventoryData);
-      this.inventoryData.push(...phpScanner.inventoryData);
-      this.inventoryData.push(...rustScanner.inventoryData);
-      this.inventoryData.push(...goScanner.inventoryData);
-      this.inventoryData.push(...csharpScanner.inventoryData);
-      this.inventoryData.push(...javaScanner.inventoryData);
-      this.inventoryData.push(...rubyScanner.inventoryData);
-    }
-
+    // OS scan if requested
     if (options.scan_os) {
       if (process.platform === "win32") {
         const winScanner = new WindowsHostScanner();
@@ -934,22 +885,111 @@ await Promise.all([
         linuxScanner.getInstalled();
         this.inventoryData.push(...linuxScanner.inventoryData);
       }
-    }
-
-    const merged = this.mergeInventoryByPurl(this.inventoryData);
-    this.inventoryData = merged;
-
-    // Assign scopes per project root so each project's own package.json is used,
-    // mirroring how PythonVenvScanner groups by venv_root.
-    // Fall back to startDir if no project roots were discovered (e.g. scan_node: false).
-    const roots = projectRoots.length ? projectRoots : [startDir];
-    for (const root of roots) {
-      const pkgJsonPath = path.join(root, "package.json");
-      this._assignScopes(this.inventoryData, pkgJsonPath);
+      // Re‑merge after OS scan
+      const finalMerged = this.mergeInventoryByPurl(this.inventoryData);
+      this.inventoryData = finalMerged;
     }
 
     return merged.map(c => c.id);
   }
+
+  // ── Full‑stack: run ALL scanners in parallel ──────────────────────────────
+  console.log(`Scanning for projects in ${startDir}...`);
+
+  const pythonScanner  = new PythonVenvScanner();
+  const phpScanner     = new PhpComposerScanner();
+  const rustScanner    = new RustCargoScanner();
+  const goScanner      = new GoModScanner();
+  const csharpScanner  = new CSharpNuGetScanner();
+  const javaScanner    = new JavaMavenScanner();
+  const rubyScanner    = new RubyBundlerScanner();
+
+  // Node.js scan as a promise
+  const nodePromise = (async () => {
+    const result = scanNodeProjects();
+    return { inventory: result.inventory, projectRoots: result.projectRoots };
+  })();
+
+  // Other language scanners as promises
+  const otherPromises = [
+    (async () => {
+      console.log(`Scanning for Python projects in ${startDir}...`);
+      await pythonScanner.getInstalled(startDir);
+      return { inventory: pythonScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for PHP projects in ${startDir}...`);
+      await phpScanner.getInstalled(startDir);
+      return { inventory: phpScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Rust projects in ${startDir}...`);
+      await rustScanner.getInstalled(startDir);
+      return { inventory: rustScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Go projects in ${startDir}...`);
+      await goScanner.getInstalled(startDir);
+      return { inventory: goScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for C# projects in ${startDir}...`);
+      await csharpScanner.getInstalled(startDir);
+      return { inventory: csharpScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Java projects in ${startDir}...`);
+      await javaScanner.getInstalled(startDir);
+      return { inventory: javaScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Ruby projects in ${startDir}...`);
+      await rubyScanner.getInstalled(startDir);
+      return { inventory: rubyScanner.inventoryData, projectRoots: [] };
+    })(),
+  ];
+
+  // Run all in parallel
+  const results = await Promise.all([nodePromise, ...otherPromises]);
+
+  // Merge all inventories
+  let allInventory = [];
+  let allProjectRoots = [];
+  for (const res of results) {
+    allInventory.push(...res.inventory);
+    if (res.projectRoots) {
+      allProjectRoots.push(...res.projectRoots);
+    }
+  }
+
+  this.inventoryData = allInventory;
+
+  // ── OS scan if requested ──────────────────────────────────────────────────
+  if (options.scan_os) {
+    if (process.platform === "win32") {
+      const winScanner = new WindowsHostScanner();
+      await winScanner.getInstalled();
+      this.inventoryData.push(...winScanner.inventoryData);
+    } else {
+      const linuxScanner = new LinuxHostScanner();
+      linuxScanner.getInstalled();
+      this.inventoryData.push(...linuxScanner.inventoryData);
+    }
+  }
+
+  // ── Merge by PURL ──────────────────────────────────────────────────────────
+  const finalMerged = this.mergeInventoryByPurl(this.inventoryData);
+  this.inventoryData = finalMerged;
+
+  // ── Assign scopes per project root ────────────────────────────────────────
+  const roots = allProjectRoots.length ? allProjectRoots : [startDir];
+  for (const root of roots) {
+    const pkgJsonPath = path.join(root, "package.json");
+    this._assignScopes(this.inventoryData, pkgJsonPath);
+  }
+
+  return finalMerged.map(c => c.id);
+}
 
   // ─────────────────────────────
   // Flatten dependency tree

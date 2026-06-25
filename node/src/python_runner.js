@@ -214,6 +214,7 @@ export class PythonVenvScanner {
 
       const propagate = (names, scope) => {
         const queue = [];
+        const reached = new Set();
 
         for (const n of names) {
           for (const c of (nameIndex.get(n) || [])) {
@@ -227,6 +228,7 @@ export class PythonVenvScanner {
           const c = queue.shift();
           if (visited.has(c.id)) continue;
           visited.add(c.id);
+          reached.add(c.id);
 
           if (!c.scopes.includes(scope)) c.scopes.push(scope);
 
@@ -235,12 +237,37 @@ export class PythonVenvScanner {
             if (d && d.venv_root === venvRoot) queue.push(d);
           }
         }
+
+        return reached;
       };
 
-      propagate(prod, "prod");
-      propagate(dev, "dev");
+      // Prod is seeded and propagated first so we know, below, which
+      // packages it legitimately reaches before dev gets a chance to
+      // touch them.
+      const prodReached = propagate(prod, "prod");
+      const devReached = propagate(dev, "dev");
+
+      // A package reachable from BOTH the prod graph and the dev graph
+      // (e.g. starlette: not pinned directly in requirements.txt, but
+      // pulled in transitively via fastapi, while also appearing in
+      // requirements-dev.txt for pinning/testing) is a real prod
+      // dependency first and foremost. Drop the spurious "dev" tag in
+      // that case so it isn't reported as dev-only.
+      for (const id of devReached) {
+        if (prodReached.has(id)) {
+          const c = byId.get(id);
+          const i = c.scopes.indexOf("dev");
+          if (i !== -1) c.scopes.splice(i, 1);
+        }
+      }
 
       // 🔥 FALLBACK (critical)
+      // Only apply per-venv when NEITHER requirement-file family was
+      // found at all. If only one family exists (e.g. a project that
+      // only has requirements-dev.txt with no prod requirements.txt),
+      // we should NOT blanket-tag everything "prod" — packages that
+      // never appear in any requirement file and were never reached by
+      // propagation are genuinely undetermined, not implicitly prod.
       if (prod.size === 0 && dev.size === 0) {
         for (const c of comps) {
           if (c.scopes.length === 0) c.scopes.push("prod");
