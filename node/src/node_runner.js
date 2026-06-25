@@ -4,7 +4,7 @@ import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { createHash } from "crypto";
 
-import { LockfileParser } from "./lockfiles_parser.js";
+import { LockfileParser, WorkspaceResolver } from "./lockfiles_parser.js";
 import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE } from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
 import { PhpComposerScanner } from "./php_runner.js";
@@ -293,6 +293,77 @@ export class NodeManagerInstance {
   }
 
   // ─────────────────────────────
+  // Workspace resolution
+  // ─────────────────────────────
+
+  /**
+   * Resolve workspace package directories under rootDir by reading
+   * package.json#workspaces and pnpm-workspace.yaml (if present).
+   *
+   * Returns an array of absolute paths to workspace package directories,
+   * not including the root itself.
+   *
+   * @param {string} rootDir  - Monorepo root directory
+   * @returns {string[]}      - Absolute paths of workspace package dirs
+   */
+  _resolveWorkspaces(rootDir) {
+    const pkgJsonPath = path.join(rootDir, "package.json");
+    const pnpmWsPath  = path.join(rootDir, "pnpm-workspace.yaml");
+
+    let pkgJson    = null;
+    let pnpmWsYaml = null;
+
+    try {
+      if (fs.existsSync(pkgJsonPath)) {
+        pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+      }
+    } catch { /* unparseable — skip */ }
+
+    try {
+      if (fs.existsSync(pnpmWsPath)) {
+        pnpmWsYaml = fs.readFileSync(pnpmWsPath, "utf8");
+      }
+    } catch { /* missing or unreadable — skip */ }
+
+    const globs = WorkspaceResolver.globs(pkgJson, pnpmWsYaml);
+    if (globs.length === 0) return [];
+
+    // Collect candidate relative paths by reading the directory tree
+    // up to two levels deep (covers "packages/*" and "apps/web" patterns).
+    const candidates = [];
+
+    const scanDepth = (dir, prefix, depth) => {
+      if (depth > 3) return; // safety cap for deep globs like "packages/**"
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { return; }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        candidates.push(rel);
+        scanDepth(path.join(dir, entry.name), rel, depth + 1);
+      }
+    };
+
+    scanDepth(rootDir, "", 0);
+
+    const matched = WorkspaceResolver.match(globs, candidates);
+    return matched.map(rel => path.join(rootDir, rel));
+  }
+
+  /**
+   * Returns true if rootDir is a workspace/monorepo root (has workspace
+   * config in package.json or pnpm-workspace.yaml).
+   *
+   * @param {string} rootDir
+   * @returns {boolean}
+   */
+  _isWorkspaceRoot(rootDir) {
+    return this._resolveWorkspaces(rootDir).length > 0;
+  }
+
+  // ─────────────────────────────
   // Scanner → component tree
   // ─────────────────────────────
 
@@ -548,7 +619,13 @@ export class NodeManagerInstance {
   }
 
   // ── 11. Assign scopes ─────────────────────────────────────────────────
-  this._assignScopes(allCandidateComponents, packageJsonPath);
+  // Collect package.json paths: root + all workspace sub-packages.
+  const allScopePkgJsonPaths = [packageJsonPath];
+  for (const wsDir of this._resolveWorkspaces(projectPath)) {
+    const wsPkgJson = path.join(wsDir, "package.json");
+    if (fs.existsSync(wsPkgJson)) allScopePkgJsonPaths.push(wsPkgJson);
+  }
+  this._assignScopes(allCandidateComponents, allScopePkgJsonPaths);
 
   const scopeMap = new Map(allCandidateComponents.map(c => [c.id, c.scopes]));
   for (const comp of this.inventoryData) {
@@ -867,12 +944,19 @@ export class NodeManagerInstance {
     const merged = this.mergeInventoryByPurl(this.inventoryData);
     this.inventoryData = merged;
 
-    // Assign scopes
+    // Assign scopes — collect all package.json paths: project roots + their
+    // workspace package sub-directories (if any).
     const roots = nodeProjectRoots.length ? nodeProjectRoots : [startDir];
+    const allPkgJsonPaths = [];
     for (const root of roots) {
-      const pkgJsonPath = path.join(root, "package.json");
-      this._assignScopes(this.inventoryData, pkgJsonPath);
+      allPkgJsonPaths.push(path.join(root, "package.json"));
+      // Expand workspace sub-packages and include their package.json files
+      for (const wsDir of this._resolveWorkspaces(root)) {
+        const wsPkgJson = path.join(wsDir, "package.json");
+        if (fs.existsSync(wsPkgJson)) allPkgJsonPaths.push(wsPkgJson);
+      }
     }
+    this._assignScopes(this.inventoryData, allPkgJsonPaths);
 
     // OS scan if requested
     if (options.scan_os) {
@@ -981,12 +1065,17 @@ export class NodeManagerInstance {
   const finalMerged = this.mergeInventoryByPurl(this.inventoryData);
   this.inventoryData = finalMerged;
 
-  // ── Assign scopes per project root ────────────────────────────────────────
+  // ── Assign scopes per project root (+ workspace sub-packages) ────────────
   const roots = allProjectRoots.length ? allProjectRoots : [startDir];
+  const allPkgJsonPaths = [];
   for (const root of roots) {
-    const pkgJsonPath = path.join(root, "package.json");
-    this._assignScopes(this.inventoryData, pkgJsonPath);
+    allPkgJsonPaths.push(path.join(root, "package.json"));
+    for (const wsDir of this._resolveWorkspaces(root)) {
+      const wsPkgJson = path.join(wsDir, "package.json");
+      if (fs.existsSync(wsPkgJson)) allPkgJsonPaths.push(wsPkgJson);
+    }
   }
+  this._assignScopes(this.inventoryData, allPkgJsonPaths);
 
   return finalMerged.map(c => c.id);
 }
@@ -1038,6 +1127,18 @@ export class NodeManagerInstance {
   // Scope assignment
   // ─────────────────────────────
 
+  /**
+   * Assign "prod" / "dev" scopes to inventory components.
+   *
+   * Accepts either a single package.json path (string) or an array of paths
+   * (for monorepos with multiple workspace package.json files).  When multiple
+   * package.json files are supplied, a component is marked "prod" if it is a
+   * prod dependency in *any* workspace, and "dev" if it is a dev dependency in
+   * *any* workspace (with "prod" taking precedence).
+   *
+   * @param {object[]}       inventory    - Component array (mutated in place)
+   * @param {string|string[]} pkgJsonPath - Path(s) to package.json files
+   */
   _assignScopes(inventory, pkgJsonPath) {
     const byId = new Map();
     for (const comp of inventory) byId.set(comp.id, comp);
@@ -1046,17 +1147,26 @@ export class NodeManagerInstance {
       if (!Array.isArray(comp.scopes)) comp.scopes = [];
     }
 
-    let pkgJson = null;
-    try {
-      if (fs.existsSync(pkgJsonPath)) {
-        pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
-      }
-    } catch { /* unparseable package.json — skip */ }
+    // Normalise to array
+    const pkgJsonPaths = Array.isArray(pkgJsonPath) ? pkgJsonPath : [pkgJsonPath];
 
-    if (!pkgJson) return;
+    // Accumulate prod/dev direct-dependency name sets across all package.json files.
+    const proDirect = new Set();
+    const devDirect = new Set();
 
-    const proDirect = new Set(Object.keys(pkgJson.dependencies    || {}));
-    const devDirect = new Set(Object.keys(pkgJson.devDependencies || {}));
+    for (const pjPath of pkgJsonPaths) {
+      let pkgJson = null;
+      try {
+        if (fs.existsSync(pjPath)) {
+          pkgJson = JSON.parse(fs.readFileSync(pjPath, "utf8"));
+        }
+      } catch { /* unparseable package.json — skip */ }
+
+      if (!pkgJson) continue;
+
+      for (const name of Object.keys(pkgJson.dependencies    || {})) proDirect.add(name);
+      for (const name of Object.keys(pkgJson.devDependencies || {})) devDirect.add(name);
+    }
 
     const nameIndex = new Map();
     for (const comp of inventory) {
@@ -1115,6 +1225,9 @@ export class NodeManagerInstance {
         clone.paths  = this._safeArray(clone.paths);
         if (clone.path && !clone.paths.includes(clone.path)) clone.paths.push(clone.path);
         delete clone.path;
+        // Normalise workspace: collect as a Set internally, flatten at end
+        clone._workspaces = new Set(clone.workspace ? [clone.workspace] : []);
+        delete clone.workspace;
         map.set(id, clone);
         continue;
       }
@@ -1131,6 +1244,21 @@ export class NodeManagerInstance {
         for (const s of comp.scopes) {
           if (!existing.scopes.includes(s)) existing.scopes.push(s);
         }
+      }
+      if (comp.workspace) existing._workspaces.add(comp.workspace);
+    }
+
+    // Flatten _workspaces → workspace (null if only one origin and it's null/root,
+    // otherwise an array of workspace names)
+    for (const comp of map.values()) {
+      const ws = [...comp._workspaces];
+      delete comp._workspaces;
+      if (ws.length === 0) {
+        comp.workspace = null;
+      } else if (ws.length === 1) {
+        comp.workspace = ws[0];
+      } else {
+        comp.workspace = ws; // shared by multiple workspaces
       }
     }
 

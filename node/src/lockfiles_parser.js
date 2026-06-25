@@ -17,6 +17,8 @@ import path from "path";
 //     dependencies: string[],   // PURL strings (version may be empty)
 //     path:         string,
 //     paths:        string[],
+//     workspace:    string | null,  // workspace package name that owns this dep,
+//                                   // null for root-level deps
 //   }
 //
 // Supported formats
@@ -25,7 +27,139 @@ import path from "path";
 //   yarn  — yarn.lock          (classic v1, berry v2/v3)
 //   pnpm  — pnpm-lock.yaml     (v5 / v6 / v9)
 //   bun   — bun.lock / bun.lockb (JSONC text format)
+//
+// Workspace support
+// ─────────────────
+//   All parsers populate a `workspace` field on each component indicating
+//   which workspace package introduced it (by package name), or null if it
+//   comes from the root.  WorkspaceResolver (below) provides utilities for
+//   resolving workspace globs from package.json / pnpm-workspace.yaml without
+//   requiring fs access inside the parser itself.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WorkspaceResolver
+//
+// Pure utility — no fs calls.  Accepts the raw text of workspace manifest
+// files and resolves the logical workspace package names from them.
+//
+// Usage (caller supplies file contents):
+//
+//   const pkgJson        = JSON.parse(fs.readFileSync("package.json", "utf8"));
+//   const pnpmWsYaml     = fs.readFileSync("pnpm-workspace.yaml", "utf8"); // optional
+//   const workspaceGlobs = WorkspaceResolver.globs(pkgJson, pnpmWsYaml);
+//   // → ["packages/*", "apps/*"]
+//
+//   // Expand globs against an array of known sub-directory names (relative):
+//   const dirs = WorkspaceResolver.match(workspaceGlobs, ["packages/ui", "apps/web"]);
+//
+//   // Extract the workspace package name from a lockfile path key (npm):
+//   const wsName = WorkspaceResolver.nameFromNpmKey("packages/ui", pkgJsonContents);
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class WorkspaceResolver {
+
+  /**
+   * Extract workspace glob patterns from a parsed package.json and/or a raw
+   * pnpm-workspace.yaml string.
+   *
+   * @param {object}      pkgJson      - Parsed package.json (may be null/undefined)
+   * @param {string|null} pnpmWsYaml   - Raw text of pnpm-workspace.yaml (optional)
+   * @returns {string[]}               - Array of glob patterns, e.g. ["packages/*"]
+   */
+  static globs(pkgJson, pnpmWsYaml = null) {
+    const patterns = [];
+
+    // npm / yarn workspaces field (array or {packages:[...]})
+    if (pkgJson?.workspaces) {
+      const ws = pkgJson.workspaces;
+      if (Array.isArray(ws)) {
+        patterns.push(...ws);
+      } else if (Array.isArray(ws.packages)) {
+        patterns.push(...ws.packages);
+      }
+    }
+
+    // pnpm-workspace.yaml  — minimal parser for "packages:" list
+    if (pnpmWsYaml && typeof pnpmWsYaml === "string") {
+      let inPackages = false;
+      for (const rawLine of pnpmWsYaml.split("\n")) {
+        const line = rawLine.trimEnd();
+        if (/^packages\s*:/.test(line)) { inPackages = true; continue; }
+        if (inPackages) {
+          if (/^[a-zA-Z]/.test(line)) { inPackages = false; continue; }
+          const m = line.match(/^\s*-\s*['"]?(.+?)['"]?\s*$/);
+          if (m) patterns.push(m[1]);
+        }
+      }
+    }
+
+    return [...new Set(patterns)];
+  }
+
+  /**
+   * Minimal glob matcher: supports `*` (single path segment) and `**`
+   * (any number of segments).  Sufficient for all real-world workspace globs.
+   *
+   * @param {string[]} patterns  - Glob patterns from globs()
+   * @param {string[]} dirs      - Relative directory paths to test (forward-slash separated)
+   * @returns {string[]}         - Subset of dirs that match at least one pattern
+   */
+  static match(patterns, dirs) {
+    return dirs.filter(d => patterns.some(p => WorkspaceResolver._globMatch(p, d)));
+  }
+
+  static _globMatch(pattern, str) {
+    // Normalise separators
+    pattern = pattern.replace(/\\/g, "/").replace(/\/$/, "");
+    str     = str.replace(/\\/g, "/").replace(/\/$/, "");
+
+    // Build regex: ** → any segments, * → one segment (no slash)
+    const re = pattern
+      .split("/")
+      .map(seg => seg === "**" ? ".*" : seg.replace(/\*/g, "[^/]*"))
+      .join("/");
+
+    return new RegExp(`^${re}$`).test(str);
+  }
+
+  /**
+   * Given the path-key prefix from a npm lockfile (e.g. "packages/ui") and
+   * the raw text of that workspace package's package.json, return its name.
+   * Falls back to the last path segment if the package.json is unavailable.
+   *
+   * @param {string}      keyPrefix  - e.g. "packages/ui"
+   * @param {string|null} pkgJsonRaw - Raw text of the workspace's package.json
+   * @returns {string}
+   */
+  static nameFromNpmKey(keyPrefix, pkgJsonRaw) {
+    if (pkgJsonRaw) {
+      try {
+        const parsed = JSON.parse(pkgJsonRaw);
+        if (parsed.name) return parsed.name;
+      } catch { /* fall through */ }
+    }
+    return keyPrefix.split("/").pop();
+  }
+
+  /**
+   * Return true if a pnpm lockfile entry key represents a local workspace
+   * package (link: or file: protocol, or bare name with no registry version).
+   */
+  static isPnpmWorkspaceKey(key) {
+    // v9: "name@link:../path"  or  "name@file:../path"
+    // v5/v6: "/name/link:../path"  (rare but possible)
+    return /[@/](?:link|file):/.test(key);
+  }
+
+  /**
+   * Return true if a bun lockfile resolution string represents a workspace
+   * package (workspace: protocol).
+   */
+  static isBunWorkspaceResolution(resolution) {
+    return /^workspace:/.test(resolution);
+  }
+}
 
 export class LockfileParser {
 
@@ -90,12 +224,42 @@ export class LockfileParser {
     if (data?.packages) {
       const components = [];
 
+      // ── Build workspace map: prefix → workspace package name ─────────
+      // Workspace package roots appear as keys with no "node_modules" segment
+      // and a "name" field, e.g. "packages/ui" → "@myorg/ui".
+      // We use this to tag each dependency with which workspace introduced it.
+      const workspacePrefixes = new Map(); // "packages/ui" → "@myorg/ui"
+      for (const [pkgPath, meta] of Object.entries(data.packages)) {
+        if (pkgPath === "") continue;
+        if (!pkgPath.includes("node_modules") && meta?.name) {
+          workspacePrefixes.set(pkgPath, meta.name);
+        }
+      }
+
+      // Sort prefixes longest-first so the most-specific match wins.
+      const sortedPrefixes = [...workspacePrefixes.keys()]
+        .sort((a, b) => b.length - a.length);
+
+      const resolveWorkspace = (pkgPath) => {
+        for (const prefix of sortedPrefixes) {
+          if (pkgPath.startsWith(prefix + "/node_modules/") ||
+              pkgPath.startsWith(prefix + "/")) {
+            return workspacePrefixes.get(prefix);
+          }
+        }
+        return null;
+      };
+
       for (const [pkgPath, meta] of Object.entries(data.packages)) {
         if (pkgPath === "" || typeof meta !== "object") continue;
+
+        // Skip workspace package roots themselves (they're local, not deps).
+        if (!pkgPath.includes("node_modules")) continue;
 
         // Derive name from the lockfile path key when not explicit.
         // e.g. "node_modules/@babel/core" → "@babel/core"
         //      "node_modules/.pnpm/@babel+core@7.x/node_modules/@babel/core" → "@babel/core"
+        //      "packages/ui/node_modules/react" → "react"
         let name = meta.name;
         if (!name) {
           const parts = pkgPath.split("node_modules/");
@@ -122,6 +286,7 @@ export class LockfileParser {
           dependencies,
           path:         path.join(".", pkgPath),
           paths:        [path.join(".", pkgPath)],
+          workspace:    resolveWorkspace(pkgPath),
         });
       }
 
@@ -129,6 +294,7 @@ export class LockfileParser {
     }
 
     // ── v1: dependencies map ──────────────────────────────────────────────
+    // v1 lockfiles have no workspace metadata — all components get workspace:null.
     if (data?.dependencies) {
       const components = [];
 
@@ -156,6 +322,7 @@ export class LockfileParser {
             dependencies,
             path:         pkgPath,
             paths:        [pkgPath],
+            workspace:    null,
           });
 
           if (meta.dependencies) {
@@ -195,6 +362,12 @@ export class LockfileParser {
     const components = [];
     // Map from "name@version" → component for deduplication
     const seen = new Map();
+
+    // Berry workspace stanzas have descriptors like:
+    //   "@myorg/ui@workspace:packages/ui":
+    // We collect these to mark them as workspace packages (skip as local deps)
+    // and build a set of known workspace package names.
+    const workspacePackageNames = new Set();
 
     const lines = content.split("\n");
     let i = 0;
@@ -245,6 +418,15 @@ export class LockfileParser {
       return fields;
     }
 
+    // ── First pass: identify Berry workspace package names ────────────────
+    // A workspace stanza looks like: `"@myorg/ui@workspace:packages/ui":`
+    // We need to know these names before building components so we can set
+    // workspace: null for them (they're local, not external deps).
+    for (const line of lines) {
+      const wsMatch = line.match(/^"?(@?[^@"]+)@workspace:[^"]*"?\s*:/);
+      if (wsMatch) workspacePackageNames.add(wsMatch[1].trim());
+    }
+
     while (i < lines.length) {
       skipBlanksAndComments();
       if (i >= lines.length) break;
@@ -269,6 +451,10 @@ export class LockfileParser {
 
       // Parse the body at 2-space indent
       const fields = parseBlock(2);
+
+      // ── Berry workspace stanza: skip (local package, not an external dep) ─
+      // Descriptor: "@myorg/ui@workspace:packages/ui"
+      if (descriptorLine.includes("@workspace:")) continue;
 
       const version = (fields.version || "").replace(/^"|"$/g, "");
       if (!version) continue;
@@ -297,6 +483,9 @@ export class LockfileParser {
       name = name.replace(/@npm$/, "");
       if (!name) continue;
 
+      // Skip workspace packages themselves
+      if (workspacePackageNames.has(name)) continue;
+
       const key = `${name}@${version}`;
       if (seen.has(key)) continue;
 
@@ -304,6 +493,8 @@ export class LockfileParser {
       const rawDeps = fields.dependencies || {};
       const dependencies = Object.keys(rawDeps).map(d => LockfileParser.purl(d, null));
 
+      // yarn.lock is a flat, root-level file — there is no per-workspace
+      // attribution in the lockfile format itself.  workspace is always null.
       const comp = {
         id:           LockfileParser.purl(name, version),
         name,
@@ -315,6 +506,7 @@ export class LockfileParser {
         dependencies,
         path:         path.join(".", "node_modules", ...name.split("/")),
         paths:        [path.join(".", "node_modules", ...name.split("/"))],
+        workspace:    null,
       };
 
       seen.set(key, comp);
@@ -520,6 +712,13 @@ export class LockfileParser {
 
         if (!name || !version) continue;
 
+        // ── Skip local workspace packages (link: / file: protocol) ─────────
+        // pnpm represents workspace packages with versions like "link:../pkg"
+        // or "file:../pkg".  These are local packages, not external deps.
+        if (version && /^(?:link|file):/.test(version)) continue;
+        // Also skip if the entry key itself contains link:/file: (v9 snapshots)
+        if (WorkspaceResolver.isPnpmWorkspaceKey(entryKey)) continue;
+
         const key = `${name}@${version}`;
         if (seen.has(key)) continue;
         seen.set(key, true);
@@ -529,6 +728,8 @@ export class LockfileParser {
         const rawDeps = fields.dependencies || {};
         const dependencies = Object.keys(rawDeps).map(d => LockfileParser.purl(d, null));
 
+        // pnpm uses a single flat lockfile at the workspace root — there is no
+        // per-workspace attribution in the lockfile format itself.
         components.push({
           id:           LockfileParser.purl(name, version),
           name,
@@ -540,6 +741,7 @@ export class LockfileParser {
           dependencies,
           path:         "",
           paths:        [],
+          workspace:    null,
         });
 
     }
@@ -588,6 +790,11 @@ export class LockfileParser {
       // entry[0] is always "name@version" (the resolved specifier)
       const resolution = String(entry[0] || "");
 
+      // ── Skip workspace packages (workspace: protocol) ─────────────────
+      // bun represents local workspace packages with resolution strings like
+      // "workspace:packages/ui" — skip them as they're local, not external deps.
+      if (WorkspaceResolver.isBunWorkspaceResolution(resolution)) continue;
+
       let name, version;
 
       // Scoped: "@scope/name@ver"
@@ -635,6 +842,7 @@ export class LockfileParser {
       }
       const dependencies = depNames.map(d => LockfileParser.purl(d, null));
 
+      // bun.lock is a flat root-level file — no per-workspace attribution.
       components.push({
         id:           LockfileParser.purl(name, version),
         name,
@@ -646,6 +854,7 @@ export class LockfileParser {
         dependencies,
         path:         "",
         paths:        [],
+        workspace:    null,
       });
     }
 
