@@ -25,8 +25,129 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 from urllib.parse import quote
+
+
+# ---------------------------------------------------------------------------
+# WorkspaceResolver
+#
+# Pure utility — no I/O.  Mirrors WorkspaceResolver in lockfiles_parser.js.
+# ---------------------------------------------------------------------------
+
+class WorkspaceResolver:
+
+    @staticmethod
+    def globs(pkg_json: Optional[Dict], pnpm_ws_yaml: Optional[str] = None) -> List[str]:
+        """
+        Extract workspace glob patterns from a parsed package.json and/or a
+        raw pnpm-workspace.yaml string.
+
+        Supports:
+          • npm/yarn:  "workspaces": ["packages/*"]
+          • npm/yarn:  "workspaces": { "packages": ["packages/*"] }
+          • pnpm:      pnpm-workspace.yaml  packages: list
+        """
+        patterns: List[str] = []
+
+        if pkg_json:
+            ws = pkg_json.get("workspaces")
+            if isinstance(ws, list):
+                patterns.extend(ws)
+            elif isinstance(ws, dict) and isinstance(ws.get("packages"), list):
+                patterns.extend(ws["packages"])
+
+        if pnpm_ws_yaml and isinstance(pnpm_ws_yaml, str):
+            in_packages = False
+            for raw_line in pnpm_ws_yaml.splitlines():
+                line = raw_line.rstrip()
+                if re.match(r"^packages\s*:", line):
+                    in_packages = True
+                    continue
+                if in_packages:
+                    if line and line[0].isalpha():
+                        in_packages = False
+                        continue
+                    m = re.match(r"^\s*-\s*['\"]?(.+?)['\"]?\s*$", line)
+                    if m:
+                        patterns.append(m.group(1))
+
+        seen: Set[str] = set()
+        result: List[str] = []
+        for p in patterns:
+            if p not in seen:
+                seen.add(p)
+                result.append(p)
+        return result
+
+    @staticmethod
+    def match(patterns: List[str], dirs: List[str]) -> List[str]:
+        """
+        Return the subset of *dirs* that match at least one glob pattern.
+        Supports ``*`` (single path segment) and ``**`` (any depth).
+        """
+        return [d for d in dirs if any(WorkspaceResolver._glob_match(p, d) for p in patterns)]
+
+    @staticmethod
+    def _glob_match(pattern: str, s: str) -> bool:
+        pattern = pattern.replace("\\", "/").rstrip("/")
+        s       = s.replace("\\", "/").rstrip("/")
+        parts   = pattern.split("/")
+        re_parts = []
+        for seg in parts:
+            if seg == "**":
+                re_parts.append(".*")
+            else:
+                re_parts.append(re.escape(seg).replace(r"\*", "[^/]*"))
+        rx = "^" + "/".join(re_parts) + "$"
+        return bool(re.match(rx, s))
+
+    @staticmethod
+    def resolve_workspace_dirs(root_dir: str) -> List[str]:
+        """
+        Read package.json and pnpm-workspace.yaml at *root_dir*, expand
+        workspace globs against the directory tree, and return a list of
+        absolute paths to workspace package directories.
+
+        Returns an empty list for non-monorepo projects.
+        """
+        pkg_json   = _parse_pkg_json(os.path.join(root_dir, "package.json"))
+        pnpm_yaml  = None
+        pnpm_path  = os.path.join(root_dir, "pnpm-workspace.yaml")
+        if os.path.isfile(pnpm_path):
+            try:
+                with open(pnpm_path, "r", encoding="utf-8", errors="replace") as fh:
+                    pnpm_yaml = fh.read()
+            except OSError:
+                pass
+
+        globs = WorkspaceResolver.globs(pkg_json, pnpm_yaml)
+        if not globs:
+            return []
+
+        # Collect candidate relative paths up to 3 levels deep
+        candidates: List[str] = []
+
+        def _scan(directory: str, prefix: str, depth: int) -> None:
+            if depth > 3:
+                return
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                return
+            for entry in entries:
+                if not entry.is_dir():
+                    continue
+                if entry.name.startswith(".") or entry.name == "node_modules":
+                    continue
+                rel = f"{prefix}/{entry.name}" if prefix else entry.name
+                candidates.append(rel)
+                _scan(entry.path, rel, depth + 1)
+
+        _scan(root_dir, "", 0)
+
+        matched = WorkspaceResolver.match(globs, candidates)
+        return [os.path.join(root_dir, rel) for rel in matched]
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +382,18 @@ def _parse_pkg_json(pkg_json_path: str) -> Optional[Dict]:
         return None
 
 
-def _assign_scopes(inventory: List[Dict], pkg_json_path: str) -> None:
+def _assign_scopes(
+    inventory: List[Dict],
+    pkg_json_path: Union[str, List[str]],
+) -> None:
     """
     BFS scope propagation from package.json direct dependencies.
+
+    *pkg_json_path* may be a single path string or a list of paths (for
+    monorepos).  When multiple paths are supplied, ``dependencies`` and
+    ``devDependencies`` are unioned across all supplied package.json files
+    before propagation — so a package that is a prod dep in any workspace
+    gets the "prod" scope, and likewise for "dev".
 
     Rules (mirrors NodeManager._assignScopes):
       • listed in ``dependencies``    → prod (and all transitives)
@@ -278,12 +408,18 @@ def _assign_scopes(inventory: List[Dict], pkg_json_path: str) -> None:
         if not isinstance(comp.get("scopes"), list):
             comp["scopes"] = []
 
-    pkg_json = _parse_pkg_json(pkg_json_path)
-    if not pkg_json:
-        return
+    # Normalise to list
+    paths = [pkg_json_path] if isinstance(pkg_json_path, str) else list(pkg_json_path)
 
-    pro_direct: Set[str] = set(pkg_json.get("dependencies",    {}).keys())
-    dev_direct: Set[str] = set(pkg_json.get("devDependencies", {}).keys())
+    pro_direct: Set[str] = set()
+    dev_direct: Set[str] = set()
+
+    for path in paths:
+        pkg_json = _parse_pkg_json(path)
+        if not pkg_json:
+            continue
+        pro_direct.update(pkg_json.get("dependencies",    {}).keys())
+        dev_direct.update(pkg_json.get("devDependencies", {}).keys())
 
     # name → [comp, …]  (a name can have multiple version entries)
     name_index: Dict[str, List[Dict]] = {}
@@ -343,12 +479,14 @@ def _merge_inventory_by_purl(components: List[Dict]) -> List[Dict]:
         cid = comp["id"]
 
         if cid not in merged:
-            clone         = dict(comp)
+            clone          = dict(comp)
             clone["paths"] = list(clone.get("paths", []))
-            # absorb single "path" key
             p = clone.pop("path", None)
             if p and p not in clone["paths"]:
                 clone["paths"].append(p)
+            # Collect workspace attributions as a set during merge
+            ws = clone.get("workspace")
+            clone["_workspaces"] = {ws} if ws else set()
             merged[cid] = clone
             continue
 
@@ -363,6 +501,21 @@ def _merge_inventory_by_purl(components: List[Dict]) -> List[Dict]:
         for s in (comp.get("scopes") or []):
             if s not in existing["scopes"]:
                 existing["scopes"].append(s)
+        # Union-merge workspace attributions
+        ws = comp.get("workspace")
+        if ws:
+            existing["_workspaces"].add(ws)
+
+    # Flatten _workspaces → workspace
+    for comp in merged.values():
+        ws_set = comp.pop("_workspaces", set())
+        ws_list = list(ws_set)
+        if len(ws_list) == 0:
+            comp["workspace"] = None
+        elif len(ws_list) == 1:
+            comp["workspace"] = ws_list[0]
+        else:
+            comp["workspace"] = ws_list  # shared by multiple workspaces
 
     return list(merged.values())
 
@@ -450,16 +603,26 @@ class NodeModulesScanner:
                         scanner  = _NodeModulesScanner(directory)
                         raw_pkgs = scanner.scan()
 
-                        # Convert raw scanner records → canonical component shape
-                        pkg_json_path = os.path.join(directory, "package.json")
-                        components    = _pkgs_to_components(raw_pkgs)
+                        components = _pkgs_to_components(raw_pkgs)
 
-                        _assign_scopes(components, pkg_json_path)
+                        # Collect package.json paths: project root + all
+                        # workspace sub-package directories (if any).
+                        pkg_json_paths: List[str] = []
+                        root_pj = os.path.join(directory, "package.json")
+                        if os.path.isfile(root_pj):
+                            pkg_json_paths.append(root_pj)
+
+                        for ws_dir in WorkspaceResolver.resolve_workspace_dirs(directory):
+                            ws_pj = os.path.join(ws_dir, "package.json")
+                            if os.path.isfile(ws_pj):
+                                pkg_json_paths.append(ws_pj)
+
+                        _assign_scopes(components, pkg_json_paths)
                         all_components.extend(components)
                     except Exception:
                         pass
 
-                    # Never descend into node_modules itself (mirrors JS continue)
+                    # Never descend into node_modules itself
                     continue
 
                 # Depth-control: only recurse deeper when is_recursive=True.
@@ -506,6 +669,7 @@ def _pkgs_to_components(raw_pkgs: List[Dict]) -> List[Dict]:
             "scopes":       [],
             "dependencies": pkg.get("dependencies", []),
             "paths":        [pkg["path"]] if pkg.get("path") else [],
+            "workspace":    None,
         }
 
     return list(by_purl.values())

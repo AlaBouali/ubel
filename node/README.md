@@ -10,6 +10,7 @@ This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
 ## Features
 
 - Full dependency resolution with PURL generation via lockfile dry-run
+- Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
 - Policy engine — block/allow by severity threshold and unknown-severity packages

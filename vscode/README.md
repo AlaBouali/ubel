@@ -21,6 +21,7 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 ## Extension's features
 
 - Full dependency resolution with PURL generation
+- Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - Vulnerability scanning via batched API queries to OSV.dev and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
 - Policy engine — block/allow by severity threshold and unknown-severity packages
@@ -343,5 +344,5 @@ UBEL is fully local. The only external call is to [osv.dev's public API](https:/
 
 ## License
 
-AGPL-3.0-only — free for scanning your own projects and systems.  
+Free for scanning your own projects and systems.  
 See [LICENSE.md](LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.

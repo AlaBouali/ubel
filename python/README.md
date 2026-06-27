@@ -10,6 +10,7 @@ This document covers the **Python** ecosystem (`ubel-pip`) and the **Linux host*
 ## Features
 
 - Full dependency resolution with PURL generation via `pip --dry-run --report`
+- Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries (up to 800 PURLs per batch)
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references) with up to 40 parallel threads
 - Policy engine — block/allow by severity threshold and unknown-severity packages
