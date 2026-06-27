@@ -1,6 +1,6 @@
-export const TOOL_VERSION = "0.2.0";
+export const TOOL_VERSION = "0.6.0";
 export const TOOL_NAME = "@arcane-spark/ubel-node";
-export const TOOL_LICENSE = "AGPL-3.0-only";
+export const TOOL_LICENSE = "SEE LICENSE IN LICENSE.md";
 export const AUTHOR = "Ala Bouali";
 //export const COMPANY = "Arcane-Spark";
 export const GITHUB = "https://github.com/AlaBouali/ubel";
