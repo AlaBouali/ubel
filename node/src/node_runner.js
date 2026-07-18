@@ -568,21 +568,35 @@ export class NodeManagerInstance {
   const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
 
   // ── 9. Diff: isolate net‑new packages ──────────────────────────────
-  const originalPurls = new Set();
-  if (this._original_lockfile) {
-    try {
-      for (const comp of LockfileParser.parse(cfg.lockfile, this._original_lockfile)) {
-        originalPurls.add(comp.id);
+  //
+  // Note: when skipDryRun is true, we never regenerated the lockfile, so
+  // `_original_lockfile` and `allCandidateComponents` come from the exact
+  // same file. Diffing them against each other would (incorrectly) yield
+  // zero new components — every existing package would look "already
+  // accounted for" even though it has never been scanned. In that mode
+  // there is no meaningful "before/after" to diff: the entire existing
+  // lockfile IS the inventory we're being asked to report on.
+  let componentsForInventory;
+
+  if (skipDryRun) {
+    componentsForInventory = allCandidateComponents;
+  } else {
+    const originalPurls = new Set();
+    if (this._original_lockfile) {
+      try {
+        for (const comp of LockfileParser.parse(cfg.lockfile, this._original_lockfile)) {
+          originalPurls.add(comp.id);
+        }
+      } catch {
+        // Original lockfile unparseable → treat all candidates as new
       }
-    } catch {
-      // Original lockfile unparseable → treat all candidates as new
     }
+
+    componentsForInventory = allCandidateComponents.filter(c => !originalPurls.has(c.id));
   }
 
-  const newComponents = allCandidateComponents.filter(c => !originalPurls.has(c.id));
-
   // ── 10. Normalise ─────────────────────────────────────────────────────
-  const merged = this.mergeInventoryByPurl(newComponents);
+  const merged = this.mergeInventoryByPurl(componentsForInventory);
   this.inventoryData = merged;
 
   if (this.engineVersion) {

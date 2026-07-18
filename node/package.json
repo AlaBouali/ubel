@@ -16,7 +16,9 @@
     "ubel-pnpm": "bin/pnpm.js",
     "ubel-bun": "bin/bun.js",
     "ubel-agent": "bin/agent.js",
-    "ubel-platform": "bin/platform.js"
+    "ubel-platform": "bin/platform.js",
+    "ubel-sast": "bin/sast.js",
+    "ubel-mal": "bin/mal.js"
   },
   "scripts": {
     "test": "node src/main.js npm health"

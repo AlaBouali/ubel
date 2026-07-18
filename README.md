@@ -3,7 +3,7 @@
 
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-[![License](https://img.shields.io/badge/license-AGPL--3.0--only-green)](LICENSE.md)
+[!](LICENSE.md)
 [![PyPI](https://img.shields.io/badge/pypi-ubel--python-blue)](https://pypi.org/project/ubel-python/)
 [![npm](https://img.shields.io/badge/npm-%40arcane--spark%2Fubel--node-red)](https://www.npmjs.com/package/@arcane-spark/ubel-node)
 [![VS Code](https://img.shields.io/badge/vscode-Arcane--Spark.ubel-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
@@ -306,7 +306,6 @@ UBEL is fully local. The only external calls are to [osv.dev's public API](https
 
 ## License
 
-AGPL-3.0-only — free for scanning your own projects and systems.  
 See [LICENSE.md](LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.
 
 ---
