@@ -26,7 +26,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 ## Installation
 
 ```bash
-npm install -g @arcane-spark/ubel-sast
+npm install -g @arcane-spark/ubel-node
 ```
 
 After installation, the following entry-point binaries are available:
