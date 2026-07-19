@@ -4,7 +4,7 @@
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
 This document covers the **Node.js** ecosystem (npm, pnpm, bun, yarn).
-
+scan_project
 ---
 
 ## Features
@@ -375,7 +375,7 @@ Specifiers containing shell metacharacters or other unsafe characters are reject
 `main()` doubles as a programmatic entry point for agents, platform scanners, and the VS Code extension:
 
 ```js
-import { main } from "@arcane-spark/ubel-node";
+import { main } from "@arcane-spark/ubel-node/sca";
 
 const report = await main({
   projectRoot : "/abs/path/to/project",

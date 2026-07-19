@@ -5,7 +5,8 @@
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
   "files": [
-    "src/",
+    "sca/",
+    "sast/",
     "bin/",
     "LICENSE.md",
     "DISCLAIMER.md",
@@ -21,12 +22,7 @@
     "ubel-mal": "bin/mal.js",
     "ubel-chunk": "bin/chunk.js"
   },
-  "scripts": {
-    "test_sca": "node -e \"process.argv.splice(2,0,'npm','health'); import('@arcane-spark/ubel-node/sca').then(({ main }) => main())\"",
-    "test_sast": "node -e \"process.argv.splice(2,0,'--help'); import('@arcane-spark/ubel-node/sast').then(({ main }) => main())\"",
-    "test_mal": "node -e \"process.argv.splice(2,0,'malware','--help'); import('@arcane-spark/ubel-node/sast').then(({ main }) => main())\"",
-    "test": "npm run test_sca && npm run test_sast && npm run test_mal"
-  },
+  "scripts": {},
   "engines": {
     "node": ">=18.0.0"
   },
