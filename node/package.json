@@ -1,7 +1,7 @@
 {
   "name": "@arcane-spark/ubel-node",
   "version": "0.6.0",
-  "description": "Supply-chain security firewall for Node.js — resolves dependencies, scans via OSV.dev and NVD, and enforces configurable vulnerability policies before anything reaches node_modules.",
+  "description": "Supply-chain security firewall for Node.js — resolves dependencies, scans via OSV.dev and NVD, and enforces configurable vulnerability policies before anything reaches node_modules. Also includes an AI-powered SAST engine (scan → verify → taint-trace) for source-level vulnerability detection, plus a separate malicious-code/backdoor scanner, both with JSON, HTML, and SARIF reporting.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
   "files": [
@@ -18,17 +18,22 @@
     "ubel-agent": "bin/agent.js",
     "ubel-platform": "bin/platform.js",
     "ubel-sast": "bin/sast.js",
-    "ubel-mal": "bin/mal.js"
+    "ubel-mal": "bin/mal.js",
+    "ubel-chunk": "bin/chunk.js"
   },
   "scripts": {
-    "test": "node src/main.js npm health"
+    "test_sca": "node -e \"process.argv.splice(2,0,'npm','health'); import('@arcane-spark/ubel-node/sca').then(({ main }) => main())\"",
+    "test_sast": "node -e \"process.argv.splice(2,0,'--help'); import('@arcane-spark/ubel-node/sast').then(({ main }) => main())\"",
+    "test_mal": "node -e \"process.argv.splice(2,0,'malware','--help'); import('@arcane-spark/ubel-node/sast').then(({ main }) => main())\"",
+    "test": "npm run test_sca && npm run test_sast && npm run test_mal"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "main": "src/main.js",
+  "main": "sca/main.js",
   "exports": {
-    ".": "./src/main.js"
+    "./sca": "./sca/main.js",
+    "./sast": "./sast/main.js"
   },
   "keywords": [
     "security",
@@ -56,7 +61,7 @@
     "lockfile",
     "cyclonedx"
   ],
-  "author": "Ala Bouali <contact@alabouali.com>",
+  "author": "Ala Bouali <ala.bouali.1997@gmail.com>",
   "repository": {
     "type": "git",
     "url": "https://github.com/AlaBouali/ubel.git",

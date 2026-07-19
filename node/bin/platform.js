@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { main }    from "../src/main.js";
+import { main }    from "../sca/main.js";
 import { homedir } from "os";
 
 async function run() {

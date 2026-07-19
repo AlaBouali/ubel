@@ -1,3 +1,3 @@
 #!/usr/bin/env node
 process.argv.splice(2, 0, "pnpm");
-import("../src/main.js").then(({ main }) => main());
+import("../sca/main.js").then(({ main }) => main());

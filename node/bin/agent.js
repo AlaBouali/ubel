@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { main } from "../src/main.js";
+import { main } from "../sca/main.js";
 
 async function run() {
   const [, , targetPath] = process.argv;

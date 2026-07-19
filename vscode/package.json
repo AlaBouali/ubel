@@ -111,7 +111,7 @@
     ]
   },
   "scripts": {
-    "prepackage": "xcopy /E /I /Y ..\\node\\src node\\src",
+    "prepackage": "xcopy /E /I /Y ..\\node\\sca node\\src",
     "package": "vsce package --no-dependencies --out ubel-vscode-extension.vsix --allow-missing-repository",
     "vs_install": "code --install-extension ubel-vscode-extension.vsix",
     "clean": "rmdir /S /Q node || rm -rf node"
