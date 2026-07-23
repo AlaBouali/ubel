@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { main } from "../sca/main.js";
+import { SCA_scan } from "../sca/main.js";
 
 async function run() {
   const [, , targetPath] = process.argv;
 
   try {
-    const result = await main({
+    const result = await SCA_scan({
       projectRoot : targetPath || process.cwd(),
       engine      : "npm",
       mode        : "health",
