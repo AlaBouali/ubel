@@ -80,7 +80,7 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
  * @param {string}  [programmaticOptions.scan_scope="repository"]
  * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
  */
-export async function main(programmaticOptions) {
+async function main(programmaticOptions) {
 
   // ════════════════════════════════════════════════════════════════════════════
   // PROGRAMMATIC PATH
@@ -263,3 +263,5 @@ export async function main(programmaticOptions) {
 export async function scan_project(projectRoot, options = {}) {
   return main({ projectRoot, ...options });
 }
+
+export { main as SCA_scan };

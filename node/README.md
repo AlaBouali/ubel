@@ -375,9 +375,9 @@ Specifiers containing shell metacharacters or other unsafe characters are reject
 `main()` doubles as a programmatic entry point for agents, platform scanners, and the VS Code extension:
 
 ```js
-import { main } from "@arcane-spark/ubel-node/sca";
+import { SCA_scan } from "@arcane-spark/ubel-node/sca";
 
-const report = await main({
+const report = await SCA_scan({
   projectRoot : "/abs/path/to/project",
   engine      : "npm",
   mode        : "health",
