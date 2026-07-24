@@ -1,7 +1,7 @@
 {
   "name": "@arcane-spark/ubel-node",
-  "version": "0.6.0",
-  "description": "Supply-chain security firewall for Node.js — resolves dependencies, scans via OSV.dev and NVD, and enforces configurable vulnerability policies before anything reaches node_modules. Also includes an AI-powered SAST engine (scan → verify → taint-trace) for source-level vulnerability detection, plus a separate malicious-code/backdoor scanner, both with JSON, HTML, and SARIF reporting.",
+  "version": "0.7.0",
+  "description": "Software supply-chain and source-code security for Node.js. SCA: resolves dependencies, scans via OSV.dev and NVD, and annotates findings with heuristic reachability (SBOM/CycloneDX + SARIF reporting). Firewall: gates npm/pnpm/bun installs behind a lockfile-only dry-run scan before anything reaches node_modules, with atomic revert and TOCTOU protection. Also includes an AI-powered SAST engine (scan → verify → taint-trace) for source-level vulnerability detection, plus a separate malicious-code/backdoor scanner, both with JSON, HTML, and SARIF reporting.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
   "files": [

@@ -16,9 +16,9 @@
 
 import path   from 'path';
 import crypto from 'crypto';
-import { TOOL_NAME, TOOL_VERSION } from './info.js';
-import { getGitMetadata }           from './git_info.js';
-import { getOSMetadata }            from './os_metadata.js';
+import { TOOL_NAME, TOOL_VERSION } from '../sca/info.js';
+import { getGitMetadata }           from '../sca/git_info.js';
+import { getOSMetadata }            from '../sca/os_metadata.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@
 //
 // Output: HTML string (caller writes to disk)
 
-import { TOOL_NAME, TOOL_VERSION } from './info.js';
+import { TOOL_NAME, TOOL_VERSION } from '../sca/info.js';
 
 const SAST_TOOL = '@arcane-spark/ubel-sast';
 

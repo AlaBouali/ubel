@@ -8,9 +8,9 @@ import { buildChunks }            from './src/chunker/index.js';
 import { analyzeSast, analyzeMalware } from './src/analyzer/index.js';
 import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
-import { getGitMetadata }         from './git_info.js';
-import { getOSMetadata }          from './os_metadata.js';
-import { TOOL_VERSION }           from './info.js';
+import { getGitMetadata }         from '../sca/git_info.js';
+import { getOSMetadata }          from '../sca/os_metadata.js';
+import { TOOL_VERSION }           from '../sca/info.js';
 
 // ─── Shared CLI flag parser ────────────────────────────────────────────────────
 

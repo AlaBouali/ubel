@@ -1,4 +1,4 @@
-export const TOOL_VERSION = "0.6.0";
+export const TOOL_VERSION = "0.7.0";
 export const TOOL_NAME = "@arcane-spark/ubel-node";
 export const TOOL_LICENSE = "SEE LICENSE IN LICENSE.md";
 export const AUTHOR = "Ala Bouali";
