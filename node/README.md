@@ -53,11 +53,21 @@ ubel-bun health
 A distinct mode of the same `ubel-npm` / `ubel-pnpm` / `ubel-bun` binaries: before any real install, a lockfile-only dry-run (`--package-lock-only` / `--lockfile-only`) resolves the candidate tree without touching `node_modules`, scans it, and either proceeds or reverts the lockfile from its on-disk backup. Pre/post-install scripts are always blocked (`--ignore-scripts`) during this phase. A SHA-256 check re-verifies the lockfile and `package.json` immediately before the real install, closing the TOCTOU window between scan and install.
 
 ```bash
+
+# examples
+
 # Dry-run only — scan and exit, nothing installed
 ubel-npm check lodash express
 
 # Scan-gated real install — proceeds only if policy allows
 ubel-npm install lodash@4.17.21
+
+# install current project
+ubel-pnpm install
+
+# check the current project
+
+ubel-bun check
 ```
 
 Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>`; malicious-package advisories are always blocked regardless of policy.
@@ -125,10 +135,6 @@ RUN ubel-sast --fail-on valid .
 ## License
 
 Source-available, internal-use license. Modification for internal needs is permitted; redistribution, wrapping, and hosting as a third-party service are not. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for full terms, including the consultant-use exception.
-
-For commercial licenses permitting redistribution, hosting, or embedding, contact:
-**ala.bouali.1997@gmail.com**
-
 ---
 
 ## Links
