@@ -4,7 +4,6 @@
 Covers source repos, developer machines, zero cloud calls except for osv.dev and NVD API.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
-[![License](https://img.shields.io/badge/license-AGPL--3.0--only-green)](LICENSE.md)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
 [![GitHub](https://img.shields.io/badge/github-AlaBouali%2Fubel-lightgrey)](https://github.com/AlaBouali/ubel)
 

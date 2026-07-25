@@ -974,7 +974,15 @@ export class NodeManagerInstance {
 
     // OS scan if requested
     if (options.scan_os) {
-      if (process.platform === "win32") {
+      if (options.scan_scope === "container-image") {
+        const linuxScanner = new LinuxHostScanner(startDir);
+        linuxScanner.getInstalled();
+        this.inventoryData.push(...linuxScanner.inventoryData);
+        console.log(`[docker] OS package scan: ${linuxScanner.inventoryData.length} package(s) found in ${startDir}`);
+        if (linuxScanner.inventoryData.length === 0) {
+          console.warn("[docker] 0 OS packages found — the apk/dpkg/rpm database likely failed to extract; re-run with --keep and inspect lib/apk/db/installed under the temp rootfs");
+        }
+      } else if (process.platform === "win32") {
         const winScanner = new WindowsHostScanner();
         await winScanner.getInstalled();
         this.inventoryData.push(...winScanner.inventoryData);
@@ -1064,7 +1072,15 @@ export class NodeManagerInstance {
 
   // ── OS scan if requested ──────────────────────────────────────────────────
   if (options.scan_os) {
-    if (process.platform === "win32") {
+    if (options.scan_scope === "container-image") {
+      const linuxScanner = new LinuxHostScanner(startDir);
+      linuxScanner.getInstalled();
+      this.inventoryData.push(...linuxScanner.inventoryData);
+      console.log(`[docker] OS package scan: ${linuxScanner.inventoryData.length} package(s) found in ${startDir}`);
+      if (linuxScanner.inventoryData.length === 0) {
+        console.warn("[docker] 0 OS packages found — the apk/dpkg/rpm database likely failed to extract; re-run with --keep and inspect lib/apk/db/installed under the temp rootfs");
+      }
+    } else if (process.platform === "win32") {
       const winScanner = new WindowsHostScanner();
       await winScanner.getInstalled();
       this.inventoryData.push(...winScanner.inventoryData);

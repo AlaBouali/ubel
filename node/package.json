@@ -20,7 +20,9 @@
     "ubel-platform": "bin/platform.js",
     "ubel-sast": "bin/sast.js",
     "ubel-mal": "bin/mal.js",
-    "ubel-chunk": "bin/chunk.js"
+    "ubel-chunk": "bin/chunk.js",
+    "ubel-cicd": "bin/cicd.js",
+    "ubel-docker":"bin/docker.js"
   },
   "scripts": {},
   "engines": {

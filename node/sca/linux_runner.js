@@ -87,11 +87,14 @@ function parseOsRelease(content) {
   throw new Error(`Unsupported OS ecosystem: ${JSON.stringify(candidates)}`);
 }
 
-function detectHostEcosystem() {
+function detectHostEcosystem(rootDir = "") {
   for (const p of ["/etc/os-release", "/usr/lib/os-release"]) {
-    if (fs.existsSync(p)) return parseOsRelease(fs.readFileSync(p, "utf8"));
+    const fullPath = rootDir ? path.join(rootDir, p) : p;
+    if (fs.existsSync(fullPath)) return parseOsRelease(fs.readFileSync(fullPath, "utf8"));
   }
-  throw new Error("Cannot detect OS ecosystem: no os-release file found");
+  throw new Error(
+    `Cannot detect OS ecosystem: no os-release file found${rootDir ? ` under ${rootDir}` : ""}`
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -229,7 +232,7 @@ function parseDpkgStatus(content) {
  * files with awk.  Returns an empty Map on any failure so the caller can
  * use it as a best-effort overlay without aborting the scan.
  */
-function readDpkgLicenses() {
+function readDpkgLicenses(rootDir = "") {
   // execFileSync / shell glob never expand wildcards — enumerate files in JS.
   // We also:
   //   • Filter with statSync().isFile() because glob / readdirSync can surface
@@ -239,7 +242,7 @@ function readDpkgLicenses() {
   //     exits non-zero due to a missing file mid-run.
   //   • Chunk to 200 files to stay under ARG_MAX.
   const licenses = new Map();
-  const docDir = "/usr/share/doc";
+  const docDir = rootDir ? path.join(rootDir, "/usr/share/doc") : "/usr/share/doc";
   if (!fs.existsSync(docDir)) return licenses;
 
   const files = [];
@@ -254,8 +257,12 @@ function readDpkgLicenses() {
 
   if (!files.length) return licenses;
 
+  // The gsub pattern strips the docDir prefix from awk's FILENAME so we get
+  // back a bare package name — docDir now varies (rootDir-prefixed or not),
+  // so it's escaped and built dynamically instead of hardcoded.
+  const escapedDocDir = docDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const AWK_SCRIPT =
-    String.raw`/^License:/ {pkg=FILENAME; gsub(/^\/usr\/share\/doc\/|\/copyright$/, "", pkg); print pkg, $2}`;
+    String.raw`/^License:/ {pkg=FILENAME; gsub(/^` + escapedDocDir + String.raw`\/|\/copyright$/, "", pkg); print pkg, $2}`;
 
   const CHUNK = 200;
   for (let i = 0; i < files.length; i += CHUNK) {
@@ -279,8 +286,8 @@ function readDpkgLicenses() {
   return licenses;
 }
 
-function scanDpkg(ecosystem) {
-  const statusPath = "/var/lib/dpkg/status";
+function scanDpkg(ecosystem, rootDir = "") {
+  const statusPath = rootDir ? path.join(rootDir, "/var/lib/dpkg/status") : "/var/lib/dpkg/status";
   if (!fs.existsSync(statusPath)) {
     throw new Error(`dpkg: status file not found at ${statusPath}`);
   }
@@ -288,7 +295,7 @@ function scanDpkg(ecosystem) {
   const pkgs = parseDpkgStatus(fs.readFileSync(statusPath, "utf8"));
 
   // Overlay licenses from /usr/share/doc/*/copyright (more reliable than dpkg status)
-  const copyrightLicenses = readDpkgLicenses();
+  const copyrightLicenses = readDpkgLicenses(rootDir);
   for (const [name, info] of pkgs.entries()) {
     if (info.license === "unknown" || !info.license) {
       const lic = copyrightLicenses.get(name);
@@ -304,7 +311,7 @@ function scanDpkg(ecosystem) {
 
   // Collect executable paths from .list files
   const pathsByPkg = new Map();
-  const infoDir = "/var/lib/dpkg/info";
+  const infoDir = rootDir ? path.join(rootDir, "/var/lib/dpkg/info") : "/var/lib/dpkg/info";
 
   if (fs.existsSync(infoDir)) {
     for (const fname of fs.readdirSync(infoDir)) {
@@ -315,17 +322,23 @@ function scanDpkg(ecosystem) {
       const listPath = path.join(infoDir, fname);
       try {
         for (const line of fs.readFileSync(listPath, "utf8").split("\n")) {
+          // fp is the *logical* path as it exists inside the image (e.g.
+          // /usr/bin/bash) — that's what we record. Only the on-disk stat
+          // check below needs the rootDir-prefixed real path.
           const fp = line.trim();
-          if (fp && isExecutablePath(fp) && fs.existsSync(fp)) {
-            try {
-              const stat = fs.statSync(fp);
-              const mode = stat.mode;
-              // Check execute bit (owner | group | other)
-              if (stat.isFile() && (mode & 0o111)) {
-                if (!pathsByPkg.has(pkgName)) pathsByPkg.set(pkgName, []);
-                pathsByPkg.get(pkgName).push(fp);
-              }
-            } catch { /* skip unreadable */ }
+          if (fp && isExecutablePath(fp)) {
+            const realFp = rootDir ? path.join(rootDir, fp) : fp;
+            if (fs.existsSync(realFp)) {
+              try {
+                const stat = fs.statSync(realFp);
+                const mode = stat.mode;
+                // Check execute bit (owner | group | other)
+                if (stat.isFile() && (mode & 0o111)) {
+                  if (!pathsByPkg.has(pkgName)) pathsByPkg.set(pkgName, []);
+                  pathsByPkg.get(pkgName).push(fp);
+                }
+              } catch { /* skip unreadable */ }
+            }
           }
         }
       } catch { /* skip unreadable list file */ }
@@ -403,8 +416,8 @@ function parseApkInstalled(content, ecosystem) {
   return pkgs;
 }
 
-function scanApk(ecosystem) {
-  const dbPath = "/lib/apk/db/installed";
+function scanApk(ecosystem, rootDir = "") {
+  const dbPath = rootDir ? path.join(rootDir, "/lib/apk/db/installed") : "/lib/apk/db/installed";
   if (!fs.existsSync(dbPath)) {
     throw new Error(`apk: database not found at ${dbPath}`);
   }
@@ -434,12 +447,15 @@ function scanApk(ecosystem) {
 const RPM_QA_QF  = "%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{LICENSE}\\t[%{REQUIRENAME},]\\n";
 const RPM_QL_QF  = "[%{=NAME}\\t%{FILENAMES}\\n]";
 
-function rpmQueryAll() {
+function rpmQueryAll(rootDir = "") {
+  const args = rootDir
+    ? ["--root", rootDir, "-qa", "--qf", RPM_QA_QF]
+    : ["-qa", "--qf", RPM_QA_QF];
   let out;
   try {
     out = execFileSync(
       "rpm",
-      ["-qa", "--qf", RPM_QA_QF],
+      args,
       { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {
@@ -463,12 +479,15 @@ function rpmQueryAll() {
   return pkgs;
 }
 
-function* rpmQueryFilesChunk(pkgNames) {
+function* rpmQueryFilesChunk(pkgNames, rootDir = "") {
+  const args = rootDir
+    ? ["--root", rootDir, "-ql", "--qf", RPM_QL_QF, ...pkgNames]
+    : ["-ql", "--qf", RPM_QL_QF, ...pkgNames];
   let out;
   try {
     out = execFileSync(
       "rpm",
-      ["-ql", "--qf", RPM_QL_QF, ...pkgNames],
+      args,
       { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {
@@ -490,15 +509,15 @@ function* rpmQueryFilesChunk(pkgNames) {
 
 const RPM_CHUNK_SIZE = 200;
 
-function* rpmQueryFiles(pkgNames) {
+function* rpmQueryFiles(pkgNames, rootDir = "") {
   if (!pkgNames.length) return;
   for (let i = 0; i < pkgNames.length; i += RPM_CHUNK_SIZE) {
-    yield* rpmQueryFilesChunk(pkgNames.slice(i, i + RPM_CHUNK_SIZE));
+    yield* rpmQueryFilesChunk(pkgNames.slice(i, i + RPM_CHUNK_SIZE), rootDir);
   }
 }
 
-function scanRpm(ecosystem) {
-  const pkgs = rpmQueryAll();
+function scanRpm(ecosystem, rootDir = "") {
+  const pkgs = rpmQueryAll(rootDir);
 
   const purls = new Map();
   for (const [name, { version }] of pkgs.entries()) {
@@ -506,11 +525,14 @@ function scanRpm(ecosystem) {
   }
 
   const pathsByPkg = new Map();
-  for (const { pkgName, filepath } of rpmQueryFiles([...pkgs.keys()])) {
+  for (const { pkgName, filepath } of rpmQueryFiles([...pkgs.keys()], rootDir)) {
     if (!isExecutablePath(filepath)) continue;
-    // Verify the execute bit on the real filesystem
+    // Verify the execute bit on the real filesystem. rpm --root reports
+    // filepath as the logical in-image path, so the on-disk check needs the
+    // rootDir prefix while the recorded path stays logical.
+    const realPath = rootDir ? path.join(rootDir, filepath) : filepath;
     try {
-      const stat = fs.statSync(filepath);
+      const stat = fs.statSync(realPath);
       if (!stat.isFile() || !(stat.mode & 0o111)) continue;
     } catch { continue; }
 
@@ -536,12 +558,19 @@ function scanRpm(ecosystem) {
 
 export class LinuxHostScanner {
 
-  constructor() {
+  /**
+   * @param {string} [rootDir=""]  Absolute path to an extracted image
+   *   rootfs. Omit (or pass "") to scan the live host — this preserves the
+   *   original host-scanning behavior exactly.
+   */
+  constructor(rootDir = "") {
     this.inventoryData = [];
+    this.rootDir = rootDir;
   }
 
   /**
-   * Scan the running Linux host.
+   * Scan the running Linux host, or an extracted image rootfs when rootDir
+   * was provided to the constructor.
    * Returns an array of PURL id strings (same contract as the other scanners).
    * Full records are available on LinuxHostScanner.inventoryData.
    */
@@ -549,19 +578,19 @@ export class LinuxHostScanner {
 
     this.inventoryData = [];
 
-    const ecosystem = detectHostEcosystem();
+    const ecosystem = detectHostEcosystem(this.rootDir);
 
     let packages;
     if (ecosystem === "debian" || ecosystem === "ubuntu") {
-      packages = scanDpkg(ecosystem);
+      packages = scanDpkg(ecosystem, this.rootDir);
     } else if (ecosystem === "alpine") {
-      packages = scanApk(ecosystem);
+      packages = scanApk(ecosystem, this.rootDir);
     } else if (
       ecosystem === "redhat" ||
       ecosystem === "almalinux" ||
       ecosystem === "rockylinux"
     ) {
-      packages = scanRpm(ecosystem);
+      packages = scanRpm(ecosystem, this.rootDir);
     } else {
       throw new Error(`No scanner implemented for ecosystem: ${ecosystem}`);
     }

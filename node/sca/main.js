@@ -5,15 +5,27 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun
+ *   engine    : npm | pnpm | bun | docker
  *   mode      : check | install | health | init | threshold | block-unknown
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
  *     block-unknown <true|false> — set block_unknown_vulnerabilities
  *
+ *   Docker mode (`docker` engine only supports `health`):
+ *     node src/main.js docker health <image> [--no-pull] [--keep]
+ *
+ *     Pulls (or reuses a local) image, creates a stopped container — never
+ *     runs its ENTRYPOINT/CMD — exports its filesystem to a temp dir, and
+ *     scans that dir exactly like any other project root: OS packages via
+ *     LinuxHostScanner (scan_os) plus every ecosystem's app dependencies
+ *     (full_stack). Safe to point at an unvetted base image pre-deploy.
+ *     `--no-pull` scans an image that only exists locally (e.g. right after
+ *     `docker build`, before it's pushed). `--keep` skips cleanup of the
+ *     extracted rootfs for debugging.
+ *
  * ── Programmatic usage (agent, platform, VS Code extension) ──────────────────
- *   import { main } from "./main.js";
+ *   import { main, dockerScan } from "./main.js";
  *
  *   await main({
  *     projectRoot : "/abs/path",   // cwd() when omitted
@@ -29,11 +41,14 @@
  *     is_vscanned_project : false,
  *   });
  *
+ *   await dockerScan({ image: "node:20-alpine" });
+ *
  * ── check/install support matrix ─────────────────────────────────────────────
  *   npm  — yes  (--package-lock-only dry-run)
  *   pnpm — yes  (--lockfile-only dry-run)
  *   bun  — yes  (--lockfile-only dry-run, node_modules untouched)
  *   yarn — no   (no lockfile-only equivalent; yarn add always writes node_modules)
+ *   docker — n/a (docker only supports `health`; check/install don't apply to images)
  */
 
 import path from "path";
@@ -41,6 +56,7 @@ import { UbelEngineInstance, PolicyViolationError } from "./engine.js";
 import { NodeManagerInstance }  from "./node_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
+import { DockerImageScanner }    from "./docker_runner.js";
 
 import fs from 'node:fs/promises';
 
@@ -164,6 +180,46 @@ async function main(programmaticOptions) {
     process.exit(1);
   }
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // DOCKER ENGINE
+  // Called by: bin/docker.js
+  // Scans an image's extracted filesystem rather than the CLI's cwd, so it
+  // branches out here before resolvedRoot/manager/eng get built against cwd.
+  // ════════════════════════════════════════════════════════════════════════════
+  if (engine === "docker") {
+    if (mode !== "health" && mode !== "check" && mode !== "install") {
+      console.error(`[!] Invalid mode '${mode}' for the docker engine. Supported: health | check | install.`);
+      console.error("[!] Usage: ubel-docker <health|check|install> <image> [--no-pull] [--keep]");
+      process.exit(1);
+    }
+
+    const [image, ...flags] = extraArgs;
+    if (!image) {
+      console.error("Usage: ubel-docker <health|check|install> <image> [--no-pull] [--keep]");
+      console.error("  e.g. ubel-docker health node:20-alpine");
+      console.error("  e.g. ubel-docker check  node:20-alpine   # pull, scan, always remove the image after");
+      console.error("  e.g. ubel-docker install node:20-alpine  # pull, scan, remove the image only if policy blocks it");
+      process.exit(1);
+    }
+
+    try {
+      await dockerScan({
+        image,
+        mode,
+        pull: !flags.includes("--no-pull"),
+        keep: flags.includes("--keep"),
+      });
+    } catch (err) {
+      if (err instanceof PolicyViolationError) {
+        process.exit(1);
+      }
+      console.error("[!] Docker scan failed:", err.message);
+      if (process.env.DEBUG) console.error(err.stack);
+      process.exit(1);
+    }
+    return;
+  }
+
   // The CLI always operates in the current working directory.
   const resolvedRoot = path.resolve(process.cwd());
 
@@ -262,6 +318,86 @@ async function main(programmaticOptions) {
  */
 export async function scan_project(projectRoot, options = {}) {
   return main({ projectRoot, ...options });
+}
+
+/**
+ * dockerScan() — pulls (or reuses a local) image, extracts its filesystem to
+ * a temp dir, and recurses into main()'s own programmatic path against that
+ * dir with scan_os + full_stack forced on — same eng.scan() pipeline every
+ * other engine goes through, just with an image's rootfs as projectRoot
+ * instead of a repo checkout or the live host.
+ *
+ * `docker create` never runs the image's ENTRYPOINT/CMD, so this is safe to
+ * point at an unvetted base image before it's pushed or deployed anywhere.
+ *
+ * The scan itself is identical across modes — mode only changes what happens
+ * to the *pulled image* afterward, mirroring the npm/pnpm/bun health-check-
+ * install split but adapted to "pull an image" having no dry-run equivalent
+ * (there's nothing to resolve-without-writing the way a lockfile install
+ * does — the image is either on the machine or it isn't):
+ *   - health  — scan only. The image is left exactly as it was found.
+ *   - check   — scan, then always `docker rmi` the image afterward,
+ *               regardless of the policy decision. Nothing persists locally
+ *               beyond the report.
+ *   - install — scan, then `docker rmi` the image only if the scan resulted
+ *               in a policy block. A clean scan leaves the image in place.
+ *
+ * @param {object}  opts
+ * @param {string}  opts.image           Anything `docker pull`/`docker create` accepts.
+ * @param {boolean} [opts.pull=true]     Run `docker pull` first. Set false to scan an
+ *                                       image that only exists locally (e.g. right
+ *                                       after `docker build`, before it's pushed).
+ * @param {boolean} [opts.keep=false]    Skip cleanup of the extracted rootfs, and skip
+ *                                       any image removal check/install would otherwise
+ *                                       do (debugging).
+ * @param {"health"|"check"|"install"} [opts.mode="health"]
+ * @returns {Promise<object>} same report shape main()/eng.scan() already returns.
+ */
+export async function dockerScan({ image, pull = true, keep = false, mode = "health", ...rest }) {
+  if (!image) throw new Error("dockerScan requires an `image` reference");
+
+  const scanner = new DockerImageScanner(image);
+  let report;
+  let violated = false;
+
+  try {
+    const rootDir = await scanner.extract({ pull });
+
+    try {
+      report = await main({
+        projectRoot:  rootDir,
+        engine:       "docker",
+        mode:         "health", // the scan pipeline itself is the same regardless of CLI mode; only image retention differs below
+        is_script:    false,
+        save_reports: true,
+        scan_os:      true,
+        full_stack:   true,
+        scan_scope:   "container-image",
+        ...rest,
+      });
+    } catch (err) {
+      if (err instanceof PolicyViolationError) violated = true;
+      throw err; // still propagate so the CLI's own exit-code handling fires
+    }
+  } finally {
+    if (keep) {
+      console.log(`[docker] --keep set, leaving extracted rootfs at ${scanner.rootDir}`);
+    } else {
+      scanner.cleanup();
+    }
+
+    if (!keep) {
+      if (mode === "check") {
+        scanner.removeImage();
+      } else if (mode === "install" && violated) {
+        console.log("[docker] policy violation — removing image");
+        scanner.removeImage();
+      }
+      // health, or install with no violation: image stays on the machine.
+    }
+  }
+
+  return report;
 }
 
 export { main as SCA_scan };

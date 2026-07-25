@@ -2195,6 +2195,11 @@ export class UbelEngineInstance {
       full_stack,
       scan_os: options.scan_os ?? options.os_scan,
       scan_node: options.scan_node ?? true,
+      // Threaded through so getInstalled() can tell "scan_os against an
+      // extracted container rootfs" apart from "scan_os against the live
+      // host" — those need different scanners regardless of what OS the
+      // CLI itself happens to be running on. See node_runner.js.
+      scan_scope,
     };
 
     const ecosystems = new Set();
