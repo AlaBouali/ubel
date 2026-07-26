@@ -264,9 +264,11 @@ export class PhpComposerScanner {
             visited.add(key);
             raw.push(...this._scanProject(full));
           }
-          // Don't descend into a detected project root – its vendor/ is
-          // already handled. Walk sibling dirs only.
-          continue;
+          // Still descend — its own vendor/ is already excluded by the
+          // ignore list above, so this only picks up genuinely nested
+          // composer.json projects (e.g. a monorepo with packages/foo
+          // having its own composer.json + vendor), not a re-walk of
+          // the project we just scanned.
         }
 
         walk(full);

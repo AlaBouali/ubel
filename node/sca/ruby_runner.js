@@ -336,7 +336,10 @@ export class RubyBundlerScanner {
             visited.add(key);
             raw.push(...this._scanProject(full));
           }
-          continue;
+          // Still descend — monorepos commonly contain more than one
+          // independent Bundler project nested in the tree (e.g. multiple
+          // Rails apps under apps/*), each with its own Gemfile.lock.
+          // `visited` prevents re-scanning the same root twice.
         }
 
         walk(full);

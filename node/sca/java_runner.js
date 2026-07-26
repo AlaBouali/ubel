@@ -309,9 +309,12 @@ export class JavaMavenScanner {
           // _scanProject will add full to visited on first call;
           // multi-module recursion reuses the same set so no double-scan.
           raw.push(...this._scanProject(full, visited));
-          // Do NOT recurse further into a Maven root — _scanProject follows
-          // <modules> itself.
-          continue;
+          // Still descend — <modules> covers declared multi-module
+          // aggregation, but monorepos also commonly contain independent
+          // Maven projects nested in the tree with no aggregator pom at
+          // all. `visited` (checked at the top of _scanProject) prevents
+          // any project already picked up via <modules> from being
+          // scanned again here.
         }
 
         walk(full);

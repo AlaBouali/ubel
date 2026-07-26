@@ -393,7 +393,10 @@ export class CSharpNuGetScanner {
             visited.add(key);
             raw.push(...this._scanProject(full));
           }
-          continue;
+          // Still descend – monorepo solution folders commonly nest another
+          // project a level or two below one that was just scanned (e.g.
+          // src/Service/SubModule/SubModule.csproj). `visited` guards against
+          // re-scanning the same root twice.
         }
 
         walk(full);
