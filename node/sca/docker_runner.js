@@ -37,6 +37,12 @@ import { spawnSync } from "child_process";
 
 const SUBPROCESS_TIMEOUT = 10 * 60 * 1000; // 10 min — image pulls/exports can be slow/large
 
+// extractTarPure streams the tar via a file descriptor rather than loading
+// it into memory, so peak memory is bounded by these two constants instead
+// of by the size of the tar or of any single entry in it.
+const TAR_CHUNK_SIZE = 1024 * 1024; // 1 MiB — read/write granularity for regular file data
+const TAR_MAX_METADATA_SIZE = 1024 * 1024; // 1 MiB cap on GNU longname/PAX header payloads (paths only — never legitimately larger)
+
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, {
     encoding: "utf8",
@@ -75,12 +81,46 @@ function readOctal(buf, start, len) {
  * sockets) is skipped. No third-party tar library — built-in Buffer
  * parsing only.
  *
+ * Resource use is bounded regardless of tar size or individual entry size:
+ * the archive is read via a file descriptor (fs.readSync at explicit
+ * offsets) rather than fs.readFileSync, and each regular file's content is
+ * streamed straight from the tar to its destination path in fixed
+ * TAR_CHUNK_SIZE pieces rather than being buffered whole. A multi-GB image
+ * layer or a multi-GB single file inside it no longer costs multi-GB of
+ * resident memory — peak memory stays roughly TAR_CHUNK_SIZE plus whatever
+ * the current header/metadata entry needs.
+ *
  * @param {string} tarPath  Path to the tar file on disk.
  * @param {string} destDir  Directory to extract into (must already exist).
  * @returns {{regularCount:number, dirCount:number, linkCount:number, resolvedLinks:number, skipCount:number, writeFailCount:number, writeFailures:Array<{relPath:string,reason:string}>}}
  */
 function extractTarPure(tarPath, destDir) {
-  const buf = fs.readFileSync(tarPath);
+  // Stream from disk via a file descriptor instead of fs.readFileSync —
+  // the old approach pulled the whole tar into memory, so peak memory
+  // scaled with the size of the entire uncompressed image (multi-GB for
+  // many real images). Header blocks and file data are now read on demand
+  // with explicit-offset fs.readSync calls, keeping memory bounded by
+  // TAR_CHUNK_SIZE regardless of how large the tar or any entry in it is.
+  const fd = fs.openSync(tarPath, "r");
+  const tarSize = fs.fstatSync(fd).size;
+  const header = Buffer.allocUnsafe(512);
+  const chunkBuf = Buffer.allocUnsafe(TAR_CHUNK_SIZE);
+
+  // Reads exactly `length` bytes from the tar at absolute file position
+  // `filePos` into `destBuf` starting at index 0. Loops because a single
+  // fs.readSync isn't guaranteed to fill the request. Returns the number
+  // of bytes actually read — less than `length` only at a truncated or
+  // corrupt end-of-file.
+  function readAt(destBuf, filePos, length) {
+    let readSoFar = 0;
+    while (readSoFar < length) {
+      const n = fs.readSync(fd, destBuf, readSoFar, length - readSoFar, filePos + readSoFar);
+      if (n === 0) break; // EOF
+      readSoFar += n;
+    }
+    return readSoFar;
+  }
+
   let offset = 0;
   let overrideName = null;
   let overrideLinkname = null;
@@ -89,103 +129,137 @@ function extractTarPure(tarPath, destDir) {
   let writeFailCount = 0;
   const writeFailures = []; // sample of {relPath, reason}, capped for logging
 
-  while (offset + 512 <= buf.length) {
-    let allZero = true;
-    for (let i = 0; i < 512; i++) { if (buf[offset + i] !== 0) { allZero = false; break; } }
-    if (allZero) break; // end-of-archive marker
+  try {
+    while (offset + 512 <= tarSize) {
+      const headerRead = readAt(header, offset, 512);
+      if (headerRead < 512) break; // truncated archive — don't parse a partial header
 
-    const h = offset;
-    let name = readString(buf, h, 100);
-    const size = readOctal(buf, h + 124, 12);
-    const typeflag = String.fromCharCode(buf[h + 156] || 48);
-    let linkname = readString(buf, h + 157, 100);
-    const magic = readString(buf, h + 257, 6);
-    const prefix = magic.startsWith("ustar") ? readString(buf, h + 345, 155) : "";
+      let allZero = true;
+      for (let i = 0; i < 512; i++) { if (header[i] !== 0) { allZero = false; break; } }
+      if (allZero) break; // end-of-archive marker
 
-    const dataStart = h + 512;
-    const dataEnd = dataStart + size;
-    const paddedEnd = dataStart + Math.ceil(size / 512) * 512;
+      let name = readString(header, 0, 100);
+      const size = readOctal(header, 124, 12);
+      const typeflag = String.fromCharCode(header[156] || 48);
+      let linkname = readString(header, 157, 100);
+      const magic = readString(header, 257, 6);
+      const prefix = magic.startsWith("ustar") ? readString(header, 345, 155) : "";
 
-    if (overrideName) { name = overrideName; overrideName = null; }
-    else if (prefix) { name = prefix + "/" + name; }
-    if (overrideLinkname) { linkname = overrideLinkname; overrideLinkname = null; }
+      const dataStart = offset + 512;
+      const paddedEnd = dataStart + Math.ceil(size / 512) * 512;
 
-    if (typeflag === "L") { // GNU long name — payload is the *next* entry's real name
-      overrideName = buf.toString("utf8", dataStart, dataStart + size).replace(/\0+$/, "");
-      offset = paddedEnd; continue;
-    }
-    if (typeflag === "K") { // GNU long linkname
-      overrideLinkname = buf.toString("utf8", dataStart, dataStart + size).replace(/\0+$/, "");
-      offset = paddedEnd; continue;
-    }
-    if (typeflag === "x" || typeflag === "g") { // PAX extended header
-      // Parsed directly off the buffer, not a decoded string: PAX record
-      // format is "<byte-length> <key>=<value>\n", and that length prefix
-      // is a BYTE count. A record's value can contain multi-byte UTF-8
-      // (accented filenames are common in ca-certificates packages) — if
-      // we decode the whole block to a JS string first and then slice by
-      // character index, one multi-byte char makes every subsequent slice
-      // in the block land on the wrong byte, and the corruption silently
-      // carries into every entry parsed after this header. Slicing the
-      // buffer directly and only UTF-8-decoding each already-correct
-      // byte range avoids that entirely.
-      let p = dataStart;
-      let paxPath = null, paxLink = null;
-      while (p < dataEnd) {
-        let sp = p;
-        while (sp < dataEnd && buf[sp] !== 0x20 /* ' ' */) sp++;
-        if (sp >= dataEnd) break;
-        const len = parseInt(buf.toString("ascii", p, sp), 10);
-        if (!len || len <= 0) break;
-        const recordEnd = p + len; // exclusive; includes the record's own trailing \n
-        if (recordEnd > dataEnd) break; // truncated/corrupt — stop rather than misread
-        const eq = buf.indexOf(0x3d /* '=' */, sp + 1);
-        if (eq === -1 || eq >= recordEnd) { p = recordEnd; continue; }
-        const key = buf.toString("utf8", sp + 1, eq);
-        const val = buf.toString("utf8", eq + 1, recordEnd - 1); // -1 drops the trailing \n
-        if (key === "path") paxPath = val;
-        if (key === "linkpath") paxLink = val;
-        p = recordEnd;
+      if (overrideName) { name = overrideName; overrideName = null; }
+      else if (prefix) { name = prefix + "/" + name; }
+      if (overrideLinkname) { linkname = overrideLinkname; overrideLinkname = null; }
+
+      if (typeflag === "L" || typeflag === "K" || typeflag === "x" || typeflag === "g") {
+        // GNU long name/linkname and PAX extended headers carry only
+        // metadata (paths) — never legitimately more than a few KB. Cap
+        // what we'll buffer for them so a corrupt or hostile archive can't
+        // force a large in-memory allocation just by lying about this
+        // entry's size.
+        if (size > TAR_MAX_METADATA_SIZE) {
+          offset = paddedEnd;
+          continue;
+        }
+        const metaBuf = Buffer.allocUnsafe(size);
+        readAt(metaBuf, dataStart, size);
+
+        if (typeflag === "L") { // GNU long name — payload is the *next* entry's real name
+          overrideName = metaBuf.toString("utf8", 0, size).replace(/\0+$/, "");
+        } else if (typeflag === "K") { // GNU long linkname
+          overrideLinkname = metaBuf.toString("utf8", 0, size).replace(/\0+$/, "");
+        } else { // PAX extended header ('x'/'g')
+          // Parsed directly off the buffer, not a decoded string: PAX record
+          // format is "<byte-length> <key>=<value>\n", and that length prefix
+          // is a BYTE count. A record's value can contain multi-byte UTF-8
+          // (accented filenames are common in ca-certificates packages) — if
+          // we decode the whole block to a JS string first and then slice by
+          // character index, one multi-byte char makes every subsequent slice
+          // in the block land on the wrong byte, and the corruption silently
+          // carries into every entry parsed after this header. Slicing the
+          // buffer directly and only UTF-8-decoding each already-correct
+          // byte range avoids that entirely.
+          let p = 0;
+          let paxPath = null, paxLink = null;
+          while (p < size) {
+            let sp = p;
+            while (sp < size && metaBuf[sp] !== 0x20 /* ' ' */) sp++;
+            if (sp >= size) break;
+            const len = parseInt(metaBuf.toString("ascii", p, sp), 10);
+            if (!len || len <= 0) break;
+            const recordEnd = p + len; // exclusive; includes the record's own trailing \n
+            if (recordEnd > size) break; // truncated/corrupt — stop rather than misread
+            const eq = metaBuf.indexOf(0x3d /* '=' */, sp + 1);
+            if (eq === -1 || eq >= recordEnd) { p = recordEnd; continue; }
+            const key = metaBuf.toString("utf8", sp + 1, eq);
+            const val = metaBuf.toString("utf8", eq + 1, recordEnd - 1); // -1 drops the trailing \n
+            if (key === "path") paxPath = val;
+            if (key === "linkpath") paxLink = val;
+            p = recordEnd;
+          }
+          if (paxPath) overrideName = paxPath;
+          if (paxLink) overrideLinkname = paxLink;
+        }
+        offset = paddedEnd;
+        continue;
       }
-      if (paxPath) overrideName = paxPath;
-      if (paxLink) overrideLinkname = paxLink;
-      offset = paddedEnd; continue;
-    }
 
-    const relPath = name.replace(/^\.?\/+/, "");
-    // Guard against path traversal from a hostile/corrupt archive.
-    if (!relPath || relPath.split(/[/\\]/).includes("..")) { offset = paddedEnd; continue; }
-    const destPath = path.join(destDir, relPath);
+      const relPath = name.replace(/^\.?\/+/, "");
+      // Guard against path traversal from a hostile/corrupt archive.
+      if (!relPath || relPath.split(/[/\\]/).includes("..")) { offset = paddedEnd; continue; }
+      const destPath = path.join(destDir, relPath);
 
-    // Any single write below can fail for reasons that have nothing to do
-    // with the archive being malformed: Windows rejects ':', '*', '?', '"',
-    // '<', '>', '|' in filenames (Debian's man pages routinely have '::' in
-    // Perl module names — Dpkg::Arch.3perl.gz is a real one), reserved
-    // device names (CON, NUL, ...), and paths past MAX_PATH in some
-    // configurations. None of that should take down extraction of the
-    // other several thousand entries in the archive — those files are
-    // irrelevant to manifest-based scanning anyway. Skip and count instead
-    // of throwing.
-    try {
-      if (typeflag === "5") {
-        fs.mkdirSync(destPath, { recursive: true });
-        dirCount++;
-      } else if (typeflag === "0" || typeflag === "\0") {
-        fs.mkdirSync(path.dirname(destPath), { recursive: true });
-        fs.writeFileSync(destPath, buf.subarray(dataStart, dataEnd));
-        regularCount++;
-      } else if (typeflag === "1" || typeflag === "2") {
-        links.push({ relPath, linkname, hard: typeflag === "1" });
-        linkCount++;
-      } else {
-        skipCount++; // device/fifo/socket — irrelevant to manifest-based scanning
+      // Any single write below can fail for reasons that have nothing to do
+      // with the archive being malformed: Windows rejects ':', '*', '?', '"',
+      // '<', '>', '|' in filenames (Debian's man pages routinely have '::' in
+      // Perl module names — Dpkg::Arch.3perl.gz is a real one), reserved
+      // device names (CON, NUL, ...), and paths past MAX_PATH in some
+      // configurations. None of that should take down extraction of the
+      // other several thousand entries in the archive — those files are
+      // irrelevant to manifest-based scanning anyway. Skip and count instead
+      // of throwing.
+      try {
+        if (typeflag === "5") {
+          fs.mkdirSync(destPath, { recursive: true });
+          dirCount++;
+        } else if (typeflag === "0" || typeflag === "\0") {
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          // Stream this entry's content straight from the tar to disk in
+          // fixed TAR_CHUNK_SIZE pieces instead of buffering the whole
+          // file — otherwise a single large layer file (model weights, a
+          // bundled binary, an uncompressed asset) would push resident
+          // memory up by that file's full size on top of everything else.
+          const outFd = fs.openSync(destPath, "w");
+          try {
+            let remaining = size;
+            let readPos = dataStart;
+            while (remaining > 0) {
+              const n = readAt(chunkBuf, readPos, Math.min(TAR_CHUNK_SIZE, remaining));
+              if (n === 0) break; // truncated archive — write what we got and stop
+              fs.writeSync(outFd, chunkBuf, 0, n);
+              remaining -= n;
+              readPos += n;
+            }
+          } finally {
+            fs.closeSync(outFd);
+          }
+          regularCount++;
+        } else if (typeflag === "1" || typeflag === "2") {
+          links.push({ relPath, linkname, hard: typeflag === "1" });
+          linkCount++;
+        } else {
+          skipCount++; // device/fifo/socket — irrelevant to manifest-based scanning
+        }
+      } catch (err) {
+        writeFailCount++;
+        if (writeFailures.length < 20) writeFailures.push({ relPath, reason: err.message });
       }
-    } catch (err) {
-      writeFailCount++;
-      if (writeFailures.length < 20) writeFailures.push({ relPath, reason: err.message });
-    }
 
-    offset = paddedEnd;
+      offset = paddedEnd;
+    }
+  } finally {
+    fs.closeSync(fd);
   }
 
   // Second pass: resolve link entries to plain content copies now that
@@ -260,6 +334,19 @@ export class DockerImageScanner {
   /**
    * @param {string} image  Any reference `docker pull`/`docker create` accepts:
    *                        "node:20-alpine", "myregistry.io/team/app@sha256:...", etc.
+   *                        OR a path to a local, uncompressed .tar file (e.g. from a
+   *                        prior `docker save`/`docker export`, or a CI artifact) —
+   *                        auto-detected by a ".tar" extension that resolves to an
+   *                        existing file. In that case extract() skips
+   *                        pull/create/export entirely and extracts the given tar
+   *                        directly; the file is never modified or deleted (only tars
+   *                        this class creates itself via `docker export` are cleaned
+   *                        up). Compressed tarballs (.tar.gz/.tgz) are NOT matched
+   *                        here and fall through to being treated as an image
+   *                        reference — extractTarPure only reads uncompressed ustar/
+   *                        GNU tar, and silently mis-parsing a gzip header as tar data
+   *                        would fail confusingly deep inside the parser instead of
+   *                        with a clear error up front.
    */
   constructor(image) {
     // Every docker invocation below places this positionally where an image
@@ -272,49 +359,74 @@ export class DockerImageScanner {
     if (typeof image !== "string" || image.startsWith("-")) {
       throw new Error(`Invalid image reference '${image}': must not start with '-'`);
     }
+
+    let isTarFile = false;
+    try {
+      isTarFile = image.toLowerCase().endsWith(".tar") && fs.statSync(image).isFile();
+    } catch {
+      isTarFile = false; // doesn't exist / not accessible — treat as an image reference
+    }
+
     this.image        = image;
+    this.isTarFile     = isTarFile;
     this.containerId  = null;
     this.rootDir       = null;
-    this._tarPath      = null;
+    this._tarPath      = isTarFile ? path.resolve(image) : null;
+    // Only a tar this class produces itself (via `docker export`) is ours
+    // to delete in cleanup() — a tar the caller pointed us at is their
+    // file, and removing it out from under them would be a bad surprise.
+    this._tarPathIsOwned = !isTarFile;
   }
 
   /**
-   * Pulls the image (unless skipped), creates a stopped container from it,
-   * and extracts its filesystem into a fresh temp directory.
+   * For an image reference: pulls it (unless skipped), creates a stopped
+   * container from it, and exports its filesystem to a tar. For a local
+   * .tar file (see constructor): skips all three steps and uses the given
+   * tar as-is. Either way, extracts the resulting tar's filesystem into a
+   * fresh temp directory.
    *
    * @param {object}  [opts]
    * @param {boolean} [opts.pull=true]  Run `docker pull` first. Set false to
    *                                    scan an image that only exists locally
    *                                    (e.g. just built with `docker build`,
-   *                                    not yet pushed).
+   *                                    not yet pushed). Ignored when scanning
+   *                                    a local .tar file — there's nothing to pull.
    * @returns {Promise<string>} Absolute path to the extracted rootfs.
    */
   async extract({ pull = true } = {}) {
-    if (pull) {
-      console.log(`[docker] Pulling ${this.image} ...`);
-      const pullRes = run("docker", ["pull", "--", this.image], { stdio: "inherit" });
-      if (pullRes.status !== 0) {
-        throw new Error(`docker pull failed for '${this.image}' (exit ${pullRes.status})`);
+    if (this.isTarFile) {
+      console.log(`[docker] Using local tar file ${this._tarPath} ...`);
+    } else {
+      if (pull) {
+        console.log(`[docker] Pulling ${this.image} ...`);
+        const pullRes = run("docker", ["pull", "--", this.image], { stdio: "inherit" });
+        if (pullRes.status !== 0) {
+          throw new Error(`docker pull failed for '${this.image}' (exit ${pullRes.status})`);
+        }
       }
-    }
 
-    console.log(`[docker] Creating container from ${this.image} (not starting it) ...`);
-    const createRes = run("docker", ["create", "--", this.image]);
-    if (createRes.status !== 0) {
-      throw new Error(`docker create failed for '${this.image}': ${(createRes.stderr || createRes.stdout || "").trim()}`);
+      console.log(`[docker] Creating container from ${this.image} (not starting it) ...`);
+      const createRes = run("docker", ["create", "--", this.image]);
+      if (createRes.status !== 0) {
+        throw new Error(`docker create failed for '${this.image}': ${(createRes.stderr || createRes.stdout || "").trim()}`);
+      }
+      this.containerId = createRes.stdout.trim();
     }
-    this.containerId = createRes.stdout.trim();
 
     const uuid = randomUUID();
     this.rootDir  = path.join(process.cwd(), ".ubel", uuid);
     fs.mkdirSync(this.rootDir, { recursive: true });
-    this._tarPath = path.join(process.cwd(), ".ubel", `${uuid}.tar`);
+    if (!this.isTarFile) {
+      this._tarPath = path.join(process.cwd(), ".ubel", `${uuid}.tar`);
+    }
 
     try {
-      console.log("[docker] Exporting filesystem ...");
-      const exportRes = run("docker", ["export", "-o", this._tarPath, this.containerId]);
-      if (exportRes.status !== 0) {
-        throw new Error(`docker export failed: ${(exportRes.stderr || exportRes.stdout || "").trim()}`);
+      if (!this.isTarFile) {
+        console.log("[docker] Exporting filesystem ...");
+        const exportRes = run("docker", ["export", "-o", this._tarPath, this.containerId]);
+        if (exportRes.status !== 0) {
+          throw new Error(`docker export failed: ${(exportRes.stderr || exportRes.stdout || "").trim()}`);
+        }
       }
 
       console.log(`[docker] Extracting to ${this.rootDir} ...`);
@@ -382,9 +494,14 @@ export class DockerImageScanner {
    * which only tears down the scan's scratch space (container/tar/rootfs).
    * Used by `check` (always, after scanning) and `install` (only when the
    * scan results in a policy block) to decide whether the image stays on
-   * the local machine after the scan is done.
+   * the local machine after the scan is done. A no-op when the scan
+   * source was a local .tar file — there's no pulled image to remove.
    */
   removeImage() {
+    if (this.isTarFile) {
+      console.log(`[docker] input was a local tar file (${this._tarPath}) — no pulled image to remove, skipping docker rmi`);
+      return;
+    }
     const res = run("docker", ["rmi", "-f", "--", this.image]);
     if (res.status !== 0) {
       console.warn(`[docker] could not remove image '${this.image}': ${(res.stderr || res.stdout || "").trim()}`);
@@ -393,13 +510,13 @@ export class DockerImageScanner {
     }
   }
 
-  /** Removes the container, the intermediate tar file, and the extracted rootfs. */
+  /** Removes the container, the intermediate tar file (if we created one), and the extracted rootfs. */
   cleanup() {
     if (this.containerId) {
       run("docker", ["rm", "-f", this.containerId]);
       this.containerId = null;
     }
-    if (this._tarPath && fs.existsSync(this._tarPath)) {
+    if (this._tarPathIsOwned && this._tarPath && fs.existsSync(this._tarPath)) {
       fs.rmSync(this._tarPath, { force: true });
     }
     if (this.rootDir && fs.existsSync(this.rootDir)) {

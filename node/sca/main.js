@@ -12,8 +12,8 @@
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
  *     block-unknown <true|false> — set block_unknown_vulnerabilities
  *
- *   Docker mode (`docker` engine only supports `health`):
- *     node src/main.js docker health <image> [--no-pull] [--keep]
+ *   Docker mode (`docker` engine supports `health`, `check`, and `install`):
+ *     node src/main.js docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
  *
  *     Pulls (or reuses a local) image, creates a stopped container — never
  *     runs its ENTRYPOINT/CMD — exports its filesystem to a temp dir, and
@@ -23,6 +23,23 @@
  *     `--no-pull` scans an image that only exists locally (e.g. right after
  *     `docker build`, before it's pushed). `--keep` skips cleanup of the
  *     extracted rootfs for debugging.
+ *
+ *     The scan pipeline itself is identical across modes — mode only
+ *     controls what happens to the image afterward:
+ *       health  — scan only, image left exactly as found.
+ *       check   — scan, then always remove the image afterward.
+ *       install — scan, then remove the image only if the scan results in
+ *                 a policy block; a clean scan leaves it in place.
+ *
+ *     In place of an image reference, <image|tar-path> also accepts a path
+ *     to a local, uncompressed .tar file (e.g. from a prior `docker save`/
+ *     `docker export`, or a CI artifact) — detected automatically by a
+ *     `.tar` extension that resolves to an existing file. That skips
+ *     `docker pull`/`docker create`/`docker export` entirely and extracts
+ *     the given tar directly; `--no-pull` is a no-op in that case, and
+ *     `check`/`install` won't attempt `docker rmi` since there's no pulled
+ *     image to remove. Compressed tarballs (.tar.gz/.tgz) aren't supported
+ *     — decompress first.
  *
  * ── Programmatic usage (agent, platform, VS Code extension) ──────────────────
  *   import { main, dockerScan } from "./main.js";
@@ -42,13 +59,14 @@
  *   });
  *
  *   await dockerScan({ image: "node:20-alpine" });
+ *   await dockerScan({ image: "/path/to/rootfs.tar" });  // local tar file, same API
  *
  * ── check/install support matrix ─────────────────────────────────────────────
- *   npm  — yes  (--package-lock-only dry-run)
- *   pnpm — yes  (--lockfile-only dry-run)
- *   bun  — yes  (--lockfile-only dry-run, node_modules untouched)
- *   yarn — no   (no lockfile-only equivalent; yarn add always writes node_modules)
- *   docker — n/a (docker only supports `health`; check/install don't apply to images)
+ *   npm    — yes  (--package-lock-only dry-run)
+ *   pnpm   — yes  (--lockfile-only dry-run)
+ *   bun    — yes  (--lockfile-only dry-run, node_modules untouched)
+ *   yarn   — no   (no lockfile-only equivalent; yarn add always writes node_modules)
+ *   docker — yes  (health/check/install all supported; see Docker mode above)
  */
 
 import path from "path";
@@ -189,16 +207,17 @@ async function main(programmaticOptions) {
   if (engine === "docker") {
     if (mode !== "health" && mode !== "check" && mode !== "install") {
       console.error(`[!] Invalid mode '${mode}' for the docker engine. Supported: health | check | install.`);
-      console.error("[!] Usage: ubel-docker <health|check|install> <image> [--no-pull] [--keep]");
+      console.error("[!] Usage: ubel-docker <health|check|install> <image|tar-path> [--no-pull] [--keep]");
       process.exit(1);
     }
 
     const [image, ...flags] = extraArgs;
     if (!image) {
-      console.error("Usage: ubel-docker <health|check|install> <image> [--no-pull] [--keep]");
+      console.error("Usage: ubel-docker <health|check|install> <image|tar-path> [--no-pull] [--keep]");
       console.error("  e.g. ubel-docker health node:20-alpine");
       console.error("  e.g. ubel-docker check  node:20-alpine   # pull, scan, always remove the image after");
       console.error("  e.g. ubel-docker install node:20-alpine  # pull, scan, remove the image only if policy blocks it");
+      console.error("  e.g. ubel-docker health /path/to/rootfs.tar  # scan a local tar directly, no docker pull/create/export");
       process.exit(1);
     }
 
@@ -343,7 +362,12 @@ export async function scan_project(projectRoot, options = {}) {
  *               in a policy block. A clean scan leaves the image in place.
  *
  * @param {object}  opts
- * @param {string}  opts.image           Anything `docker pull`/`docker create` accepts.
+ * @param {string}  opts.image           Anything `docker pull`/`docker create` accepts,
+ *                                       OR a path to a local, uncompressed .tar file
+ *                                       (auto-detected — see DockerImageScanner). In the
+ *                                       latter case `pull`/`--no-pull` has no effect and
+ *                                       `check`/`install` skip image removal (nothing was
+ *                                       pulled).
  * @param {boolean} [opts.pull=true]     Run `docker pull` first. Set false to scan an
  *                                       image that only exists locally (e.g. right
  *                                       after `docker build`, before it's pushed).
