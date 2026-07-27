@@ -6,7 +6,18 @@ import path from 'path';
 import {
   IGNORE_DIRS, EXT_FAMILY, FAMILY_LABELS, LANGUAGE_ALIASES, DEFAULT_LANGUAGES,
 } from './constants.js';
+import { detectConfigKind, familyForKind } from './configDetect.js';
 import { chunkFile } from './dispatcher.js';
+
+// Resolves a file's language family, falling back to filename/content-based
+// detection (Dockerfile, Compose, Terraform, Kubernetes, CloudFormation,
+// Ansible) for files EXT_FAMILY doesn't cover by extension alone.
+function resolveFileFamily(fullPath, ext) {
+  const family = EXT_FAMILY[ext];
+  if (family) return family;
+  const kind = detectConfigKind(fullPath);
+  return kind ? familyForKind(kind) : undefined;
+}
 
 function resolveLanguageSet(languages) {
   const families = new Set();
@@ -80,7 +91,7 @@ function buildChunks(targetPath, opts) {
         } else if (entry.isFile()) {
           if (skipFileSet.has(nameLower)) continue;
           const ext    = path.extname(entry.name).toLowerCase();
-          const family = EXT_FAMILY[ext];
+          const family = resolveFileFamily(fullPath, ext);
           if (family && langFamilies.has(family)) files.push(fullPath);
         }
       }
@@ -94,7 +105,7 @@ function buildChunks(targetPath, opts) {
 
   const byLang = {};
   for (const f of files) {
-    const family = EXT_FAMILY[path.extname(f).toLowerCase()] || 'unknown';
+    const family = resolveFileFamily(f, path.extname(f).toLowerCase()) || 'unknown';
     byLang[family] = (byLang[family] || 0) + 1;
   }
 

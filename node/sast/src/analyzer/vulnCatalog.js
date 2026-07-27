@@ -581,6 +581,150 @@ const DEFAULT_VULN_CLASSES = [
       'Business constraints (e.g., maximum order quantity, minimum age, unique email) not enforced server‑side before completing an operation',
     ],
   },
+  // ─── Docker (Dockerfile / Compose) ──────────────────────────────────────
+  {
+    name: 'container running as root',
+    cwe: 'CWE-250',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'Dockerfile has no USER instruction, so the container runs as root (UID 0) by default',
+      'USER instruction is present but sets `root` or `0` explicitly, or a USER that switches back to root later in the file',
+      'Compose service defines `user: root` / `user: "0"`, or omits `user:` for an image that itself defaults to root',
+      'RUN steps create a non-root user/group but no USER instruction ever switches to it before CMD/ENTRYPOINT',
+    ],
+  },
+  {
+    name: 'privileged container / excessive Docker capabilities',
+    cwe: 'CWE-250',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'Compose service sets `privileged: true`',
+      'Compose service sets `cap_add: [ALL]` or adds dangerous capabilities individually (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, SYS_MODULE)',
+      'Compose service shares the host namespace: `network_mode: host`, `pid: host`, `ipc: host`',
+      'Compose service bind-mounts the Docker socket into the container (`/var/run/docker.sock:/var/run/docker.sock`), granting effective host root',
+      'Compose service sets `security_opt: [seccomp:unconfined]` or disables AppArmor/SELinux confinement',
+    ],
+  },
+  {
+    name: 'hardcoded secret in Docker image or Compose file',
+    cwe: 'CWE-798',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'ENV or ARG instruction assigns a literal password, API key, token, or private key value baked permanently into the image layer history',
+      'RUN instruction echoes or writes credentials into a file inside the image instead of mounting them at runtime',
+      'COPY of a credentials file (.env, .npmrc, id_rsa, credentials.json, .aws/credentials) into the image without a corresponding multi-stage step that discards it before the final stage',
+      'Compose `environment:`/`env_file:` blocks contain literal secret values (as opposed to referencing an external secret store or `secrets:` mechanism)',
+      'ARG used to pass a secret at build time without `--secret`/BuildKit secret mounts, leaving it recoverable from `docker history`',
+    ],
+  },
+  {
+    name: 'unpinned or unsafe base image',
+    cwe: 'CWE-1104',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'FROM instruction with no tag (defaults to `:latest`) or an explicit `:latest` tag, making builds non-reproducible and silently pulling in new vulnerabilities over time',
+      'FROM instruction pulling from an unofficial, unverified, or third-party registry/namespace with no digest pin (`@sha256:...`) for a base image handling sensitive workloads',
+      'Compose `image:` reference with no tag or `:latest`',
+    ],
+  },
+  {
+    name: 'insecure ADD / untrusted remote content',
+    cwe: 'CWE-494',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'ADD instruction fetching a remote URL directly into the image without any checksum/signature verification step afterward',
+      'ADD used instead of COPY for local files with no archive-extraction need — masks intent and, for tar archives, auto-extracts (potential Zip-Slip-style path traversal if the archive is untrusted)',
+      'Remote script fetched via ADD/RUN curl|wget and piped directly into `sh`/`bash` without pinning a version or verifying a hash/signature',
+    ],
+  },
+  {
+    name: 'sensitive Docker volume or bind mount exposure',
+    cwe: 'CWE-732',
+    needsUserInput: false,
+    languages: ['docker'],
+    signals: [
+      'Compose bind-mounts the host root, `/etc`, `/proc`, `/var/run/docker.sock`, or another sensitive host path into the container',
+      'Volume mounted read-write where the container only needs read access (missing `:ro` on a mount that should be read-only)',
+      'Compose service exposes ports by binding `0.0.0.0` (or omitting a host IP, which defaults to all interfaces) for a service that should only be reachable internally (e.g. a database with no `expose`-only / internal network restriction)',
+    ],
+  },
+  // ─── Infrastructure as Code (Terraform / Kubernetes / CloudFormation / Ansible) ───
+  {
+    name: 'publicly exposed cloud resource',
+    cwe: 'CWE-284',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'Storage bucket / blob container resource with public-read or public-read-write ACL, or a bucket policy with `Principal: "*"` and no condition restricting it',
+      'Security group / firewall rule with ingress `cidr_blocks = ["0.0.0.0/0"]` (or `::/0`) on a sensitive port (22, 3389, 3306, 5432, 6379, 9200, 27017)',
+      'Database or cache instance resource with `publicly_accessible = true` and no compensating network ACL',
+      'Kubernetes Service of `type: LoadBalancer` or `NodePort` exposing an internal-only workload (databases, admin panels) without an accompanying NetworkPolicy',
+    ],
+  },
+  {
+    name: 'hardcoded secret in IaC template or variable',
+    cwe: 'CWE-798',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'Terraform resource argument or `variable` block `default` containing a literal password, API key, private key, or connection string instead of referencing a secrets manager / `sensitive = true` variable with no default',
+      'Kubernetes Secret manifest with `data`/`stringData` containing a real-looking credential checked into source rather than sealed/external-secret referenced',
+      'CloudFormation template parameter with `Default` set to a literal secret instead of using `NoEcho` + external injection, or a resource property embedding a credential directly',
+      'Ansible playbook/vars file with a plaintext password/token instead of Ansible Vault or a lookup against an external secret store',
+    ],
+  },
+  {
+    name: 'disabled encryption at rest or in transit (IaC)',
+    cwe: 'CWE-311',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'Storage/database/queue resource explicitly setting `encrypted = false` / `storage_encrypted = false`, or omitting encryption entirely for a resource type where it defaults to off',
+      'Load balancer / API Gateway / ingress resource allowing plain HTTP (no `redirect to HTTPS`, no `tls:` block, or `require_ssl`/`ssl_enforcement` disabled)',
+      'CloudFormation/Terraform resource for a data store missing a KMS key / `kms_key_id` where encryption is configured but with default/weak key management',
+    ],
+  },
+  {
+    name: 'overly permissive IAM policy or RBAC',
+    cwe: 'CWE-269',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'IAM policy document with `Action: "*"` and/or `Resource: "*"` (wildcard privilege escalation risk), or `AdministratorAccess` attached to a role/user that does not need it',
+      'Trust policy (assume-role) with an overly broad Principal (e.g. `*` or an entire AWS account) instead of a scoped role/service principal',
+      'Kubernetes ClusterRoleBinding/RoleBinding granting `cluster-admin` (or a Role with wildcard `verbs`/`resources`/`apiGroups`) to a workload ServiceAccount that does not need it',
+      'Ansible task running with `become: true` unconditionally for the whole play rather than the specific task that needs elevation',
+    ],
+  },
+  {
+    name: 'insecure Kubernetes pod security context',
+    cwe: 'CWE-250',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'Pod/container spec missing `securityContext` or explicitly setting `allowPrivilegeEscalation: true`, `privileged: true`, or `runAsNonRoot: false`/omitted (defaults to root)',
+      'Container spec sets `hostNetwork: true`, `hostPID: true`, or `hostIPC: true`, breaking namespace isolation from the node',
+      'Container `capabilities.add` includes `SYS_ADMIN`, `NET_ADMIN`, or `ALL` without justification',
+      'Pod mounts the host filesystem via `hostPath` volume (especially `/`, `/var/run/docker.sock`, or `/etc`) instead of a scoped PVC/ConfigMap',
+      'No `resources.limits` set (missing CPU/memory limits), allowing a single pod to exhaust node resources',
+    ],
+  },
+  {
+    name: 'insecure network exposure or unencrypted state (Terraform)',
+    cwe: 'CWE-200',
+    needsUserInput: false,
+    languages: ['iac'],
+    signals: [
+      'Terraform `backend` configuration storing state locally or in an unencrypted remote backend for a project handling secrets, with no `encrypt = true` (S3 backend) or equivalent',
+      'Output blocks or resource attributes marked to output sensitive values (passwords, keys, connection strings) without `sensitive = true`',
+      'Provider or resource configuration disabling TLS/certificate validation (`insecure = true`, `skip_tls_verify = true`, `verify_ssl = false`)',
+    ],
+  },
 ];
 
 // Maps the human-readable language label attached to chunks (see
@@ -601,6 +745,14 @@ const DISPLAY_LANG_TO_FAMILY = {
   'c#':       'csharp',
   c:          'c',
   'c++':      'c',
+  // Docker/IaC — keys match KIND_LABEL values (chunker/configDetect.js),
+  // lowercased, as set on chunk.language by analyzeSast.js/analyzeMalware.js.
+  dockerfile:       'docker',
+  'docker compose': 'docker',
+  terraform:        'iac',
+  kubernetes:       'iac',
+  cloudformation:   'iac',
+  ansible:          'iac',
 };
 
 // Filter the catalog down to the classes relevant to a given chunk's language.

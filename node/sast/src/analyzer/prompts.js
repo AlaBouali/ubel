@@ -1,6 +1,7 @@
 'use strict';
 
 import { buildVulnCatalog, filterVulnClassesForLanguage } from './vulnCatalog.js';
+import { KIND_FENCE_LANG } from '../chunker/configDetect.js';
 
 /**
  * Default prompt builder. Receives the enriched chunk and vuln class list.
@@ -76,7 +77,7 @@ CODE CHUNK
 Language  : ${chunk.language}
 Type      : ${chunk.type}
 
-\`\`\`${chunk.language.toLowerCase()}
+\`\`\`${KIND_FENCE_LANG[chunk.type] || chunk.language.toLowerCase()}
 ${chunk.code}
 \`\`\``;
 }

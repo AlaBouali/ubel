@@ -2,6 +2,7 @@
 
 import path from 'path';
 import { EXT_FAMILY } from './constants.js';
+import { detectDockerKind } from './configDetect.js';
 import { regexCanFollow, consumeRegexLiteral } from './regexliteral.js';
 
 // ─── Comment stripper ─────────────────────────────────────────────────────────
@@ -194,6 +195,45 @@ function stripCommentsCSharp(code) {
   return stripCommentsJS(code);
 }
 
+// Dockerfile / Compose / Kubernetes / CloudFormation / Ansible: the only
+// comment marker is '#', and — unlike shell — it's only treated as a comment
+// when it starts the line or follows whitespace. This matters because these
+// files commonly carry unquoted values containing '#' or '//' that are NOT
+// comments, e.g. `ENV API_URL=http://example.com/path#fragment` — a JS-style
+// stripper would wrongly truncate that at "//".
+function stripCommentsHash(code) {
+  const lines = code.split('\n');
+  const out   = [];
+  for (const line of lines) {
+    let result  = '';
+    let inStr   = false;
+    let strChar = '';
+    let i       = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (inStr) {
+        result += ch;
+        if (ch === '\\') { result += line[i + 1] || ''; i += 2; continue; }
+        if (ch === strChar) inStr = false;
+        i++; continue;
+      }
+      if (ch === '"' || ch === "'") { inStr = true; strChar = ch; result += ch; i++; continue; }
+      if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]))) break; // rest of line is a comment
+      result += ch; i++;
+    }
+    out.push(result);
+  }
+  return collapseBlankLines(out);
+}
+
+// Terraform/HCL: '#', '//', and '/* */' comments, all quote-aware — same
+// syntax PHP supports, so reuse that stripper. Unlike Dockerfile/YAML, HCL
+// string values are always quoted, so no whitespace-precedes-'#' heuristic
+// is needed here.
+function stripCommentsHcl(code) {
+  return stripCommentsPHP(code);
+}
+
 // Collapse more than one consecutive blank line into a single blank line
 function collapseBlankLines(lines) {
   const out = [];
@@ -210,9 +250,22 @@ function collapseBlankLines(lines) {
   return out.join('\n');
 }
 
-// Dispatch to the right stripper based on file extension
+// Dispatch to the right stripper based on file extension/name.
+// Terraform (.tf/.tfvars) and Dockerfile/Compose (filename-based, no
+// reliable extension) are checked before the EXT_FAMILY lookup since neither
+// is resolvable from extension alone. Kubernetes/CloudFormation/Ansible share
+// the ambiguous .yaml/.yml/.json extension with countless non-IaC files, but
+// all use '#'-only comments same as Dockerfile/Compose, so no content sniff
+// is needed here — just route any of those three extensions to the hash
+// stripper.
 function stripComments(code, filePath) {
-  const family = EXT_FAMILY[path.extname(filePath).toLowerCase()];
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (ext === '.tf' || ext === '.tfvars') return stripCommentsHcl(code);
+  if (detectDockerKind(filePath)) return stripCommentsHash(code);
+  if (ext === '.yaml' || ext === '.yml' || ext === '.json') return stripCommentsHash(code);
+
+  const family = EXT_FAMILY[ext];
   switch (family) {
     case 'python': return stripCommentsPython(code);
     case 'php':    return stripCommentsPHP(code);
@@ -238,5 +291,7 @@ export {
   stripCommentsJava,
   stripCommentsKotlin,
   stripCommentsCSharp,
+  stripCommentsHash,
+  stripCommentsHcl,
   collapseBlankLines,
 };

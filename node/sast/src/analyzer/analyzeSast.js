@@ -2,7 +2,7 @@
 
 import path from 'path';
 
-import { buildChunks, stripComments, DEFAULT_LANGUAGES  } from '../chunker/index.js';
+import { buildChunks, stripComments, DEFAULT_LANGUAGES, KIND_LABEL  } from '../chunker/index.js';
 import { PROVIDERS } from './providers.js';
 import { DEFAULT_VULN_CLASSES } from './vulnCatalog.js';
 import { defaultBuildPrompt } from './prompts.js';
@@ -168,7 +168,11 @@ async function analyzeSast(chunks, opts = {}) {
 
   const enriched  = resolvedChunks.map(c => ({
     ...c,
-    language: EXT_LANG[path.extname(c.file).toLowerCase()] || 'unknown',
+    // Docker/IaC chunks carry their specific kind ('dockerfile', 'terraform',
+    // 'kubernetes', ...) as chunk.type, set by chunkDocker/chunkIac — check
+    // that first since these files aren't resolvable by extension alone
+    // (Dockerfile has none; .yaml/.yml/.json is shared with everything else).
+    language: KIND_LABEL[c.type] || EXT_LANG[path.extname(c.file).toLowerCase()] || 'unknown',
   }));
 
   // ── Resolve diff file set when --only-diff is active ─────────────────────

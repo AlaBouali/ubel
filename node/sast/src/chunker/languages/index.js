@@ -10,6 +10,8 @@ import { chunkJava }   from './java.js';
 import { chunkKotlin } from './kotlin.js';
 import { chunkCSharp } from './csharp.js';
 import { chunkC }      from './c.js';
+import { chunkDocker } from './docker.js';
+import { chunkIac }    from './iac.js';
 
 export {
   chunkPython,
@@ -22,4 +24,6 @@ export {
   chunkKotlin,
   chunkCSharp,
   chunkC,
+  chunkDocker,
+  chunkIac,
 };

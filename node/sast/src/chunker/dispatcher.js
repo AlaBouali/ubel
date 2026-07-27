@@ -4,9 +4,11 @@ import fs   from 'fs';
 import path from 'path';
 
 import { EXT_FAMILY } from './constants.js';
+import { detectConfigKind, familyForKind } from './configDetect.js';
 import {
   chunkPython, chunkJS, chunkPHP, chunkRuby, chunkGo,
   chunkRust, chunkJava, chunkKotlin, chunkCSharp, chunkC,
+  chunkDocker, chunkIac,
 } from './languages/index.js';
 
 // ─── Dispatcher ───────────────────────────────────────────────────────────────
@@ -23,7 +25,16 @@ function chunkFile(filePath) {
 
   const lines  = content.split('\n');
   const ext    = path.extname(filePath).toLowerCase();
-  const family = EXT_FAMILY[ext];
+  let family = EXT_FAMILY[ext];
+
+  // Dockerfile/Compose (no reliable extension) and Kubernetes/CloudFormation/
+  // Ansible (share the ambiguous .yaml/.yml/.json extension) aren't in
+  // EXT_FAMILY — resolve those via filename/content detection instead.
+  // `content` is passed in so the yaml/json sniff reuses what's already read.
+  if (!family) {
+    const kind = detectConfigKind(filePath, content);
+    if (kind) family = familyForKind(kind);
+  }
 
   let chunks;
   switch (family) {
@@ -37,6 +48,8 @@ function chunkFile(filePath) {
     case 'kotlin': chunks = chunkKotlin(filePath, lines); break;
     case 'csharp': chunks = chunkCSharp(filePath, lines); break;
     case 'c':      chunks = chunkC(filePath, lines);      break;
+    case 'docker': chunks = chunkDocker(filePath, lines); break;
+    case 'iac':    chunks = chunkIac(filePath, lines);    break;
     default:       return [];
   }
 

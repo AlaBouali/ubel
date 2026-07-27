@@ -13,6 +13,12 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.kt', '.kts',
   '.cs',
   '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx',
+  '.tf', '.tfvars',
+  // .yaml/.yml/.json are deliberately NOT listed here — those extensions are
+  // shared with countless non-IaC files, so Kubernetes/CloudFormation/Ansible
+  // membership is decided by content sniff (see configDetect.js) rather than
+  // extension alone. Dockerfile/Compose have no reliable extension either
+  // and are matched by filename instead — see configDetect.js.
 ]);
 
 const IGNORE_DIRS = new Set([
@@ -24,6 +30,7 @@ const IGNORE_DIRS = new Set([
   '.gradle', '.idea', '.vs', 'packages',
   '.git', '.svn', '.hg',
   'coverage',
+  '.terraform',
 ]);
 
 const EXT_FAMILY = {
@@ -39,6 +46,12 @@ const EXT_FAMILY = {
   '.c':   'c',   '.h':   'c',
   '.cpp': 'c',   '.cc':  'c',   '.cxx': 'c',
   '.hpp': 'c',   '.hh':  'c',   '.hxx': 'c',
+  '.tf':  'iac', '.tfvars': 'iac',
+  // Dockerfile/Compose (no reliable extension) and .yaml/.yml/.json-based
+  // Kubernetes/CloudFormation/Ansible (ambiguous extension, needs content
+  // sniff) are NOT resolvable from extension alone — see configDetect.js.
+  // buildChunks.js and dispatcher.js fall back to detectConfigKind() for
+  // any file this table doesn't cover.
 };
 
 // Language family name → canonical label used in --languages filter
@@ -53,6 +66,8 @@ const FAMILY_LABELS = {
   kotlin: 'kotlin',
   csharp: 'csharp',
   c:      'c',
+  docker: 'docker',
+  iac:    'iac',
 };
 
 // Aliases accepted on the CLI / opts.languages
@@ -66,9 +81,14 @@ const LANGUAGE_ALIASES = {
   cs: 'csharp', 'c#': 'csharp', dotnet: 'csharp', '.net': 'csharp',
   net: 'csharp',
   cpp: 'c', 'c++': 'c', cxx: 'c', cc: 'c',
+  dockerfile: 'docker', compose: 'docker', 'docker-compose': 'docker',
+  terraform: 'iac', tf: 'iac', hcl: 'iac',
+  kubernetes: 'iac', k8s: 'iac',
+  cloudformation: 'iac', cfn: 'iac',
+  ansible: 'iac',
 };
 
-const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'c'];
+const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'c', 'docker', 'iac'];
 
 export {
   SUPPORTED_EXTENSIONS,
