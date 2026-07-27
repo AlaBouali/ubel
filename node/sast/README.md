@@ -236,7 +236,7 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 
 ## Supported Languages
 
-| Family | Extensions |
+| Family | Extensions/Files |
 |---|---|
 | Python | `.py` |
 | JavaScript / TypeScript | `.js` `.ts` `.mjs` `.cjs` |
@@ -248,6 +248,8 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 | Kotlin | `.kt` `.kts` |
 | C# | `.cs` |
 | C / C++ | `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` `.hxx` |
+| Docker | `Docker` `docker-compose.yml` |
+| IaC | `.tf` `.tfvars` |
 
 `--languages <a,b,c>` restricts a run to a subset of these families (e.g. `--languages python,go`).
 

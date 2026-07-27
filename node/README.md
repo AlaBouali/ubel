@@ -6,7 +6,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 
 - **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD, with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. This is the audit/reporting side — `health` mode reads what's already installed.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself: a lockfile-only dry-run is scanned *before* anything touches `node_modules`, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install.
-- **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants).
+- **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans the IaC and docker files, and detects exposed secrets.
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 

@@ -43,7 +43,10 @@ After installation, the following entry-point binaries are available:
 | `ubel-pnpm` | pnpm |
 | `ubel-bun` | bun |
 | `ubel-agent` | AI agent workspace scan ( OS, runtimes, tools, dependencies ) |
+| `ubel-cicd` | post-build scan ( OS, runtimes, tools, dependencies ) |
 | `ubel-platform` | Host platform scan (OS, runtimes, tools) |
+| `ubel-docker` | scan a given docker image's OS and dependencies |
+
 
 > **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only and cannot provide install-blocking firewall coverage for it.
 
@@ -84,6 +87,14 @@ Identical flow to npm, using pnpm's `--lockfile-only` flag. The candidate `pnpm-
 ### bun
 
 Uses bun's `--lockfile-only` flag. The candidate `bun.lock` is written and scanned before any `node_modules/` mutation. The revert path is identical to npm and pnpm.
+
+### docker
+
+`ubel-docker` scans a container image **without ever running it** – it creates a stopped container (`docker create`), exports its filesystem, and extracts the tar in‑process (no shell `tar`). This blocks path‑traversal attacks and never executes `ENTRYPOINT`/`CMD` or any scripts. The scan automatically includes OS packages (`scan_os: true`) and all application dependencies (`full_stack: true`). 
+Modes: 
+- `health` (scan only)
+- `check` (scan + always remove the image)
+- `install` (scan + remove only on policy violation). Also supports scanning a local `.tar` file directly (skip pull/export).
 
 ### UBEL's firewall always blocks pre/post install scripts to prevent running malicious scripts
 

@@ -15,7 +15,7 @@ async function run() {
       full_stack  : true,
       scan_os     : true,
       scan_node   : true,
-      scan_scope  : "agent",
+      scan_scope  : "cicd",
     });
 
     console.log(JSON.stringify(result, null, 2));
