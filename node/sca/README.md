@@ -26,6 +26,7 @@ scan_project
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
+- **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
 
 ---
 
@@ -46,6 +47,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-cicd` | post-build scan ( OS, runtimes, tools, dependencies ) |
 | `ubel-platform` | Host platform scan (OS, runtimes, tools) |
 | `ubel-docker` | scan a given docker image's OS and dependencies |
+| `ubel-secrets` | standalone secrets-only scan of a directory |
 
 
 > **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only and cannot provide install-blocking firewall coverage for it.
@@ -366,6 +368,39 @@ Each vulnerability record in the enriched report includes a `reachability` objec
 
 ---
 
+## Secrets Detection
+
+Every scan includes a secrets pass by default (`scan_secrets: true`), and it's also reachable standalone via `ubel-secrets`, which runs a secrets-only pass with no dependency resolution and no LLM calls:
+
+```bash
+ubel-secrets /path/to/project
+```
+
+### Ruleset
+
+The builtin ruleset (`sca/vendor/trivy/rules.js`, `sca/vendor/trivy/allow-rules.js`) is ported from [Trivy's](https://github.com/aquasecurity/trivy) built-in secret scanner (`pkg/fanal/secret/builtin-rules.go`), Apache-2.0, with full attribution in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE) and [`LICENSE`](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/LICENSE). It's kept in sync with Trivy's own upstream additions.
+
+On top of the ported set, `sca/secrets.js` defines an `extraRules` array covering credential types not present in Trivy's current builtin rules, including:
+
+- HashiCorp Vault tokens (`hvs.` prefix)
+- Google Cloud API keys (`AIza…`) and OAuth access tokens (`ya29.`)
+- Anthropic and OpenRouter API keys
+- Firebase server tokens
+- Amazon MWS auth tokens
+- Square OAuth secrets and access tokens, Braintree access tokens
+- Stripe restricted keys (`rk_live_` / `rk_test_`) — Trivy covers publishable/secret keys but not this format
+- Twilio Account SIDs and App SIDs (Trivy covers the API-key format only)
+- Credentials embedded in a git remote URL (`https://user:token@host/...`) — a different injection vector from the token-format-specific rules above
+- Generic high-entropy and key-value fallback rules for unknown vendors
+
+### Output
+
+- **HTML report**: a dedicated Secrets tab (category, severity, file/line, redacted match preview — the raw secret value is never written to any report or log).
+- **SBOM (CycloneDX v1.6)**: exposed as a `ubel:secrets` entry in the root `properties` array, as a JSON-string value. Not a top-level `x-`-prefixed key — CycloneDX's root schema sets `additionalProperties: false`, so a custom root key would fail strict schema validation; the `properties` array is the schema's actual documented extension point.
+- **SARIF 2.1.0**: its own `run`, with a dedicated `tool.driver` and rule set, kept separate from the dependency-vulnerability run.
+
+---
+
 ## Package Argument Validation
 
 All package specifiers passed to `check` and `install` are validated against an allow-list pattern before any subprocess is invoked. Accepted formats:
@@ -430,6 +465,7 @@ The HTML report is fully self-contained (no server required) and includes:
 - Full inventory with state (safe / vulnerable / infected / undetermined)
 - Interactive force-directed dependency graph with vulnerable-subtree filter
 - Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV/NVD references)
+- Dedicated Secrets tab (category, severity, file/line, redacted match preview)
 - System and runtime metadata
 
 The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
