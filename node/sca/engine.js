@@ -674,13 +674,13 @@ function generateHTMLReport(data) {
                 const row = document.createElement('tr');
                 row.className = 'hover:bg-neutral-800/30 transition-colors';
                 const sev = (f.severity || 'unknown').toLowerCase();
-                const loc = f.column_start ? \`\${f.line}:\${f.column_start}\` : \`\${f.line}\`;
+                const loc = f.column_start ? \`line: \${f.line}<br>column: \${f.column_start}\` : \`\${f.line}\`;
                 row.innerHTML = \`
                     <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${sev}">\${escapeHtml(f.severity || 'unknown')}</span></td>
                     <td class="px-6 py-4 font-medium">\${escapeHtml(f.title)}</td>
                     <td class="px-6 py-4 text-neutral-400 text-xs">\${escapeHtml(f.category || '')}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(f.file_path)}</td>
-                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(loc)}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${loc}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-500">\${escapeHtml(f.match_preview || '')}</td>
                 \`;
                 tbody.appendChild(row);
