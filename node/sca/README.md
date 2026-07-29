@@ -186,7 +186,7 @@ When invoked with `scan_os: true` on Windows, the scanner probes the registry an
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, Visual Studio, Cursor |
+| Developer tools | Git, Docker Desktop, Visual Studio, Cursor, Claude Code |
 | Shell | PowerShell |
 
 ---

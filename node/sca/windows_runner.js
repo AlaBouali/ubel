@@ -202,6 +202,9 @@ function detectVersion(cmds) {
  * - Otherwise append version and wildcards to complete 13 fields.
  */
 function buildCpe(cpePrefix, version) {
+  if (cpePrefix.startsWith("pkg:")) {
+    return `${cpePrefix}${version}`;
+  }
   const colonCount = (cpePrefix.match(/:/g) || []).length;
   if (colonCount >= 12) {
     // Full template: replace the version slot (index 5)
@@ -233,6 +236,8 @@ function makePurl(name, version) {
  */
 function licenseFor(key) {
   switch (key) {
+    case "claude_code":
+      return "LicenseRef-Proprietary";
     // ── Microsoft OS / tooling ──────────────────────────────────────────────
     case "windows":
       return "LicenseRef-Microsoft-Windows-EULA";
@@ -709,6 +714,21 @@ const COMPONENTS = {
     pathCmd: null,
   },
 
+    // Claude Code (npm package)
+  claude_code: {
+    cpe: "pkg:npm/%40anthropic-ai/claude-code@",
+    cmds: [
+      {
+        type: "exec",
+        bin: "claude",
+        args: ["--version"],
+        parse: out => out.trim().split(/\s+/)[0] || null,
+      },
+    ],
+    pathCmd: { type: "where", bin: "claude" },
+    nameOverride: "claude_code",
+  },
+
   cursor: {
     cpe: "cpe:2.3:a:anysphere:cursor:",
     cmds: [
@@ -737,7 +757,6 @@ function buildPackage(key, componentDef, version, paths, cpeOverride = null) {
   const sw_type = cpe.startsWith("cpe:2.3:o:") ? "operating_system" : "application";
   return {
     id: cpe,
-    cpe,
     name,
     version,
     type: sw_type,

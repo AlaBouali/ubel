@@ -48,7 +48,7 @@ process.argv.splice(2, 0, "malware");
 import("../sast/main.js");
 ```
 
-So `ubel-sast [args]` ≡ `node main.js analyze [args]`, and `ubel-mal [args]` ≡ `node main.js malware [args]`. A third subcommand, `chunk`, is reachable only via `node sast/main.js chunk` directly (no dedicated binary) — it's the free "look before you spend tokens" utility. Every flag documented below applies to both `analyze` and `malware` unless stated otherwise.
+So `ubel-sast [args]` ≡ `node main.js analyze [args]`, and `ubel-mal [args]` ≡ `node main.js malware [args]`. A third subcommand, `chunk`, also has its own dedicated binary, `ubel-chunk` (≡ `node main.js chunk [args]`) — it's the free "look before you spend tokens" utility. Every flag documented below applies to both `analyze` and `malware` unless stated otherwise.
 
 ---
 

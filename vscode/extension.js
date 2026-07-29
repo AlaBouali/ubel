@@ -169,7 +169,7 @@ function activate(context) {
     try {
       scanningInProgress = true;
       await runScan({
-        main,
+        main: SCA_scan,
         PolicyViolationError,
         scanOptions: {
           projectRoot,
