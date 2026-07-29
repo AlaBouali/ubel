@@ -658,7 +658,7 @@ const DEFAULT_VULN_CLASSES = [
     name: 'publicly exposed cloud resource',
     cwe: 'CWE-284',
     needsUserInput: false,
-    languages: ['iac'],
+    languages: ['iac', 'k8s'],
     signals: [
       'Storage bucket / blob container resource with public-read or public-read-write ACL, or a bucket policy with `Principal: "*"` and no condition restricting it',
       'Security group / firewall rule with ingress `cidr_blocks = ["0.0.0.0/0"]` (or `::/0`) on a sensitive port (22, 3389, 3306, 5432, 6379, 9200, 27017)',
@@ -670,7 +670,7 @@ const DEFAULT_VULN_CLASSES = [
     name: 'hardcoded secret in IaC template or variable',
     cwe: 'CWE-798',
     needsUserInput: false,
-    languages: ['iac'],
+    languages: ['iac', 'k8s'],
     signals: [
       'Terraform resource argument or `variable` block `default` containing a literal password, API key, private key, or connection string instead of referencing a secrets manager / `sensitive = true` variable with no default',
       'Kubernetes Secret manifest with `data`/`stringData` containing a real-looking credential checked into source rather than sealed/external-secret referenced',
@@ -693,7 +693,7 @@ const DEFAULT_VULN_CLASSES = [
     name: 'overly permissive IAM policy or RBAC',
     cwe: 'CWE-269',
     needsUserInput: false,
-    languages: ['iac'],
+    languages: ['iac', 'k8s'],
     signals: [
       'IAM policy document with `Action: "*"` and/or `Resource: "*"` (wildcard privilege escalation risk), or `AdministratorAccess` attached to a role/user that does not need it',
       'Trust policy (assume-role) with an overly broad Principal (e.g. `*` or an entire AWS account) instead of a scoped role/service principal',
@@ -705,13 +705,38 @@ const DEFAULT_VULN_CLASSES = [
     name: 'insecure Kubernetes pod security context',
     cwe: 'CWE-250',
     needsUserInput: false,
-    languages: ['iac'],
+    languages: ['k8s'],
     signals: [
       'Pod/container spec missing `securityContext` or explicitly setting `allowPrivilegeEscalation: true`, `privileged: true`, or `runAsNonRoot: false`/omitted (defaults to root)',
       'Container spec sets `hostNetwork: true`, `hostPID: true`, or `hostIPC: true`, breaking namespace isolation from the node',
       'Container `capabilities.add` includes `SYS_ADMIN`, `NET_ADMIN`, or `ALL` without justification',
       'Pod mounts the host filesystem via `hostPath` volume (especially `/`, `/var/run/docker.sock`, or `/etc`) instead of a scoped PVC/ConfigMap',
       'No `resources.limits` set (missing CPU/memory limits), allowing a single pod to exhaust node resources',
+    ],
+  },
+  {
+    name: 'missing Kubernetes network segmentation',
+    cwe: 'CWE-284',
+    needsUserInput: false,
+    languages: ['k8s'],
+    signals: [
+      'Namespace or workload with no default-deny `NetworkPolicy` at all, leaving pod-to-pod traffic unrestricted cluster-wide',
+      '`NetworkPolicy` with an empty `podSelector: {}` combined with an `Egress` rule of `- {}` (allow-all egress), permitting unrestricted exfiltration from any matched pod',
+      '`Ingress` resource routing to a backend Service with no corresponding `NetworkPolicy` restricting which namespaces/pods may reach it',
+      '`NetworkPolicy` restricting ingress but not egress for a workload that handles sensitive data, leaving exfiltration paths open',
+    ],
+  },
+  {
+    name: 'insecure Kubernetes workload supply-chain hygiene',
+    cwe: 'CWE-1104',
+    needsUserInput: false,
+    languages: ['k8s'],
+    signals: [
+      'Container image reference with no tag (defaults to `:latest`) or an explicit `:latest` tag — mutable, not pinned to a digest or immutable version',
+      '`imagePullPolicy: Always` paired with a mutable tag pulling from a registry the cluster does not otherwise restrict via an admission policy',
+      '`automountServiceAccountToken` not explicitly set to `false` for a workload that never calls the Kubernetes API, leaving an unused, exfiltratable token mounted by default',
+      'Container spec missing `readOnlyRootFilesystem: true` for a workload with no legitimate need to write to its own filesystem',
+      'Pod spec referencing a `ServiceAccount` with no `imagePullSecrets` scoping, or a default ServiceAccount left with its auto-mounted token in a namespace running third-party workloads',
     ],
   },
   {
@@ -750,7 +775,7 @@ const DISPLAY_LANG_TO_FAMILY = {
   dockerfile:       'docker',
   'docker compose': 'docker',
   terraform:        'iac',
-  kubernetes:       'iac',
+  kubernetes:       'k8s',
   cloudformation:   'iac',
   ansible:          'iac',
 };

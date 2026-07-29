@@ -50,6 +50,14 @@ function chunkFile(filePath) {
     case 'c':      chunks = chunkC(filePath, lines);      break;
     case 'docker': chunks = chunkDocker(filePath, lines); break;
     case 'iac':    chunks = chunkIac(filePath, lines);    break;
+    // Kubernetes manifests are mechanically identical to the rest of the IaC
+    // formats (declarative YAML, whole-file, no function/brace structure to
+    // decompose) — chunkIac already branches on `detectConfigKind`'s result
+    // internally, so it's reused here rather than duplicated. What's
+    // different is the family this resolves to (see configDetect.js /
+    // constants.js), which is what lets `--languages k8s` target Kubernetes
+    // manifests specifically instead of the whole iac bucket.
+    case 'k8s':    chunks = chunkIac(filePath, lines);    break;
     default:       return [];
   }
 

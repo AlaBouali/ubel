@@ -68,6 +68,7 @@ const FAMILY_LABELS = {
   c:      'c',
   docker: 'docker',
   iac:    'iac',
+  k8s:    'k8s',
 };
 
 // Aliases accepted on the CLI / opts.languages
@@ -83,12 +84,16 @@ const LANGUAGE_ALIASES = {
   cpp: 'c', 'c++': 'c', cxx: 'c', cc: 'c',
   dockerfile: 'docker', compose: 'docker', 'docker-compose': 'docker',
   terraform: 'iac', tf: 'iac', hcl: 'iac',
-  kubernetes: 'iac', k8s: 'iac',
   cloudformation: 'iac', cfn: 'iac',
   ansible: 'iac',
+  // Kubernetes gets its own family, same treatment as docker above, rather
+  // than being folded into the generic iac bucket — a `--languages k8s`
+  // selection now targets Kubernetes manifests only, not every Terraform/
+  // CloudFormation/Ansible file in the repo too.
+  kubernetes: 'k8s', k8s: 'k8s',
 };
 
-const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'c', 'docker', 'iac'];
+const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'c', 'docker', 'iac', 'k8s'];
 
 export {
   SUPPORTED_EXTENSIONS,

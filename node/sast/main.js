@@ -404,9 +404,9 @@ function runAnalyzeCommand(args) {
   if (flags['max-tokens'])     opts.maxTokens       = parseInt(flags['max-tokens'],    10);
   if (flags['timeout'])        opts.requestTimeout  = parseInt(flags['timeout'],       10);
   if (flags['max-retries'])    opts.maxRetries      = parseInt(flags['max-retries'],   10);
-  if (flags['no-retry'] ) opts.retryOnParseError = false;
-  if (flags['no-verify'] ) opts.verify      = false;
-  if (flags['no-taint'] ) opts.taintTrace  = false;
+  if (flags['no-retry']) opts.retryOnParseError = false;
+  if (flags['no-verify']) opts.verify      = false;
+  if (flags['no-taint']) opts.taintTrace  = false;
   if (opts.verify === undefined)     opts.verify     = true;
   if (opts.taintTrace === undefined) opts.taintTrace = true;
   if (flags['include-signals'] ) {
@@ -427,7 +427,7 @@ function runAnalyzeCommand(args) {
   if (flags['skip-folders'])     opts.skipFolders  = String(flags['skip-folders']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['skip-files'])       opts.skipFiles    = String(flags['skip-files']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
-  if (flags['only-diff'] ) opts.onlyDiff   = true;
+  if (flags['only-diff'] )       opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
 
   const FAIL_ON_MODES = new Set(['any', 'valid', 'exploitable']);
@@ -478,8 +478,8 @@ function runMalwareCommand(args) {
   if (flags['max-tokens'])     opts.maxTokens       = parseInt(flags['max-tokens'],    10);
   if (flags['timeout'])        opts.requestTimeout  = parseInt(flags['timeout'],       10);
   if (flags['max-retries'])    opts.maxRetries      = parseInt(flags['max-retries'],   10);
-  if (flags['no-retry']) opts.retryOnParseError = false;
-  if (flags['no-verify']) opts.verify      = false;
+  if (flags['no-retry'])       opts.retryOnParseError = false;
+  if (flags['no-verify'])      opts.verify      = false;
   if (opts.verify === undefined) opts.verify = true;
   if (flags['include-signals']) {
     opts.skipSignals = false
@@ -497,7 +497,7 @@ function runMalwareCommand(args) {
   if (flags['skip-folders'])     opts.skipFolders  = String(flags['skip-folders']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['skip-files'])       opts.skipFiles    = String(flags['skip-files']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
-  if (flags['only-diff']) opts.onlyDiff   = true;
+  if (flags['only-diff'])        opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
 
   const FAIL_ON_MODES = new Set(['any', 'confirmed']);
@@ -529,15 +529,65 @@ function runMalwareCommand(args) {
 function printUsage() {
   console.log(`UBEL SAST — usage:
 
-  main.js chunk    [path] [options]   Build semantic code chunks → sast_chunks.json
-  main.js analyze  [path] [options]   Run SAST analysis (scan → verify → taint trace) → .ubel/reports/
-  main.js malware  [path] [options]   Scan for intentional malicious code / backdoors (scan → verify) → .ubel/reports/
+  ubel-sast  [path] [options]   Run SAST analysis (scan → verify → taint trace) → .ubel/reports/
+  ubel-mal   [path] [options]   Scan for intentional malicious code / backdoors (scan → verify) → .ubel/reports/
+  ubel-chunk [path] [options]   Build semantic code chunks only, no LLM calls → sast_chunks.json
 
 If no subcommand is given, "analyze" is assumed and the first argument is
 treated as the target path (or --working-dir).
 
-Run with --help after a subcommand is not currently supported; see project
-documentation for the full list of options.`);
+PROVIDER / REQUEST OPTIONS  (analyze, malware)
+  --provider <name>              LLM provider (default: openrouter)
+  --api-key <key>                API key for the chosen provider
+  --api-key-header <name>        Override the auth header name (provider default otherwise)
+  --api-key-prefix <prefix>      Override the auth value prefix, e.g. "Bearer " (provider default otherwise)
+  --endpoint <url>               Override the API base URL (provider default otherwise)
+  --model <name>                 Override the model string (provider default otherwise)
+  --concurrency <n>              Parallel Pass-1 requests (default: 5)
+  --temperature <n>              Pass-1 sampling temperature (default: 0.1; Passes 2/3 are always 0)
+  --max-tokens <n>               Pass-1 response token budget (default: 4096)
+  --timeout <ms>                 Per-request timeout, shared across all passes (default: 120000)
+  --max-retries <n>              Max retry attempts per request (default: 2)
+  --no-retry                     Disable the parse-error-triggered retry
+
+PIPELINE CONTROLS  (analyze, malware)
+  --no-verify                    Skip Pass 2 (verification) — findings get is_valid: undefined
+  --no-taint                     Skip Pass 3 (taint-trace) — analyze only; findings get no taint field
+  --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default)
+  --verify-concurrency <n>       Parallel Pass-2 requests (default: = --concurrency)
+  --taint-concurrency <n>        Parallel Pass-3 requests, analyze only (default: = --concurrency)
+  --verification-max-tokens <n>  Pass-2 response token budget (default: 4096)
+  --taint-max-tokens <n>         Pass-3 response token budget, analyze only (default: 4096)
+
+SCOPE & CHUNKING  (chunk, analyze, malware)
+  --working-dir <path>           Target directory (same as the positional path argument)
+  --max-chunk-size <n>           Max characters per chunk (default: 12000)
+  --chunks-start <n>             Skip the first N chunks
+  --max-chunks <n>               Cap the number of chunks scanned
+  --skip-folders <a,b,c>         Comma-separated folder names to exclude
+  --skip-files <a,b,c>           Comma-separated file names to exclude
+  --languages <a,b,c>            Comma-separated language filter, e.g. java,kotlin
+
+DIFF MODE  (analyze, malware)
+  --only-diff                    Restrict Pass 1 to diff-changed chunks; full chunk set is still built for Pass 3
+  --diff-base <ref>              Git ref to diff against (default: HEAD^; "staged" diffs the index against HEAD)
+
+EXIT-CODE POLICY
+  --fail-on <mode>                analyze: any (default) | valid | exploitable
+                                   malware: any (default) | confirmed
+                                   Reports on disk always contain every finding regardless of this flag —
+                                   --fail-on only changes the process exit code.
+
+EXAMPLES
+  ubel-sast
+  ubel-sast /path/to/project
+  ubel-sast --only-diff --diff-base main
+  ubel-sast --provider anthropic --model claude-haiku-4-5-20251001
+  ubel-mal --fail-on confirmed
+  ubel-chunk /path/to/project --max-chunk-size 8000
+
+Full documentation (pipeline mechanics, token-cost breakdown, CI examples):
+  node/sast/README.md`);
 }
 
 // ─── Unified entry point ────────────────────────────────────────────────────────
@@ -593,14 +643,20 @@ export async function main(programmaticOptions) {
   const rawArgs = process.argv.slice(2);
   const [first, ...rest] = rawArgs;
 
-  if (first === 'chunk')   { runChunkCommand(rest);   return; }
-  if (first === 'analyze') { runAnalyzeCommand(rest); return; }
-  if (first === 'malware') { runMalwareCommand(rest); return; }
-
-  if (first === '--help' || first === '-h') {
+  // Checked BEFORE any subcommand dispatch, and against the full arg list —
+  // not just `first` — so --help/-h can never fall through to a real scan
+  // just because it wasn't the very first token (e.g. `ubel-sast /path
+  // --help`, `ubel-sast --provider x --help`, or `analyze --help` typed
+  // directly). A help request must never silently trigger a real,
+  // possibly billed, LLM-calling scan.
+  if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
     printUsage();
     return;
   }
+
+  if (first === 'chunk')   { runChunkCommand(rest);   return; }
+  if (first === 'analyze') { runAnalyzeCommand(rest); return; }
+  if (first === 'malware') { runMalwareCommand(rest); return; }
 
   // Backward-compatible default: no subcommand given → run analyze directly,
   // treating all args (including a leading path) as analyze's own args.

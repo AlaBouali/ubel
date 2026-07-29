@@ -9,9 +9,9 @@ This document covers the **SAST / malware-scan** component (source-level code an
 
 ## Features
 
-- Semantic code chunker across 10 language families — class/function-aware boundaries, not naive line-splitting
+- Semantic code chunker across 11 language families — class/function-aware boundaries, not naive line-splitting
 - Three-pass analysis pipeline for vulnerability findings: **scan** (Pass 1) → **verify** (Pass 2) → **taint trace** (Pass 3)
-- Structured, CWE-mapped vulnerability catalog — 46 classes across 10 language families, each with concrete "detect when you see" signals fed to the model
+- Structured, CWE-mapped vulnerability catalog — 59 classes across 11 language families, each with concrete "detect when you see" signals fed to the model
 - Per-language catalog filtering — classes irrelevant to a chunk's language are dropped before the prompt is built, cutting token usage and false positives
 - Cross-chunk call-graph resolution — `buildFullCallChain` walks callers/callees across chunk boundaries so the taint-trace pass reasons about real source→sink flow, not a single isolated snippet
 - Separate **malicious code / backdoor** scan — its own catalog (15 classes: reverse shells, C2 beacons, supply-chain implants, persistence, exfiltration, anti-analysis evasion, logic bombs, and more), own prompts, own report set, never mixed with accidental-vulnerability findings
@@ -158,7 +158,7 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 |---|---|---|---|
 | `--no-verify` | flag | verify on | Skip Pass 2 — findings get `is_valid: undefined` |
 | `--no-taint` | flag | taint on | Skip Pass 3 — findings get no `taint` field |
-| `--skip-signals` | flag | off | Omit the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept |
+| `--include-signals` | flag | off (signals omitted by default) | Include the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept regardless of this flag |
 | `--verify-concurrency <n>` | int | = `--concurrency` | Parallel Pass-2 requests |
 | `--taint-concurrency <n>` | int | = `--concurrency` | Parallel Pass-3 requests |
 | `--verification-max-tokens <n>` | int | `4096` | Pass-2 response token budget |
@@ -200,8 +200,11 @@ ubel-sast --no-taint --fail-on valid
 # Only fail on confirmed-exploitable findings, higher concurrency for speed
 ubel-sast --fail-on exploitable --concurrency 10
 
-# Trim prompt size (skip catalog detection bullets) for a big legacy repo
-ubel-sast --skip-signals --skip-folders legacy,scripts --languages java,kotlin
+# Scan only Kubernetes manifests in a mixed IaC repo (Terraform/CloudFormation/Ansible excluded)
+ubel-sast --languages k8s
+
+# Small, high-value repo — opt into the full catalog detection bullets for max recall
+ubel-sast --include-signals --skip-folders legacy,scripts --languages java,kotlin
 
 # Point at a local Ollama model, no API key needed
 ubel-sast --provider local --endpoint http://localhost:11434/v1/chat/completions
@@ -225,8 +228,8 @@ ubel-mal /path/to/project
 # CI gate: only fail on confirmed malicious code
 ubel-mal --fail-on confirmed
 
-# Cheap, fast malware sweep on a dependency tree pulled in via CI
-ubel-mal --skip-signals --provider local --concurrency 8
+# Cheap, fast malware sweep on a dependency tree pulled in via CI (signals omitted by default)
+ubel-mal --provider local --concurrency 8
 
 # Malware scan restricted to files changed in a PR
 ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
@@ -249,27 +252,35 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 | C# | `.cs` |
 | C / C++ | `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` `.hxx` |
 | Docker | `Docker` `docker-compose.yml` |
-| IaC | `.tf` `.tfvars` |
+| IaC | `.tf` `.tfvars`, plus content-sniffed `.yaml`/`.yml`/`.json` for CloudFormation and Ansible |
+| Kubernetes | content-sniffed `.yaml`/`.yml`/`.json` (`apiVersion:` + `kind:`) — its own family, not bundled under IaC |
 
 `--languages <a,b,c>` restricts a run to a subset of these families (e.g. `--languages python,go`).
 
 ---
 
-## Vulnerability Catalog (46 classes)
+## Vulnerability Catalog (59 classes)
 
 Each catalog entry carries a canonical name, primary CWE, a `needsUserInput` flag (whether the class requires a visible attacker-controlled source to be reportable — hardcoded secrets don't, SQL injection does), the language families it realistically applies to, and a set of concrete "detect when you see" signal bullets shown to the model. Classes irrelevant to a chunk's language are filtered out before the prompt is built via `filterVulnClassesForLanguage()`.
 
-Representative coverage: SQL/command/code injection, XSS, XXE, insecure deserialization, path traversal, SSRF, hardcoded secrets, weak cryptography, race conditions, use-after-free / buffer overflow (C/Rust/Go/JVM/.NET-scoped), CSRF, open redirect, insecure randomness, prototype pollution (JS-scoped), and more — spanning CWE-20 through CWE-943.
+Representative coverage: SQL/command/code injection, XSS, XXE, insecure deserialization, path traversal, SSRF, hardcoded secrets, weak cryptography, race conditions, use-after-free / buffer overflow (C/Rust/Go/JVM/.NET-scoped), CSRF, open redirect, insecure randomness, prototype pollution (JS-scoped), insecure container/pod configuration, missing Kubernetes network segmentation, IaC public-cloud exposure, and more — spanning CWE-20 through CWE-1104.
 
 Per-language filtering already trims this list before it reaches a prompt, automatically:
 
 | Language | Applicable classes |
 |---|---|
-| C | 19 / 45 |
-| Python | 34 / 45 |
-| C# | 34 / 45 |
-| JS/TS | 35 / 45 |
-| Rust | 36 / 45 |
+| C | 19 / 59 |
+| Ruby | 34 / 59 |
+| Python | 34 / 59 |
+| C# | 34 / 59 |
+| Go | 33 / 59 |
+| JS/TS | 35 / 59 |
+| Java / Kotlin | 35 / 59 |
+| PHP | 36 / 59 |
+| Rust | 36 / 59 |
+| IaC (Terraform / CloudFormation / Ansible) | 5 / 59 |
+| Docker | 6 / 59 |
+| Kubernetes | 6 / 59 |
 
 ---
 
@@ -404,15 +415,15 @@ Approximating tokens as `chars / 4` (measured directly from the actual prompt-bu
 
 | Component | Chars | ≈ Tokens |
 |---|---|---|
-| Full vuln catalog, 45 classes, with signals (unfiltered) | 30,523 | ~7,631 |
-| Full vuln catalog, 45 classes, no signals (`--skip-signals`) | 5,618 | ~1,405 |
-| Malware catalog, 15 classes, with signals | 8,642 | ~2,161 |
-| Malware catalog, 15 classes, no signals | 789 | ~197 |
+| Full vuln catalog, 59 classes, with signals (`--include-signals`) | 40,602 | ~10,151 |
+| Full vuln catalog, 59 classes, no signals *(default)* | 7,407 | ~1,852 |
+| Malware catalog, 15 classes, with signals (`--include-signals`) | 8,642 | ~2,161 |
+| Malware catalog, 15 classes, no signals *(default)* | 789 | ~197 |
 | Scan prompt scaffold (rules + schema + headers, catalog excluded) | ~2,600 | ~650 |
 | Verification prompt scaffold (excluding injected code + finding JSON) | ~1,000 | ~250 |
 | Taint prompt scaffold (excluding injected call-chain code) | ~1,800 | ~450 |
 
-Per-language catalog filtering (see the catalog table above) already trims the 45-class list before it reaches a prompt — automatic, not a flag. Worked for a Python chunk, a full Pass-1 prompt (scaffold + catalog + empty-ish code) measures ~26,115 chars (~6,529 tokens) with signals vs. ~7,122 chars (~1,781 tokens) with `--skip-signals` — **roughly a 3.7× reduction** in the catalog+scaffold portion of every Pass-1 call, before the code chunk is even added. Class name, CWE, and the scope rule (attacker-input-required or not) are always retained; only the worked-example detection bullets are dropped.
+Per-language catalog filtering (see the catalog table above) already trims the 59-class list before it reaches a prompt — automatic, not a flag. The catalog-only figures above (measured directly from `buildVulnCatalog()`) show **roughly a 5.5× reduction** in the catalog portion alone with signals omitted. Class name, CWE, and the scope rule (attacker-input-required or not) are always retained regardless; only the worked-example detection bullets are gated behind the flag. Signals are omitted by default specifically because Pass 1 is the dominant cost by call count — pass `--include-signals` when the extra recall is worth the extra catalog cost, e.g. a smaller or higher-value repo. *(The previous version of this section quoted a full-Pass-1-prompt example including scaffold text; that figure hasn't been re-measured against the current 59-class catalog and is omitted here rather than left stale — the catalog-only numbers above are independently verified.)*
 
 ### Chunk body cost
 
@@ -443,7 +454,7 @@ Because Pass 1 is normally the majority of total calls, restricting it to files 
 
 1. **`chunk` first, always**, on an unfamiliar repo — free, and shows the real chunk count before spend is committed.
 2. **`--only-diff --diff-base <ref>`** for any repeat/CI run against an already-baselined codebase.
-3. **`--skip-signals`** cuts the catalog+scaffold portion of every Pass-1 call by ~3–4×, trading some recall for a flat, compounding saving.
+3. **Leave `--include-signals` off** (the default) — omitting the catalog detection bullets cuts the catalog+scaffold portion of every Pass-1 call by ~3–4×, trading some recall for a flat, compounding saving. Only pass `--include-signals` when the extra recall is worth it.
 4. **Right-size `--max-tokens`** for Pass 1 to avoid the parse-error doubling path firing repeatedly.
 5. **`--no-taint`** when "is this a real bug" (verification) is enough without confirming attacker-reachability — removes the most expensive per-call pass.
 6. **`--languages <subset>`** on monorepos with incidental languages you don't need scanned.
@@ -472,16 +483,16 @@ ubel-sast --provider anthropic --api-key sk-ant-...
 ubel-mal --fail-on confirmed
 
 # Inspect how a codebase will be chunked before spending API calls
-node sast/main.js chunk . --max-chunk-size 8000
+ubel-chunk . --max-chunk-size 8000
 
-# Cheapest possible full scan
-ubel-sast --skip-signals --no-taint --provider local
+# Cheapest possible full scan (signals omitted by default)
+ubel-sast --no-taint --provider local
 
 # Cheapest possible CI re-scan on a PR
-ubel-sast --only-diff --diff-base main --skip-signals
+ubel-sast --only-diff --diff-base main
 
 # Highest-fidelity scan (accept the cost)
-ubel-sast --provider anthropic --model claude-opus-4-8 --max-tokens 2048
+ubel-sast --provider anthropic --model claude-opus-4-8 --max-tokens 2048 --include-signals
 ```
 
 ---

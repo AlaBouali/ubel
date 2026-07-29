@@ -22,7 +22,7 @@ const KIND_FAMILY = {
   dockerfile:     'docker',
   compose:        'docker',
   terraform:      'iac',
-  kubernetes:     'iac',
+  kubernetes:     'k8s',
   cloudformation: 'iac',
   ansible:        'iac',
 };
