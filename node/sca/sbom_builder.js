@@ -233,6 +233,39 @@ export class CycloneDXBuilder {
     return out;
   }
 
+  /**
+   * Build the secrets-in-source findings block.
+   *
+   * CycloneDX has no native "secret finding" concept (these aren't
+   * component vulnerabilities — they're not tied to a package/purl at
+   * all, just a line in a source file). Unlike SARIF, CycloneDX's root
+   * schema sets "additionalProperties": false — a bare "x-"-prefixed
+   * root key is NOT tolerated by strict schema validation, despite that
+   * convention working for other formats. The schema's own documented
+   * extension point is the root-level "properties" name/value array
+   * (see generate()), so the full secrets payload is serialized as a
+   * single JSON-string property value there instead of as a root key.
+   */
+  buildSecrets() {
+    const secrets = this.data.secrets || { enabled: true, count: 0, findings: [], stats: {} };
+    return {
+      enabled: secrets.enabled !== false,
+      count:   secrets.count || 0,
+      stats:   secrets.stats || {},
+      findings: (secrets.findings || []).map(f => ({
+        id:            f.id,
+        title:         f.title,
+        category:      f.category,
+        severity:      f.severity,
+        file_path:     f.file_path,
+        line:          f.line,
+        column_start:  f.column_start,
+        column_end:    f.column_end,
+        match_preview: f.match_preview,
+      })),
+    };
+  }
+
   /** Generate full SBOM object. */
   generate() {
     const decision = this.data.decision || {};
@@ -252,6 +285,12 @@ export class CycloneDXBuilder {
         { name: "inventory_size", value: String(stats.inventory_size || 0) },
         { name: "total_vulns", value: String(stats.total_vulnerabilities || 0) },
         { name: "total_infections", value: String(stats.total_infections || 0) },
+        { name: "secrets_found", value: String((this.data.secrets || {}).count || 0) },
+        // Full secrets payload — CycloneDX's root schema forbids
+        // additionalProperties, so this can't be a top-level "x-"
+        // key (see buildSecrets() docstring); it has to travel as a
+        // JSON-string property value like everything else here.
+        { name: "ubel:secrets", value: JSON.stringify(this.buildSecrets()) },
       ],
     };
   }

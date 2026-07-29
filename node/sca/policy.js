@@ -41,6 +41,9 @@ export function evaluatePolicy(report) {
   if ((stats.total_infections || 0) > 0) {
     return [false, "Blocked: infections detected (always enforced)"];
   }
+  if ((report.secrets?.count || 0) > 0) {
+    return [false, "Blocked: secrets detected (always enforced)"];
+  }
 
   // ── 2. Severity threshold ─────────────────────────────────────────────────
   const rawThreshold = (policy.severity_threshold || "").toLowerCase();

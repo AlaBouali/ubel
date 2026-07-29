@@ -2,7 +2,7 @@
   "name": "ubel-vscode",
   "displayName": "UBEL — Supply-Chain security scanner and firewall",
   "description": "Multi-ecosystem dependency security scanner and supply-chain firewall. Scans Node.js, Python, PHP, Rust, Go, C#/.NET, Java/Kotlin, and Ruby projects — plus your VS Code extensions and the development environment — for vulnerabilities and malicious packages. Runs entirely locally, no cloud calls except for osv.dev and NVD API.",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "Arcane-Spark",
   "author": {
     "name": "Ala Bouali",
@@ -90,6 +90,11 @@
         "command": "ubel.scanPlatform",
         "title": "UBEL: Scan Host Platform",
         "category": "UBEL"
+      },
+      {
+        "command": "ubel.scanSecrets",
+        "title": "UBEL: Scan project for Exposed Secrets",
+        "category": "UBEL"
       }
     ],
     "keybindings": [
@@ -107,6 +112,11 @@
         "command": "ubel.scanPlatform",
         "key": "ctrl+alt+p",
         "mac": "cmd+alt+p"
+      },
+      {
+        "command": "ubel.scanSecrets",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
       }
     ]
   },

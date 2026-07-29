@@ -17,6 +17,16 @@ export class SarifBuilder {
       "https://json.schemastore.org/sarif-2.1.0.json";
 
     this._purlLocationIndex = null;
+
+    // The scan's actual projectRoot (engine.js sets runtime.cwd to it —
+    // see the "projectRoot replaces all process.cwd() references" contract
+    // in UbelEngineInstance). This process's own cwd is NOT reliable here:
+    // callers such as the VS Code extension scan a workspace folder that
+    // is almost never the extension host's cwd, so every file path and
+    // base URI in the report must be resolved against this instead of a
+    // bare process.cwd() call.
+    this.projectRoot =
+      (this.data.runtime && this.data.runtime.cwd) || process.cwd();
   }
 
   getFirstNWords(obj,words_count) {
@@ -108,7 +118,7 @@ export class SarifBuilder {
 
     const cwd =
       this._normalizeUri(
-        process.cwd()
+        this.projectRoot
       );
 
     const lowerPath =
@@ -756,7 +766,7 @@ export class SarifBuilder {
     const repoUri =
       git.url && git.url !== ""
         ? git.url
-        : this._toFileUri(process.cwd());
+        : this._toFileUri(this.projectRoot);
 
     const revisionId =
       git.latest_commit ||
@@ -874,11 +884,114 @@ export class SarifBuilder {
     }));
   }
 
+  /**
+   * Build the SARIF rules[] for secrets-in-source findings, deduplicated
+   * by rule id (e.g. "aws-access-key-id"). Unlike vulnerability rules,
+   * these ids are already stable human-readable slugs from the ruleset
+   * itself, so no hashing is needed.
+   */
+  buildSecretsRules() {
+    const secrets = this.data.secrets || {};
+    const rulesMap = new Map();
+    for (const f of secrets.findings || []) {
+      if (rulesMap.has(f.id)) continue;
+      rulesMap.set(f.id, {
+        id: f.id,
+        name: this._toPascalCaseRuleName(f.title),
+        shortDescription: { text: f.title },
+        fullDescription: { text: `${f.title} (${f.category || "Generic"}) detected in source.` },
+        properties: {
+          category: f.category || null,
+          severity: f.severity || "unknown",
+        },
+        defaultConfiguration: {
+          level: this._severityToLevel(f.severity),
+        },
+      });
+    }
+    return [...rulesMap.values()];
+  }
+
+  /** Build SARIF results[] for secrets-in-source findings. */
+  buildSecretsResults() {
+    const secrets = this.data.secrets || {};
+    const rules = this.buildSecretsRules();
+    const ruleIndexMap = new Map(rules.map((r, idx) => [r.id, idx]));
+
+    return (secrets.findings || []).map(f => ({
+      ruleId: f.id,
+      ruleIndex: ruleIndexMap.get(f.id),
+      level: this._severityToLevel(f.severity),
+      message: {
+        text: f.match_preview
+          ? `${f.title} detected in ${f.file_path}:${f.line} (${f.match_preview})`
+          : `${f.title} detected in ${f.file_path}:${f.line}`,
+      },
+      locations: [{
+        physicalLocation: {
+          artifactLocation: { uri: this._normalizeUri(f.file_path), uriBaseId: "%SRCROOT%" },
+          region: {
+            startLine:   f.line,
+            startColumn: f.column_start || 1,
+            endColumn:   f.column_end || undefined,
+            snippet:     f.match_preview ? { text: f.match_preview } : undefined,
+          },
+        },
+      }],
+      partialFingerprints: {
+        secretRuleId: f.id,
+        primaryLocationLineHash: `${f.file_path}:${f.line}:${f.column_start || 0}:${f.id}`,
+      },
+      fingerprints: {
+        primary: this._sha256VulnId(`secret:${f.file_path}:${f.line}:${f.column_start || 0}:${f.id}`),
+      },
+      properties: {
+        category: f.category || null,
+        severity: f.severity || "unknown",
+      },
+    }));
+  }
+
+  /**
+   * Build a second SARIF run for secrets-in-source findings, kept
+   * separate from the dependency-vulnerability run above (its own tool
+   * driver + rule/result namespace) rather than mixed into it — SARIF
+   * 2.1.0 natively supports multiple runs per log for exactly this case.
+   * Returns null when secrets scanning was disabled or found nothing,
+   * so `runs` stays a single-entry array in the common case.
+   */
+  buildSecretsRun() {
+    const secrets = this.data.secrets;
+    if (!secrets || secrets.enabled === false || !secrets.count) return null;
+
+    const cwd = this._normalizeUri(this.projectRoot);
+    let baseUri = this._toFileUri(cwd);
+    if (!baseUri.endsWith("/")) baseUri += "/";
+
+    return {
+      tool: {
+        driver: {
+          name: "ubel-secrets-scanner",
+          fullName: `${TOOL_NAME} Secrets Scanner`,
+          informationUri: "https://github.com/Arcane-Spark/UBEL",
+          rules: this.buildSecretsRules(),
+        },
+      },
+      automationDetails: { id: "ubel-secrets" },
+      originalUriBaseIds: { "%SRCROOT%": { uri: baseUri } },
+      results: this.buildSecretsResults(),
+      properties: {
+        secrets_count: secrets.count,
+        secrets_stats: secrets.stats || {},
+      },
+    };
+  }
+
   /** Generate full SARIF document */
   generate() {
     const cwd =
       this._normalizeUri(
-        process.cwd()
+        this.projectRoot
       );
 
     // SARIF requires base URI to end with a slash
@@ -945,6 +1058,10 @@ export class SarifBuilder {
       run.taxonomies = taxonomies;
     }
 
+    const runs = [run];
+    const secretsRun = this.buildSecretsRun();
+    if (secretsRun) runs.push(secretsRun);
+
     return {
       $schema:
         this.SARIF_SCHEMA,
@@ -952,7 +1069,7 @@ export class SarifBuilder {
       version:
         this.SARIF_VERSION,
 
-      runs: [run],
+      runs,
     };
   }
 }

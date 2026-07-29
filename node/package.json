@@ -22,7 +22,8 @@
     "ubel-mal": "bin/mal.js",
     "ubel-chunk": "bin/chunk.js",
     "ubel-cicd": "bin/cicd.js",
-    "ubel-docker":"bin/docker.js"
+    "ubel-docker":"bin/docker.js",
+    "ubel-secrets":"bin/secrets.js"
   },
   "scripts": {},
   "engines": {

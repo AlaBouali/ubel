@@ -141,10 +141,10 @@ function activate(context) {
       return;
     }
 
-    let main, PolicyViolationError;
+    let SCA_scan, PolicyViolationError;
 
     try {
-      ({ main }                 = require(path.join(ubelRoot, "main.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
       ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
@@ -185,6 +185,7 @@ function activate(context) {
           editor_kind        : editor.kind,
           editor_label       : editor.label,
           editor_version     : editor.version,
+          scan_secrets       : true,  // workspace scan includes secrets
         },
         reportUri,
         title: "UBEL: Scanning project…",
@@ -203,10 +204,10 @@ function activate(context) {
       return;
     }
 
-    let main, PolicyViolationError;
+    let SCA_scan, PolicyViolationError;
 
     try {
-      ({ main }                 = require(path.join(ubelRoot, "main.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
       ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
@@ -225,7 +226,7 @@ function activate(context) {
     try {
       scanningInProgress = true;
       await runScan({
-        main,
+        main: SCA_scan,
         PolicyViolationError,
         scanOptions: {
           projectRoot        : extensionsDir,
@@ -245,6 +246,7 @@ function activate(context) {
           // vscode.version is resolved here in extension.js where the vscode
           // API is available, so engine.js never needs to shell out for it.
           editor_version     : editor.version,
+          scan_secrets       : true,  // extension scan does not include secrets
         },
         reportUri,
         title: `UBEL: Scanning ${editor.label} extensions…`,
@@ -263,10 +265,10 @@ function activate(context) {
       return;
     }
 
-    let main, PolicyViolationError;
+    let SCA_scan, PolicyViolationError;
 
     try {
-      ({ main }                 = require(path.join(ubelRoot, "main.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
       ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
@@ -285,7 +287,7 @@ function activate(context) {
     try {
       scanningInProgress = true;
       await runScan({
-        main,
+        main: SCA_scan,
         PolicyViolationError,
         scanOptions: {
           projectRoot        : platformRoot,
@@ -301,6 +303,7 @@ function activate(context) {
           editor_kind        : editor.kind,
           editor_label       : editor.label,
           editor_version     : editor.version,
+          scan_secrets        : false,  // platform scan does not include secrets
         },
         reportUri,
         title: "UBEL: Scanning host platform…",
@@ -310,7 +313,72 @@ function activate(context) {
     }
   });
 
-  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd);
+  // ─────────────────────────────────────────────
+  // Command 2: Scan host editor's extensions
+  // ─────────────────────────────────────────────
+  const scanSecretsCmd = vscode.commands.registerCommand("ubel.scanSecrets", async () => {
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
+      return;
+    }
+
+    let SCA_scan, PolicyViolationError;
+
+    try {
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+    } catch (err) {
+      vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
+      return;
+    }
+
+    // Secrets scanning is a project-level check — scan the open workspace
+    // folder, not the editor's extensions directory.
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+      vscode.window.showErrorMessage("UBEL: No workspace folder open.");
+      return;
+    }
+
+    const projectRoot = folders[0].uri.fsPath;
+
+    // Detect editor so the report can surface it as the host environment.
+    const editor = detectEditor();
+
+    const reportUri = vscode.Uri.file(
+      path.join(projectRoot, ".ubel", "reports", "latest.html")
+    );
+
+    try {
+      scanningInProgress = true;
+      await runScan({
+        main: SCA_scan,
+        PolicyViolationError,
+        scanOptions: {
+          projectRoot,
+          engine             : "npm",
+          mode               : "health",
+          is_script          : true,
+          save_reports       : true,
+          scan_os            : false,
+          full_stack         : false,
+          scan_node          : false,
+          is_vscanned_project: true,
+          scan_scope         : "secrets",
+          editor_kind        : editor.kind,
+          editor_label       : editor.label,
+          editor_version     : editor.version,
+          scan_secrets       : true,  // this command exists specifically to run the secrets scan
+        },
+        reportUri,
+        title: `UBEL: Scanning for exposed secrets…`,
+      });
+    } finally {
+      scanningInProgress = false;
+    }
+  });
+
+  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd, scanSecretsCmd);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,10 +386,10 @@ function activate(context) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Calls main() with a pre-built options object and handles all three outcome
+ * Calls SCA_scan() with a pre-built options object and handles all three outcome
  * states: clean, PolicyViolationError, and unexpected error.
  */
-async function runScan({ main, PolicyViolationError, scanOptions, reportUri, title }) {
+async function runScan({ main: SCA_scan, PolicyViolationError, scanOptions, reportUri, title }) {
   await vscode.window.withProgress(
     {
       location   : vscode.ProgressLocation.Notification,
@@ -330,7 +398,7 @@ async function runScan({ main, PolicyViolationError, scanOptions, reportUri, tit
     },
     async () => {
       try {
-        const result = await main(scanOptions);
+        const result = await SCA_scan(scanOptions);
 
         if (result && result.decision && result.decision.allowed === false) {
           const choice = await vscode.window.showWarningMessage(

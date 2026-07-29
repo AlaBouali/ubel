@@ -13,6 +13,7 @@ import {getGitMetadata, getEditorVersion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
+import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
 
@@ -359,6 +360,7 @@ function generateHTMLReport(data) {
             renderInventory();
             renderStats();
             renderSystem();
+            renderSecrets();
             setupFilters();
             populatePackageSelect();
 
@@ -403,6 +405,7 @@ function generateHTMLReport(data) {
             document.getElementById('policy-threshold').textContent = thresh;
             document.getElementById('policy-block-unknown').textContent = blockUnk;
             document.getElementById('policy-infection').textContent = 'block (always)';
+            document.getElementById('policy-secrets').textContent = 'block (always)';
 
             const ctxSev = document.getElementById('severityChart').getContext('2d');
             const sevStats = stats.vulnerabilities_stats.severity;
@@ -638,6 +641,49 @@ function generateHTMLReport(data) {
             });
             document.getElementById('inv-filter-state').addEventListener('change', (e) => {
                 renderInventory(document.getElementById('inv-search').value, e.target.value);
+            });
+            const sf=()=>[document.getElementById('secrets-search').value,document.getElementById('secrets-filter-severity').value];
+            document.getElementById('secrets-search').addEventListener('input',()=>renderSecrets(...sf()));
+            document.getElementById('secrets-filter-severity').addEventListener('change',()=>renderSecrets(...sf()));
+        }
+
+        function renderSecrets(filter = '', severity = 'all') {
+            const tbody = document.getElementById('secrets-table-body');
+            const banner = document.getElementById('secrets-disabled-banner');
+            const secrets = reportData.secrets || { enabled: true, findings: [] };
+
+            banner.classList.toggle('hidden', secrets.enabled !== false);
+
+            const q = filter.trim().toLowerCase();
+            const filtered = (secrets.findings || []).filter(f => {
+                const matchesSearch = !q ||
+                    f.file_path.toLowerCase().includes(q) ||
+                    f.title.toLowerCase().includes(q) ||
+                    f.id.toLowerCase().includes(q);
+                const matchesSeverity = severity === 'all' || (f.severity || '').toLowerCase() === severity;
+                return matchesSearch && matchesSeverity;
+            });
+
+            tbody.innerHTML = '';
+            if (filtered.length === 0) {
+                tbody.innerHTML = \`<tr><td colspan="6" class="px-6 py-12 text-center text-neutral-500 italic">No secrets found.</td></tr>\`;
+                return;
+            }
+
+            filtered.forEach(f => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-neutral-800/30 transition-colors';
+                const sev = (f.severity || 'unknown').toLowerCase();
+                const loc = f.column_start ? \`\${f.line}:\${f.column_start}\` : \`\${f.line}\`;
+                row.innerHTML = \`
+                    <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${sev}">\${escapeHtml(f.severity || 'unknown')}</span></td>
+                    <td class="px-6 py-4 font-medium">\${escapeHtml(f.title)}</td>
+                    <td class="px-6 py-4 text-neutral-400 text-xs">\${escapeHtml(f.category || '')}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(f.file_path)}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(loc)}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-500">\${escapeHtml(f.match_preview || '')}</td>
+                \`;
+                tbody.appendChild(row);
             });
         }
 
@@ -918,6 +964,7 @@ function generateHTMLReport(data) {
     <nav class="border-b border-neutral-800 bg-neutral-900/30">
         <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
             <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
+            <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets</button>
             <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities</button>
             <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory</button>
             <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Sequences</button>
@@ -936,7 +983,7 @@ function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Vulnerabilities Section -->
@@ -1143,6 +1190,32 @@ function generateHTMLReport(data) {
 
   </div>
 </section>
+        <!-- Secrets Section -->
+        <section id="section-secrets" class="hidden space-y-6">
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
+                <h2 class="text-xl font-bold">Secrets Found in Source</h2>
+                <div class="flex gap-2 w-full md:w-auto">
+                    <input type="text" id="secrets-search" placeholder="Search file or rule..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
+                    <select id="secrets-filter-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none">
+                        <option value="all">All Severities</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                        <option value="unknown">Unknown</option>
+                    </select>
+                </div>
+            </div>
+            <div id="secrets-disabled-banner" class="hidden glass p-4 rounded-xl text-sm text-neutral-400 italic">Secrets scanning was disabled for this scan.</div>
+            <div class="glass rounded-xl overflow-hidden">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
+                        <tr><th class="px-6 py-4">Severity</th><th>Rule</th><th>Category</th><th>File</th><th>Location</th><th>Preview</th></tr>
+                    </thead>
+                    <tbody id="secrets-table-body" class="divide-y divide-neutral-800"></tbody>
+                </table>
+            </div>
+        </section>
     </main>
     <footer class="border-t border-neutral-800 p-6 bg-neutral-900/50"><div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4"><p class="text-xs text-neutral-500">Powered by <span class="text-neutral-300 font-semibold">Ubel Security Engine</span></p></div></footer>
     <div id="modal-overlay" class="modal-overlay items-center justify-center p-4" style="display: none;">
@@ -2174,6 +2247,7 @@ export class UbelEngineInstance {
       scan_node           = true,
       is_vscanned_project = false,
       scan_scope          = "repository",
+      scan_secrets        = true,
     } = options;
 
     const projectRoot = this.projectRoot;
@@ -2486,6 +2560,29 @@ export class UbelEngineInstance {
 
       // Reachability
       try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
+
+      // ── Secrets-in-source scan (independent of the dependency scan above) ──
+      if (scan_secrets) {
+        try {
+          const secretsResult = await scanSecrets(projectRoot);
+          const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+          for (const f of secretsResult.findings) {
+            const key = (f.severity || "unknown").toLowerCase();
+            bySeverity[key] = (bySeverity[key] || 0) + 1;
+          }
+          finalJson.secrets = {
+            enabled: true,
+            count: secretsResult.count,
+            findings: secretsResult.findings,
+            stats: { by_severity: bySeverity },
+          };
+        } catch (e) {
+          console.warn("[~] Secrets scan failed:", e.message);
+          finalJson.secrets = { enabled: true, count: 0, findings: [], stats: { by_severity: {} }, error: e.message };
+        }
+      } else {
+        finalJson.secrets = { enabled: false, count: 0, findings: [], stats: { by_severity: {} } };
+      }
 
       const [allowed, reason] = evaluatePolicy(finalJson);
       finalJson.decision = { allowed, reason, policy_violations: policyViolations };

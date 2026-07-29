@@ -134,6 +134,7 @@ async function main(programmaticOptions) {
       scan_node          = true,
       is_vscanned_project = false,
       scan_scope         = "repository",
+      scan_secrets        = true,
       severity_threshold = undefined,
       block_unknown_vulnerabilities = undefined,
       ...rest

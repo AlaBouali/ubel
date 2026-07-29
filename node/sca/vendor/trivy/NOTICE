@@ -1,0 +1,42 @@
+vendor/trivy — third-party ruleset, ported
+
+================================================================================
+Third-party content
+================================================================================
+
+The two files in this directory — rules.js (the `builtinRules` data: rule
+IDs, categories, titles, severities, regex patterns, keywords, path scopes,
+and the jwt-token rule's nested allow-rule) and allow-rules.js (the
+`builtinAllowRules` global path/content allow-list) — are ported from:
+
+    Trivy (https://github.com/aquasecurity/trivy)
+    pkg/fanal/secret/builtin-rules.go
+    pkg/fanal/secret/builtin-allow-rules.go
+    Copyright the Trivy Authors
+    Licensed under the Apache License, Version 2.0
+
+A copy of the Apache License, Version 2.0 is included as LICENSE in this
+directory, as required by Section 4(a) of that License.
+
+Modifications made to the ported content, per Section 4(b):
+  - Ported from Go to JavaScript (ES modules).
+  - Regex syntax adapted from Go's RE2 engine to ECMAScript: Go named
+    groups `(?P<n>...)` converted to ECMAScript named groups
+    `(?<n>...)`; Go's `\A`/`\z` absolute anchors converted to `^`/`$`;
+    Go's inline, rest-of-pattern `(?i)` case-insensitivity toggle detected,
+    stripped, and reapplied as a whole-pattern `i` flag on the compiled
+    RegExp (a documented, accepted approximation for the couple of rules
+    where `(?i)` appears after a case-sensitive literal prefix).
+  - The two rules built via Go's `fmt.Sprintf()` over shared string
+    constants (aws-access-key-id, aws-secret-access-key) were expanded by
+    substituting those constants into their final literal pattern form.
+  - Go's `MustCompileWithoutWordPrefix()` / `MustCompileWithBoundaries()`
+    helper wrapping (word-boundary guards around the secret-bearing group)
+    was reimplemented directly in the generated pattern source.
+
+This directory contains ONLY the ported rule data (rules.js, allow-rules.js)
+plus this NOTICE and the Apache LICENSE it requires. The scanning engine
+that consumes this data (file walking, extra non-Trivy rules, allow-rule
+application, report shaping) is original UBEL code and lives outside this
+directory — see ../../secrets.js — and is licensed under UBEL's own terms,
+not Apache-2.0. Only the contents of this directory are Apache-2.0.
