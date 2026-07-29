@@ -404,9 +404,9 @@ function runAnalyzeCommand(args) {
   if (flags['max-tokens'])     opts.maxTokens       = parseInt(flags['max-tokens'],    10);
   if (flags['timeout'])        opts.requestTimeout  = parseInt(flags['timeout'],       10);
   if (flags['max-retries'])    opts.maxRetries      = parseInt(flags['max-retries'],   10);
-  if (flags['no-retry'] && (flags['no-retry'].toLowerCase().startsWith('t') || flags['no-retry'] === "1")) opts.retryOnParseError = false;
-  if (flags['no-verify'] && (flags['no-verify'].toLowerCase().startsWith('t') || flags['no-verify'] === "1")) opts.verify      = false;
-  if (flags['no-taint']  && (flags['no-taint'].toLowerCase().startsWith('t') || flags['no-taint'] === "1")) opts.taintTrace  = false;
+  if (flags['no-retry'] ) opts.retryOnParseError = false;
+  if (flags['no-verify'] ) opts.verify      = false;
+  if (flags['no-taint'] ) opts.taintTrace  = false;
   if (opts.verify === undefined)     opts.verify     = true;
   if (opts.taintTrace === undefined) opts.taintTrace = true;
   if (flags['include-signals'] ) {
@@ -427,7 +427,7 @@ function runAnalyzeCommand(args) {
   if (flags['skip-folders'])     opts.skipFolders  = String(flags['skip-folders']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['skip-files'])       opts.skipFiles    = String(flags['skip-files']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
-  if (flags['only-diff'] && (flags['only-diff'].toLowerCase().startsWith('t') || flags['only-diff'] === "1")) opts.onlyDiff   = true;
+  if (flags['only-diff'] ) opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
 
   const FAIL_ON_MODES = new Set(['any', 'valid', 'exploitable']);
@@ -478,8 +478,8 @@ function runMalwareCommand(args) {
   if (flags['max-tokens'])     opts.maxTokens       = parseInt(flags['max-tokens'],    10);
   if (flags['timeout'])        opts.requestTimeout  = parseInt(flags['timeout'],       10);
   if (flags['max-retries'])    opts.maxRetries      = parseInt(flags['max-retries'],   10);
-  if (flags['no-retry']  && (flags['no-retry'].toLowerCase().startsWith('t') || flags['no-retry'] === "1")) opts.retryOnParseError = false;
-  if (flags['no-verify'] && (flags['no-verify'].toLowerCase().startsWith('t') || flags['no-verify'] === "1")) opts.verify      = false;
+  if (flags['no-retry']) opts.retryOnParseError = false;
+  if (flags['no-verify']) opts.verify      = false;
   if (opts.verify === undefined) opts.verify = true;
   if (flags['include-signals']) {
     opts.skipSignals = false
@@ -497,7 +497,7 @@ function runMalwareCommand(args) {
   if (flags['skip-folders'])     opts.skipFolders  = String(flags['skip-folders']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['skip-files'])       opts.skipFiles    = String(flags['skip-files']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
-  if (flags['only-diff'] && (flags['only-diff'].toLowerCase().startsWith('t') || flags['only-diff'] === "1")) opts.onlyDiff   = true;
+  if (flags['only-diff']) opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
 
   const FAIL_ON_MODES = new Set(['any', 'confirmed']);

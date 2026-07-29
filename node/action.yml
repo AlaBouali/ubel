@@ -1,0 +1,20 @@
+name: 'UBEL Security Scan and dependencies firewall'
+description: 'Supply-chain, secrets, and SAST scanning via UBEL'
+inputs:
+  command:
+    description: 'Which UBEL bin to run (sast, mal, cicd, secrets, npm, pnpm, bun, docker)'
+    required: true
+  version:
+    description: 'Pinned @arcane-spark/ubel-node version'
+    default: '0.8.0'
+  args:
+    description: 'Extra flags, e.g. --fail-on high'
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    - shell: bash
+      run: npx -p @arcane-spark/ubel-node@${{ inputs.version }} -- ubel-${{ inputs.command }} ${{ inputs.args }}
