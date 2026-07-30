@@ -1,7 +1,7 @@
-# UBEL — Supply-Chain Firewall
+# UBEL — Supply-Chain & Secrets Scanner for VS Code
 
-**Multi-ecosystem security scanner for the developer's machine and tools.**  
-Covers source repos, developer machines, zero cloud calls except for osv.dev and NVD API.
+**Multi-ecosystem dependency and secrets scanner for the developer's machine and tools.**  
+Covers source repos, developer machines, and exposed secrets — zero cloud calls except for osv.dev and NVD API (both mirror-configurable).
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
@@ -11,9 +11,11 @@ Covers source repos, developer machines, zero cloud calls except for osv.dev and
 
 ## What is UBEL?
 
-UBEL is a **software composition analysis (SCA)** tool and **install-blocking firewall** built for teams who care about what enters their supply chain at every layer. Unlike report-only scanners, UBEL enforces policy — if a scan fails, it blocks the operation and tells you exactly why.
+UBEL is a **software composition analysis (SCA)** tool, **secrets detector**, and **install-blocking firewall** built for teams who care about what enters their supply chain at every layer. Unlike report-only scanners, the full UBEL toolset enforces policy — if a scan fails, it blocks the operation and tells you exactly why.
 
-It spans the entire delivery chain: from the moment a developer adds a dependency, through CI validation, to what is running on a deployment server or inside an AI agent's runtime environment.
+As a project, UBEL spans the entire delivery chain: from the moment a developer adds a dependency, through CI validation, to what is running on a deployment server or inside an AI agent's runtime environment.
+
+**This specific extension** covers the editor-side slice of that: dependency vulnerability scanning (SCA), secrets detection, and host/editor-extension auditing, all in `health` (report-only) mode. It does **not** include the install-time firewall (the scan-before-you-install gate that blocks a malicious package before it ever reaches `node_modules`), AI-powered SAST/malicious-code scanning, or CI/CD wiring — those live in the `@arcane-spark/ubel-node` CLI package ([npm](https://www.npmjs.com/package/@arcane-spark/ubel-node), [docs](https://github.com/AlaBouali/ubel/blob/main/node/README.md)) and the [official GitHub Action](https://github.com/AlaBouali/ubel), which this extension is a companion to rather than a replacement for.
 
 ---
 
@@ -25,6 +27,7 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
 - Policy engine — block/allow by severity threshold and unknown-severity packages
 - Malicious package (infection) detection — always blocked regardless of policy
+- **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, Stripe restricted keys, Twilio SIDs, URL-embedded git credentials, and more). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - Dependency graph with introduced-by and parent tracking
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -38,11 +41,12 @@ It spans the entire delivery chain: from the moment a developer adds a dependenc
 
 | Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
 |---|---|---|---|
-| **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder |
-| **UBEL: Scan Code Editor's Extensions** | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
+| **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder (includes secrets by default) |
+| **UBEL: Scan Code Editor's Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
 | **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
+| **UBEL: Scan project for Exposed Secrets** | `Ctrl+Alt+S` | `Cmd+Alt+S` | Secrets-only pass over the open workspace folder — no dependency resolution |
 
-All three commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
+All four commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
 
 ---
 
@@ -140,6 +144,33 @@ The report is always written to `~/.ubel/reports/latest.*`, independent of any o
 ```
 ~/.ubel/reports/latest.*
 ```
+
+---
+
+## Scan for Exposed Secrets (`Ctrl+Alt+S`)
+
+Runs a secrets-only pass over the open workspace folder — no dependency resolution, no package-manager calls. Built on Trivy's ported secret-scanning ruleset (Apache-2.0, see [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover:
+
+- HashiCorp Vault tokens
+- Google Cloud API keys and OAuth access tokens
+- Anthropic and OpenRouter API keys
+- Firebase tokens
+- Stripe restricted keys (`rk_live_` / `rk_test_`)
+- Twilio Account/App SIDs
+- Square and Braintree credentials
+- Credentials embedded in a git remote URL (`https://user:token@host/...`)
+
+Match previews shown in every report are redacted — the raw secret value is never written to disk, in this report or any other.
+
+**This scan also runs automatically** as part of **UBEL: Scan Project** (`Ctrl+Alt+U`) — this command exists for when you want a fast, dependency-resolution-free pass, e.g. before a commit.
+
+**Report location**
+
+```
+<project-root>/.ubel/reports/latest.*
+```
+
+> This is the same path **UBEL: Scan Project** writes to. Running one after the other overwrites `latest.*` with whichever ran most recently — the timestamped copy under `.ubel/local/reports/.../<date>/` from the earlier run is retained, but `latest.*` always reflects the most recent scan of either kind.
 
 ---
 
@@ -244,6 +275,7 @@ The threshold is inclusive — `high` blocks both `high` and `critical`. Setting
 | Surface |
 |---|
 | Source repos & monorepos |
+| Exposed secrets in source |
 | Developer machines (Windows / Linux) |
 | VS Code extension |
 
@@ -310,6 +342,7 @@ Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** + 
 | Scan target | Report path |
 |---|---|
 | Workspace | `<project-root>/.ubel/reports/latest*` |
+| Secrets-only scan | `<project-root>/.ubel/reports/latest*` — same path as Workspace, see the note in [Scan for Exposed Secrets](#scan-for-exposed-secrets-ctrlalts) |
 | VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest*` or `~/.vscode-oss/extensions/.ubel/reports/latest*` or `~/.cursor/extensions/.ubel/reports/latest*` |
 | Host platform | `~/.ubel/reports/latest*` |
 
@@ -332,7 +365,9 @@ Previous scans are retained under:
 
 ## Privacy
 
-UBEL is fully local. The only external call is to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receives package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere.
+UBEL is fully local. The only external calls are to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receive package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk.
+
+Both endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where even those two calls need to stay on an internal network. See [node/sca/README.md](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 
 ---
 

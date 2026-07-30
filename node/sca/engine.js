@@ -19,8 +19,17 @@ import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommend
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch";
-const OSV_VULN_BASE  = "https://api.osv.dev/v1/vulns";
+// OSV API base — overridable via UBEL_OSV_ENDPOINT for self-hosted/air-gapped
+// mirrors (e.g. an internal proxy in front of a local OSV database dump).
+// Expected to expose the same REST path shape as the public API
+// (`/v1/querybatch`, `/v1/vulns/{id}`) — only the host/base path changes.
+// This only affects the live vulnerability queries below; the "view
+// online" reference links shown in reports (osv.dev/vulnerability/{id})
+// are left pointing at the public site regardless, since a private mirror
+// generally doesn't serve an equivalent browsable web UI at that path.
+const OSV_API_BASE   = (process.env.UBEL_OSV_ENDPOINT || "https://api.osv.dev").replace(/\/+$/, "");
+const OSV_QUERYBATCH = `${OSV_API_BASE}/v1/querybatch`;
+const OSV_VULN_BASE  = `${OSV_API_BASE}/v1/vulns`;
 
 
 // ── Network metadata helpers ──────────────────────────────────────────────────
@@ -674,13 +683,13 @@ function generateHTMLReport(data) {
                 const row = document.createElement('tr');
                 row.className = 'hover:bg-neutral-800/30 transition-colors';
                 const sev = (f.severity || 'unknown').toLowerCase();
-                const loc = f.column_start ? \`line: \${f.line}<br>column: \${f.column_start}\` : \`\${f.line}\`;
+                const loc = f.column_start ? \`\${f.line}:\${f.column_start}\` : \`\${f.line}\`;
                 row.innerHTML = \`
                     <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${sev}">\${escapeHtml(f.severity || 'unknown')}</span></td>
                     <td class="px-6 py-4 font-medium">\${escapeHtml(f.title)}</td>
                     <td class="px-6 py-4 text-neutral-400 text-xs">\${escapeHtml(f.category || '')}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(f.file_path)}</td>
-                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${loc}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(loc)}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-500">\${escapeHtml(f.match_preview || '')}</td>
                 \`;
                 tbody.appendChild(row);
@@ -1429,8 +1438,13 @@ function getEcosystemFromPurl(purl) {
 // Rate-limit: NVD allows ~5 req/30 s without an API key.  We use a serial
 // queue with per-request exponential backoff (same fetchJSON opts) so we
 // never hammer the endpoint.
+//
+// Overridable via UBEL_NVD_ENDPOINT for self-hosted/air-gapped mirrors —
+// same scoping note as UBEL_OSV_ENDPOINT above: this only affects the live
+// CPE query below, not the "view online" nvd.nist.gov reference link
+// generated per-finding elsewhere, which assumes the public site's structure.
 
-const NVD_CVE_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0";
+const NVD_CVE_BASE = (process.env.UBEL_NVD_ENDPOINT || "https://services.nvd.nist.gov/rest/json/cves/2.0").replace(/\/+$/, "");
 
 /**
  * Pick the best available CVSS vector + score from an NVD CVE entry.

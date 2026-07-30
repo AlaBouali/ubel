@@ -246,7 +246,7 @@ function activate(context) {
           // vscode.version is resolved here in extension.js where the vscode
           // API is available, so engine.js never needs to shell out for it.
           editor_version     : editor.version,
-          scan_secrets       : true,  // extension scan does not include secrets
+          scan_secrets       : true,  // included by default even for an extensions-directory scan
         },
         reportUri,
         title: `UBEL: Scanning ${editor.label} extensions…`,
