@@ -729,6 +729,15 @@ export class SarifBuilder {
           total_infections:
             stats.total_infections || 0,
 
+          license_osi_approved:
+            (stats.license_stats || {}).osi_approved || 0,
+
+          license_not_osi_approved:
+            (stats.license_stats || {}).not_osi_approved || 0,
+
+          license_unknown:
+            (stats.license_stats || {}).unknown || 0,
+
           policy_allowed:
             decision.allowed !== undefined
               ? decision.allowed
@@ -987,6 +996,191 @@ export class SarifBuilder {
     };
   }
 
+  /**
+   * Whether a package's license classification (see license_checker.js)
+   * warrants a SARIF finding. Low/medium-risk, OSI-approved licenses are
+   * treated as compliant by default and produce no result — this run is
+   * meant to surface what needs review, not to restate the whole inventory
+   * (mirrors how the main run only reports vulnerabilities, not every
+   * package). Anything high risk, or not confirmed OSI-approved (i.e.
+   * `osi_approved` is `false` — a real but non-OSI/proprietary license — or
+   * `null` — missing/unparseable license text), is flagged.
+   */
+  _isLicenseFlagged(info) {
+    if (!info) return false;
+    if (info.risk === "high") return true;
+    if (info.osi_approved !== true) return true;
+    return false;
+  }
+
+  /** Stable SARIF rule id for a license classification bucket. */
+  _licenseRuleId(info) {
+    const key = info.spdx || info.category || "unknown";
+    return `license-${String(key).replace(/[^A-Za-z0-9.+-]+/g, "-")}`;
+  }
+
+  /**
+   * Build SARIF locations for a license finding from an inventory item's
+   * install paths. Separate from _buildLocations(v) above, which is keyed
+   * off findings_summary (vulnerability-only) data — license findings need
+   * every flagged package's own paths, not just vulnerable/infected ones.
+   */
+  _buildLicenseLocations(item) {
+    const locations = [];
+    const seen = new Set();
+
+    const addLocation = rawUri => {
+      const relativeUri = this._toRepoRelativeUri(rawUri);
+      if (!relativeUri || seen.has(relativeUri)) return;
+      seen.add(relativeUri);
+      locations.push({
+        physicalLocation: {
+          artifactLocation: { uri: relativeUri, uriBaseId: "%SRCROOT%" },
+          region: { startLine: 1, startColumn: 1 },
+        },
+      });
+    };
+
+    const paths = Array.isArray(item.paths) ? item.paths : [];
+    for (const p of paths) {
+      const text = p && typeof p === "object" ? p.text : p;
+      if (typeof text === "string") addLocation(text);
+    }
+    if (item.path) {
+      const text = typeof item.path === "object" ? item.path.text : item.path;
+      if (typeof text === "string") addLocation(text);
+    }
+
+    if (!locations.length) {
+      locations.push({
+        physicalLocation: {
+          artifactLocation: { uri: ".", uriBaseId: "%SRCROOT%" },
+          region: { startLine: 1, startColumn: 1 },
+        },
+      });
+    }
+
+    return locations;
+  }
+
+  /**
+   * Build the SARIF rules[] for license-compliance findings, one rule per
+   * distinct flagged license classification (e.g. "license-GPL-3.0-only",
+   * "license-none", "license-UNLICENSED"), deduplicated across packages
+   * that share the same license.
+   */
+  buildLicenseRules() {
+    const rulesMap = new Map();
+    for (const item of this.data.inventory || []) {
+      const info = item.license_info;
+      if (!this._isLicenseFlagged(info)) continue;
+
+      const ruleId = this._licenseRuleId(info);
+      if (rulesMap.has(ruleId)) continue;
+
+      const label = info.spdx || (info.category === "none" ? "No license declared" : info.category);
+      const level = info.risk === "high" ? "error" : info.risk === "medium" ? "warning" : "note";
+
+      rulesMap.set(ruleId, {
+        id: ruleId,
+        name: this._toPascalCaseRuleName(label),
+        shortDescription: { text: `${label} (${info.category})` },
+        fullDescription: { text: this._truncate(info.reason || "License requires manual compliance review.", 2000) },
+        properties: {
+          spdx: info.spdx,
+          category: info.category,
+          risk: info.risk,
+          osi_approved: info.osi_approved,
+        },
+        defaultConfiguration: { level },
+      });
+    }
+    return [...rulesMap.values()];
+  }
+
+  /** Build SARIF results[] for license-compliance findings. */
+  buildLicenseResults() {
+    const rules = this.buildLicenseRules();
+    const ruleIndexMap = new Map(rules.map((r, idx) => [r.id, idx]));
+    const results = [];
+
+    for (const item of this.data.inventory || []) {
+      const info = item.license_info;
+      if (!this._isLicenseFlagged(info)) continue;
+
+      const ruleId = this._licenseRuleId(info);
+      const level = info.risk === "high" ? "error" : info.risk === "medium" ? "warning" : "note";
+      const label = info.spdx || (info.category === "none" ? "no declared license" : info.category);
+
+      results.push({
+        ruleId,
+        ruleIndex: ruleIndexMap.get(ruleId),
+        level,
+        message: {
+          text: this._truncate(
+            `${item.name || item.id}@${item.version || ""} — ${label}: ${info.reason || "requires manual compliance review"}`,
+            2000
+          ),
+        },
+        locations: this._buildLicenseLocations(item),
+        partialFingerprints: {
+          affectedPurl: String(item.id || ""),
+          primaryLocationLineHash: `${item.id || ""}:${ruleId}`,
+        },
+        fingerprints: {
+          primary: this._sha256VulnId(`license:${item.id || ""}:${ruleId}`),
+        },
+        properties: {
+          package: item.name || null,
+          package_version: item.version || null,
+          affected_package_id: item.id || null,
+          license_raw: item.license ?? null,
+          license_spdx: info.spdx,
+          license_identifiers: info.identifiers || [],
+          license_category: info.category,
+          license_risk: info.risk,
+          osi_approved: info.osi_approved,
+        },
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Build a third SARIF run for license-compliance findings, kept separate
+   * from both the vulnerability run and the secrets run above (its own
+   * tool driver + rule/result namespace), following the same
+   * multi-run pattern used for buildSecretsRun(). Returns null when no
+   * package's license was flagged, so `runs` only grows when there's
+   * something to report.
+   */
+  buildLicenseRun() {
+    const results = this.buildLicenseResults();
+    if (!results.length) return null;
+
+    const cwd = this._normalizeUri(this.projectRoot);
+    let baseUri = this._toFileUri(cwd);
+    if (!baseUri.endsWith("/")) baseUri += "/";
+
+    return {
+      tool: {
+        driver: {
+          name: "ubel-license-compliance",
+          fullName: `${TOOL_NAME} License Compliance`,
+          informationUri: "https://github.com/Arcane-Spark/UBEL",
+          rules: this.buildLicenseRules(),
+        },
+      },
+      automationDetails: { id: "ubel-license" },
+      originalUriBaseIds: { "%SRCROOT%": { uri: baseUri } },
+      results,
+      properties: {
+        license_stats: (this.data.stats || {}).license_stats || {},
+      },
+    };
+  }
+
   /** Generate full SARIF document */
   generate() {
     const cwd =
@@ -1061,6 +1255,8 @@ export class SarifBuilder {
     const runs = [run];
     const secretsRun = this.buildSecretsRun();
     if (secretsRun) runs.push(secretsRun);
+    const licenseRun = this.buildLicenseRun();
+    if (licenseRun) runs.push(licenseRun);
 
     return {
       $schema:

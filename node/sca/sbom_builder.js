@@ -83,6 +83,28 @@ export class CycloneDXBuilder {
     };
   }
 
+  /**
+   * Build the CycloneDX `licenses` array for a component.
+   *
+   * Prefers the normalized classification from `license_info` (see
+   * license_checker.js): a single SPDX id or a full boolean expression
+   * ("MIT OR Apache-2.0") is emitted via the `expression` form, which
+   * CycloneDX accepts for both a bare id and a compound expression alike.
+   * Falls back to the raw, unparsed license string as free-text `license.name`
+   * when license_info couldn't resolve a usable SPDX id (e.g. inline license
+   * text, or a genuinely missing/"unknown" value with nothing to carry).
+   */
+  _buildLicenses(item) {
+    const info = item.license_info;
+    if (info && info.spdx) {
+      return [{ expression: info.spdx }];
+    }
+    if (item.license && typeof item.license === "string" && item.license.trim()) {
+      return [{ license: { name: item.license } }];
+    }
+    return [];
+  }
+
   /** Build components from inventory. */
   buildComponents() {
     const components = [];
@@ -95,7 +117,7 @@ export class CycloneDXBuilder {
         name: item.name || "",
         version: item.version || "",
         purl: purl,
-        licenses: item.license ? [ { expression: item.license } ] : [],
+        licenses: this._buildLicenses(item),
       };
       if (cpe) comp.cpe = cpe;
 
@@ -103,6 +125,18 @@ export class CycloneDXBuilder {
         "scopes", "paths", "introduced_by", "parents",
         "state", "is_policy_violation"
       ]);
+      // License risk classification (see license_checker.js) as component
+      // properties — CycloneDX's `licenses` field has no room for OSI
+      // approval / risk metadata, so it travels alongside like reachability
+      // does for vulnerabilities below.
+      if (item.license_info) {
+        props.push(
+          { name: "license.osi_approved", value: JSON.stringify(item.license_info.osi_approved) },
+          { name: "license.risk",         value: item.license_info.risk || "unknown" },
+          { name: "license.category",     value: item.license_info.category || "unrecognized" },
+          { name: "license.reason",       value: item.license_info.reason || "" },
+        );
+      }
       if (props.length) comp.properties = props;
       components.push(comp);
     }
@@ -285,6 +319,9 @@ export class CycloneDXBuilder {
         { name: "inventory_size", value: String(stats.inventory_size || 0) },
         { name: "total_vulns", value: String(stats.total_vulnerabilities || 0) },
         { name: "total_infections", value: String(stats.total_infections || 0) },
+        { name: "license_osi_approved", value: String((stats.license_stats || {}).osi_approved || 0) },
+        { name: "license_not_osi_approved", value: String((stats.license_stats || {}).not_osi_approved || 0) },
+        { name: "license_unknown", value: String((stats.license_stats || {}).unknown || 0) },
         { name: "secrets_found", value: String((this.data.secrets || {}).count || 0) },
         // Full secrets payload — CycloneDX's root schema forbids
         // additionalProperties, so this can't be a top-level "x-"

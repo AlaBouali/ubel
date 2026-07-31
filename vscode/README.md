@@ -28,6 +28,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Policy engine — block/allow by severity threshold and unknown-severity packages
 - Malicious package (infection) detection — always blocked regardless of policy
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, Stripe restricted keys, Twilio SIDs, URL-embedded git credentials, and more). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
+- **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan.
 - Dependency graph with introduced-by and parent tracking
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -196,7 +197,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 |---|---|
 | **Dashboard** | Vulnerability counts by severity, policy decision summary, scan metadata |
 | **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, reachability level, and policy decision |
-| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, and vulnerability count |
+| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count |
 | **Graph** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **System** | OS metadata, Node.js version, scan engine info |
@@ -253,6 +254,24 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 | Ruby | `.rb` | `require '<gem>'` |
 
 Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field.
+
+---
+
+## License Compliance
+
+Every project scan classifies each package's declared license by default — no separate command needed. Licenses arrive in inconsistent shapes across ecosystems (SPDX ids, free text like `"Apache 2.0"`, npm's `UNLICENSED` proprietary sentinel, Python trove classifiers, `OR`/`AND` SPDX expressions, or missing entirely); UBEL normalizes all of them to a canonical SPDX identifier, checks it against the OSI-approved license list, and assigns a risk rating:
+
+| Category | Examples | Risk |
+|---|---|---|
+| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC | `low` |
+| Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0 | `medium` |
+| Strong copyleft | GPL-2.0/3.0, AGPL-3.0 | `high` |
+| Proprietary / source-available | npm `UNLICENSED`, SSPL-1.0, BUSL-1.1 | `high` |
+| None / unrecognized | missing, `unknown`, or unparseable text | `unknown` |
+
+npm's `UNLICENSED` sentinel (proprietary — all rights reserved) is deliberately not confused with the SPDX `Unlicense` public-domain license; dual-licensed packages (`OR`) are classified using the most favorable option, since the consumer may legally choose it.
+
+Results appear in the **Inventory** tab of the HTML report (per-package license, OSI-approved status, and risk) and in the machine-readable JSON/SBOM/SARIF reports under each package's `license_info` field.
 
 ---
 

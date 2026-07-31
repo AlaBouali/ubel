@@ -1,7 +1,3 @@
-# Disclaimer for the extracted licenses in the reports:
-
-The licenses are extracted raw whenever available. The tool hasn't yet implemented a normalization layer for them, but I am planning to in a future release.
-
 # Disclaimer for the missing `hashes` in the `components` section of the generated `cyclonedx` files:
 
 Package hashes are not consistently available across all supported ecosystems and package managers at scan time. It is impossible to provide the hashes consistently for all detected packages/dependencies across all stacks. So, for the sake of consistency, I chose to remove them entirely instead of generated inconsistent outputs across scans.

@@ -27,6 +27,7 @@ scan_project
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
+- **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included in every scan by default (see [License Compliance](#license-compliance))
 
 ---
 
@@ -417,6 +418,80 @@ On top of the ported set, `sca/secrets.js` defines an `extraRules` array coverin
 - **HTML report**: a dedicated Secrets tab (category, severity, file/line, redacted match preview — the raw secret value is never written to any report or log).
 - **SBOM (CycloneDX v1.6)**: exposed as a `ubel:secrets` entry in the root `properties` array, as a JSON-string value. Not a top-level `x-`-prefixed key — CycloneDX's root schema sets `additionalProperties: false`, so a custom root key would fail strict schema validation; the `properties` array is the schema's actual documented extension point.
 - **SARIF 2.1.0**: its own `run`, with a dedicated `tool.driver` and rule set, kept separate from the dependency-vulnerability run.
+
+---
+
+## License Compliance
+
+Every scan classifies each inventory item's declared license by default — no separate flag, no separate command. The classification is purely additive: the raw `license` field reported by the package manager is left untouched, and a `license_info` object is added alongside it.
+
+### Normalization
+
+Licenses arrive in wildly inconsistent shapes across ecosystems, and all of the following are normalized to the same canonical SPDX identifier before classification:
+
+- Case and whitespace variants — `mit`, `MIT`, `Mit` → `MIT`
+- Free text — `"Apache 2.0"`, `"apache2"`, `"Apache License 2.0"` → `Apache-2.0`
+- SPDX boolean expressions — `(MIT OR Apache-2.0)`, `GPL-2.0-or-later`, `GPL-2.0+`
+- Legacy npm object/array forms — `{ type: "ISC", url: "..." }`, `[{type:"MIT"}, {type:"Apache-2.0"}]`
+- Python trove classifiers — `"License :: OSI Approved :: MIT License"` → `MIT`
+- npm's `"UNLICENSED"` sentinel — a *proprietary* marker (all rights reserved), deliberately not confused with the SPDX `Unlicense` public-domain license
+- `"SEE LICENSE IN <file>"` — flagged as unverifiable rather than guessed at
+- Missing, empty, `null`, or `"unknown"` values — classified as `none` rather than silently dropped
+
+Dual/multi-licensed packages (`OR`) are classified using the most favorable component, since the consumer may legally choose it; conjunctively-licensed packages (`AND`) are classified using the most restrictive component, since all obligations stack.
+
+### Risk classification
+
+Each normalized license is checked against a curated OSI-approved license table and assigned a category and risk level:
+
+| Category | Examples | Risk |
+|---|---|---|
+| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC, 0BSD | `low` |
+| Public domain | Unlicense (OSI-approved), CC0-1.0 (not OSI-approved but permissive in practice) | `low` |
+| Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0, CDDL | `medium` |
+| Strong copyleft | GPL-2.0/3.0, AGPL-3.0 | `high` |
+| Source-available / rejected by OSI | SSPL-1.0, BUSL-1.1, Elastic-2.0 | `high` |
+| Proprietary | npm `UNLICENSED`, `"Proprietary"` | `high` |
+| None / unrecognized | missing, `unknown`, or unparseable text | `unknown` |
+
+`osi_approved` is `true` only for licenses on the [OSI-approved list](https://opensource.org/licenses); `false` for a real, identifiable license that isn't on it (proprietary, source-available, or non-software licenses like Creative Commons); `null` when there's nothing to check (missing license, or text that couldn't be parsed).
+
+### Output fields
+
+Each inventory item gets a `license_info` object:
+
+```json
+{
+  "license": "UNLICENSED",
+  "license_info": {
+    "raw": "UNLICENSED",
+    "spdx": null,
+    "identifiers": [],
+    "osi_approved": false,
+    "risk": "high",
+    "category": "proprietary",
+    "reason": "npm \"UNLICENSED\" marker — explicitly no license grant (all rights reserved). Not to be confused with the SPDX \"Unlicense\" public-domain license."
+  }
+}
+```
+
+The top-level `stats.license_stats` field summarizes the whole inventory:
+
+```json
+{
+  "total": 142,
+  "osi_approved": 118,
+  "not_osi_approved": 9,
+  "unknown": 15,
+  "by_risk": { "low": 112, "medium": 6, "high": 9, "unknown": 15 }
+}
+```
+
+### Output
+
+- **HTML report**: the inventory table and per-package detail modal render `license_info` as a risk-badged license table (SPDX id, identifiers, OSI-approved, risk, category, reason) rather than a bare string.
+- **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name` otherwise; `license.osi_approved` / `license.risk` / `license.category` / `license.reason` are added as component `properties`. Root-level `properties` include `license_osi_approved` / `license_not_osi_approved` / `license_unknown` counts.
+- **SARIF 2.1.0**: a dedicated `ubel-license-compliance` run, separate from both the dependency-vulnerability run and the secrets run. Only packages that need review are reported — any package with `risk: "high"`, or `osi_approved` not equal to `true` (i.e. `false` or `null`) — so a fully permissively-licensed tree produces no findings. Rules are deduplicated per license classification (one rule per distinct SPDX id / category combination); result `level` maps from risk (`high` → `error`, `medium` → `warning`, `low` → `note`).
 
 ---
 

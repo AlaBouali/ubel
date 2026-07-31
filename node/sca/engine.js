@@ -16,6 +16,7 @@ import { SarifBuilder } from "./sarif_builder.js"
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
+import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +168,56 @@ function generateHTMLReport(data) {
     const clientScript = `
         // --- DATA ---
         const reportData = ${safeJson};
+
+        // Helper: render a small risk pill for a license_info.risk value.
+        function riskBadge(risk) {
+            const riskColor = {
+                low: 'text-green-400 border-green-400/40',
+                medium: 'text-yellow-400 border-yellow-400/40',
+                high: 'text-red-400 border-red-400/40',
+                unknown: 'text-neutral-400 border-neutral-600'
+            }[risk] || 'text-neutral-400 border-neutral-600';
+            return \`<span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold \${riskColor}">\${risk || 'unknown'}</span>\`;
+        }
+
+        // Helper: render an item's license_info classification object (see
+        // license_checker.js on the backend) as a small key/value table.
+        // Falls back gracefully if a report predates this field.
+        function renderLicenseInfoTable(licenseInfo) {
+            if (!licenseInfo || typeof licenseInfo !== 'object') {
+                return '<p class="text-neutral-500 text-xs italic">No license classification available.</p>';
+            }
+            const osiLabel = licenseInfo.osi_approved === true ? 'Yes'
+                : licenseInfo.osi_approved === false ? 'No'
+                : 'Unverified';
+            const rows = [
+                ['SPDX', escapeHtmlClient(licenseInfo.spdx || '—')],
+                ['Identifiers', escapeHtmlClient((licenseInfo.identifiers || []).join(', ') || '—')],
+                ['OSI Approved', osiLabel],
+                ['Risk', riskBadge(licenseInfo.risk)],
+                ['Category', escapeHtmlClient(licenseInfo.category || '—')],
+                ['Reason', escapeHtmlClient(licenseInfo.reason || '—')],
+            ];
+            return \`
+                <table class="w-full text-left text-xs">
+                    <tbody class="divide-y divide-neutral-800">
+                        \${rows.map(([k, v]) => \`
+                            <tr>
+                                <td class="py-1.5 pr-4 text-neutral-500 uppercase text-[10px] font-bold align-top whitespace-nowrap">\${k}</td>
+                                <td class="py-1.5 mono">\${v}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
+            \`;
+        }
+
+        function escapeHtmlClient(str) {
+            if (!str || typeof str !== 'string') return str || '';
+            return str.replace(/[&<>"']/g, (m) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[m]));
+        }
 
         // Helper: get package display name from inventory
         function getPackageDisplay(purl) {
@@ -512,7 +563,7 @@ function generateHTMLReport(data) {
 }">\${item.state}</span></td>
                     <td class="px-6 py-4"><span class="text-xs \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</span></td>
                     <td class="px-6 py-4 text-neutral-400">\${item.ecosystem}</td>
-                    <td class="px-6 py-4 text-neutral-400">\${item.license}</td>
+                    <td class="px-6 py-4 text-neutral-400">\${item.license || 'unknown'}</td>
                     <td class="px-6 py-4 text-neutral-500 text-xs">\${item.scopes.join(', ')}</td>
                 \`;
                 tbody.appendChild(row);
@@ -776,6 +827,7 @@ function generateHTMLReport(data) {
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold \${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">\${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
                     </div>
 
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">License Risk</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">\${renderLicenseInfoTable(item.license_info)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (\${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">\${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">\${depsRows}</div></div>
@@ -2447,6 +2499,14 @@ export class UbelEngineInstance {
 
       normalizeInventoryPaths(inventory, primaryLocalIP);
 
+      // ── License risk enrichment ─────────────────────────────────────────────
+      // Replaces each item's raw `license` string with a classification object
+      // ({ raw, spdx, identifiers, osi_approved, risk, category, reason }).
+      // Handles missing/null/"unknown" values, the npm "UNLICENSED" proprietary
+      // sentinel, free-text and SPDX-expression normalization, and OSI-approval
+      // lookup. See license_checker.js.
+      const licenseSummary = enrichInventoryWithLicenseRisk(inventory);
+
       vulnerabilities = deduplicateVulnerabilitiesByAlias(vulnerabilities);
 
       [vulnerabilities, inventory] = filterFalsePositiveInfections(inventory, vulnerabilities);
@@ -2504,6 +2564,7 @@ export class UbelEngineInstance {
         total_vulnerabilities: vulnerabilities.length,
         vulnerabilities_stats: { severity: severityBuckets },
         total_infections: infectionCount,
+        license_stats: licenseSummary,
       };
 
       const runtime = {
