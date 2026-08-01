@@ -109,7 +109,7 @@ export const extraRules = [
   {
     id: "generic-fallback",
     category: "Generic",
-    severity: "MEDIUM",
+    severity: "HIGH",
     title: "Generic High‑Entropy Token",
     generic: true,
     keywords: ["sk-", "pk_", "xoxb", "xoxp", "api_", "key_", "token_"],
@@ -120,7 +120,7 @@ export const extraRules = [
   {
     id: "generic-key-value-credential",
     category: "Generic",
-    severity: "LOW",
+    severity: "HIGH",
     title: "Generic Key‑Value Credential",
     generic: true,
     keywords: ["password", "secret", "token", "api_key", "private_key"],
