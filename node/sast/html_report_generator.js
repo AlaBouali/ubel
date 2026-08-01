@@ -204,6 +204,14 @@ function validBadge(isValid) {
   return '<span class="px-1.5 py-0.5 rounded border text-[10px] text-neutral-600 border-neutral-700">UNVERIFIED</span>';
 }
 
+// ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
+
+function updateTabCounts() {
+  const s = reportData.stats;
+  document.getElementById('tab-findings').textContent  = 'Findings(' + s.totalFindings + ')';
+  document.getElementById('tab-inventory').textContent = 'Chunk Inventory(' + s.totalChunks + ')';
+}
+
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 
 function switchTab(id) {
@@ -767,6 +775,7 @@ const SAST_TOOL_NAME = '${SAST_TOOL}';
 
 function init() {
   closeModal();
+  updateTabCounts();
   renderDashboard();
   renderFindings();
   renderInventory();
@@ -890,8 +899,8 @@ export function generateSastHTMLReport(results, meta = {}) {
   <nav class="border-b border-neutral-800 bg-neutral-900/30">
     <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
       <button onclick="switchTab('dashboard')"      id="tab-dashboard"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
-      <button onclick="switchTab('findings')"       id="tab-findings"       class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings</button>
-      <button onclick="switchTab('inventory')"      id="tab-inventory"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Chunk Inventory</button>
+      <button onclick="switchTab('findings')"       id="tab-findings"       class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
+      <button onclick="switchTab('inventory')"      id="tab-inventory"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Chunk Inventory(0)</button>
       <button onclick="switchTab('stats')"          id="tab-stats"          class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
       <button onclick="switchTab('system')"         id="tab-system"         class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
     </div>

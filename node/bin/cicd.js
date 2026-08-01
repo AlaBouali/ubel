@@ -21,14 +21,14 @@ async function run() {
     console.log(JSON.stringify(result, null, 2));
 
     if (result && result.decision && result.decision.allowed === false) {
-      console.error("[!] Agent scan blocked by policy:", result.decision.reason);
+      console.error("[!] CICD scan blocked by policy:", result.decision.reason);
       process.exit(1);
     }
 
     process.exit(0);
 
   } catch (err) {
-    console.error("[!] Agent scan failed:", err.message);
+    console.error("[!] CICD scan failed:", err.message);
     if (process.env.DEBUG) console.error(err.stack);
     process.exit(1);
   }

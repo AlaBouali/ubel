@@ -810,13 +810,13 @@ function generateHTMLReport(data) {
                 const row = document.createElement('tr');
                 row.className = 'hover:bg-neutral-800/30 transition-colors';
                 const sev = (f.severity || 'unknown').toLowerCase();
-                const loc = f.column_start ? \`\${f.line}:\${f.column_start}\` : \`\${f.line}\`;
+                const loc = f.line;
                 row.innerHTML = \`
                     <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${sev}">\${escapeHtml(f.severity || 'unknown')}</span></td>
                     <td class="px-6 py-4 font-medium">\${escapeHtml(f.title)}</td>
                     <td class="px-6 py-4 text-neutral-400 text-xs">\${escapeHtml(f.category || '')}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(f.file_path)}</td>
-                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${escapeHtml(loc)}</td>
+                    <td class="px-6 py-4 mono text-xs text-neutral-400">\${loc}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-500">\${escapeHtml(f.match_preview || '')}</td>
                 \`;
                 tbody.appendChild(row);
@@ -1346,7 +1346,7 @@ function generateHTMLReport(data) {
             <div class="glass rounded-xl overflow-hidden">
                 <table class="w-full text-left text-sm">
                     <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">
-                        <tr><th class="px-6 py-4">Severity</th><th>Rule</th><th>Category</th><th>File</th><th>Location</th><th>Preview</th></tr>
+                        <tr><th class="px-6 py-4">Severity</th><th>Rule</th><th>Category</th><th>Location</th><th>Line</th><th>Preview</th></tr>
                     </thead>
                     <tbody id="secrets-table-body" class="divide-y divide-neutral-800"></tbody>
                 </table>

@@ -317,6 +317,19 @@ Unlike `threshold`/`block-unknown`, this gate is only ever evaluated on `health`
 
 ---
 
+### `license-block-unknown`
+
+Separately controls whether packages whose license couldn't be classified at all cause a block — distinct from `license-risk` above, which only governs the `low`/`medium`/`high` buckets and deliberately never blocks on `unknown`.
+
+```bash
+ubel-npm license-block-unknown true
+ubel-npm license-block-unknown false   # default
+```
+
+Same `health`-mode-only scope as `license-risk`. Off by default: an `unknown` classification is usually a detection gap (unparseable free-text license, missing metadata) rather than an actual compliance finding, so this is opt-in even on a strict `license-risk` policy — a fresh scan of an unfamiliar codebase can otherwise block on packages nobody has actually looked at yet, purely because their metadata didn't parse.
+
+---
+
 ## Policy
 
 Policy is stored as JSON at `.ubel/local/policy/config.json` relative to the project root.
@@ -327,7 +340,8 @@ Default policy created on first run:
 {
     "severity_threshold": "high",
     "block_unknown_vulnerabilities": true,
-    "license_risk_threshold": "none"
+    "license_risk_threshold": "none",
+    "block_unknown_license_risk": false
 }
 ```
 
@@ -335,7 +349,9 @@ Default policy created on first run:
 
 **Block unknown** — when `true`, any vulnerability whose severity cannot be determined also causes a block.
 
-**License risk threshold** — packages whose license risk is at or above this level cause a block. Risk order: `low → medium → high`. Defaults to `"none"` (disabled) — unlike the vulnerability gates above, this is opt-in even when license classification runs, because license detection has real gaps (free-text licenses, missing metadata) and legal risk tolerance for e.g. weak copyleft varies by organization. There is deliberately no "block unknown license risk" flag: an `unknown` classification usually reflects a detection gap rather than an actual finding, so it's never folded into an enforced gate. This gate is also a no-op outside `health`-mode scans, since `license_stats` is only populated there — see [License Compliance](#license-compliance).
+**License risk threshold** — packages whose license risk is at or above this level cause a block. Risk order: `low → medium → high`. Defaults to `"none"` (disabled) — unlike the vulnerability gates above, this is opt-in even when license classification runs, because license detection has real gaps (free-text licenses, missing metadata) and legal risk tolerance for e.g. weak copyleft varies by organization. This threshold never blocks on `unknown` regardless of how strict it's set — see `block_unknown_license_risk` below. This gate is also a no-op outside `health`-mode scans, since `license_stats` is only populated there — see [License Compliance](#license-compliance).
+
+**Block unknown license risk** — separately controls whether packages whose license couldn't be classified at all cause a block. Defaults to `false`, for the same reason `license_risk_threshold` excludes `unknown` from its ordered levels: an unclassified license is more often a detection gap than a real finding. Same `health`-mode-only scope.
 
 **Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to any of the settings above.
 
