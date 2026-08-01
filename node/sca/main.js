@@ -6,7 +6,7 @@
  *   node src/main.js <engine> <mode> [...extra_args]
  *
  *   engine    : npm | pnpm | bun | docker
- *   mode      : check | install | health | init | threshold | block-unknown | license-risk
+ *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
@@ -17,6 +17,10 @@
  *       already installed on the machine, not an install-time security
  *       gate, so this has no effect on `check`/`install` scans regardless
  *       of the level set here. Defaults to "none" (not enforced).
+ *     license-block-unknown <true|false> — set block_unknown_license_risk
+ *       Separate from license-risk above: blocks packages whose license
+ *       couldn't be classified at all, rather than a specific risk level.
+ *       Same health-mode-only scope. Defaults to false.
  *
  *   Docker mode (`docker` engine supports `health`, `check`, and `install`):
  *     node src/main.js docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
@@ -95,7 +99,7 @@ async function createTargetPath(dirPath) {
   }
 }
 
-const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown", "license-risk"];
+const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown", "license-risk", "license-block-unknown"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 
@@ -152,6 +156,7 @@ async function main(programmaticOptions) {
       severity_threshold = undefined,
       block_unknown_vulnerabilities = undefined,
       license_risk_threshold = undefined,
+      block_unknown_license_risk = undefined,
       ...rest
     } = programmaticOptions;
 
@@ -196,6 +201,13 @@ async function main(programmaticOptions) {
         throw new Error(`Invalid license_risk_threshold: ${license_risk_threshold}. Must be one of: none, low, medium, high`);
       }
       eng.setPolicyField("license_risk_threshold", level);
+    }
+
+    if (block_unknown_license_risk !== undefined) {
+      if (typeof block_unknown_license_risk !== "boolean") {
+        throw new Error(`block_unknown_license_risk must be a boolean, got ${typeof block_unknown_license_risk}`);
+      }
+      eng.setPolicyField("block_unknown_license_risk", block_unknown_license_risk);
     }
 
     return await eng.scan(packages, {
@@ -330,6 +342,21 @@ async function main(programmaticOptions) {
     eng.setPolicyField("license_risk_threshold", level);
     console.log(`[+] Policy updated: license_risk_threshold = ${level}`);
     console.log("[i] Only enforced against `health`-mode scans — installed-software audits, not check/install gating.");
+    process.exit(0);
+  }
+
+  // ── license-block-unknown <true|false> ───────────────────────────────────────
+  if (effectiveMode === "license-block-unknown") {
+    const raw = (extraArgs[0] || "").toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      console.error("[!] Provide true or false");
+      console.error("[!] Example: ubel-npm license-block-unknown true");
+      process.exit(1);
+    }
+    const value = raw === "true";
+    eng.setPolicyField("block_unknown_license_risk", value);
+    console.log(`[+] Policy updated: block_unknown_license_risk = ${value}`);
+    console.log("[i] Only enforced against `health`-mode scans, and separate from license-risk — this blocks packages whose license couldn't be classified at all, not a specific risk level.");
     process.exit(0);
   }
 

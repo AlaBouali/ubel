@@ -3,28 +3,34 @@
  *
  * Policy file schema (JSON):
  * {
- *   "severity_threshold": "high",          // block this level and above
- *   "block_unknown_vulnerabilities": true, // whether to block unknowns
- *   "license_risk_threshold": "none"       // block this license risk level
- *                                          // and above; "none" disables
- *                                          // license-risk blocking (default)
+ *   "severity_threshold": "high",              // block this level and above
+ *   "block_unknown_vulnerabilities": true,     // whether to block unknowns
+ *   "license_risk_threshold": "none",          // block this license risk level
+ *                                              // and above; "none" disables
+ *                                              // license-risk blocking (default)
+ *   "block_unknown_license_risk": false        // separately block packages whose
+ *                                              // license couldn't be classified
+ *                                              // at all (default: false)
  * }
  *
  * Severity order (ascending): low → medium → high → critical
  * "unknown" is governed solely by block_unknown_vulnerabilities.
  *
  * License risk order (ascending): low → medium → high
- * "none" is not a risk level — it means the gate is off. There is
- * deliberately no "unknown" handling here: license detection can't always
- * resolve a package's terms (missing metadata, unparsable free text), and
- * folding "unknown" into an enforced gate would risk blocking installs
- * over a detection gap rather than an actual legal/compliance finding. If
- * that's ever needed, it should be its own explicit opt-in flag, mirroring
- * block_unknown_vulnerabilities above, not bundled into the threshold.
+ * "none" is not a risk level — it means the gate is off. "unknown" is
+ * deliberately NOT part of this ordered threshold, for the same reason
+ * unknown-severity vulnerabilities get their own separate flag above:
+ * license detection can't always resolve a package's terms (missing
+ * metadata, unparsable free text), and folding "unknown" into the ordered
+ * gate would make license_risk_threshold silently skip over misclassified
+ * packages no matter how strict the threshold is set. block_unknown_license_risk
+ * is the explicit, separate opt-in for that case — default false, since an
+ * unknown classification is still more often a detection gap than an actual
+ * legal finding, and a fresh scan on an unfamiliar codebase can otherwise
+ * block on packages nobody has looked at yet.
  *
- * Only populated for `health`-mode scans — see engine.js — so this check
- * is a no-op for `check`/`install` scans regardless of the configured
- * threshold.
+ * Only populated for `health`-mode scans — see engine.js — so both license
+ * checks above are a no-op for `check`/`install` scans regardless of config.
  *
  * Infections are always blocked regardless of policy.
  */
@@ -107,6 +113,14 @@ export function evaluatePolicy(report) {
           `(threshold: ${rawLicenseThreshold})`,
         ];
       }
+    }
+  }
+
+  // ── 5. Unknown license risk (health-mode scans only; separate opt-in) ────
+  if (policy.block_unknown_license_risk === true) {
+    const unknownLicenseCount = stats?.license_stats?.by_risk?.unknown || 0;
+    if (unknownLicenseCount > 0) {
+      return [false, `Blocked by policy: ${unknownLicenseCount} package(s) with unclassified license risk detected`];
     }
   }
 

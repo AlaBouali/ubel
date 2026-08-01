@@ -455,6 +455,7 @@ function generateHTMLReport(data) {
             renderSecrets();
             setupFilters();
             populatePackageSelect();
+            setupCounts();
 
             // Close dropdown when clicking outside
             document.addEventListener('click', (e) => {
@@ -463,6 +464,12 @@ function generateHTMLReport(data) {
                     closePkgDropdown();
                 }
             });
+        }
+
+        function setupCounts() {
+            document.getElementById('tab-secrets').textContent = \`Secrets(\${reportData.secrets?.count || 0})\`;
+            document.getElementById('tab-vulnerabilities').textContent = \`Vulnerabilities(\${reportData.stats.total_vulnerabilities})\`;
+            document.getElementById('tab-inventory').textContent = \`Inventory(\${reportData.stats.inventory_size})\`;
         }
 
         function switchTab(tabId) {
@@ -495,9 +502,11 @@ function generateHTMLReport(data) {
             const thresh = pol.severity_threshold || 'none';
             const blockUnk = pol.block_unknown_vulnerabilities === true ? 'block' : 'allow';
             const licenseRisk = pol.license_risk_threshold || 'none';
+            const blockUnkLicense = pol.block_unknown_license_risk === true ? 'block' : 'allow';
             document.getElementById('policy-threshold').textContent = thresh;
             document.getElementById('policy-block-unknown').textContent = blockUnk;
             document.getElementById('policy-license-risk').textContent = licenseRisk;
+            document.getElementById('policy-block-unknown-license').textContent = blockUnkLicense;
             document.getElementById('policy-infection').textContent = 'block (always)';
             document.getElementById('policy-secrets').textContent = 'block (always)';
 
@@ -1094,9 +1103,9 @@ function generateHTMLReport(data) {
     <nav class="border-b border-neutral-800 bg-neutral-900/30">
         <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
             <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
-            <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets</button>
-            <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities</button>
-            <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory</button>
+            <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets(0)</button>
+            <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities(0)</button>
+            <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory(0)</button>
             <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Sequences</button>
             <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
             <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
@@ -1113,7 +1122,7 @@ function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Vulnerabilities Section -->
@@ -2250,11 +2259,20 @@ function sortVulnerabilities(vulns) {
 //                                   one, and only ever populated for `health`-mode
 //                                   scans (see the license enrichment step above
 //                                   and policy.js), so it's opt-in even there.
+//   block_unknown_license_risk    — separately block packages whose license
+//                                   couldn't be classified at all. Deliberately
+//                                   its own flag rather than folded into
+//                                   license_risk_threshold — an "unknown"
+//                                   classification is usually a detection gap
+//                                   (unparseable free text, missing metadata),
+//                                   not a real compliance finding, so it's off
+//                                   by default even when a threshold is set.
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
   block_unknown_vulnerabilities: true,
   license_risk_threshold:        "none",
+  block_unknown_license_risk:    false,
 };
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────
@@ -2381,7 +2399,7 @@ export class UbelEngineInstance {
   /**
    * Set a single top-level policy field and persist it to disk.
    *
-   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"} key
+   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"|"block_unknown_license_risk"} key
    * @param {string|boolean} value
    */
   setPolicyField(key, value) {

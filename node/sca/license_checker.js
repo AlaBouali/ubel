@@ -41,6 +41,12 @@
 const LICENSE_TABLE = Object.freeze({
   // ── Permissive, OSI-approved ──
   "MIT":              { osi: true,  category: "permissive",     risk: "low" },
+  // MIT-CMU — a Carnegie Mellon-attributed MIT variant; distinct SPDX id
+  // from plain "MIT" (CMU is listed as an added copyright holder in the
+  // license text) and not on the OSI-approved list under this specific id,
+  // but functionally the same permissive terms. Notably: this is Pillow's
+  // own declared license.
+  "MIT-CMU":          { osi: false, category: "permissive",     risk: "low" },
   "MIT-0":            { osi: true,  category: "permissive",     risk: "low" },
   "Apache-1.1":       { osi: true,  category: "permissive",     risk: "low" },
   "Apache-2.0":       { osi: true,  category: "permissive",     risk: "low" },
@@ -127,6 +133,14 @@ const ALIASES = Object.freeze({
   "apache 2.0": "Apache-2.0", "apache license 2.0": "Apache-2.0",
   "apache license, version 2.0": "Apache-2.0", "apache-2": "Apache-2.0",
   "apache software license": "Apache-2.0", "asl 2.0": "Apache-2.0",
+  // "Apache Software" (no trailing "License") is PyPI's classic
+  // `license` metadata field value, distinct from the newer trove
+  // classifier — seen as-is on real packages (motor, requests,
+  // python-dateutil, s3transfer, python-multipart). Apache 1.1 is
+  // essentially extinct in maintained packages, so treating this as
+  // Apache-2.0 matches what other license-scanning tools (e.g.
+  // pip-licenses) assume in practice.
+  "apache software": "Apache-2.0",
 
   "bsd": "BSD-3-Clause", "bsd license": "BSD-3-Clause",
   "bsd 3-clause": "BSD-3-Clause", "bsd-3": "BSD-3-Clause",
@@ -135,6 +149,10 @@ const ALIASES = Object.freeze({
   "simplified bsd license": "BSD-2-Clause", "freebsd": "BSD-2-Clause",
 
   "isc license": "ISC", "isc license (iscl)": "ISC",
+  // Same as above without the word "license" — dnspython's actual
+  // declared metadata value is "ISC  (ISCL)" (collapses to this after
+  // whitespace normalization).
+  "isc (iscl)": "ISC",
 
   "blue oak model license": "BlueOak-1.0.0", "blue oak model license 1.0.0": "BlueOak-1.0.0",
   "blueoak-1.0.0": "BlueOak-1.0.0", "blueoak 1.0.0": "BlueOak-1.0.0", "blueoak": "BlueOak-1.0.0",
@@ -152,6 +170,10 @@ const ALIASES = Object.freeze({
   "cc0 1.0 universal": "CC0-1.0",
 
   "mozilla public license 2.0": "MPL-2.0", "mpl 2.0": "MPL-2.0",
+  // certifi's actual declared metadata value — "Mozilla Public 2.0
+  // (MPL 2.0)" (no "License" word, parenthetical suffix) after
+  // whitespace normalization.
+  "mozilla public 2.0 (mpl 2.0)": "MPL-2.0",
   "mozilla public license 1.1": "MPL-1.1", "mpl 1.1": "MPL-1.1",
 
   "lesser general public license v2.1": "LGPL-2.1-only",
@@ -239,9 +261,16 @@ function stripPythonClassifier(str) {
 }
 
 function cleanToken(token) {
-  return token
-    .trim()
-    .replace(/^\(+|\)+$/g, "")
+  let t = token.trim();
+  // Strip a single layer of fully-wrapping parens, e.g. "(MIT)" -> "MIT".
+  // Deliberately only when the parens wrap the ENTIRE token — the previous
+  // version stripped any leading "(" run or trailing ")" run independently,
+  // which mangled legitimate trailing parentheticals like "Mozilla Public
+  // 2.0 (MPL 2.0)" into "Mozilla Public 2.0 (MPL 2.0" (unbalanced), causing
+  // it to fail every alias/exact-match lookup downstream.
+  const wrapped = t.match(/^\((.*)\)$/);
+  if (wrapped) t = wrapped[1].trim();
+  return t
     .replace(/\s+/g, " ")
     .replace(/\.$/, "")
     .trim();
@@ -324,7 +353,16 @@ function normalizeToken(rawToken) {
  * Returns { op: "SINGLE"|"OR"|"AND", tokens: string[] }
  */
 function splitExpression(raw) {
-  const cleaned = raw.trim().replace(/^\(+|\)+$/g, "");
+  const trimmed = raw.trim();
+  // Only strip parens when they wrap the WHOLE expression, e.g. "(MIT OR
+  // Apache-2.0)" -> "MIT OR Apache-2.0". The previous unconditional
+  // leading-"("/trailing-")" strip mangled any raw string with a trailing
+  // parenthetical that isn't expression-wrapping, e.g. "Mozilla Public 2.0
+  // (MPL 2.0)" -> "Mozilla Public 2.0 (MPL 2.0" (unbalanced), which then
+  // failed every downstream lookup regardless of what cleanToken or the
+  // alias table did later.
+  const wrapped = trimmed.match(/^\((.*)\)$/);
+  const cleaned = wrapped ? wrapped[1].trim() : trimmed;
   const orParts = cleaned.split(/\s+OR\s+/i);
   if (orParts.length > 1) {
     return { op: "OR", tokens: orParts.map(cleanToken) };
