@@ -57,6 +57,19 @@ const LICENSE_TABLE = Object.freeze({
   "Unlicense":        { osi: true,  category: "public-domain",  risk: "low" },
   "X11":              { osi: true,  category: "permissive",     risk: "low" },
   "Artistic-2.0":     { osi: true,  category: "permissive",     risk: "low" },
+  "PHP-3.01":         { osi: true,  category: "permissive",     risk: "low" },
+  "PHP-3.0":          { osi: true,  category: "permissive",     risk: "low" },
+  // Blue Oak Model License 1.0.0 — maintained by the Blue Oak Council, a
+  // deliberately clearer/shorter rewrite of MIT/BSD-style terms with the
+  // same permissive effect (no copyleft, no attribution-notice-preservation
+  // gotchas). Not currently OSI-approved (never submitted through that
+  // process), but functionally equivalent risk to MIT/BSD.
+  "BlueOak-1.0.0":    { osi: false, category: "permissive",     risk: "low" },
+  // Ruby's own license — not currently on the OSI-approved list, but a
+  // real, well-understood permissive license (dual-licensable with the
+  // GPL). Distinct from the BSD-2-Clause it's often paired with in
+  // "Ruby OR BSD-2-Clause" expressions.
+  "Ruby":             { osi: false, category: "permissive",     risk: "low" },
 
   // ── Permissive-in-practice, NOT OSI-approved ──
   "WTFPL":            { osi: false, category: "permissive",     risk: "low" },
@@ -122,6 +135,9 @@ const ALIASES = Object.freeze({
   "simplified bsd license": "BSD-2-Clause", "freebsd": "BSD-2-Clause",
 
   "isc license": "ISC", "isc license (iscl)": "ISC",
+
+  "blue oak model license": "BlueOak-1.0.0", "blue oak model license 1.0.0": "BlueOak-1.0.0",
+  "blueoak-1.0.0": "BlueOak-1.0.0", "blueoak 1.0.0": "BlueOak-1.0.0", "blueoak": "BlueOak-1.0.0",
 
   "zlib license": "Zlib", "zlib/libpng license": "Zlib",
 
@@ -191,6 +207,22 @@ const NPM_UNLICENSED = "unlicensed";
 
 const RISK_RANK = { low: 1, medium: 2, high: 3, unknown: 4 };
 
+// ── SPDX "WITH <exception>" modifiers ────────────────────────────────────
+// A handful of copyleft licenses are commonly paired with a linking
+// exception that meaningfully changes their practical risk — most notably
+// the GPL family's Classpath exception, used by OpenJDK/Oracle JDK builds,
+// which explicitly permits linking proprietary code without inheriting
+// GPL's copyleft obligations. Without this, "GPL-2.0-only WITH
+// Classpath-exception-2.0" (as reported for jre/jdk by windows_runner.js)
+// would be treated as an unparsed, unrecognized expression and collapse to
+// "unknown" risk, hiding the fact that it's actually a well-understood,
+// lower-risk case than plain GPL.
+// risk_cap: the ceiling this exception imposes on the base license's risk
+// — only applied when it's actually lower than the base's own risk.
+const EXCEPTIONS = Object.freeze({
+  "Classpath-exception-2.0": { risk_cap: "medium" },
+});
+
 // ── Normalization ────────────────────────────────────────────────────────
 
 function stripPythonClassifier(str) {
@@ -222,6 +254,22 @@ function cleanToken(token) {
 function normalizeToken(rawToken) {
   let token = cleanToken(stripPythonClassifier(rawToken));
   if (!token) return null;
+
+  // SPDX "<license> WITH <exception>" expressions, e.g. "GPL-2.0-only WITH
+  // Classpath-exception-2.0". Recurse to canonicalize the base license id,
+  // then reassemble — classifyId() below applies the exception's effect
+  // on risk. Only recognized when the base id resolves to something we
+  // actually know; otherwise treated as unparsable, same as any other
+  // free-form text.
+  const withMatch = token.match(/^(.+?)\s+WITH\s+(.+)$/i);
+  if (withMatch) {
+    const base = normalizeToken(withMatch[1]);
+    const exception = cleanToken(withMatch[2]);
+    if (base && /^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(exception)) {
+      return `${base} WITH ${exception}`;
+    }
+    return null;
+  }
 
   // "License" suffix noise: "MIT License" -> already aliased above, but
   // catch generic "<Name> License" forms not explicitly listed.
@@ -308,8 +356,44 @@ function coerceToString(input) {
 }
 
 function classifyId(id) {
+  // SPDX "<license> WITH <exception>" — normalizeToken() has already
+  // canonicalized the base license id and validated the exception's shape;
+  // here we look up the base and, if the exception has a known risk-capping
+  // effect (see EXCEPTIONS above), apply it — but only when it actually
+  // lowers the risk below what the base license would carry on its own.
+  const withMatch = id.match(/^(.+?)\s+WITH\s+(.+)$/i);
+  if (withMatch) {
+    const base = LICENSE_TABLE[withMatch[1]];
+    if (base) {
+      const exception = EXCEPTIONS[withMatch[2]];
+      if (exception && RISK_RANK[exception.risk_cap] < RISK_RANK[base.risk]) {
+        return {
+          id,
+          osi:      base.osi,
+          category: `${base.category}-with-exception`,
+          risk:     exception.risk_cap,
+        };
+      }
+      return { id, ...base };
+    }
+    // Unrecognized base license — fall through to the unrecognized case
+    // below rather than guessing.
+  }
+
   const entry = LICENSE_TABLE[id];
   if (entry) return { id, ...entry };
+
+  // SPDX "LicenseRef-*" — a real, named license or vendor EULA that has no
+  // registered SPDX identifier (npm, PyPI, and UBEL's own host scanners
+  // — e.g. windows_runner.js's "LicenseRef-Microsoft-Windows-EULA",
+  // "LicenseRef-Proprietary", "LicenseRef-Google-Chrome-TOS" — all use
+  // this convention). The governing vendor and terms aren't in question
+  // here, just the lack of a public SPDX id, so this is a known,
+  // proprietary-leaning classification, not "unrecognized"/unknown.
+  if (/^LicenseRef-/i.test(id)) {
+    return { id, osi: false, category: "proprietary-eula", risk: "high" };
+  }
+
   return { id, osi: false, category: "unrecognized", risk: "unknown" };
 }
 

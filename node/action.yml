@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, and SAST scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, npm, pnpm, bun, docker'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -35,10 +35,12 @@ runs:
     # risk of script injection"). Referencing them as `$COMMAND`/`$ARGS`
     # instead means bash only ever sees them as data.
     #
-    # `command` is additionally checked against an explicit allow-list
-    # matching UBEL's actual registered `package.json` bin names, so this
-    # can never construct or execute a binary name that isn't one of ours
-    # — regardless of what a caller passes.
+    # `command` is additionally checked against an explicit allow-list kept
+    # in sync with UBEL's actual registered `package.json` bin names (not
+    # derived from it automatically — this list must be updated by hand
+    # whenever a bin is added or removed there), so this can never
+    # construct or execute a binary name that isn't one of ours regardless
+    # of what a caller passes.
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -46,10 +48,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|npm|pnpm|bun|docker)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, npm, pnpm, bun, docker"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker"
             exit 1
             ;;
         esac

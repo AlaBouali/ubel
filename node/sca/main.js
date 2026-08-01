@@ -6,11 +6,17 @@
  *   node src/main.js <engine> <mode> [...extra_args]
  *
  *   engine    : npm | pnpm | bun | docker
- *   mode      : check | install | health | init | threshold | block-unknown
+ *   mode      : check | install | health | init | threshold | block-unknown | license-risk
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
  *     block-unknown <true|false> — set block_unknown_vulnerabilities
+ *     license-risk <level>       — set license_risk_threshold (none|low|medium|high)
+ *       Only ever enforced against `health`-mode scans (see engine.js /
+ *       policy.js) — license risk is a compliance concern over software
+ *       already installed on the machine, not an install-time security
+ *       gate, so this has no effect on `check`/`install` scans regardless
+ *       of the level set here. Defaults to "none" (not enforced).
  *
  *   Docker mode (`docker` engine supports `health`, `check`, and `install`):
  *     node src/main.js docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
@@ -56,6 +62,8 @@
  *     full_stack          : true,
  *     scan_node           : false,
  *     is_vscanned_project : false,
+ *     scan_secrets        : true,   // default true
+ *     scan_vulns          : true,   // default true; false skips all OSV/NVD lookups (ubel-license)
  *   });
  *
  *   await dockerScan({ image: "node:20-alpine" });
@@ -87,8 +95,9 @@ async function createTargetPath(dirPath) {
   }
 }
 
-const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown"];
+const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown", "license-risk"];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
+const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
 const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
@@ -112,6 +121,10 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
  * @param {boolean} [programmaticOptions.scan_node=true]
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
+ * @param {boolean} [programmaticOptions.scan_secrets=true]
+ * @param {boolean} [programmaticOptions.scan_vulns=true]      When false, skips OSV/NVD entirely —
+ *   no vulnerability network calls are made and `vulnerabilities` stays empty. Inventory and
+ *   license classification are unaffected. Used by `ubel-license` for an inventory/license-only scan.
  * @returns {Promise<object|void>}  Report object when called programmatically; void for CLI.
  */
 async function main(programmaticOptions) {
@@ -135,8 +148,10 @@ async function main(programmaticOptions) {
       is_vscanned_project = false,
       scan_scope         = "repository",
       scan_secrets        = true,
+      scan_vulns          = true,
       severity_threshold = undefined,
       block_unknown_vulnerabilities = undefined,
+      license_risk_threshold = undefined,
       ...rest
     } = programmaticOptions;
 
@@ -175,6 +190,14 @@ async function main(programmaticOptions) {
       eng.setPolicyField("block_unknown_vulnerabilities", block_unknown_vulnerabilities);
     }
 
+    if (license_risk_threshold !== undefined) {
+      const level = String(license_risk_threshold).toLowerCase();
+      if (!VALID_LICENSE_RISKS.has(level)) {
+        throw new Error(`Invalid license_risk_threshold: ${license_risk_threshold}. Must be one of: none, low, medium, high`);
+      }
+      eng.setPolicyField("license_risk_threshold", level);
+    }
+
     return await eng.scan(packages, {
       is_script,
       save_reports,
@@ -183,6 +206,8 @@ async function main(programmaticOptions) {
       scan_node,
       is_vscanned_project,
       scan_scope,
+      scan_secrets,
+      scan_vulns,
       ...rest,
     });
   }
@@ -291,6 +316,20 @@ async function main(programmaticOptions) {
     const value = raw === "true";
     eng.setPolicyField("block_unknown_vulnerabilities", value);
     console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
+    process.exit(0);
+  }
+
+  // ── license-risk <level> ─────────────────────────────────────────────────────
+  if (effectiveMode === "license-risk") {
+    const level = (extraArgs[0] || "").toLowerCase();
+    if (!level || !VALID_LICENSE_RISKS.has(level)) {
+      console.error("[!] Provide a valid license risk level: none | low | medium | high");
+      console.error("[!] Example: ubel-npm license-risk high");
+      process.exit(1);
+    }
+    eng.setPolicyField("license_risk_threshold", level);
+    console.log(`[+] Policy updated: license_risk_threshold = ${level}`);
+    console.log("[i] Only enforced against `health`-mode scans — installed-software audits, not check/install gating.");
     process.exit(0);
   }
 

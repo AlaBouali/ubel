@@ -16,6 +16,7 @@
     "ubel-npm": "bin/npm.js",
     "ubel-pnpm": "bin/pnpm.js",
     "ubel-bun": "bin/bun.js",
+    "ubel-yarn": "bin/yarn.js",
     "ubel-agent": "bin/agent.js",
     "ubel-platform": "bin/platform.js",
     "ubel-sast": "bin/sast.js",
@@ -23,7 +24,8 @@
     "ubel-chunk": "bin/chunk.js",
     "ubel-cicd": "bin/cicd.js",
     "ubel-docker":"bin/docker.js",
-    "ubel-secrets":"bin/secrets.js"
+    "ubel-secrets":"bin/secrets.js",
+    "ubel-license":"bin/license.js"
   },
   "scripts": {},
   "engines": {

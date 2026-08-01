@@ -496,6 +496,12 @@ export class SarifBuilder {
         rule.properties.reachability_tags       = v.reachability.tags || [];
       }
 
+      // Indicators of Compromise — populated on OSV malicious-package
+      // entries (e.g. MAL-*) only; omitted entirely otherwise.
+      if (v.iocs) {
+        rule.properties.iocs = v.iocs;
+      }
+
       rulesMap.set(ruleId, rule);
     }
 
@@ -635,6 +641,8 @@ export class SarifBuilder {
                 signals:     v.reachability.signals || {},
               }
             : null,
+
+          iocs: v.iocs || null,
         },
       });
     }

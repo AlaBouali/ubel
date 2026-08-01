@@ -76,25 +76,6 @@ function getLocalIPsSync() {
 }
 
 /**
- * Fetches the host's external (public) IP via the ipify API.
- * Returns null on any error or timeout.
- */
-async function getExternalIP() {
-  return new Promise((resolve) => {
-    const req = https.get(
-      { hostname: "api.ipify.org", path: "/?format=text", timeout: 4000 },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => { data += c; });
-        res.on("end",  () => resolve((data || "").trim() || null));
-      }
-    );
-    req.on("error",   () => resolve(null));
-    req.on("timeout", () => { req.destroy(); resolve(null); });
-  });
-}
-
-/**
  * Wraps a plain filesystem path string into the canonical SystemPath object.
  * Port list is empty at scan time (populated by enrichment tier if needed).
  *
@@ -205,6 +186,57 @@ function generateHTMLReport(data) {
                             <tr>
                                 <td class="py-1.5 pr-4 text-neutral-500 uppercase text-[10px] font-bold align-top whitespace-nowrap">\${k}</td>
                                 <td class="py-1.5 mono">\${v}</td>
+                            </tr>
+                        \`).join('')}
+                    </tbody>
+                </table>
+            \`;
+        }
+
+        function renderVulnTransitiveTable(list) {
+            if (!Array.isArray(list) || list.length === 0) {
+                return '<p class="text-neutral-500 text-xs italic">No vulnerable transitive dependencies.</p>';
+            }
+            const rows = list.map(dep => \`
+                <tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('\${dep.id}'), 50)">
+                    <td class="py-2 pr-4 mono">\${escapeHtmlClient(dep.name)}</td>
+                    <td class="py-2 pr-4 text-neutral-400">\${dep.vulns_count}</td>
+                    <td class="py-2">\${dep.is_policy_violation
+                        ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Yes</span>'
+                        : '<span class="text-[10px] text-neutral-500">No</span>'}</td>
+                </tr>
+            \`).join('');
+            return \`
+                <table class="w-full text-left text-xs">
+                    <thead class="text-neutral-500 uppercase text-[10px] tracking-widest">
+                        <tr><th class="pb-2 pr-4 font-bold">Name</th><th class="pb-2 pr-4 font-bold">Vulns</th><th class="pb-2 font-bold">Policy Violation</th></tr>
+                    </thead>
+                    <tbody class="divide-y divide-neutral-800">\${rows}</tbody>
+                </table>
+            \`;
+        }
+
+        function renderIocTable(iocs) {
+            const urls    = (iocs && iocs.urls)    || [];
+            const domains = (iocs && iocs.domains) || [];
+            const ips     = (iocs && iocs.ips)     || [];
+            if (!urls.length && !domains.length && !ips.length) {
+                return '<p class="text-neutral-500 text-xs italic">No indicators of compromise reported.</p>';
+            }
+            const rows = [
+                ['URLs',    urls],
+                ['Domains', domains],
+                ['IPs',     ips],
+            ];
+            return \`
+                <table class="w-full text-left text-xs">
+                    <tbody class="divide-y divide-neutral-800">
+                        \${rows.map(([label, values]) => \`
+                            <tr>
+                                <td class="py-2 pr-4 text-neutral-500 uppercase text-[10px] font-bold align-top whitespace-nowrap">\${label}</td>
+                                <td class="py-2 break-all">\${values.length
+                                    ? values.map(val => \`<span class="inline-block mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 mr-1 mb-1">\${escapeHtmlClient(val)}</span>\`).join('')
+                                    : '<span class="text-neutral-600 italic">—</span>'}</td>
                             </tr>
                         \`).join('')}
                     </tbody>
@@ -462,8 +494,10 @@ function generateHTMLReport(data) {
             const pol = reportData.policy || {};
             const thresh = pol.severity_threshold || 'none';
             const blockUnk = pol.block_unknown_vulnerabilities === true ? 'block' : 'allow';
+            const licenseRisk = pol.license_risk_threshold || 'none';
             document.getElementById('policy-threshold').textContent = thresh;
             document.getElementById('policy-block-unknown').textContent = blockUnk;
+            document.getElementById('policy-license-risk').textContent = licenseRisk;
             document.getElementById('policy-infection').textContent = 'block (always)';
             document.getElementById('policy-secrets').textContent = 'block (always)';
 
@@ -533,14 +567,20 @@ function generateHTMLReport(data) {
             });
         }
 
-        function renderInventory(filter = '', state = 'all') {
+        function renderInventory(filter = '', state = 'all', directness = 'all', policy = 'all') {
             const tbody = document.getElementById('inv-table-body');
             tbody.innerHTML = '';
 
             const filtered = reportData.inventory.filter(item => {
-                const matchesSearch = item.name.toLowerCase().includes(filter.toLowerCase());
-                const matchesState = state === 'all' || item.state === state;
-                return matchesSearch && matchesState;
+                const matchesSearch     = item.name.toLowerCase().includes(filter.toLowerCase());
+                const matchesState      = state === 'all' || item.state === state;
+                const matchesDirectness = directness === 'all'
+                    || (directness === 'direct'     && item.is_direct)
+                    || (directness === 'transitive' && !item.is_direct);
+                const matchesPolicy     = policy === 'all'
+                    || (policy === 'violate' && item.is_policy_violation)
+                    || (policy === 'safe'    && !item.is_policy_violation);
+                return matchesSearch && matchesState && matchesDirectness && matchesPolicy;
             });
 
             filtered.forEach(item => {
@@ -550,6 +590,7 @@ function generateHTMLReport(data) {
                 row.innerHTML = \`
                     <td class="px-6 py-4 font-medium">\${item.name}</td>
                     <td class="px-6 py-4 mono text-xs text-neutral-400">\${item.version}</td>
+                    <td class="px-6 py-4"><span class="text-xs \${item.is_direct ? 'text-white' : 'text-neutral-500'}">\${item.is_direct ? 'Direct' : 'Transitive'}</span></td>
                     <td class="px-6 py-4"><span class="text-xs \${
   item.state === 'safe'
     ? 'text-green-400'
@@ -643,6 +684,35 @@ function generateHTMLReport(data) {
                     <span>\${l}: \${ecoValues[i]}</span>
                 </div>
             \`).join('');
+
+            // License risk — only populated on health-mode scans (see
+            // engine.js / policy.js); s.license_stats is absent on
+            // check/install reports, so every field here falls back to 0.
+            const lic = s.license_stats || { total: 0, osi_approved: 0, by_risk: { low: 0, medium: 0, high: 0, unknown: 0 } };
+            document.getElementById('stats-license-total').textContent = lic.total || 0;
+            document.getElementById('stats-license-low').textContent = lic.by_risk?.low || 0;
+            document.getElementById('stats-license-med').textContent = lic.by_risk?.medium || 0;
+            document.getElementById('stats-license-high').textContent = lic.by_risk?.high || 0;
+            document.getElementById('stats-license-unk').textContent = lic.by_risk?.unknown || 0;
+            document.getElementById('stats-license-osi').textContent = lic.osi_approved || 0;
+
+            new Chart(document.getElementById('statsLicenseChart'), {
+                type: 'pie',
+                data: {
+                    labels: ['Low', 'Medium', 'High', 'Unknown'],
+                    datasets: [{
+                        data: [
+                            lic.by_risk?.low || 0,
+                            lic.by_risk?.medium || 0,
+                            lic.by_risk?.high || 0,
+                            lic.by_risk?.unknown || 0
+                        ],
+                        backgroundColor: ['#10b981', '#fb923c', '#ef4444', '#6b7280'],
+                        borderWidth: 0
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+            });
         }
 
         function renderSystem() {
@@ -683,8 +753,6 @@ function generateHTMLReport(data) {
                   ).join('')
                 : '<span class="text-neutral-600 italic">none detected</span>';
 
-            document.getElementById('os-external-ip').textContent = os.external_ip || 'unavailable';
-
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
@@ -696,12 +764,11 @@ function generateHTMLReport(data) {
             document.getElementById('vuln-search').addEventListener('input',()=>renderVulnerabilities(...gf()));
             document.getElementById('vuln-filter-severity').addEventListener('change',()=>renderVulnerabilities(...gf()));
             document.getElementById('vuln-filter-reachability').addEventListener('change',()=>renderVulnerabilities(...gf()));
-            document.getElementById('inv-search').addEventListener('input', (e) => {
-                renderInventory(e.target.value, document.getElementById('inv-filter-state').value);
-            });
-            document.getElementById('inv-filter-state').addEventListener('change', (e) => {
-                renderInventory(document.getElementById('inv-search').value, e.target.value);
-            });
+            const invf=()=>[document.getElementById('inv-search').value,document.getElementById('inv-filter-state').value,document.getElementById('inv-filter-direct').value,document.getElementById('inv-filter-policy').value];
+            document.getElementById('inv-search').addEventListener('input', () => renderInventory(...invf()));
+            document.getElementById('inv-filter-state').addEventListener('change', () => renderInventory(...invf()));
+            document.getElementById('inv-filter-direct').addEventListener('change', () => renderInventory(...invf()));
+            document.getElementById('inv-filter-policy').addEventListener('change', () => renderInventory(...invf()));
             const sf=()=>[document.getElementById('secrets-search').value,document.getElementById('secrets-filter-severity').value];
             document.getElementById('secrets-search').addEventListener('input',()=>renderSecrets(...sf()));
             document.getElementById('secrets-filter-severity').addEventListener('change',()=>renderSecrets(...sf()));
@@ -831,6 +898,7 @@ function generateHTMLReport(data) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">\${introRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (\${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">\${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (\${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">\${depsRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (\${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">\${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">\${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (\${itemVulns.length})</h4><div class="space-y-0">\${vulnRows}</div></div>
                 </div>
@@ -934,6 +1002,7 @@ function generateHTMLReport(data) {
                         </div>
                     </div>\` : ''}
                     \${(v.cwes && v.cwes.length > 0) ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">\${v.cwes.map(c => \`<a href="https://cwe.mitre.org/data/definitions/\${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-\${c}</a>\`).join('')}</div></div>\` : ''}
+                    \${v.iocs ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Indicators of Compromise</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">\${renderIocTable(v.iocs)}</div></div>\` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
                 </div>
@@ -1044,7 +1113,7 @@ function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Vulnerabilities Section -->
@@ -1054,8 +1123,8 @@ function generateHTMLReport(data) {
         </section>
         <!-- Inventory Section -->
         <section id="section-inventory" class="hidden space-y-6">
-            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option><option value="undetermined">Undetermined</option></select></div></div>
-            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th>Name</th><th>Version</th><th>State</th><th>Policy Violation</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
+            <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Package Inventory</h2><div class="flex gap-2 w-full md:w-auto flex-wrap"><input type="text" id="inv-search" placeholder="Search packages..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full md:w-64"><select id="inv-filter-state" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All States</option><option value="safe">Safe</option><option value="vulnerable">Vulnerable</option><option value="infected">Infected</option><option value="undetermined">Undetermined</option></select><select id="inv-filter-direct" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All</option><option value="direct">Direct</option><option value="transitive">Transitive</option></select><select id="inv-filter-policy" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select></div></div>
+            <div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th>Name</th><th>Version</th><th>Direct</th><th>State</th><th>Policy Violation</th><th>Ecosystem</th><th>License</th><th>Scopes</th></tr></thead><tbody id="inv-table-body" class="divide-y divide-neutral-800"></tbody></table></div>
         </section>
         <!-- Dependency Sequences Section (replaces old graph) -->
         <section id="section-graph" class="hidden space-y-6">
@@ -1083,6 +1152,7 @@ function generateHTMLReport(data) {
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3><div class="h-48"><canvas id="statsInventoryChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Undetermined</span><span class="mono text-gray-400" id="stats-inv-und">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3><div class="h-48"><canvas id="statsVulnChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3><div class="h-48"><canvas id="statsEcoChart"></canvas></div><div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div></div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">License Risk</h3><div class="h-48"><canvas id="statsLicenseChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Classified</span><span class="mono" id="stats-license-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-green-400" id="stats-license-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-license-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-license-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-license-unk">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">OSI Approved</span><span class="mono text-blue-400" id="stats-license-osi">0</span></div></div></div>
             </div>
         </section>
         <!-- System Section -->
@@ -1201,13 +1271,9 @@ function generateHTMLReport(data) {
           <span class="text-neutral-500 text-xs">OS Version</span>
           <span class="mono text-xs" id="os-version">...</span>
         </div>
-        <div class="flex flex-col gap-1 border-b border-neutral-800 pb-2">
+        <div class="flex flex-col gap-1">
           <span class="text-neutral-500 text-xs">Local IPs</span>
           <div id="os-local-ips" class="mono text-[10px] text-neutral-300 space-y-0.5"></div>
-        </div>
-        <div class="flex justify-between">
-          <span class="text-neutral-500 text-xs">External IP</span>
-          <span class="mono text-xs text-neutral-300" id="os-external-ip">...</span>
         </div>
       </div>
     </div>
@@ -1912,6 +1978,21 @@ async function getVulnById({ vulnerability_id, purl, dependency, affected_versio
     .map(c => parseInt(String(c).replace(/^CWE-/i, ""), 10))
     .filter(n => !isNaN(n));
 
+  // Extract Indicators of Compromise (populated on OSV malicious-package
+  // entries, e.g. MAL-*) from database_specific before deleting it below.
+  // Only attached when at least one IOC value is present, to avoid
+  // dragging empty {urls:[],domains:[],ips:[]} objects onto every
+  // ordinary CVE-style vulnerability.
+  const iocsRaw = dbSpecific.iocs || {};
+  const iocs = {
+    urls:    Array.isArray(iocsRaw.urls)    ? iocsRaw.urls    : [],
+    domains: Array.isArray(iocsRaw.domains) ? iocsRaw.domains : [],
+    ips:     Array.isArray(iocsRaw.ips)     ? iocsRaw.ips     : [],
+  };
+  if (iocs.urls.length || iocs.domains.length || iocs.ips.length) {
+    data.iocs = iocs;
+  }
+
   for (const key of ["database_specific", "affected", "schema_version"]) {
     delete data[key];
   }
@@ -2162,10 +2243,18 @@ function sortVulnerabilities(vulns) {
 //                                   Infections are ALWAYS blocked regardless.
 //   block_unknown_vulnerabilities — whether to block vulnerabilities whose
 //                                   severity could not be determined.
+//   license_risk_threshold        — block this license risk level and everything
+//                                   above it. Order: low < medium < high.
+//                                   Defaults to "none" (not enforced) — license
+//                                   risk is a compliance signal, not a security
+//                                   one, and only ever populated for `health`-mode
+//                                   scans (see the license enrichment step above
+//                                   and policy.js), so it's opt-in even there.
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
   block_unknown_vulnerabilities: true,
+  license_risk_threshold:        "none",
 };
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────
@@ -2292,7 +2381,7 @@ export class UbelEngineInstance {
   /**
    * Set a single top-level policy field and persist it to disk.
    *
-   * @param {"severity_threshold"|"block_unknown_vulnerabilities"} key
+   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"} key
    * @param {string|boolean} value
    */
   setPolicyField(key, value) {
@@ -2314,6 +2403,7 @@ export class UbelEngineInstance {
       is_vscanned_project = false,
       scan_scope          = "repository",
       scan_secrets        = true,
+      scan_vulns          = true,
     } = options;
 
     const projectRoot = this.projectRoot;
@@ -2416,42 +2506,49 @@ export class UbelEngineInstance {
 
       let inventory = [...manager.inventoryData];
 
-      // ── OSV query ─────────────────────────────────────────────────────────
-      const vuln_ids = await submitToOsv(purls);
+      // Dependency-id linking is needed for the inventory tree regardless of
+      // whether vulnerability lookups run, so it always happens up front.
       matchDependenciesWithInventory(inventory);
 
-      // ── Enrich vulnerabilities concurrently ───────────────────────────────
+      // ── OSV / NVD query ──────────────────────────────────────────────────
+      // Skipped entirely when scan_vulns is false (e.g. ubel-license): no
+      // OSV/NVD network calls are made, and vulnerabilities stays empty.
       let vulnerabilities = [];
-      const CONCURRENCY   = 40;
-      for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
-        const batch   = vuln_ids.slice(i, i + CONCURRENCY);
-        const results = await Promise.allSettled(batch.map(getVulnById));
-        for (const r of results) {
-          if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
-          else if (r.status === "rejected")
-            console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
-        }
-      }
+      if (scan_vulns) {
+        const vuln_ids = await submitToOsv(purls);
 
-      // ── NVD query for CPE-based inventory items ────────────────────────────
-      const nvdVulns = await submitToNvd(inventory);
-      if (nvdVulns.length) {
-        for (const v of nvdVulns) {
-          const nvdScore  = v.severity_score;
-          const nvdVector = v.severity_vector;
-          processVulnerability(v);
-          if (v.severity_score  == null) v.severity_score  = nvdScore;
-          if (v.severity_vector == null) v.severity_vector = nvdVector;
-          v.severity = scoreToSeverity(v.severity_score);
-          getFix(v);
-          for (const key of ["database_specific", "affected", "schema_version"]) {
-            delete v[key];
+        // ── Enrich vulnerabilities concurrently ─────────────────────────────
+        const CONCURRENCY = 40;
+        for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
+          const batch   = vuln_ids.slice(i, i + CONCURRENCY);
+          const results = await Promise.allSettled(batch.map(getVulnById));
+          for (const r of results) {
+            if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
+            else if (r.status === "rejected")
+              console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
           }
         }
-        const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_package_id}`));
-        for (const v of nvdVulns) {
-          if (!osvKeys.has(`${v.id}::${v.affected_package_id}`)) {
-            vulnerabilities.push(v);
+
+        // ── NVD query for CPE-based inventory items ──────────────────────────
+        const nvdVulns = await submitToNvd(inventory);
+        if (nvdVulns.length) {
+          for (const v of nvdVulns) {
+            const nvdScore  = v.severity_score;
+            const nvdVector = v.severity_vector;
+            processVulnerability(v);
+            if (v.severity_score  == null) v.severity_score  = nvdScore;
+            if (v.severity_vector == null) v.severity_vector = nvdVector;
+            v.severity = scoreToSeverity(v.severity_score);
+            getFix(v);
+            for (const key of ["database_specific", "affected", "schema_version"]) {
+              delete v[key];
+            }
+          }
+          const osvKeys = new Set(vulnerabilities.map(v => `${v.id}::${v.affected_package_id}`));
+          for (const v of nvdVulns) {
+            if (!osvKeys.has(`${v.id}::${v.affected_package_id}`)) {
+              vulnerabilities.push(v);
+            }
           }
         }
       }
@@ -2493,8 +2590,14 @@ export class UbelEngineInstance {
       }
 
       // ── Network metadata ──────────────────────────────────────────────────
+      // Local IP is retained: it's used below to tag every inventory item's
+      // filesystem path with the host it was found on (normalizeInventoryPaths),
+      // which matters once reports from multiple hosts/containers get combined.
+      // The external (public) IP lookup was removed — it phoned home to a
+      // third-party API (ipify) on every scan purely for a display field with
+      // no other consumer, which cut against UBEL's zero-third-party-dependency
+      // and fully-local-execution positioning.
       const localIPs       = getLocalIPsSync();
-      const externalIP     = await getExternalIP();
       const primaryLocalIP = Object.values(localIPs)[0] || "";
 
       normalizeInventoryPaths(inventory, primaryLocalIP);
@@ -2505,7 +2608,18 @@ export class UbelEngineInstance {
       // Handles missing/null/"unknown" values, the npm "UNLICENSED" proprietary
       // sentinel, free-text and SPDX-expression normalization, and OSI-approval
       // lookup. See license_checker.js.
-      const licenseSummary = enrichInventoryWithLicenseRisk(inventory);
+      //
+      // Restricted to `health` scans: license risk is a compliance/legal
+      // concern over software already installed on the machine, not an
+      // install-time security gate — `check`/`install` scans are evaluating
+      // whether it's safe to add a new dependency, and mixing the two would
+      // make the policy license-risk gate (see policy.js) fire in a context
+      // it wasn't meant for. `item.license_info` / `stats.license_stats` are
+      // simply absent outside health mode; every downstream consumer
+      // (report UI, SBOM builder) already falls back gracefully.
+      const licenseSummary = this.checkMode === "health"
+        ? enrichInventoryWithLicenseRisk(inventory)
+        : undefined;
 
       vulnerabilities = deduplicateVulnerabilitiesByAlias(vulnerabilities);
 
@@ -2551,6 +2665,75 @@ export class UbelEngineInstance {
         inventoryItem.is_policy_violation = vulnerabilities.some(
           v => v.affected_package_id === inventoryItem.id && v.policy_decision === "block"
         );
+      }
+
+      // ── Dependency-graph attributes: is_direct, policy-violation
+      // propagation, and per-package vulnerable_transitive_dependencies ──
+      {
+        const byId = new Map(inventory.map(c => [c.id, c]));
+
+        // Reverse map: child purl → Set of direct parent purls. A package
+        // with no parents isn't depended on by anything else in the
+        // inventory, i.e. it's a root/direct dependency of the project.
+        const parentsOf = new Map(inventory.map(c => [c.id, new Set()]));
+        for (const comp of inventory) {
+          for (const dep of (comp.dependencies || [])) {
+            if (parentsOf.has(dep)) parentsOf.get(dep).add(comp.id);
+          }
+        }
+
+        for (const comp of inventory) {
+          comp.is_direct = (parentsOf.get(comp.id)?.size || 0) === 0;
+        }
+
+        // A package that only violates policy through something it pulls
+        // in should still surface as a violation itself — propagate every
+        // seed violation upward through every ancestor chain.
+        const propagationQueue = inventory.filter(c => c.is_policy_violation).map(c => c.id);
+        const propagationSeen  = new Set(propagationQueue);
+        while (propagationQueue.length) {
+          const id = propagationQueue.shift();
+          for (const parentId of (parentsOf.get(id) || [])) {
+            const parent = byId.get(parentId);
+            if (parent) parent.is_policy_violation = true;
+            if (!propagationSeen.has(parentId)) {
+              propagationSeen.add(parentId);
+              propagationQueue.push(parentId);
+            }
+          }
+        }
+
+        // Vulnerability count per package, used below.
+        const vulnCountByPurl = new Map();
+        for (const v of vulnerabilities) {
+          if (!v.affected_package_id) continue;
+          vulnCountByPurl.set(v.affected_package_id, (vulnCountByPurl.get(v.affected_package_id) || 0) + 1);
+        }
+
+        // For every package, every vulnerable/infected package anywhere in
+        // its full transitive dependency closure (direct children and
+        // deeper descendants alike) — not just its immediate dependencies.
+        for (const comp of inventory) {
+          const closure = new Set();
+          const stack   = [...(comp.dependencies || [])];
+          while (stack.length) {
+            const depId = stack.pop();
+            if (closure.has(depId)) continue;
+            closure.add(depId);
+            const depComp = byId.get(depId);
+            if (depComp) stack.push(...(depComp.dependencies || []));
+          }
+
+          comp.vulnerable_transitive_dependencies = [...closure]
+            .map(id => byId.get(id))
+            .filter(dep => dep && (dep.state === "vulnerable" || dep.state === "infected"))
+            .map(dep => ({
+              id:                  dep.id,
+              name:                dep.name,
+              vulns_count:         vulnCountByPurl.get(dep.id) || 0,
+              is_policy_violation: !!dep.is_policy_violation,
+            }));
+        }
       }
 
       const stats = {
@@ -2620,7 +2803,7 @@ export class UbelEngineInstance {
         generated_at:      now.toISOString().replace("Z", "") + "Z",
         runtime,
         engine:            engine_info,
-        os_metadata:       { ...os_metadata_info, local_ips: localIPs, external_ip: externalIP || null },
+        os_metadata:       { ...os_metadata_info, local_ips: localIPs },
         git_metadata:      git_metadata,
         tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
         scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", ...(runtime.editor ? { editor: runtime.editor } : {}) },

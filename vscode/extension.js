@@ -378,7 +378,71 @@ function activate(context) {
     }
   });
 
-  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd, scanSecretsCmd);
+  // ─────────────────────────────────────────────
+  // Command 5: Scan project for license compliance (ctrl+alt+l)
+  // ─────────────────────────────────────────────
+  const scanLicensesCmd = vscode.commands.registerCommand("ubel.scanLicenses", async () => {
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
+      return;
+    }
+
+    let SCA_scan, PolicyViolationError;
+
+    try {
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+    } catch (err) {
+      vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
+      return;
+    }
+
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+      vscode.window.showErrorMessage("UBEL: No workspace folder open.");
+      return;
+    }
+
+    const projectRoot = folders[0].uri.fsPath;
+
+    const reportUri = vscode.Uri.file(
+      path.join(projectRoot, ".ubel", "reports", "latest.html")
+    );
+
+    // Detect editor so the report can surface it as the host environment.
+    const editor = detectEditor();
+
+    try {
+      scanningInProgress = true;
+      await runScan({
+        main: SCA_scan,
+        PolicyViolationError,
+        scanOptions: {
+          projectRoot,
+          engine             : "npm",
+          mode               : "health",
+          is_script          : true,
+          save_reports       : true,
+          scan_os            : false,
+          full_stack         : true,
+          scan_node          : true,
+          is_vscanned_project: true,
+          scan_scope         : "license",
+          editor_kind        : editor.kind,
+          editor_label       : editor.label,
+          editor_version     : editor.version,
+          scan_vulns         : false, // license scan only — no OSV/NVD lookups
+          scan_secrets       : false, // license scan only — no secrets scan
+        },
+        reportUri,
+        title: "UBEL: Scanning project for license compliance…",
+      });
+    } finally {
+      scanningInProgress = false;
+    }
+  });
+
+  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd, scanSecretsCmd, scanLicensesCmd);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

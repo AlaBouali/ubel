@@ -262,6 +262,19 @@ export class CycloneDXBuilder {
         ];
       }
 
+      // Indicators of Compromise — populated on OSV malicious-package
+      // entries (e.g. MAL-*) only. CycloneDX properties are flat
+      // name/value string pairs, so each IOC list is JSON-encoded,
+      // matching the reachability.tags/signals convention above.
+      if (v.iocs) {
+        entry.properties = entry.properties || [];
+        entry.properties.push(
+          { name: "iocs.urls",    value: JSON.stringify(v.iocs.urls    || []) },
+          { name: "iocs.domains", value: JSON.stringify(v.iocs.domains || []) },
+          { name: "iocs.ips",     value: JSON.stringify(v.iocs.ips     || []) },
+        );
+      }
+
       out.push(entry);
     }
     return out;

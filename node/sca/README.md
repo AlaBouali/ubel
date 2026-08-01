@@ -13,7 +13,7 @@ scan_project
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
-- Policy engine — block/allow by severity threshold and unknown-severity packages
+- Policy engine — block/allow by severity threshold, unknown-severity packages, and (on `health` scans) license risk
 - Malicious package (infection) detection — always blocked regardless of policy
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
@@ -27,7 +27,7 @@ scan_project
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
-- **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included in every scan by default (see [License Compliance](#license-compliance))
+- **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
 
 ---
 
@@ -44,14 +44,16 @@ After installation, the following entry-point binaries are available:
 | `ubel-npm` | npm |
 | `ubel-pnpm` | pnpm |
 | `ubel-bun` | bun |
-| `ubel-agent` | AI agent workspace scan ( OS, runtimes, tools, dependencies ) |
-| `ubel-cicd` | post-build scan ( OS, runtimes, tools, dependencies ) |
-| `ubel-platform` | Host platform scan (OS, runtimes, tools) |
+| `ubel-yarn` | yarn — `health` mode only, no firewall (`check`/`install`) coverage; see note below |
 | `ubel-docker` | scan a given docker image's OS and dependencies |
-| `ubel-secrets` | standalone secrets-only scan of a directory |
+| `ubel-agent` | Fixed-config workspace scan for AI-agent sandboxes — see [Fixed-Configuration Scan CLIs](#fixed-configuration-scan-clis) |
+| `ubel-cicd` | Fixed-config post-build scan for CI/CD pipelines — see [Fixed-Configuration Scan CLIs](#fixed-configuration-scan-clis) |
+| `ubel-platform` | Fixed-config host/developer-machine scan (OS, runtimes, tools; no app dependencies) — see [Fixed-Configuration Scan CLIs](#fixed-configuration-scan-clis) |
+| `ubel-secrets` | standalone secrets-only scan of a directory — see [Secrets Detection](#secrets-detection) |
+| `ubel-license` | standalone inventory + license-compliance scan, no OSV/NVD or secrets — see [License Compliance](#license-compliance) |
 
 
-> **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only and cannot provide install-blocking firewall coverage for it.
+> **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing.
 
 ---
 
@@ -71,6 +73,8 @@ After installation, the following entry-point binaries are available:
 
 Both are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
+Aside from these (and the OS/NVD-name CPE lookups they front), UBEL makes no other outbound network calls during a scan. Earlier versions queried a third-party IP-lookup API (ipify) to record the host's public IP in reports; this was removed — it was a network call to an external service on every scan for a display-only field with no other consumer, which cut against the zero-third-party-dependency, fully-local-execution positioning above. The scan's *local* network interfaces are still recorded (used internally to tag which host a given inventory item's filesystem path came from, useful once reports from multiple hosts/containers get combined) — that information never leaves the machine.
+
 ```bash
 # Point live queries at internal mirrors instead of the public APIs
 export UBEL_OSV_ENDPOINT="https://osv-mirror.internal.example.com"
@@ -87,6 +91,7 @@ ubel-npm health
 ubel-npm   <mode> [packages...]
 ubel-pnpm  <mode> [packages...]
 ubel-bun   <mode> [packages...]
+ubel-yarn  health              # health only — check/install unsupported, see below
 ```
 
 Package arguments are optional for `check` and `install` — when omitted, the existing lockfile in the working directory is used as the dependency source.
@@ -112,11 +117,36 @@ Uses bun's `--lockfile-only` flag. The candidate `bun.lock` is written and scann
 
 ### docker
 
-`ubel-docker` scans a container image **without ever running it** – it creates a stopped container (`docker create`), exports its filesystem, and extracts the tar in‑process (no shell `tar`). This blocks path‑traversal attacks and never executes `ENTRYPOINT`/`CMD` or any scripts. The scan automatically includes OS packages (`scan_os: true`) and all application dependencies (`full_stack: true`). 
-Modes: 
-- `health` (scan only)
-- `check` (scan + always remove the image)
-- `install` (scan + remove only on policy violation). Also supports scanning a local `.tar` file directly (skip pull/export).
+`ubel-docker` scans a container image **without ever running it** – it creates a stopped container (`docker create`), exports its filesystem, and extracts the tar in‑process (no shell `tar`). This blocks path‑traversal attacks and never executes `ENTRYPOINT`/`CMD` or any scripts. The scan automatically includes OS packages (`scan_os: true`) and all application dependencies (`full_stack: true`).
+
+```bash
+ubel-docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
+```
+
+Modes:
+- `health` — scan only, image left exactly as found.
+- `check` — scan, then always remove the image afterward.
+- `install` — scan, then remove the image only if the scan results in a policy block; a clean scan leaves it in place.
+
+Flags:
+- `--no-pull` — scan an image that only exists locally (e.g. right after `docker build`, before it's pushed); skips `docker pull`.
+- `--keep` — skip cleanup of the extracted rootfs afterward, for debugging.
+
+In place of an image reference, `<image|tar-path>` also accepts a path to a local, uncompressed `.tar` file (e.g. from a prior `docker save`/`docker export`, or a CI artifact) — detected automatically by a `.tar` extension that resolves to an existing file. That skips `docker pull`/`docker create`/`docker export` entirely and extracts the given tar directly; `--no-pull` is a no-op in that case, and `check`/`install` won't attempt `docker rmi` since there's no pulled image to remove. Compressed tarballs (`.tar.gz`/`.tgz`) aren't supported — decompress first.
+
+```bash
+# Scan a base image before it's ever run
+ubel-docker health node:20-alpine
+
+# Pull, scan, and keep or remove based on policy
+ubel-docker install node:20-alpine
+
+# Scan a locally-built image without pulling
+ubel-docker check myapp:latest --no-pull
+
+# Scan a tar artifact from CI (e.g. docker save output) directly
+ubel-docker health ./myapp-image.tar
+```
 
 ### UBEL's firewall always blocks pre/post install scripts to prevent running malicious scripts
 
@@ -160,6 +190,7 @@ Scans the current project's installed dependency graph without running any insta
 ubel-npm health
 ubel-pnpm health
 ubel-bun health
+ubel-yarn health
 ```
 
 #### Full-stack monorepo scanning
@@ -208,6 +239,8 @@ When invoked with `scan_os: true` on Windows, the scanner probes the registry an
 | Browsers | Chrome, Firefox, Microsoft Edge |
 | Developer tools | Git, Docker Desktop, Visual Studio, Cursor, Claude Code |
 | Shell | PowerShell |
+
+Each component is reported with its actual license or vendor EULA (see [License Compliance](#license-compliance)) — proprietary Microsoft/vendor components (Windows itself, Defender, Edge, VS Code/Visual Studio IDE, Chrome, Docker Desktop, Cursor, Claude Code) resolve to a `LicenseRef-*` identifier rather than `unknown`; open-source runtimes and tools resolve to their real SPDX id (e.g. `MIT` for Node.js/.NET, `PSF-2.0` for Python, `GPL-2.0-only WITH Classpath-exception-2.0` for JRE/JDK).
 
 ---
 
@@ -270,6 +303,20 @@ ubel-npm block-unknown false
 
 ---
 
+### `license-risk`
+
+Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
+
+```bash
+ubel-npm license-risk high     # block only high-risk licenses (e.g. GPL/AGPL, proprietary EULAs)
+ubel-npm license-risk medium   # block medium and up (also weak-copyleft: MPL, LGPL, EPL, CDDL)
+ubel-npm license-risk none     # disable license-risk blocking (default)
+```
+
+Unlike `threshold`/`block-unknown`, this gate is only ever evaluated on `health`-mode scans — see [License Compliance](#license-compliance) for why license classification itself is restricted to `health` mode. Setting it on `check`/`install` policy files has no effect on those scans.
+
+---
+
 ## Policy
 
 Policy is stored as JSON at `.ubel/local/policy/config.json` relative to the project root.
@@ -279,7 +326,8 @@ Default policy created on first run:
 ```json
 {
     "severity_threshold": "high",
-    "block_unknown_vulnerabilities": true
+    "block_unknown_vulnerabilities": true,
+    "license_risk_threshold": "none"
 }
 ```
 
@@ -287,7 +335,40 @@ Default policy created on first run:
 
 **Block unknown** — when `true`, any vulnerability whose severity cannot be determined also causes a block.
 
-**Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to either setting above.
+**License risk threshold** — packages whose license risk is at or above this level cause a block. Risk order: `low → medium → high`. Defaults to `"none"` (disabled) — unlike the vulnerability gates above, this is opt-in even when license classification runs, because license detection has real gaps (free-text licenses, missing metadata) and legal risk tolerance for e.g. weak copyleft varies by organization. There is deliberately no "block unknown license risk" flag: an `unknown` classification usually reflects a detection gap rather than an actual finding, so it's never folded into an enforced gate. This gate is also a no-op outside `health`-mode scans, since `license_stats` is only populated there — see [License Compliance](#license-compliance).
+
+**Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to any of the settings above.
+
+---
+
+## Fixed-Configuration Scan CLIs
+
+`ubel-agent`, `ubel-cicd`, and `ubel-platform` are thin wrappers around the same `health`-mode scan engine as `ubel-npm health` — each hardcodes a specific `SCA_scan()` option set for one deployment context, rather than exposing the full `<engine> <mode>` argument surface. All three: take a single optional path argument (defaults shown below), print the full JSON report to stdout, always write reports to disk exactly like any other scan (see [Reports](#reports)), and use the same exit-code contract as `check`/`install` — `0` if policy passes, `1` if policy blocks or the scan itself throws.
+
+| Binary | Target (arg default) | `scan_os` | `scan_node` (full-stack) | `scan_secrets` | Fixed `scan_scope` |
+|---|---|---|---|---|---|
+| `ubel-agent` | `process.cwd()` | ✅ | ✅ | default | `agent` |
+| `ubel-cicd` | `process.cwd()` | ✅ | ✅ | default | `cicd` |
+| `ubel-platform` | home directory (`os.homedir()`) | ✅ | ❌ | default | `developer_platform` |
+| `ubel-secrets` | `process.cwd()` | ❌ | ❌ | ✅ (forced on; `scan_os`/`scan_node` forced off) | `agent` |
+| `ubel-license` | `process.cwd()` | ❌ | ✅ (full-stack) | ❌ (forced off; `scan_vulns` also forced off) | `license` |
+
+```bash
+# Scan an AI agent's sandboxed working directory before it's allowed to run
+# further tool calls — OS packages + every app ecosystem in the sandbox.
+ubel-agent /path/to/agent/workspace
+
+# Post-build CI/CD scan of the final built workspace (after install, before deploy)
+ubel-cicd /path/to/build/output
+
+# Host/developer-machine platform scan — OS packages and installed dev
+# tools/runtimes only, no application dependency resolution. Defaults to
+# the invoking user's home directory when no path is given.
+ubel-platform
+ubel-platform /path/to/specific/directory
+```
+
+`scan_scope` only affects labeling in the report (`scan_info.scan_scope`) and how the report path is filed under `.ubel/local/reports/<ecosystem>/<mode>/...` — it has no effect on scan behavior itself. All three are also reachable programmatically via `SCA_scan()`/`main()` with the same options, for embedding in a VS Code extension, an orchestration agent, or a custom CI step (see [Programmatic API](#programmatic-api)).
 
 ---
 
@@ -423,7 +504,9 @@ On top of the ported set, `sca/secrets.js` defines an `extraRules` array coverin
 
 ## License Compliance
 
-Every scan classifies each inventory item's declared license by default — no separate flag, no separate command. The classification is purely additive: the raw `license` field reported by the package manager is left untouched, and a `license_info` object is added alongside it.
+Every `health`-mode scan classifies each inventory item's declared license by default — no separate flag needed. Classification is restricted to `health` scans: license risk is a compliance/legal concern over software already installed on the machine, not an install-time security gate, and running it during `check`/`install` would let the license-risk policy gate (see [Policy](#policy)) fire in a context it wasn't meant for — those pre-install dry-run scans are evaluating whether it's safe to add a new dependency, a separate question. `check`/`install` reports simply have no `license_info` on inventory items and no `stats.license_stats`; every downstream consumer (report UI, SBOM builder) already falls back gracefully when it's absent. The classification itself is purely additive: the raw `license` field reported by the package manager is left untouched, and a `license_info` object is added alongside it.
+
+For an inventory + license-only scan with no OSV/NVD vulnerability lookups and no secrets scan, use the standalone `ubel-license` command (`bin/license.js`), or pass `scan_vulns: false, scan_secrets: false` to `SCA_scan()`/`main()` programmatically. `scan_vulns: false` skips OSV/NVD entirely — no network calls are made for vulnerability data — while dependency resolution and license classification run exactly as they do in any other `health` scan.
 
 ### Normalization
 
@@ -432,6 +515,8 @@ Licenses arrive in wildly inconsistent shapes across ecosystems, and all of the 
 - Case and whitespace variants — `mit`, `MIT`, `Mit` → `MIT`
 - Free text — `"Apache 2.0"`, `"apache2"`, `"Apache License 2.0"` → `Apache-2.0`
 - SPDX boolean expressions — `(MIT OR Apache-2.0)`, `GPL-2.0-or-later`, `GPL-2.0+`
+- SPDX `WITH` exception expressions — `GPL-2.0-only WITH Classpath-exception-2.0` (as reported for JRE/JDK by the Windows host scanner) is recognized as a distinct, lower-risk case rather than falling through as unparseable free text — the Classpath exception permits linking without inheriting GPL's copyleft obligations, so it's capped at `medium` risk instead of plain GPL's `high`
+- `LicenseRef-*` identifiers — SPDX's convention for a real, named license or vendor EULA with no registered SPDX id (used by the Windows host scanner for OS/vendor components — e.g. `LicenseRef-Microsoft-Windows-EULA`, `LicenseRef-Google-Chrome-TOS`, `LicenseRef-Proprietary`); classified as a known proprietary-leaning license rather than "unrecognized"
 - Legacy npm object/array forms — `{ type: "ISC", url: "..." }`, `[{type:"MIT"}, {type:"Apache-2.0"}]`
 - Python trove classifiers — `"License :: OSI Approved :: MIT License"` → `MIT`
 - npm's `"UNLICENSED"` sentinel — a *proprietary* marker (all rights reserved), deliberately not confused with the SPDX `Unlicense` public-domain license
@@ -446,12 +531,13 @@ Each normalized license is checked against a curated OSI-approved license table 
 
 | Category | Examples | Risk |
 |---|---|---|
-| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC, 0BSD | `low` |
+| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC, 0BSD, PHP-3.01, Ruby, BlueOak-1.0.0 | `low` |
 | Public domain | Unlicense (OSI-approved), CC0-1.0 (not OSI-approved but permissive in practice) | `low` |
 | Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0, CDDL | `medium` |
+| Strong copyleft (with linking exception) | GPL-2.0-only WITH Classpath-exception-2.0 (Oracle/OpenJDK JRE/JDK) | `medium` |
 | Strong copyleft | GPL-2.0/3.0, AGPL-3.0 | `high` |
 | Source-available / rejected by OSI | SSPL-1.0, BUSL-1.1, Elastic-2.0 | `high` |
-| Proprietary | npm `UNLICENSED`, `"Proprietary"` | `high` |
+| Proprietary | npm `UNLICENSED`, `"Proprietary"`, `LicenseRef-*` vendor EULAs (Windows OS/Defender, Chrome, Docker Desktop, Visual Studio, …) | `high` |
 | None / unrecognized | missing, `unknown`, or unparseable text | `unknown` |
 
 `osi_approved` is `true` only for licenses on the [OSI-approved list](https://opensource.org/licenses); `false` for a real, identifiable license that isn't on it (proprietary, source-available, or non-software licenses like Creative Commons); `null` when there's nothing to check (missing license, or text that couldn't be parsed).
@@ -560,7 +646,8 @@ The HTML report is fully self-contained (no server required) and includes:
 - Interactive force-directed dependency graph with vulnerable-subtree filter
 - Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV/NVD references)
 - Dedicated Secrets tab (category, severity, file/line, redacted match preview)
-- System and runtime metadata
+- License Risk stats card (low/medium/high/unknown breakdown, OSI-approved count) — populated on `health`-mode scans, see [License Compliance](#license-compliance)
+- System and runtime metadata (OS, local network interfaces, git info, engine/tool versions)
 
 The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
 
@@ -568,7 +655,31 @@ The JSON report contains the full machine-readable equivalent and can be consume
 
 ## CI/CD Integration
 
-All CLI commands exit non-zero on policy violations, making them native to any CI runner:
+All CLI commands exit non-zero on policy violations, making them native to any CI runner.
+
+**Via the packaged GitHub Action** ([`action.yml`](https://github.com/AlaBouali/ubel/blob/main/action.yml), a composite action wrapping `npx @arcane-spark/ubel-node@<version>` behind a `command` allow-list checked against UBEL's own `package.json` bin names):
+
+```yaml
+- uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
+  with:
+    command: npm
+    version: 0.8.0
+    args: check
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: npm
+    version: 0.8.0
+    args: install
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: license                  # inventory + license compliance only
+```
+
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`.
+
+**Calling the binaries directly** (self-hosted runners, non-GitHub CI, Dockerfiles):
 
 ```yaml
 # GitHub Actions
@@ -577,6 +688,9 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 
 - name: UBEL firewall-gated install
   run: ubel-npm install
+
+- name: UBEL license compliance scan
+  run: ubel-license .
 ```
 
 ```dockerfile
@@ -601,6 +715,10 @@ ubel-npm check lodash@4.17.20
 # Tighten policy, then re-scan
 ubel-npm threshold critical
 ubel-npm check
+
+# Block installed high-risk-licensed software on health scans
+ubel-npm license-risk high
+ubel-npm health
 
 # Scan the installed project dependencies
 ubel-npm health

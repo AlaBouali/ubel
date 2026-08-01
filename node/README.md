@@ -7,7 +7,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [node/sca/README.md](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, or `bun`'s install path, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them.
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
-- **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run.
+- **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
@@ -27,6 +27,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls |
+| `ubel-license` | SCA | Standalone inventory + license-compliance scan — no vulnerability lookups (OSV/NVD), no secrets scan |
 | `ubel-agent` | SCA | AI-agent workspace scan (OS, runtimes, tools, dependencies) |
 | `ubel-cicd` | SCA | Post-install CI/CD scan of the final built workspace (OS, runtimes, tools, dependencies) |
 | `ubel-platform` | SCA | Host platform scan (OS, runtimes, tools) |
@@ -89,6 +90,27 @@ Policy (severity threshold, unknown-severity blocking) is configurable via `ubel
 
 ---
 
+## Fixed-Configuration Scan CLIs
+
+`ubel-agent`, `ubel-cicd`, and `ubel-platform` wrap the same `health`-mode scan engine as `ubel-npm health`, each with a fixed option set for one deployment context — no `<engine> <mode>` arguments, just an optional target path. All three print the full JSON report to stdout and exit `1` on a policy block.
+
+```bash
+# AI-agent sandbox workspace — OS packages + every app ecosystem present
+ubel-agent /path/to/agent/workspace
+
+# Post-build CI/CD scan of the final built workspace
+ubel-cicd /path/to/build/output
+
+# Host/developer-machine scan — OS packages and dev tools/runtimes only,
+# no application dependency resolution. Defaults to the home directory.
+ubel-platform
+```
+
+**Full documentation — exact flags per binary and how they differ from `ubel-secrets`/`ubel-license`:**
+[**node/sca/README.md#fixed-configuration-scan-clis**](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#fixed-configuration-scan-clis)
+
+---
+
 ## Secrets Detection
 
 Built on Trivy's ported secret-scanning ruleset (Apache-2.0, attributed in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with rules for vendors not yet covered by Trivy's current upstream ruleset: HashiCorp Vault tokens, Google Cloud API keys and OAuth tokens, Anthropic and OpenRouter API keys, Firebase tokens, Stripe restricted keys, Twilio Account/App SIDs, Square and Braintree credentials, and URL-embedded git credentials. Match previews in every report are redacted — the raw secret value is never written to disk.
@@ -104,7 +126,15 @@ Secrets findings are also included in every SCA/firewall scan by default, surfac
 
 ## License Compliance
 
-Every scanned package's declared license — whatever form it arrives in (an SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an `OR`/`AND` SPDX expression, or missing entirely) — is normalized into a canonical SPDX identifier, checked against the OSI-approved license list, and assigned a risk rating (`low` / `medium` / `high` / `unknown`) based on license category (permissive, weak-copyleft, strong-copyleft, proprietary, public-domain, unrecognized). Included in every SCA/firewall scan by default; no separate command needed.
+Every scanned package's declared license — whatever form it arrives in (an SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an `OR`/`AND` SPDX expression, or missing entirely) — is normalized into a canonical SPDX identifier, checked against the OSI-approved license list, and assigned a risk rating (`low` / `medium` / `high` / `unknown`) based on license category (permissive, weak-copyleft, strong-copyleft, proprietary, public-domain, unrecognized). Included in every SCA/firewall scan by default.
+
+```bash
+# Standalone inventory + license scan — resolves dependencies (full-stack,
+# every ecosystem present in the repo) and classifies licenses only; no
+# OSV/NVD calls, no secrets scan. Same JSON, HTML, CycloneDX SBOM, and
+# SARIF 2.1.0 outputs as any other SCA scan.
+ubel-license /path/to/project
+```
 
 Surfaced per-package in the HTML report's inventory table and detail view, as `license.osi_approved` / `license.risk` / `license.category` properties on every SBOM component, and as its own SARIF run (`ubel-license-compliance`) that flags any non-OSI-approved or high-risk license as a finding.
 
@@ -140,7 +170,45 @@ Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-h
 
 ## CI/CD Integration
 
-All binaries exit non-zero on findings that clear their respective gate, so any of the three fit natively into a CI runner:
+All binaries exit non-zero on findings that clear their respective gate, so any of them fit natively into a CI runner.
+
+### GitHub Actions — using the packaged action
+
+[`action.yml`](https://github.com/AlaBouali/ubel/blob/main/action.yml) wraps `npx @arcane-spark/ubel-node@<version>` as a composite action, behind an explicit `command` allow-list validated against UBEL's actual registered `package.json` bin names — so it can never construct or execute a binary name that isn't one of ours, regardless of what a caller passes. `command`, `version`, and `args` are step inputs referenced as shell variables (`$COMMAND`/`$ARGS`), never interpolated directly into the script with `${{ }}`, closing off GitHub's documented script-injection risk for composite actions.
+
+```yaml
+- uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
+  with:
+    command: npm
+    version: 0.8.0
+    args: check
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: npm                      # `command` selects the bin; the mode (check/install/health) goes in `args`
+    version: 0.8.0
+    args: install
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: sast
+    args: --fail-on exploitable
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: mal
+    args: --fail-on confirmed
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: license                  # inventory + license compliance only — no OSV/NVD calls, no secrets scan
+```
+
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker` — anything else fails the step before `npx` ever runs.
+
+### Calling the binaries directly
+
+Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 
 ```yaml
 # GitHub Actions
@@ -155,6 +223,9 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 
 - name: UBEL malicious-code scan
   run: ubel-mal --fail-on confirmed
+
+- name: UBEL license compliance scan
+  run: ubel-license .
 ```
 
 ```dockerfile
