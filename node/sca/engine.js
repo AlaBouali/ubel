@@ -2500,7 +2500,7 @@ export class UbelEngineInstance {
         // health — scan installed packages
         manager.inventoryData = [];
         purls = await manager.getInstalled(projectRoot, getinstalledoptions);
-        manager.inventoryData.push({
+        /*manager.inventoryData.push({
           id:        `pkg:npm/${TOOL_NAME.replace("@", "%40")}@${TOOL_VERSION}`,
           name:      TOOL_NAME,
           version:   TOOL_VERSION,
@@ -2511,7 +2511,7 @@ export class UbelEngineInstance {
           dependencies: [],
           type:      "library",
           paths:     [],
-        });
+        });*/
         reportContent = {};
       }
 

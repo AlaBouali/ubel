@@ -411,7 +411,442 @@ UBEL is fully local. The only external calls are to [osv.dev's public API](https
 Both endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where even those two calls need to stay on an internal network. See [node/sca/README.md](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 
 ---
+# UBEL — Capability Reference by Ecosystem, Language, and OS
 
+This document details exactly what UBEL does — and doesn't do — for every
+ecosystem it supports, across five capability axes:
+
+- **SCA** — dependency inventory + vulnerability matching (OSV/NVD)
+- **Firewall** — pre-install/pre-deploy blocking, not just after-the-fact reporting
+- **SAST** — LLM-driven source/config vulnerability scanning
+- **Malware SAST** — LLM-driven detection of intentionally malicious code
+- **Secrets** — hardcoded credential detection
+- **License compliance** — SPDX normalization + OSI/risk classification
+- **Compliant outputs** — SARIF, CycloneDX SBOM, JSON, HTML
+
+A quick note before the detail: **Firewall and SCA are not the same capability
+everywhere.** SCA (health scanning) works on anything UBEL can resolve a
+dependency tree for. Firewall (blocking a bad install *before* it lands)
+only exists where a package manager supports a lockfile-only dry run with no
+side effects — today that's **npm, pnpm, bun, and Docker images**. Every
+other ecosystem below is SCA-covered but not firewall-covered; this is a
+mechanical constraint of each ecosystem's tooling, not an oversight.
+
+---
+
+## Capability Matrix
+
+| Ecosystem | SCA | Firewall | SAST | Malware SAST | Reachability | License Compliance | Secrets |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Python (pip/venv) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| PHP (Composer) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
+| Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Linux host (apt/dnf) | ✅ | ❌ | — | — | — | ✅ | — |
+| Windows host | ✅ | ❌ | — | — | — | ✅ | — |
+| VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
+
+✅ = built and shipped · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
+
+---
+
+## Node.js — npm / pnpm / bun / yarn
+
+**SCA:** Full lockfile parsing across npm v1/v2/v3, pnpm v5/v6/v9, yarn
+classic and berry, and bun v0/v1. Dependency resolution walks the actual
+installed `node_modules` tree in addition to the lockfile, so it reflects
+what's really on disk, not just what the manifest declares. Scope
+assignment (production / dev / environment) is computed via BFS
+propagation from the manifest's declared dependency types down through the
+full tree.
+
+**Firewall:** The only ecosystem (alongside Docker) with a true pre-install
+gate. `npm`, `pnpm`, and `bun` each support a lockfile-only dry run
+(`--package-lock-only`, `--lockfile-only`, and a `node_modules`-untouched
+equivalent respectively) — UBEL resolves what *would* be installed, scans
+it against policy, and only proceeds if it's clean. TOCTOU is closed with
+SHA-256 integrity checks on the lockfile and `package.json` before and after
+resolution, and any policy-blocked change is rolled back atomically via
+`revert_lock_to_original`. **Yarn is deliberately excluded from firewalling**
+— it has no side-effect-free dry-run equivalent; `yarn add` always writes
+to `node_modules` before you'd get a chance to block it. Yarn projects still
+get full SCA, SAST, secrets, and license coverage — they just can't be
+gated pre-install the way npm/pnpm/bun can.
+
+**SAST / Malware SAST:** Full three-pass (scan → verify → taint-trace)
+vulnerability pipeline and two-pass malware pipeline, JS/TS-aware chunking.
+
+**Reachability analysis:** Full import-graph reachability — a vulnerable
+package is downgraded in priority if nothing in your code path actually
+imports the vulnerable module, and orphaned/unused dependencies get
+flagged separately. This is one of eight ecosystems with this capability
+(see the Reachability Analysis note under Cross-Cutting Capabilities).
+
+**Editor integration:** The VS Code/Cursor/VSCodium extension runs
+in-process (no shell-out), with dedicated commands for project scan, host
+scan, and — uniquely for this ecosystem — a scan of the **editor's own
+installed extensions**, since a malicious VS Code extension is itself a
+supply-chain vector most tools never consider.
+
+---
+
+## Python — pip / venv
+
+**SCA:** Resolves dependencies by walking virtual environment directories
+directly (not just parsing `requirements.txt`), so it reflects the actual
+installed environment, including transitive packages a manifest wouldn't
+show on its own.
+
+**Firewall:** Not available. `pip install` has no equivalent to npm's
+`--package-lock-only` dry run — there's no way to resolve what *would* be
+installed without actually installing it, so there's no side-effect-free
+point at which to gate. Python projects get full health/SCA scanning
+instead: install first, then scan, with policy enforcement working as a
+detection-and-alert gate rather than a block-before-landing one. A related
+CLI isolation feature (`ubel-pipx`-style) runs pip CLI tools in isolated,
+managed per-project virtual environments to reduce blast radius even
+without a true install-time firewall.
+
+**SAST / Malware SAST:** Full coverage, same three-pass/two-pass pipelines.
+
+**Reachability analysis:** Fully covered, tracking `.py` files against the
+resolved dependency graph — one of eight ecosystems with this capability.
+
+---
+
+## PHP — Composer
+
+**SCA:** Resolves the dependency tree from `vendor/` and `composer.lock`.
+
+**Firewall:** Not available — Composer has no dry-run/lockfile-only install
+mode UBEL can safely gate against. Health-scan only.
+
+**SAST / Malware SAST:** Full coverage.
+
+**Reachability analysis:** Fully covered — `.php` files are scanned for
+`use`/`require`/`include` references against the resolved dependency
+graph, same signal set (depth, scope, attack vector, import confirmation)
+as every other reachability-covered ecosystem.
+
+---
+
+## Ruby — Bundler
+
+**SCA:** Resolves from `Gemfile.lock`.
+
+**Firewall:** Not available — same reasoning as PHP/Python: no
+side-effect-free dry-run install path in Bundler for UBEL to hook into.
+
+**SAST / Malware SAST:** Full coverage, `.rb` chunking.
+
+**Reachability analysis:** Fully covered via `.rb` import scanning.
+
+---
+
+## Rust — Cargo
+
+**SCA:** Resolves from `Cargo.lock`, giving exact resolved versions rather
+than semver ranges from `Cargo.toml`.
+
+**Firewall:** Not available — `cargo add`/`cargo build` don't offer an
+equivalent gate point.
+
+**SAST / Malware SAST:** Full coverage.
+
+**Reachability analysis:** Fully covered via `.rs` import scanning.
+
+---
+
+## Go — modules
+
+**SCA:** Resolves from `go.sum`, which pins exact versions and hashes
+already, giving high-confidence version matching against OSV.
+
+**Firewall:** Not available.
+
+**SAST / Malware SAST:** Full coverage.
+
+**Reachability analysis:** Fully covered via `.go` import scanning.
+
+---
+
+## Java / Kotlin — Maven
+
+**SCA:** Resolves the dependency tree from `pom.xml`, following transitive
+Maven resolution.
+
+**Firewall:** Not available.
+
+**SAST / Malware SAST:** Full coverage; Java and Kotlin are tracked as
+separate language families in the catalog, so idioms specific to each
+(e.g., Kotlin null-safety bypasses vs. Java reflection abuse) get
+distinct signal sets rather than one being shoehorned into the other's
+ruleset.
+
+**Reachability analysis:** Fully covered — `.java`, `.kt`, `.groovy`, and
+`.scala` files are all scanned under the same `maven` reachability key.
+
+**Note:** Gradle-based projects aren't mentioned as a separately-resolved
+build system — Maven-style resolution is the documented path for this
+ecosystem today.
+
+---
+
+## C# / .NET — NuGet
+
+**SCA:** Resolves from `packages.lock.json` where present, falling back to
+`obj/project.assets.json` (the MSBuild-generated resolved graph) when a
+project doesn't use lock-file mode.
+
+**Firewall:** Not available.
+
+**SAST / Malware SAST:** Full coverage.
+
+**Reachability analysis:** Fully covered — `.cs`, `.vb`, `.fs`, and `.fsx`
+files are all scanned under the same `nuget` reachability key.
+
+---
+
+## C (bare, no package manager)
+
+**SCA:** Not applicable — C has no standard ecosystem-level package
+manager/lockfile for UBEL to resolve a dependency tree from, so there's no
+SCA/vulnerability-matching layer for C the way there is for the
+lockfile-based ecosystems above.
+
+**SAST / Malware SAST:** Covered as its own language family in the
+catalog — memory-safety and injection-class findings are scanned for
+directly in source, independent of any dependency graph.
+
+**License compliance:** Not applicable, for the same reason as SCA — no
+per-package manifest to read a declared license from.
+
+---
+
+## Docker — container images
+
+**SCA:** The most complete single-target scan in UBEL. Pulls (or reuses a
+local) image or accepts an already-exported uncompressed `.tar` — never
+runs the image's `ENTRYPOINT`/`CMD` — exports its filesystem to a temp dir,
+and scans that filesystem exactly like any other project root: OS packages
+via the Linux host scanner *and* every application-level ecosystem's
+dependencies found inside the image (Node, Python, PHP, etc., all at once,
+via `full_stack`).
+
+**Firewall:** Docker is the **second ecosystem with true pre-install
+(here, pre-deploy) gating**, with three modes controlling what happens to
+the image after scanning:
+- `health` — scan only, image left exactly as found.
+- `check` — scan, then always remove the image afterward (throwaway vetting).
+- `install` — scan, then remove the image *only if* the scan results in a
+  policy block; a clean scan leaves it in place.
+
+`--no-pull` scans an image that only exists locally (e.g., right after
+`docker build`, before it's ever pushed to a registry) — this is the
+"vet before you ship" path. `--keep` retains the extracted root filesystem
+for debugging. Pointing this at a CI-built image before push, or at a
+third-party base image before you adopt it, is the intended pre-deploy
+firewall use.
+
+**Malware/Secrets/License:** All inherited from whatever's found inside the
+image — an image with a compromised npm package, a hardcoded AWS key in a
+baked-in `.env`, or a GPL-licensed binary bundled into a proprietary image
+all get caught the same way they would in a live checkout.
+
+---
+
+## Kubernetes manifests
+
+**Coverage:** Not a separate scanner — Kubernetes YAML is treated as its
+own chunkable language family inside the SAST catalog, so misconfigurations
+get scanned with the same LLM-driven pipeline as source code. Verified
+classes include: overly permissive RBAC / `ClusterRoleBinding`s, containers
+configured to run as root, missing `NetworkPolicy` isolation on services
+exposed via `LoadBalancer`/`NodePort`, and similar cluster-hardening gaps.
+
+**Not covered:** Live cluster state — this scans the YAML *files* in your
+repo, not a running cluster's actual applied configuration or drift from
+those files. There's no `kubectl`-based live posture check.
+
+---
+
+## Terraform / CloudFormation (Infrastructure-as-Code)
+
+**Coverage:** Same mechanism as Kubernetes above — IaC is its own language
+family in the catalog. Confirmed classes include hardcoded secrets
+embedded directly in `.tf`/CloudFormation templates and resources
+provisioned with encryption-at-rest disabled.
+
+**Not covered:** Live cloud account state. This is static analysis of the
+IaC *source* — it will not detect drift where the deployed resource no
+longer matches what the template says, and it isn't a cloud security
+posture management (CSPM) tool that queries your cloud provider's API for
+the actual state of running resources.
+
+---
+
+## Linux host (apt / dnf)
+
+**SCA:** `LinuxHostScanner` inventories installed OS packages and matches
+them against CPE/CVE data — this is what backs both the standalone
+`ubel-platform` host scan and the OS-package half of every Docker image
+scan.
+
+**Firewall:** Not available. Despite covering apt/dnf package inventory,
+there's no pre-install dry-run hook wired up for either package manager in
+the current build — this is health/detection scanning of what's already
+on the machine, not a gate on what's about to be installed.
+
+**License compliance:** Fully applied. Per-package license strings are
+extracted from rpm metadata, `/usr/share/doc/<pkg>/copyright` for
+dpkg-based systems, and apk metadata, then fed through the same SPDX
+normalization/OSI/risk classification layer as every other ecosystem — it
+isn't a separate, lesser pipeline for OS packages.
+
+---
+
+## Windows host
+
+**SCA:** `WindowsHostScanner` mirrors the Linux host scanner's role for
+Windows — installed software/package inventory matched against CPE/CVE.
+
+**Firewall:** Not available — same gap as the Linux host, no pre-install
+gate.
+
+**License compliance:** Fully applied, via its own `licenseFor()` mapping
+feeding the same classification pipeline as every other ecosystem.
+
+---
+
+## Cross-Cutting Capabilities
+
+### Reachability Analysis — 8 ecosystems via import-graph confirmation
+
+Every vulnerability is annotated with a reachability verdict derived from
+dependency depth, scope (prod/dev/env), attack vector, orphan-tool
+detection, and — where source is available — actual import/require
+scanning that confirms whether the vulnerable module is ever referenced.
+The import-scan half of this is implemented for **Python (`.py`), Node.js
+(`.js`/`.ts`/`.mjs`/`.cjs`/`.jsx`/`.tsx`), Maven/Java+Kotlin (`.java`,
+`.kt`, `.groovy`, `.scala`), NuGet/C# (`.cs`, `.vb`, `.fs`, `.fsx`), PHP
+(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — the
+same eight ecosystems that get full SCA. A known distribution-name-to-
+import-name override table (e.g. `beautifulsoup4` → `bs4`,
+`pyyaml` → `yaml`, `opencv-python` → `cv2`) keeps the import match accurate
+even where the published package name and the name you actually import
+diverge. C, OS packages, Docker, Kubernetes, and IaC don't get this layer,
+since there's no per-package "is this imported by my source" question that
+applies to them the same way.
+
+### Secrets Detection — every ecosystem, uniformly
+
+Secrets scanning is deliberately **ecosystem-independent**: it's a plain
+file walk over source and config file extensions (`.js`, `.py`, `.rb`,
+`.go`, `.java`, `.php`, `.cs`, `.rs`, `.kt`, `.swift`, `.json`, `.yml`,
+`.yaml`, config files, etc.), pattern-matched against a ruleset ported from
+Trivy's secret rules (separately attributed and licensed — only that
+vendored ruleset is Apache-2.0; the scanner code around it isn't). It
+never touches `node_modules`, `vendor/`, `target/`, virtual environments, or
+any other dependency directory — it's scanning *your* code for accidental
+commits, not your dependencies. This means it runs identically whether
+you're in a Node repo, a Python repo, a Kubernetes manifests repo, or an
+image filesystem — there's no per-language variance in what it can find.
+It's a pure in-memory scanner with no disk writes of its own; the caller
+(main engine) decides whether findings fold into the JSON/HTML/SARIF
+report.
+
+### License Compliance — every ecosystem, including OS packages
+
+A zero-dependency, no-network normalization layer that takes whatever
+inconsistent shape a package manager reports a license in — missing/null,
+free text ("Apache 2.0", "BSD"), npm's `UNLICENSED` sentinel (proprietary —
+**not** the SPDX "Unlicense" public-domain license, a common footgun),
+`SEE LICENSE IN <file>` references, Python trove classifiers, full SPDX
+expressions like `(MIT OR Apache-2.0)` — and normalizes it to a canonical
+SPDX identifier, checks it against a curated OSI-approved license table,
+and assigns a risk tier (permissive → weak copyleft → strong copyleft /
+proprietary / unrecognized). It's applied once, uniformly, to the entire
+unified scan inventory — Node, Python, PHP, Ruby, Rust, Go, Java/Kotlin,
+C#, and Linux/Windows OS packages alike. The only true exception is C (no
+package manager/manifest exists to read a license from in the first
+place). Policy supports both a `license-risk` threshold
+and a separate `license-block-unknown` flag for licenses that couldn't be
+classified at all — both enforced only against health-mode scans, since
+license risk is a compliance concern on what's already installed, not an
+install-time security gate.
+
+### Malware SAST — 10 source-code language families, universally
+
+Malware detection is a two-pass LLM pipeline covering 15 intentional-malice
+classes, applied identically across all 10 source-code families (JS,
+Python, PHP, Ruby, Go, Rust, Java, Kotlin, C#, C) — every malware catalog
+entry is tagged for `ALL_LANGUAGES`, so there's no ecosystem where malware
+detection is a second-class capability. It's explicitly separate from the
+vulnerability SAST catalog (different pipeline, different intent: is this
+code *deliberately* malicious vs. *accidentally* exploitable) and ships as
+its own CLI (`ubel-mal`), independent of the SCA/firewall engine.
+
+### Vulnerability SAST — 13 language/config families
+
+The vulnerability-finding catalog (59 CWE-mapped classes) spans a wider set
+than malware detection: the 10 source-code families above, plus Docker,
+Kubernetes, and general IaC as first-class chunkable targets — meaning
+Dockerfiles, K8s manifests, and Terraform/CloudFormation get scanned with
+the same three-pass scan → verify → taint-trace rigor as application code,
+not treated as an afterthought bolted onto the dependency scanner.
+
+### Compliant, Standardized Outputs
+
+- **SARIF 2.1.0** — full-fidelity output (deterministic SHA-256
+  fingerprints, not random UUIDs, so the same finding produces the same ID
+  run over run) that plugs directly into GitHub code scanning and any
+  other SARIF-consuming pipeline.
+- **CycloneDX 1.6 SBOM** — with VEX-style vulnerability annotations,
+  usable as a release artifact independent of any specific CI vendor.
+- **CVSS scoring** — v2, v3, v3.1, and **v4.0** (a full port of the
+  Red Hat CVSS v4 calculator, BSD-2-Clause, separately attributed) plus
+  SSVC as a normalized "other" scoring method where relevant, all folded
+  into a single normalized severity used consistently across JSON, SARIF,
+  and SBOM output.
+- **HTML reports** — force-directed dependency graphs, inventory modals,
+  and reachability badges/filters wherever reachability data exists in the
+  report (the eight ecosystems above).
+- **JSON** — the canonical, complete report every other format is derived
+  from, including effective-configuration tracing (what policy/thresholds
+  were actually in effect for that specific scan run).
+
+---
+
+## What this matrix intentionally does *not* claim
+
+To keep this document honest rather than aspirational:
+
+- Firewall/pre-install gating is **npm, pnpm, bun, and Docker only** —
+  not "every package manager," because most package managers don't offer
+  a safe dry-run install to gate against. This is a hard mechanical
+  constraint, not a roadmap gap.
+- Reachability analysis's import-confirmation half covers **8 of the 8
+  SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
+  it, since "is this imported by my source" isn't a meaningful question
+  for those.
+- Kubernetes and IaC coverage is **static file analysis**, not live
+  cluster/cloud posture management — there is no drift detection against
+  what's actually deployed.
+- OS-level packages (apt/dnf, Windows) get full SCA **and** license
+  compliance — the one thing they still don't get is firewalling
+  (no pre-install dry-run gate), same limitation as every ecosystem
+  outside npm/pnpm/bun/Docker.
+
+---
 
 ## License
 
