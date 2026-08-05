@@ -16,6 +16,7 @@ async function callOpenRouter({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
   });
 
   const headers = {
+    'ngrok-skip-browser-warning': 'true',
     [apiKeyHeader]: `${apiKeyPrefix}${apiKey}`,
     'HTTP-Referer': 'https://github.com/ubel-sast',
     'X-Title':      'UBEL SAST',
@@ -37,7 +38,10 @@ async function callOpenAI({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
     max_tokens: maxTokens,
   });
 
-  const headers = { [apiKeyHeader]: `${apiKeyPrefix}${apiKey}` };
+  const headers = {
+    'ngrok-skip-browser-warning': 'true',
+    [apiKeyHeader]: `${apiKeyPrefix}${apiKey}`
+  };
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
@@ -55,6 +59,7 @@ async function callAnthropic({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
   });
 
   const headers = {
+    'ngrok-skip-browser-warning': 'true',
     [apiKeyHeader]:      `${apiKeyPrefix}${apiKey}`,
     'anthropic-version': '2023-06-01',
   };
@@ -76,8 +81,10 @@ async function callGemini({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
   if (apiKeyHeader === 'query') {
     const sep = resolvedEndpoint.includes('?') ? '&' : '?';
     resolvedEndpoint = `${resolvedEndpoint}${sep}key=${apiKey}`;
+    headers['ngrok-skip-browser-warning'] = 'true';
   } else {
     headers[apiKeyHeader] = `${apiKeyPrefix}${apiKey}`;
+    headers['ngrok-skip-browser-warning'] = 'true';
   }
 
   const body = JSON.stringify({
@@ -104,7 +111,10 @@ async function callDeepSeek({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
     max_tokens: maxTokens,
   });
 
-  const headers = { [apiKeyHeader]: `${apiKeyPrefix}${apiKey}` };
+  const headers = {
+    'ngrok-skip-browser-warning': 'true',
+    [apiKeyHeader]: `${apiKeyPrefix}${apiKey}`
+  };
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
@@ -121,6 +131,7 @@ async function callLocal({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
   });
 
   const headers = apiKey ? { [apiKeyHeader]: `${apiKeyPrefix}${apiKey}` } : {};
+  headers['ngrok-skip-browser-warning'] = 'true';
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
