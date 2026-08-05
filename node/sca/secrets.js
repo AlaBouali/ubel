@@ -59,7 +59,7 @@ const TEXT_EXTENSIONS = new Set([
   ".py", ".rb", ".go", ".java", ".php", ".c", ".h", ".cpp", ".hpp",
   ".cs", ".rs", ".kt", ".swift",
   ".sh", ".bash", ".zsh", ".ps1",
-  ".xml", ".html", ".htm", ".css", ".scss",
+  ".xml", ".html", ".htm", //".css", ".scss",
   ".sql", ".md", ".txt", ".toml", ".properties", ".gradle",
   ".tf", ".tfvars",
   ".pem", ".key",
