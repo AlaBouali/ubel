@@ -17,6 +17,8 @@ import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
 import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
+import { PypiManagerInstance } from "./pypi_runner.js";
+import { LinuxManagerInstance } from "./linux_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2369,6 +2371,10 @@ export class UbelEngineInstance {
     this.systemType       = "npm";
     this.engine           = "npm";
     this.wasSuccessfulScan = false;
+    // Only consulted for systemType "pypi" (pip engine) — overrides the
+    // default `<projectRoot>/venv` venv location. Mirrors Python's
+    // self.venv_dir. Left null unless a caller sets it explicitly.
+    this.venvDir           = null;
 
     this.runtime_environment = "node";
     this.runtime_version     = process.version.replace(/^v/, "").replace(/^V/, "");
@@ -2409,6 +2415,26 @@ export class UbelEngineInstance {
     fs.writeFileSync(file, JSON.stringify(data, null, 4));
   }
 
+  // ── Requirements file helper (pypi install mode) ────────────────────────────
+  // Mirrors ubel_engine.py's _generate_requirements_file.
+
+  _generateRequirementsFile(purls, projectRoot) {
+    const depsDir = path.join(projectRoot, ".ubel", "dependencies");
+    fs.mkdirSync(depsDir, { recursive: true });
+    const reqFile = path.join(depsDir, "requirements.txt");
+
+    const lines = [];
+    for (const purl of purls) {
+      const [name, version] = getDependencyFromPurl(purl);
+      if (name === TOOL_NAME && version === TOOL_VERSION) continue;
+      if (name !== "unknown" && version !== "" && version !== "unknown") {
+        lines.push(`${name}==${version}`);
+      }
+    }
+    fs.writeFileSync(reqFile, lines.join("\n"));
+    return reqFile;
+  }
+
   // ── scan ────────────────────────────────────────────────────────────────────
 
   async scan(args, options = {}) {
@@ -2428,11 +2454,26 @@ export class UbelEngineInstance {
     const manager     = this.manager;
 
     const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+
+    // pip specifiers use `==`/`>=`/extras (`black[d]>=24`) and Linux package
+    // names/versions don't follow the npm @scope/name@version shape at all,
+    // so pypi/linux validate more permissively here — mirrors
+    // ubel_engine.py's validate_pkg_args (strip the allowed punctuation, what
+    // remains must be alphanumeric).
+    const validatePkgArgsLoose = (arg) => {
+      const stripped = arg.replace(/[=._+\-@/~[\]<>!]/g, "");
+      return /^[a-z0-9]+$/i.test(stripped);
+    };
+
     if (args.length) {
-      const bad = args.filter(a => !PKG_ARG_RE.test(a));
+      const bad = this.systemType === "npm"
+        ? args.filter(a => !PKG_ARG_RE.test(a))
+        : args.filter(a => !validatePkgArgsLoose(a));
       if (bad.length) {
         console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
-        console.error("[!] Expected format: name, name@version, or @scope/name@version");
+        console.error(this.systemType === "npm"
+          ? "[!] Expected format: name, name@version, or @scope/name@version"
+          : "[!] Expected format: a package name, optionally with a version/extras specifier");
         process.exit(1);
       }
     }
@@ -2486,7 +2527,49 @@ export class UbelEngineInstance {
 
     try {
       // ── Collect packages ──────────────────────────────────────────────────
-      if (needsRevert) {
+      if (this.systemType === "pypi") {
+        // ── Python (pip / pipx) firewall ─────────────────────────────────────
+        if (needsRevert) {
+          const venvDir = this.venvDir || path.join(projectRoot, "venv");
+          if (this.engine === "pip") {
+            const python = manager.initVenv(venvDir);
+            manager.engineVersion = manager.getPipVersion(python) || "";
+            purls = manager.runDryRun(args, venvDir);
+          } else if (this.engine === "pipx") {
+            purls = manager.dryRunCli(args[0]);
+          }
+          reportContent = manager.inventoryData;
+        } else {
+          // health — delegate entirely to PypiManagerInstance.getInstalled()
+          purls = manager.getInstalled(projectRoot, {
+            scanVenv: options.scan_venv ?? true,
+            scanOs:   scan_os,
+          });
+          reportContent = {};
+        }
+      } else if (this.systemType === "linux") {
+        // ── Linux (apt / dnf / yum) firewall ─────────────────────────────────
+        if (needsRevert) {
+          const packages   = manager.resolvePackages(args);
+          const systemInfo = manager.getOsInfo();
+          reportContent    = { packages, system_info: systemInfo };
+          purls            = packages.map(p => manager.packageToPurl(systemInfo, p.name, p.version));
+          manager.inventoryData = packages.map((pkg, i) => ({
+            ...pkg,
+            id: purls[i],
+            state: "undetermined",
+            scopes: ["prod"],
+            dependency_sequences: [],
+          }));
+          manager.engineVersion = manager.pkgManagerVersion;
+          // Report the concrete package manager (apt/dnf/yum), not the CLI
+          // tool name — mirrors ubel_engine.py's _engine_name override.
+          this.engine = manager.pkgManager;
+        } else {
+          purls         = manager.getLinuxPackages();
+          reportContent = { system_info: manager.getOsInfo() };
+        }
+      } else if (needsRevert) {
         purls         = await manager.runDryRun(this.engine, args, projectRoot);
         for (const inventoryItem of manager.inventoryData) {
           inventoryItem.paths = [];
@@ -2928,9 +3011,16 @@ export class UbelEngineInstance {
       }
 
       // ── latest.{json,html} — always points to the most recent scan ─────────
-      const latestDir      = path.join(projectRoot, ".ubel", "reports");
-      const latestPath     = path.join(latestDir, "latest.json");
-      const latestHtmlPath = path.join(latestDir, "latest.html");
+      // Derived from reportsLocation's own root (".../.ubel/local/reports" →
+      // ".../.ubel/reports") rather than hardcoded to projectRoot, so that
+      // ubel-apt/ubel-dnf/ubel-yum — which redirect reportsLocation to
+      // ~/.ubel/local/reports specifically to avoid writing into whatever
+      // directory the CLI happened to be run from — get the same redirect
+      // applied to this convenience path too, not just the timestamped one.
+      const ubelRoot        = path.dirname(path.dirname(this.reportsLocation));
+      const latestDir       = path.join(ubelRoot, "reports");
+      const latestPath      = path.join(latestDir, "latest.json");
+      const latestHtmlPath  = path.join(latestDir, "latest.html");
       fs.mkdirSync(latestDir, { recursive: true });
       fs.writeFileSync(latestHtmlPath, htmlReport);
       safeWriteJson(latestPath, finalJson, 1000);
@@ -2981,41 +3071,74 @@ export class UbelEngineInstance {
 
       if (this.checkMode === "check") {
         this.wasSuccessfulScan = true;
-        manager.revert_lock_to_original(this.engine, projectRoot);
-        manager.cleanupLockfileBackup();
-        if (!is_script) console.log("[+] Backup lockfiles removed.");
+        if (this.systemType === "npm") {
+          manager.revert_lock_to_original(this.engine, projectRoot);
+          manager.cleanupLockfileBackup();
+          if (!is_script) console.log("[+] Backup lockfiles removed.");
+        }
         process.exit(0);
       }
 
       if (!is_script) console.log("[+] Policy passed. Installing dependencies...");
       this.wasSuccessfulScan = true;
 
-      const saveResult = await manager.saveCandidateLockfile(this.engine, projectRoot);
-      if (!saveResult.written) {
-        if (!is_script) console.error("[!] Could not write candidate lockfile:", saveResult.reason);
-        process.exit(1);
-      }
+      if (this.systemType === "npm") {
+        const saveResult = await manager.saveCandidateLockfile(this.engine, projectRoot);
+        if (!saveResult.written) {
+          if (!is_script) console.error("[!] Could not write candidate lockfile:", saveResult.reason);
+          process.exit(1);
+        }
 
-      try {
-        const installResult = await manager.runRealInstall(this.engine, projectRoot);
-        if (installResult.status !== 0) {
-          if (!is_script) console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+        try {
+          const installResult = await manager.runRealInstall(this.engine, projectRoot);
+          if (installResult.status !== 0) {
+            if (!is_script) console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+            manager.revert_lock_to_original(this.engine, projectRoot);
+            process.exit(1);
+          }
+        } catch (err) {
+          if (!is_script) console.error("[!] Failed to run npm ci:", err.message);
           manager.revert_lock_to_original(this.engine, projectRoot);
           process.exit(1);
         }
-      } catch (err) {
-        if (!is_script) console.error("[!] Failed to run npm ci:", err.message);
-        manager.revert_lock_to_original(this.engine, projectRoot);
-        process.exit(1);
-      }
 
-      manager.cleanupLockfileBackup();
-      if (!is_script) console.log("[+] Backup lockfiles removed.");
+        manager.cleanupLockfileBackup();
+        if (!is_script) console.log("[+] Backup lockfiles removed.");
+
+      } else if (this.systemType === "pypi") {
+        // No lockfile/backup concept for pip — mirrors ubel_engine.py's
+        // install branch, which installs directly with no revert step.
+        try {
+          if (this.engine === "pip") {
+            const venvDir = this.venvDir || path.join(projectRoot, "venv");
+            const reqFile = this._generateRequirementsFile(purls, projectRoot);
+            manager.runRealInstall(reqFile, this.engine, venvDir);
+          } else if (this.engine === "pipx") {
+            manager.installCli(args[0]);
+          }
+        } catch (err) {
+          if (!is_script) console.error("[!] Failed to install package(s):", err.message);
+          process.exit(1);
+        }
+
+      } else if (this.systemType === "linux") {
+        // No lockfile/backup concept for apt/dnf either — a straight
+        // `sudo <pm> install -y`, mirroring Linux_Manager.run_real_install.
+        try {
+          const packagesList = purls
+            .filter(p => !p.includes(`/${TOOL_NAME}@${TOOL_VERSION}`))
+            .map(p => getDependencyFromPurl(p));
+          manager.runRealInstall(packagesList);
+        } catch (err) {
+          if (!is_script) console.error("[!] Failed to install package(s):", err.message);
+          process.exit(1);
+        }
+      }
 
       return finalJson;
 
     } finally {
-      if (!this.wasSuccessfulScan && needsRevert) {
+      if (this.systemType === "npm" && !this.wasSuccessfulScan && needsRevert) {
         const revertResult = manager.revert_lock_to_original(this.engine, projectRoot);
         if (!revertResult.reverted) {
           if (!is_script) {

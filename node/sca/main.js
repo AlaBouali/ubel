@@ -82,8 +82,11 @@
  */
 
 import path from "path";
+import os from "os";
 import { UbelEngineInstance, PolicyViolationError } from "./engine.js";
 import { NodeManagerInstance }  from "./node_runner.js";
+import { PypiManagerInstance }  from "./pypi_runner.js";
+import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
@@ -106,6 +109,32 @@ const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
 const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
 
+// pip/pipx/apt/dnf/yum are dispatched through their own dedicated CLI branch
+// below (mirroring __main__.py's _run_mode), not through the npm-family
+// path, so they're intentionally NOT added to CHECK_INSTALL_ENGINES above.
+const PYPI_ENGINES  = new Set(["pip", "pipx"]);
+// Each of ubel-apt/ubel-dnf/ubel-yum targets exactly one native package
+// manager — no auto-detection across the three, same as ubel-npm never
+// guesses whether you meant pnpm.
+const LINUX_ENGINES = new Set(["apt", "dnf", "yum"]);
+
+/**
+ * Resolve the right manager instance + systemType grouping for an engine
+ * name. Keeps "systemType" meaning one of exactly three ecosystem buckets
+ * ("npm" | "pypi" | "linux") everywhere engine.js reads it, regardless of
+ * which specific package manager (npm/pnpm/bun, pip/pipx, or apt/dnf/yum)
+ * is actually in play.
+ */
+function resolveManager(engine) {
+  if (PYPI_ENGINES.has(engine)) {
+    return { manager: new PypiManagerInstance(), systemType: "pypi" };
+  }
+  if (LINUX_ENGINES.has(engine)) {
+    return { manager: new LinuxManagerInstance(engine), systemType: "linux" };
+  }
+  return { manager: new NodeManagerInstance(), systemType: "npm" };
+}
+
 /**
  * main() — unified entry point for CLI callers AND programmatic callers.
  *
@@ -116,13 +145,14 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         Package manager engine.
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"docker"|"pip"|"pipx"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
  * @param {boolean} [programmaticOptions.scan_os=false]
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
+ * @param {string}  [programmaticOptions.venvDir]              engine:"pip" only — overrides the default `<projectRoot>/venv`.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
  * @param {boolean} [programmaticOptions.scan_secrets=true]
@@ -153,6 +183,7 @@ async function main(programmaticOptions) {
       scan_scope         = "repository",
       scan_secrets        = true,
       scan_vulns          = true,
+      venvDir             = undefined,
       severity_threshold = undefined,
       block_unknown_vulnerabilities = undefined,
       license_risk_threshold = undefined,
@@ -171,12 +202,16 @@ async function main(programmaticOptions) {
     await createTargetPath(resolvedRoot)
 
     // Construct fresh, isolated instances for this invocation.
-    const manager = new NodeManagerInstance();
+    const { manager, systemType } = resolveManager(engine);
     const eng     = new UbelEngineInstance(manager, resolvedRoot);
 
     eng.engine     = engine;
-    eng.systemType = engine;
+    eng.systemType = systemType;
     eng.checkMode  = mode;
+    // Only meaningful for engine: "pip" — overrides the default
+    // `<projectRoot>/venv` venv location. Harmless no-op for every other
+    // engine, since only the pypi collect/install branches read it.
+    if (venvDir !== undefined) eng.venvDir = venvDir;
 
     eng.initiateLocalPolicy();
     // Apply policy overrides if provided
@@ -277,15 +312,147 @@ async function main(programmaticOptions) {
     return;
   }
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // PYPI (pip / pipx) AND LINUX (apt / dnf / yum) ENGINES
+  // Called by: bin/pip.js, bin/pipx.js, bin/apt.js, bin/dnf.js, bin/yum.js
+  // Mirrors __main__.py's _run_mode() — a deliberately separate dispatch
+  // path from the npm-family branch below rather than folded into it, since
+  // these ecosystems differ in several specific ways: no license-risk /
+  // license-block-unknown modes, `init` provisions a venv instead of being a
+  // no-op, pip falls back to ./requirements.txt (then ./pyproject.toml) when
+  // no packages are given,
+  // apt/dnf/yum write reports/policy under $HOME to avoid needing sudo, and
+  // full_stack/scan_os default to OFF (vs. npm's health scan, which defaults
+  // full_stack to ON). apt/dnf/yum are three separate engines here, each
+  // bound to exactly one native package manager — same one-binary-per-tool
+  // shape as ubel-npm/ubel-pnpm/ubel-bun, no auto-detection between them.
+  // ════════════════════════════════════════════════════════════════════════════
+  if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine)) {
+    const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown"];
+    const scanScope =
+      engine === "pip"  ? "repository" :
+      engine === "pipx" ? "cli_tool"   :
+      "linux_machine"; // apt | dnf | yum
+
+    const resolvedRoot = path.resolve(process.cwd());
+    const { manager, systemType } = resolveManager(engine);
+    const eng = new UbelEngineInstance(manager, resolvedRoot);
+
+    // Same convention as npm/pnpm/bun: the binary's own name is the engine
+    // identity. (engine.js still substitutes TOOL_NAME for `health` mode,
+    // and the resolved apt/dnf/yum version for `check`/`install`, exactly
+    // as it already does for npm/pnpm/bun — no special-casing needed here.)
+    eng.engine     = engine;
+    eng.systemType = systemType;
+
+    if (LINUX_ENGINES.has(engine)) {
+      // Reports & policy live under $HOME so ubel-apt/ubel-dnf/ubel-yum
+      // never need sudo just to write their own output — only the real
+      // `apt/dnf/yum install` itself is escalated. Must happen BEFORE
+      // initiateLocalPolicy().
+      eng.reportsLocation = path.join(os.homedir(), ".ubel", "local", "reports");
+      eng.policyDir       = path.join(os.homedir(), ".ubel", "local", "policy");
+    }
+
+    eng.initiateLocalPolicy();
+
+    console.log(banner);
+    console.log(`Reports location: ${eng.reportsLocation}`);
+    console.log();
+    console.log(`Policy location: ${eng.policyDir}`);
+    console.log();
+
+    const effectiveMode = PIP_LINUX_VALID_MODES.includes(mode) ? mode : "health";
+    eng.checkMode = effectiveMode;
+
+    // ── init — provisions a pip venv regardless of engine, matching
+    //    __main__.py's _run_mode(), which does the same unconditionally. ──
+    if (effectiveMode === "init") {
+      const venvDir = eng.venvDir || path.join(resolvedRoot, "venv");
+      new PypiManagerInstance().initVenv(venvDir);
+      process.exit(0);
+    }
+
+    // ── threshold <level> ─────────────────────────────────────────────────
+    if (effectiveMode === "threshold") {
+      const level = (extraArgs[0] || "").toLowerCase();
+      if (!level || !VALID_SEVERITIES.has(level)) {
+        console.error("[!] Provide a valid severity level: low | medium | high | critical | none");
+        console.error(`[!] Example: ubel-${engine} threshold high`);
+        process.exit(1);
+      }
+      eng.setPolicyField("severity_threshold", level);
+      console.log(`[+] Policy updated: severity_threshold = ${level}`);
+      console.log("[i] Infections are always blocked regardless of this setting.");
+      process.exit(0);
+    }
+
+    // ── block-unknown <true|false> ────────────────────────────────────────
+    if (effectiveMode === "block-unknown") {
+      const raw = (extraArgs[0] || "").toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        console.error("[!] Provide true or false");
+        console.error(`[!] Example: ubel-${engine} block-unknown true`);
+        process.exit(1);
+      }
+      const value = raw === "true";
+      eng.setPolicyField("block_unknown_vulnerabilities", value);
+      console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
+      process.exit(0);
+    }
+
+    // ── collect package args ────────────────────────────────────────────────
+    let pkgArgs = extraArgs;
+
+    // pip check/install with no args → fall back to ./requirements.txt,
+    // then ./pyproject.toml's [project] dependencies (manager owns both —
+    // see resolveDefaultPackages() in pypi_runner.js).
+    if (!pkgArgs.length && engine === "pip" && (effectiveMode === "check" || effectiveMode === "install")) {
+      const resolved = manager.resolveDefaultPackages(resolvedRoot);
+      if (!resolved) {
+        console.error("[!] No package arguments, and no requirements.txt or pyproject.toml found.");
+        process.exit(1);
+      }
+      pkgArgs = resolved;
+    }
+
+    // ── remote mode guard ────────────────────────────────────────────────────
+    const { apiKey, assetId } = loadEnvironment();
+    if (apiKey && assetId) {
+      console.error("[!] Remote mode (UBEL_API_KEY + UBEL_ASSET_ID) is not yet implemented in the Node CLI.");
+      process.exit(1);
+    }
+
+    // ── scan ─────────────────────────────────────────────────────────────────
+    try {
+      await eng.scan(pkgArgs, {
+        is_script:    false,
+        save_reports: true,
+        scan_os:      false,
+        full_stack:   false,
+        scan_venv:    true,
+        scan_scope:   scanScope,
+      });
+    } catch (err) {
+      if (err instanceof PolicyViolationError) {
+        process.exit(1);
+      }
+      console.error("[!] Scan failed:", err.message);
+      if (process.env.DEBUG) console.error(err.stack);
+      process.exit(1);
+    }
+    return;
+  }
+
   // The CLI always operates in the current working directory.
   const resolvedRoot = path.resolve(process.cwd());
 
   // Construct fresh instances for this CLI invocation.
-  const manager = new NodeManagerInstance();
+  const { manager, systemType } = resolveManager(engine);
   const eng     = new UbelEngineInstance(manager, resolvedRoot);
 
   eng.engine     = engine;
-  eng.systemType = "npm";
+  eng.systemType = systemType;
 
   eng.initiateLocalPolicy();
 

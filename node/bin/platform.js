@@ -17,6 +17,8 @@ async function run() {
       scan_os     : true,
       scan_node   : false,
       scan_scope  : "developer_platform",
+      scan_secrets: false,
+
     });
 
     console.log(JSON.stringify(result, null, 2));

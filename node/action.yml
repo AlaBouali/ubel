@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, and SAST scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -41,6 +41,21 @@ runs:
     # whenever a bin is added or removed there), so this can never
     # construct or execute a binary name that isn't one of ours regardless
     # of what a caller passes.
+    #
+    # `pip`/`pipx` need a `python3`/`python` interpreter on PATH to create
+    # their venv — `setup-node` above doesn't provision one, so a workflow
+    # using either command needs its own `actions/setup-python` step (or a
+    # runner image, e.g. GitHub-hosted `ubuntu-latest`, that already has one).
+    #
+    # `apt`/`dnf`/`yum` are three separate commands, each bound to exactly
+    # one native package manager — same one-binary-per-tool shape as
+    # `npm`/`pnpm`/`bun` above, no auto-detection between them. Each only
+    # works on a Linux runner that actually has that specific tool present —
+    # e.g. `dnf`/`yum` are no-ops on GitHub-hosted `ubuntu-latest`, and all
+    # three are no-ops on `windows-latest`/`macos-latest`. `install` mode
+    # also shells out to `sudo <pkg-manager> install`, which needs
+    # passwordless sudo; GitHub-hosted Ubuntu runners have this by default,
+    # but a locked-down self-hosted runner may not.
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -48,10 +63,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker|pip|pipx|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, apt, dnf, yum"
             exit 1
             ;;
         esac

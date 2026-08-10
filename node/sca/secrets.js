@@ -218,7 +218,7 @@ export const extraRules = [
     path: null,
     regex: new RegExp(String.raw`(?:^|[^0-9A-Za-z_])(?:api[_\s-]?key)\s*[:=]\s*["']?(?<secret>[a-zA-Z0-9_\-]{5,100})["']?`, "i"),
     allowRules: [],
-  },*/
+  },
   {
     id: "twilio-account-sid",
     category: "Twilio",
@@ -238,7 +238,7 @@ export const extraRules = [
     path: null,
     regex: new RegExp(String.raw`(?<secret>AP[a-zA-Z0-9_\-]{32})`, ""),
     allowRules: [],
-  },
+  },*/
   {
     id: "braintree-access-token",
     category: "PayPal",

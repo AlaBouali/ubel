@@ -20,6 +20,7 @@
 
 import fs            from "fs";
 import path          from "path";
+import os            from "os";
 import { execFileSync, spawnSync } from "child_process";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -605,3 +606,371 @@ export class LinuxHostScanner {
 }
 
 export default LinuxHostScanner;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinuxManagerInstance
+//
+// JS port of Linux_Manager (linux_runner.py) — adds pre-install firewalling
+// (dry-run resolution + real install) on top of LinuxHostScanner's pure
+// inventory scanning, so ubel-linux can gate `apt`/`dnf`/`yum` installs the
+// same way ubel-npm gates `npm ci`. One fresh instance per invocation, no
+// shared mutable state between scans (matches NodeManagerInstance/
+// PypiManagerInstance conventions).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export class LinuxManagerInstance {
+
+  /**
+   * @param {"apt"|"dnf"|"yum"} pkgManager — which native package manager this
+   *   instance targets. Required and not auto-detected: mirrors
+   *   ubel-npm/ubel-pnpm/ubel-bun being three distinct binaries each bound
+   *   to one specific tool, rather than one binary that guesses. Each of
+   *   ubel-apt/ubel-dnf/ubel-yum constructs its own instance with the
+   *   matching value.
+   */
+  constructor(pkgManager) {
+    if (!["apt", "dnf", "yum"].includes(pkgManager)) {
+      throw new Error(`LinuxManagerInstance requires an explicit pkgManager ("apt"|"dnf"|"yum"), got: ${JSON.stringify(pkgManager)}`);
+    }
+    this.pkgManager          = pkgManager;
+    this.inventoryData       = [];
+    this.pkgManagerVersion   = null;
+    this.engineVersion       = null; // set after resolvePackages(); mirrors NodeManagerInstance.engineVersion
+  }
+
+  // ── Engine version capture (no-op) ──────────────────────────────────────────
+  // Version capture for linux happens inline inside resolvePackages()/
+  // getLinuxPackages() once the active package manager is known, so the
+  // generic pre-collect call in engine.js's scan() is a deliberate no-op here.
+  _captureEngineVersion() {}
+
+  // ── Dependency sequences (identical algorithm to NodeManagerInstance) ───────
+
+  buildDependencySequences(inventory) {
+    if (!Array.isArray(inventory)) inventory = Object.values(inventory || {});
+
+    const byId = new Map();
+    for (const comp of inventory) byId.set(comp.id, comp);
+
+    const depended = new Set();
+    for (const comp of inventory) {
+      for (const dep of (comp.dependencies || [])) depended.add(dep);
+    }
+
+    const roots     = inventory.map(c => c.id).filter(id => !depended.has(id));
+    const sequences = new Map();
+
+    function dfs(node, path) {
+      const nextPath = [...path, node];
+      if (!sequences.has(node)) sequences.set(node, []);
+      sequences.get(node).push(nextPath);
+      for (const dep of (byId.get(node)?.dependencies || [])) {
+        if (!path.includes(dep)) dfs(dep, nextPath);
+      }
+    }
+
+    for (const root of roots) dfs(root, []);
+    for (const comp of inventory) comp.dependency_sequences = sequences.get(comp.id) || [];
+
+    return inventory;
+  }
+
+  buildIntroducedBy(inventory) {
+    const reverse = new Map();
+    for (const pkg of inventory) reverse.set(pkg.id, []);
+    for (const pkg of inventory) {
+      for (const dep of pkg.dependencies || []) {
+        if (!reverse.has(dep)) reverse.set(dep, []);
+        reverse.get(dep).push(pkg.id);
+      }
+    }
+    for (const pkg of inventory) pkg.introduced_by = reverse.get(pkg.id) || [];
+    return inventory;
+  }
+
+  buildParents(inventory) {
+    const parents = new Map(inventory.map(c => [c.id, []]));
+    for (const comp of inventory) {
+      for (const depId of (comp.dependencies || [])) {
+        if (parents.has(depId)) parents.get(depId).push(comp.id);
+      }
+    }
+    for (const comp of inventory) comp.parents = (parents.get(comp.id) || []).sort();
+    return inventory;
+  }
+
+  mergeInventoryByPurl(components) {
+    const map = new Map();
+    for (const comp of components) {
+      if (!map.has(comp.id)) {
+        map.set(comp.id, { ...comp, paths: [...(comp.paths || [])] });
+        continue;
+      }
+      const existing = map.get(comp.id);
+      for (const p of (comp.paths || [])) {
+        if (p && !existing.paths.includes(p)) existing.paths.push(p);
+      }
+    }
+    return [...map.values()];
+  }
+
+  // ── Shell helpers ────────────────────────────────────────────────────────────
+
+  commandExists(cmd) {
+    const r = spawnSync("which", [cmd], { encoding: "utf8" });
+    return r.status === 0 && !!r.stdout.trim();
+  }
+
+  runCommand(cmd) {
+    const [bin, ...args] = cmd;
+    try {
+      const r = spawnSync(bin, args, { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, maxBuffer: 32 * 1024 * 1024 });
+      if (r.error) throw r.error;
+      // Mirror Python: return stdout on a clean run OR a non-zero exit that
+      // still produced resolvable output (apt-get -s / dnf --assumeno exit
+      // non-zero on purpose since nothing is actually installed).
+      return (r.stdout || "").trim();
+    } catch (e) {
+      console.error(`[!] Command failed: ${cmd.join(" ")}`);
+      console.error(e.message);
+      return "";
+    }
+  }
+
+  // ── OS detection (stdlib-equivalent — no external distro package) ───────────
+
+  _parseOsRelease() {
+    const data = {};
+    for (const candidate of ["/etc/os-release", "/usr/lib/os-release"]) {
+      try {
+        const content = fs.readFileSync(candidate, "utf8");
+        for (const raw of content.split("\n")) {
+          const line = raw.trim();
+          if (!line || line.startsWith("#") || !line.includes("=")) continue;
+          const eq  = line.indexOf("=");
+          const key = line.slice(0, eq).trim().toLowerCase();
+          let val   = line.slice(eq + 1).trim();
+          val = val.replace(/^"/, "").replace(/"$/, "").replace(/^'/, "").replace(/'$/, "");
+          data[key] = val;
+        }
+        return data;
+      } catch { continue; }
+    }
+    return data;
+  }
+
+  getOsInfo() {
+    const raw     = this._parseOsRelease();
+    const os_id   = (raw.id || "").replace(/\s+/g, "");
+    const name    = raw.pretty_name || raw.name || os_id;
+    const version = raw.version_id || raw.version || "";
+    const like    = raw.id_like || "";
+
+    return {
+      id:              os_id,
+      name,
+      version,
+      like,
+      package_manager: this.pkgManager,
+      ...raw,
+    };
+  }
+
+  // ── Package manager availability ────────────────────────────────────────────
+  // apt-get is what's actually invoked for resolution/version probing even
+  // when this.pkgManager === "apt" — apt's own CLI output is explicitly
+  // documented as unstable across versions for scripting, apt-get's isn't.
+
+  _pmBinary() {
+    return this.pkgManager === "apt" ? "apt-get" : this.pkgManager;
+  }
+
+  assertAvailable() {
+    const bin = this._pmBinary();
+    if (!this.commandExists(bin)) {
+      throw new Error(
+        `'${bin}' was not found on PATH — ubel-${this.pkgManager} requires ` +
+        `${this.pkgManager} to be installed and on PATH, the same way ` +
+        `ubel-pnpm requires pnpm.`
+      );
+    }
+  }
+
+  getPkgManagerVersion() {
+    const bin = this._pmBinary();
+    if (!this.commandExists(bin)) return "unknown";
+    try {
+      const r = spawnSync(bin, ["--version"], { encoding: "utf8" });
+      const firstLine = ((r.stdout || r.stderr || "").split("\n")[0] || "").trim();
+      const parts = firstLine.split(/\s+/);
+      for (const part of parts) {
+        if (/^\d+\.\d+/.test(part)) return part;
+      }
+    } catch { /* fall through */ }
+    return "unknown";
+  }
+
+  // ── PURL builder ──────────────────────────────────────────────────────────────
+
+  packageToPurl(osInfo, pkg, version) {
+    const os_id      = (osInfo.id || "").replace(/\s+/g, "").toLowerCase();
+    const like       = (osInfo.like || "").toLowerCase();
+    const pkgManager = osInfo.package_manager || "";
+
+    if (pkgManager === "apt") {
+      if (os_id.includes("ubuntu") || like.includes("ubuntu")) return `pkg:deb/ubuntu/${pkg}@${version}`;
+      return `pkg:deb/debian/${pkg}@${version}`;
+    }
+    if (os_id.includes("almalinux"))  return `pkg:rpm/almalinux/${pkg}@${version}`;
+    if (os_id.includes("redhat") || os_id.includes("rhel")) return `pkg:rpm/redhat/${pkg}@${version}`;
+    if (os_id.includes("alpaquita"))  return `pkg:apk/alpaquita/${pkg}@${version}`;
+    if (os_id.includes("rocky"))      return `pkg:rpm/rocky-linux/${pkg}@${version}`;
+    if (os_id.includes("alpine"))     return `pkg:apk/alpine/${pkg}@${version}`;
+
+    throw new Error(`Unsupported Linux distribution: id=${os_id} like=${like}`);
+  }
+
+  // ── get_linux_packages (health scan, delegates to LinuxHostScanner) ─────────
+
+  getLinuxPackages() {
+    this.assertAvailable();
+    const systemInfo = this.getOsInfo();
+
+    const scanner = new LinuxHostScanner();
+    scanner.getInstalled();
+    const rawPackages = scanner.inventoryData;
+
+    let components = rawPackages.map(pkg => ({
+      id:           pkg.id,
+      name:         pkg.name,
+      version:      pkg.version,
+      type:         "application",
+      scopes:       ["prod"],
+      license:      pkg.license || pkg.licence || "unknown",
+      dependencies: pkg.dependencies || [],
+      paths:        pkg.paths || [],
+      ecosystem:    pkg.ecosystem,
+      state:        "undetermined",
+    }));
+
+    components = this.mergeInventoryByPurl(components);
+    components = this.buildDependencySequences(components);
+
+    this.inventoryData = components;
+    const purls = components.map(c => c.id);
+
+    // Kernel component (apt-based distros only, matching Python behaviour)
+    if (this.pkgManager === "apt") {
+      const kernelVersion = os.release();
+      const kernelPurl    = this.packageToPurl(systemInfo, "linux", kernelVersion);
+      const kernelComponent = {
+        id: kernelPurl, name: "linux", version: kernelVersion, type: "application",
+        license: "unknown", paths: [], dependencies: [], ecosystem: systemInfo.id,
+        state: "undetermined", dependency_sequences: [],
+      };
+      components.push(kernelComponent);
+      purls.push(kernelPurl);
+    }
+
+    return purls;
+  }
+
+  // ── resolve_packages (dry-run via the native package manager) ───────────────
+
+  resolvePackages(packages) {
+    if (typeof packages === "string") packages = [packages];
+
+    this.assertAvailable();
+    const osInfo = this.getOsInfo();
+    this.pkgManagerVersion = this.getPkgManagerVersion();
+
+    const resolved = [];
+
+    // ── APT (Debian / Ubuntu) ────────────────────────────────────────────────
+    if (this.pkgManager === "apt") {
+      const output = this.runCommand(["apt-get", "-s", "--no-install-recommends", "install", ...packages]);
+      // e.g. "Inst curl (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])"
+      const pattern = /^Inst\s+(\S+)\s+\(([^ ]+)/;
+      for (const line of output.split("\n")) {
+        const m = pattern.exec(line.trim());
+        if (m) {
+          resolved.push({
+            name: m[1], version: m[2], type: "application",
+            ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
+          });
+        }
+      }
+      return resolved;
+    }
+
+    // ── DNF (RHEL 8+, AlmaLinux, Rocky) ────────────────────────────────────────
+    if (this.pkgManager === "dnf") {
+      const output = this.runCommand(["dnf", "install", "--assumeno", ...packages]);
+      let capture = false;
+      for (let line of output.split("\n")) {
+        line = line.trim();
+        if (line.startsWith("Installing:")) { capture = true; continue; }
+        if (capture) {
+          if (!line) break;
+          const parts = line.split(/\s+/);
+          if (parts.length >= 2) {
+            resolved.push({
+              name: parts[0].split(".")[0], version: parts[1], type: "application",
+              license: "unknown", paths: [], dependencies: [], ecosystem: osInfo.id,
+            });
+          }
+        }
+      }
+      return resolved;
+    }
+
+    // ── YUM (RHEL 7) ────────────────────────────────────────────────────────────
+    // this.pkgManager === "yum" — the only remaining option (validated in the
+    // constructor), so no fallthrough error case is needed here anymore.
+    const output = this.runCommand(["yum", "install", "--assumeno", ...packages]);
+    let capture = false;
+    for (let line of output.split("\n")) {
+      line = line.trim();
+      if (line.startsWith("Installing:")) { capture = true; continue; }
+      if (capture) {
+        if (!line) break;
+        const parts = line.split(/\s+/);
+        if (parts.length >= 2) {
+          resolved.push({
+            name: parts[0].split(".")[0], version: parts[1], type: "application",
+            ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
+          });
+        }
+      }
+    }
+    return resolved;
+  }
+
+  // ── get_packages_purls ───────────────────────────────────────────────────────
+
+  getPackagesPurls(packages) {
+    const resolved   = this.resolvePackages(packages);
+    const systemInfo = this.getOsInfo();
+    const identified = resolved.map(pkg => ({ id: this.packageToPurl(systemInfo, pkg.name, pkg.version) }));
+    this.inventoryData = identified;
+    return identified.map(pkg => pkg.id);
+  }
+
+  // ── run_real_install ─────────────────────────────────────────────────────────
+  // packagesList: array of [name, version] tuples (mirrors get_dependency_from_purl output).
+
+  runRealInstall(packagesList) {
+    this.assertAvailable();
+    const pkgs = this.pkgManager === "apt"
+      ? packagesList.map(([name, version]) => `${name}=${version}`)
+      : packagesList.map(([name, version]) => `${name}-${version}`);
+
+    const cmd = ["sudo", this.pkgManager, "install", "-y", ...pkgs];
+    const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
+    if (r.status !== 0) {
+      console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
+      throw new Error(`Package install failed (exit ${r.status})`);
+    }
+    return r;
+  }
+}
