@@ -67,6 +67,7 @@ export class PypiManagerInstance {
     this.installer      = installer;
     this.inventoryData  = [];
     this.engineVersion  = null; // set by getPipVersion()/getUvVersion() during runDryRun/install
+    this._uvBinPath     = null; // cached by _resolveUvBin() — "uv" if reachable as-is, else a resolved absolute path
   }
 
   // ── Engine version capture (no-op) ──────────────────────────────────────────
@@ -334,42 +335,72 @@ export class PypiManagerInstance {
     return components.map(c => c.id);
   }
 
-  // ── uv dry-run ────────────────────────────────────────────────────────────────
+  // ── uv binary resolution ─────────────────────────────────────────────────────
   //
-  // Uses `uv pip compile -` (specifiers piped via stdin) rather than
-  // `uv pip install --dry-run`. Confirmed by direct testing against uv
-  // 0.11.7 — the two behave quite differently and `compile` is the better
-  // fit here:
-  //   - `pip install --dry-run` only reports what would *change*: on an
-  //     already-satisfied target it prints nothing at all (same limitation
-  //     pip's own --dry-run --report has — not a uv-specific gap), and its
-  //     output has no dependency relationships between packages.
-  //   - `pip compile -` always resolves the FULL graph regardless of
-  //     what's already installed, is unaffected by the target venv's
-  //     current state, and annotates every non-root package with
-  //     `# via <parent(s)>` — which is what lets uv-sourced scans get real
-  //     introduced_by/parents/dependency_sequences data, not just a flat
-  //     package list.
-  //
-  // One honesty note, same as pip: resolving a source-only package's
-  // metadata can require building an sdist, which can run arbitrary
-  // setup.py/build-backend code — this is inherent to how Python packaging
-  // resolution works, not something either pip's or uv's implementation
-  // can avoid. A wheel-only install doesn't have this gap.
+  // `spawnSync` inherits process.env.PATH exactly as this process saw it at
+  // startup — it does NOT re-source .bashrc/.zshrc/.profile the way an
+  // interactive login shell does. The official https://astral.sh/uv install
+  // script drops the binary in ~/.local/bin and makes it reachable by
+  // appending to PATH from an rc file, not system-wide — so a plain
+  // `spawnSync("uv", ...)` (or a `which uv` subprocess, which has the same
+  // PATH-inheritance problem, plus isn't even present on Windows) can fail
+  // to find a uv that works fine in the user's actual terminal. That's the
+  // "uv is installed globally but this code can't find it" failure mode.
+  // Resolve once, cache the working invocation, and fall back through uv's
+  // documented default install locations before giving up.
+  _resolveUvBin() {
+    if (this._uvBinPath) return this._uvBinPath;
+
+    const direct = spawnSync("uv", ["--version"], { encoding: "utf8" });
+    if (direct.status === 0) {
+      this._uvBinPath = "uv";
+      return this._uvBinPath;
+    }
+
+    const home = os.homedir();
+    const candidates = process.platform === "win32"
+      ? [
+          path.join(home, ".local", "bin", "uv.exe"),
+          path.join(home, ".cargo", "bin", "uv.exe"),
+          path.join(process.env.LOCALAPPDATA || "", "Programs", "uv", "uv.exe"),
+        ]
+      : [
+          path.join(home, ".local", "bin", "uv"), // official astral.sh installer default
+          path.join(home, ".cargo", "bin", "uv"), // `cargo install uv`
+          "/opt/homebrew/bin/uv",                 // Homebrew, Apple Silicon
+          "/usr/local/bin/uv",                    // Homebrew, Intel / manual install
+          "/usr/bin/uv",
+        ];
+
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate)) continue;
+      const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+      if (probe.status === 0) {
+        this._uvBinPath = candidate;
+        return this._uvBinPath;
+      }
+    }
+
+    return null;
+  }
 
   assertUvAvailable() {
-    const r = spawnSync("which", ["uv"], { encoding: "utf8" });
-    if (r.status !== 0 || !r.stdout.trim()) {
+    if (!this._resolveUvBin()) {
       throw new Error(
-        `'uv' was not found on PATH — ubel-uv requires uv to be installed ` +
-        `and on PATH, the same way ubel-pnpm requires pnpm.`
+        `'uv' was not found on PATH or in any known install location ` +
+        `(~/.local/bin, ~/.cargo/bin, Homebrew) — ubel-uv requires uv to be ` +
+        `installed, the same way ubel-pnpm requires pnpm. If you just ` +
+        `installed it, open a new terminal (or 'source' your shell rc file) ` +
+        `so PATH picks it up.`
       );
     }
   }
 
   getUvVersion() {
+    const uvBin = this._resolveUvBin();
+    if (!uvBin) return null;
     try {
-      const r = spawnSync("uv", ["--version"], { encoding: "utf8" });
+      const r = spawnSync(uvBin, ["--version"], { encoding: "utf8" });
       if (r.status !== 0) return null;
       // "uv 0.11.7 (x86_64-unknown-linux-gnu)" → "0.11.7"
       const m = /^uv\s+(\S+)/.exec((r.stdout || "").trim());
@@ -379,8 +410,96 @@ export class PypiManagerInstance {
     }
   }
 
+  // ── uv-native venv creation (init_uv_venv) ──────────────────────────────────
+  //
+  // Mirrors initVenv()'s contract (idempotent, returns the venv's absolute
+  // python path) but drives it through uv's own project bootstrap — `uv
+  // init` then `uv venv` — instead of the stdlib `venv` module. A
+  // uv-managed install always goes through this rather than initVenv(), so
+  // the environment is one uv itself recognizes as belonging to a real
+  // project (pyproject.toml + .python-version present), not just a bare
+  // interpreter uv happens to be pointed at via --python.
+  //
+  // Both steps are skipped if already done — `uv init` errors on a project
+  // that's already initialized, same idempotency contract as initVenv()
+  // checking for pyvenv.cfg first.
+  initUvVenv(venvDir) {
+    this.assertUvAvailable();
+    const uvBin      = this._resolveUvBin();
+    const venvPath    = path.resolve(venvDir);
+    const projectDir  = path.dirname(venvPath);
+
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    if (!fs.existsSync(path.join(projectDir, "pyproject.toml"))) {
+      // --no-workspace: always bootstrap this directory as its own
+      // standalone project, regardless of whether a parent directory
+      // happens to be (or look like) a uv workspace root.
+      // --bare: projectDir is very often the caller's real project root
+      // (see the two call sites — engine.js's check/install dispatch and
+      // main.js's `init` mode both pass a venvDir under projectRoot/resolvedRoot),
+      // so a plain `uv init` scaffolding README.md/main.py/.python-version
+      // and running `git init` there — confirmed via direct testing — would
+      // be an unwelcome surprise for a firewall/dry-run tool to leave
+      // behind. `--bare` writes only the minimal pyproject.toml uv needs to
+      // recognize the directory as a project, nothing else.
+      const initResult = spawnSync(uvBin, ["init", "--bare", "--no-workspace"], {
+        cwd: projectDir,
+        encoding: "utf8",
+      });
+      if (initResult.status !== 0) {
+        throw new Error(
+          `'uv init' failed in ${projectDir} (exit ${initResult.status}):\n` +
+          (initResult.stderr || initResult.stdout || "")
+        );
+      }
+    }
+
+    if (!fs.existsSync(path.join(venvPath, "pyvenv.cfg"))) {
+      const venvResult = spawnSync(uvBin, ["venv", venvPath], {
+        cwd: projectDir,
+        encoding: "utf8",
+      });
+      if (venvResult.status !== 0) {
+        throw new Error(
+          `'uv venv' failed to create ${venvPath} (exit ${venvResult.status}):\n` +
+          (venvResult.stderr || venvResult.stdout || "")
+        );
+      }
+    }
+
+    return this._venvPython(venvPath);
+  }
+
+  // ── uv dry-run ────────────────────────────────────────────────────────────────
+  //
+  // Uses `uv pip install <specs> --dry-run` — the same command shape as the
+  // pip branch above (`pip install --dry-run`), just routed through uv —
+  // rather than `uv pip compile`. That symmetry is deliberate but it does
+  // cost real information versus `compile`, confirmed by direct testing
+  // against uv 0.11.7:
+  //   - Output is a flat `+ name==version` / `- name==version` list on
+  //     STDERR (the opposite stream from `pip compile`, which writes its
+  //     pinned list to stdout) — no `# via <parent>` provenance, so unlike
+  //     the old compile-based branch, every returned component here has an
+  //     empty `dependencies` list; buildDependencySequences() below treats
+  //     each one as its own root rather than reconstructing a real tree.
+  //   - It only reports what would *change* — on an already-satisfied
+  //     target it prints nothing at all (same limitation pip's own
+  //     --dry-run --report has). This is a non-issue in practice because
+  //     runDryRun() is only ever called against a venv initUvVenv() just
+  //     created (fresh/empty), so every requested package and its
+  //     transitive deps show up as "+" lines — see _parseUvInstallDryRun().
+  //
+  // One honesty note, same as pip: resolving a source-only package's
+  // metadata can require building an sdist, which can run arbitrary
+  // setup.py/build-backend code — this is inherent to how Python packaging
+  // resolution works, not something either pip's or uv's implementation
+  // can avoid. A wheel-only install doesn't have this gap.
+
   _runDryRunUv(initialArgs, venvDir) {
     this.assertUvAvailable();
+    const uvBin  = this._resolveUvBin();
     const python = this._venvPython(venvDir);
 
     const uvVersion = this.getUvVersion();
@@ -388,11 +507,9 @@ export class PypiManagerInstance {
     this.engineVersion = uvVersion;
 
     const args = initialArgs.filter(a => a !== "--");
-    const stdinInput = args.join("\n") + "\n";
 
-    const cmd = ["pip", "compile", "-", "--python", python, "--color", "never"];
-    const result = spawnSync("uv", cmd, {
-      input: stdinInput,
+    const cmd = ["pip", "install", ...args, "--dry-run", "--python", python, "--color", "never"];
+    const result = spawnSync(uvBin, cmd, {
       encoding: "utf8",
       timeout: SUBPROCESS_TIMEOUT,
       maxBuffer: 32 * 1024 * 1024,
@@ -400,17 +517,17 @@ export class PypiManagerInstance {
 
     if (result.status !== 0) {
       throw new Error(
-        `uv pip compile failed:\n` +
-        `CMD: uv ${cmd.join(" ")}\n` +
+        `uv pip install --dry-run failed:\n` +
+        `CMD: ${uvBin} ${cmd.join(" ")}\n` +
         `stdout: ${result.stdout || ""}\n` +
         `stderr: ${result.stderr || ""}`
       );
     }
 
-    // The pinned list + "# via" provenance is on stdout; progress/timing
-    // ("Resolved N packages in Xms") goes to stderr — confirmed by direct
-    // testing, and the opposite of where `uv pip install --dry-run` writes.
-    const { packages, requiredBy } = this._parseUvCompileOutput(result.stdout || "");
+    // The "+ name==version" plan is on stderr; stdout carries nothing
+    // useful for this command — confirmed by direct testing, and the
+    // opposite of where `uv pip compile` writes.
+    const packages = this._parseUvInstallDryRun(result.stderr || "");
 
     let components = [];
     for (const [norm, pkg] of packages) {
@@ -419,23 +536,13 @@ export class PypiManagerInstance {
         name: norm,
         version: pkg.version,
         type: "library",
-        license: "unknown", // uv's compile output doesn't expose license metadata
-        dependencies: [],   // filled in below, inverted from the parsed "via" (required-by) map
+        license: "unknown", // `install --dry-run` exposes no metadata beyond name==version
+        dependencies: [],   // flat list only — no "# via" provenance in this output, see _parseUvInstallDryRun()
         paths: [],
         ecosystem: "python",
         scopes: ["prod"],
         state: "undetermined",
       });
-    }
-
-    const byName = new Map(components.map(c => [c.name, c]));
-    for (const [childNorm, parents] of requiredBy) {
-      const child = byName.get(childNorm);
-      if (!child) continue;
-      for (const parentNorm of parents) {
-        const parent = byName.get(parentNorm);
-        if (parent && !parent.dependencies.includes(child.id)) parent.dependencies.push(child.id);
-      }
     }
 
     components.push({
@@ -459,74 +566,41 @@ export class PypiManagerInstance {
   }
 
   /**
-   * Parses `uv pip compile`'s stdout into a name→{name,version,purl} map
-   * plus a child→Set(parents) "required by" map built from `# via <parent>`
-   * annotations. Handles both forms uv emits:
-   *   pkg==1.2.3
-   *       # via other-pkg              (single parent, inline)
-   *   pkg==1.2.3
-   *       # via
-   *       #   parent-a
-   *       #   parent-b                 (multiple parents, one per line)
-   * A package with no "# via" at all is a root (directly requested) — uv
-   * confirmed to omit the annotation entirely for root packages when
-   * specifiers are piped via stdin, so no "-r <file>" marker parsing is
-   * needed the way a file-based compile would need.
+   * Parses `uv pip install --dry-run`'s stderr into a name→{name,version,purl}
+   * map. uv writes one line per package whose state would change, each
+   * prefixed with a symbol, e.g.:
+   *   Resolved 31 packages in 1.53s
+   *   Would download 1 package
+   *   Would install 31 packages
+   *    + annotated-doc==0.0.5
+   *    + annotated-types==0.8.0
+   *    ...
+   * "+" marks a package that would be installed; "-" marks one that would
+   * be removed. Only "+" lines are kept — runDryRun() always targets a venv
+   * initUvVenv() just created (see the comment above _runDryRunUv()), so in
+   * practice nothing is ever already installed to remove or upgrade, but
+   * "-" is still matched (and skipped) here rather than silently
+   * mis-parsed, in case that assumption is ever violated by a caller
+   * reusing a pre-populated venv. Header/summary lines ("Resolved N
+   * packages...", "Would install N packages") don't match the pin pattern
+   * and are ignored.
    */
-  _parseUvCompileOutput(stdout) {
-    const packages   = new Map(); // normalizedName -> { name, version, purl }
-    const requiredBy = new Map(); // normalizedName -> Set(parent normalizedNames)
+  _parseUvInstallDryRun(stderrText) {
+    const packages = new Map(); // normalizedName -> { name, version, purl }
+    const pinRe = /^\s*([+-])\s+([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)\s*$/;
 
-    let current = null;
-    let collectingVia = false;
+    for (const line of stderrText.split("\n")) {
+      const m = pinRe.exec(line);
+      if (!m) continue;
 
-    const recordVia = (childNorm, parentRaw) => {
-      const parentNorm = parentRaw.trim().toLowerCase();
-      if (!parentNorm || parentNorm.startsWith("-r ") || parentNorm.startsWith("-c ")) return;
-      if (!requiredBy.has(childNorm)) requiredBy.set(childNorm, new Set());
-      requiredBy.get(childNorm).add(parentNorm);
-    };
+      const [, sign, rawName, version] = m;
+      if (sign === "-") continue; // would-remove — not part of the resulting install set
 
-    for (const line of stdout.split("\n")) {
-      if (!line.trim()) { collectingVia = false; continue; }
-
-      // Unindented "#" lines are header comments (e.g. "# This file was
-      // autogenerated..."), never a via-continuation (those are indented).
-      if (/^#/.test(line)) { collectingVia = false; continue; }
-
-      const pinMatch = /^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)\s*$/.exec(line);
-      if (pinMatch) {
-        const [, rawName, version] = pinMatch;
-        const norm = rawName.toLowerCase();
-        packages.set(norm, { name: norm, version, purl: this._purl(rawName, version) });
-        current = norm;
-        collectingVia = false;
-        continue;
-      }
-
-      const viaInline = /^\s+#\s*via\s+(.+)$/.exec(line);
-      if (viaInline && current) {
-        recordVia(current, viaInline[1]);
-        collectingVia = false;
-        continue;
-      }
-
-      const viaBare = /^\s+#\s*via\s*$/.exec(line);
-      if (viaBare && current) {
-        collectingVia = true;
-        continue;
-      }
-
-      const viaContinuation = /^\s+#\s+(\S.*)$/.exec(line);
-      if (collectingVia && viaContinuation && current) {
-        recordVia(current, viaContinuation[1]);
-        continue;
-      }
-
-      collectingVia = false;
+      const norm = rawName.toLowerCase();
+      packages.set(norm, { name: rawName, version, purl: this._purl(rawName, version) });
     }
 
-    return { packages, requiredBy };
+    return packages;
   }
 
   // ── run_real_install ─────────────────────────────────────────────────────────
@@ -553,10 +627,11 @@ export class PypiManagerInstance {
 
     if (engine === "uv") {
       this.assertUvAvailable();
-      const cmd = ["uv", "pip", "install", "--python", python, "-r", fileName];
-      const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
+      const uvBin = this._resolveUvBin();
+      const cmd = ["pip", "install", "--python", python, "-r", fileName];
+      const r = spawnSync(uvBin, cmd, { stdio: "inherit" });
       if (r.status !== 0) {
-        console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
+        console.error(`[!] Package install failed (exit ${r.status}): ${uvBin} ${cmd.join(" ")}`);
         throw new Error(`uv pip install failed (exit ${r.status})`);
       }
       return r;
@@ -668,6 +743,7 @@ export class PypiManagerInstance {
   // (or a pyproject.toml exists but declares no [project] dependencies).
 
   resolveDefaultPackages(projectRoot) {
+    console.log(projectRoot)
     const reqPath = path.join(projectRoot, "requirements.txt");
     if (fs.existsSync(reqPath)) {
       return fs.readFileSync(reqPath, "utf8")
@@ -679,7 +755,7 @@ export class PypiManagerInstance {
     const tomlPath = path.join(projectRoot, "pyproject.toml");
     if (fs.existsSync(tomlPath)) {
       const deps = this.parsePyprojectDependencies(tomlPath);
-      if (deps.length) return deps;
+      if (deps.length || deps.length===0) return deps;
     }
 
     return null;
