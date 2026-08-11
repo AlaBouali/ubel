@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, and SAST scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, apt, dnf, yum'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -47,6 +47,10 @@ runs:
     # using either command needs its own `actions/setup-python` step (or a
     # runner image, e.g. GitHub-hosted `ubuntu-latest`, that already has one).
     #
+    # `uv` needs BOTH a `python3`/`python` interpreter (same as above, to
+    # create the venv) AND the `uv` binary itself on PATH — neither is
+    # provisioned by `setup-node`; use `astral-sh/setup-uv` for the latter.
+    #
     # `apt`/`dnf`/`yum` are three separate commands, each bound to exactly
     # one native package manager — same one-binary-per-tool shape as
     # `npm`/`pnpm`/`bun` above, no auto-detection between them. Each only
@@ -63,10 +67,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker|pip|pipx|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
             exit 1
             ;;
         esac

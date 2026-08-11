@@ -109,10 +109,11 @@ const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
 const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
 
-// pip/pipx/apt/dnf/yum are dispatched through their own dedicated CLI branch
-// below (mirroring __main__.py's _run_mode), not through the npm-family
-// path, so they're intentionally NOT added to CHECK_INSTALL_ENGINES above.
-const PYPI_ENGINES  = new Set(["pip", "pipx"]);
+// pip/pipx/uv/apt/dnf/yum are dispatched through their own dedicated CLI
+// branch below (mirroring __main__.py's _run_mode), not through the
+// npm-family path, so they're intentionally NOT added to
+// CHECK_INSTALL_ENGINES above.
+const PYPI_ENGINES  = new Set(["pip", "pipx", "uv"]);
 // Each of ubel-apt/ubel-dnf/ubel-yum targets exactly one native package
 // manager — no auto-detection across the three, same as ubel-npm never
 // guesses whether you meant pnpm.
@@ -122,12 +123,17 @@ const LINUX_ENGINES = new Set(["apt", "dnf", "yum"]);
  * Resolve the right manager instance + systemType grouping for an engine
  * name. Keeps "systemType" meaning one of exactly three ecosystem buckets
  * ("npm" | "pypi" | "linux") everywhere engine.js reads it, regardless of
- * which specific package manager (npm/pnpm/bun, pip/pipx, or apt/dnf/yum)
- * is actually in play.
+ * which specific package manager (npm/pnpm/bun, pip/pipx/uv, or
+ * apt/dnf/yum) is actually in play.
  */
 function resolveManager(engine) {
   if (PYPI_ENGINES.has(engine)) {
-    return { manager: new PypiManagerInstance(), systemType: "pypi" };
+    // pipx has no "uvx" equivalent implemented here — its CLI-isolation
+    // methods (dryRunCli/installCli) are pip-only regardless of engine, so
+    // it always gets the "pip" installer; "uv" gets its own installer mode,
+    // and "pip" is PypiManagerInstance's own default.
+    const installer = engine === "uv" ? "uv" : "pip";
+    return { manager: new PypiManagerInstance(installer), systemType: "pypi" };
   }
   if (LINUX_ENGINES.has(engine)) {
     return { manager: new LinuxManagerInstance(engine), systemType: "linux" };
@@ -313,24 +319,27 @@ async function main(programmaticOptions) {
   }
 
   // ════════════════════════════════════════════════════════════════════════════
-  // PYPI (pip / pipx) AND LINUX (apt / dnf / yum) ENGINES
-  // Called by: bin/pip.js, bin/pipx.js, bin/apt.js, bin/dnf.js, bin/yum.js
+  // PYPI (pip / pipx / uv) AND LINUX (apt / dnf / yum) ENGINES
+  // Called by: bin/pip.js, bin/pipx.js, bin/uv.js, bin/apt.js, bin/dnf.js, bin/yum.js
   // Mirrors __main__.py's _run_mode() — a deliberately separate dispatch
   // path from the npm-family branch below rather than folded into it, since
   // these ecosystems differ in several specific ways: no license-risk /
   // license-block-unknown modes, `init` provisions a venv instead of being a
-  // no-op, pip falls back to ./requirements.txt (then ./pyproject.toml) when
-  // no packages are given,
-  // apt/dnf/yum write reports/policy under $HOME to avoid needing sudo, and
-  // full_stack/scan_os default to OFF (vs. npm's health scan, which defaults
-  // full_stack to ON). apt/dnf/yum are three separate engines here, each
-  // bound to exactly one native package manager — same one-binary-per-tool
-  // shape as ubel-npm/ubel-pnpm/ubel-bun, no auto-detection between them.
+  // no-op, pip/uv fall back to ./requirements.txt (then ./pyproject.toml)
+  // when no packages are given, apt/dnf/yum write reports/policy under
+  // $HOME to avoid needing sudo, and full_stack/scan_os default to OFF (vs.
+  // npm's health scan, which defaults full_stack to ON). apt/dnf/yum are
+  // three separate engines here, each bound to exactly one native package
+  // manager — same one-binary-per-tool shape as ubel-npm/ubel-pnpm/ubel-bun,
+  // no auto-detection between them. uv is the fourth pypi-family engine:
+  // same six modes, same requirements.txt/pyproject.toml fallback, same
+  // real-install-via-generated-requirements-file behavior as pip — only the
+  // dry-run mechanism differs internally (see pypi_runner.js).
   // ════════════════════════════════════════════════════════════════════════════
   if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine)) {
     const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown"];
     const scanScope =
-      engine === "pip"  ? "repository" :
+      (engine === "pip" || engine === "uv") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
       "linux_machine"; // apt | dnf | yum
 
@@ -404,10 +413,11 @@ async function main(programmaticOptions) {
     // ── collect package args ────────────────────────────────────────────────
     let pkgArgs = extraArgs;
 
-    // pip check/install with no args → fall back to ./requirements.txt,
+    // pip/uv check/install with no args → fall back to ./requirements.txt,
     // then ./pyproject.toml's [project] dependencies (manager owns both —
-    // see resolveDefaultPackages() in pypi_runner.js).
-    if (!pkgArgs.length && engine === "pip" && (effectiveMode === "check" || effectiveMode === "install")) {
+    // see resolveDefaultPackages() in pypi_runner.js; it's installer-
+    // agnostic, so this works identically for pip and uv).
+    if (!pkgArgs.length && (engine === "pip" || engine === "uv") && (effectiveMode === "check" || effectiveMode === "install")) {
       const resolved = manager.resolveDefaultPackages(resolvedRoot);
       if (!resolved) {
         console.error("[!] No package arguments, and no requirements.txt or pyproject.toml found.");

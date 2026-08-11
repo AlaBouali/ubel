@@ -3,17 +3,39 @@
 // JS port of Pypi_Manager (python_runner.py) — the firewall-relevant subset.
 // PythonVenvScanner (python_runner.js) already covers pure inventory scanning
 // (health mode); this file adds the pre-install firewall mechanics so
-// `ubel-pip`/`ubel-pipx` can gate `pip install` the same way `ubel-npm`
-// gates `npm ci`:
+// `ubel-pip`/`ubel-uv`/`ubel-pipx` can gate an install the same way
+// `ubel-npm` gates `npm ci`:
 //
 //   initVenv(venvDir)               → create a venv at venvDir (idempotent)
 //   getPipVersion(python)           → pip version installed in the venv
-//   runDryRun(initialArgs, venvDir) → `pip install --dry-run --report`, returns
-//                                      the same component structure as before
-//   runRealInstall(fileName, engine, venvDir) → `pip install -r` inside the venv
-//   dryRunCli(packageSpec)          → dry-run for a CLI package in an isolated venv
-//   installCli(packageSpec)         → install a CLI package + expose global shims
+//   getUvVersion()                  → uv version on PATH
+//   runDryRun(initialArgs, venvDir) → dry-run resolution, branches on
+//                                      this.installer ("pip" → `pip install
+//                                      --dry-run --report`; "uv" → `uv pip
+//                                      compile`, see below) — same returned
+//                                      component structure either way
+//   runRealInstall(fileName, engine, venvDir) → `pip install -r` / `uv pip
+//                                      install -r` inside the venv
+//   dryRunCli(packageSpec)          → dry-run for a CLI package in an isolated venv (pip only)
+//   installCli(packageSpec)         → install a CLI package + expose global shims (pip only)
 //   getInstalled(startDir, opts)    → health-mode scan (delegates to PythonVenvScanner)
+//
+// pip vs uv, and why they're NOT just "the same command, different binary":
+// pip's `--dry-run --report <path>` produces a JSON install plan with each
+// package's declared `requires_dist`, so the resulting dependency graph
+// (who depends on whom) comes straight from the report. uv has no
+// equivalent for `pip install` — `uv pip install --dry-run` exists, but
+// (confirmed by testing directly against uv 0.11.7) writes a flat
+// `+ name==version` list to **stderr**, with no dependency relationships,
+// and it only reports what would *change* — a fully-satisfied install
+// prints nothing at all, same limitation pip's own dry-run --report has.
+// `uv pip compile -` (piping specifiers via stdin) instead gives a full
+// resolution every time, on **stdout**, annotated with `# via <parent>`
+// per package — that's what runDryRun uses for the "uv" installer, and how
+// dependency provenance (introduced_by/parents/dependency_sequences) is
+// reconstructed for uv-sourced scans. Neither pip nor uv can resolve a
+// source-only package's metadata without potentially building an sdist —
+// see the caveat in _runDryRunUv()/the pip branch below.
 //
 // Zero third-party runtime dependencies (Node stdlib only) — matches UBEL's
 // existing zero-dependency positioning.
@@ -26,19 +48,31 @@ import { spawnSync } from "child_process";
 import { PythonVenvScanner } from "./python_runner.js";
 import { LinuxHostScanner }  from "./linux_runner.js";
 
-const SUBPROCESS_TIMEOUT = 300_000; // ms — pip resolution can be slow
+const SUBPROCESS_TIMEOUT = 300_000; // ms — resolution can be slow
 
 export class PypiManagerInstance {
 
-  constructor() {
-    this.inventoryData = [];
-    this.engineVersion  = null; // set by getPipVersion() during runDryRun/install
+  /**
+   * @param {"pip"|"uv"} [installer="pip"] — which installer runDryRun()/
+   *   runRealInstall() drive. Defaults to "pip" so existing callers
+   *   (including the pipx CLI-isolation methods, which are pip-only —
+   *   there's no "uvx" equivalent requested/implemented here) are
+   *   unaffected. ubel-uv's CLI dispatch constructs
+   *   `new PypiManagerInstance("uv")` explicitly.
+   */
+  constructor(installer = "pip") {
+    if (!["pip", "uv"].includes(installer)) {
+      throw new Error(`PypiManagerInstance requires installer "pip" or "uv", got: ${JSON.stringify(installer)}`);
+    }
+    this.installer      = installer;
+    this.inventoryData  = [];
+    this.engineVersion  = null; // set by getPipVersion()/getUvVersion() during runDryRun/install
   }
 
   // ── Engine version capture (no-op) ──────────────────────────────────────────
-  // Mirrors LinuxManagerInstance — pip's version is only knowable once a venv
-  // exists, so it's captured inline inside runDryRun()/getInstalled(), not via
-  // a generic pre-collect probe.
+  // Mirrors LinuxManagerInstance — the version is only knowable once a venv
+  // exists (pip) or by probing `uv --version` (uv), so it's captured inline
+  // inside runDryRun()/getInstalled(), not via a generic pre-collect probe.
   _captureEngineVersion() {}
 
   // ── PURL helpers ──────────────────────────────────────────────────────────────
@@ -192,11 +226,18 @@ export class PypiManagerInstance {
   // ── run_dry_run ───────────────────────────────────────────────────────────────
 
   /**
-   * Run `pip install --dry-run` for initialArgs inside venvDir.
-   * The venv must already exist (call initVenv() first).
-   * Returns a list of PURL id strings; full records land in this.inventoryData.
+   * Dry-run resolution for initialArgs inside venvDir. Branches on
+   * this.installer — "pip" (default) uses `pip install --dry-run --report`;
+   * "uv" uses `uv pip compile`. Either way: the venv must already exist
+   * (call initVenv() first), and returns a list of PURL id strings, with
+   * full records landing in this.inventoryData.
    */
   runDryRun(initialArgs, venvDir) {
+    if (this.installer === "uv") return this._runDryRunUv(initialArgs, venvDir);
+    return this._runDryRunPip(initialArgs, venvDir);
+  }
+
+  _runDryRunPip(initialArgs, venvDir) {
     let python = this._venvPython(venvDir);
 
     let pipVersion = this.getPipVersion(python);
@@ -293,11 +334,209 @@ export class PypiManagerInstance {
     return components.map(c => c.id);
   }
 
+  // ── uv dry-run ────────────────────────────────────────────────────────────────
+  //
+  // Uses `uv pip compile -` (specifiers piped via stdin) rather than
+  // `uv pip install --dry-run`. Confirmed by direct testing against uv
+  // 0.11.7 — the two behave quite differently and `compile` is the better
+  // fit here:
+  //   - `pip install --dry-run` only reports what would *change*: on an
+  //     already-satisfied target it prints nothing at all (same limitation
+  //     pip's own --dry-run --report has — not a uv-specific gap), and its
+  //     output has no dependency relationships between packages.
+  //   - `pip compile -` always resolves the FULL graph regardless of
+  //     what's already installed, is unaffected by the target venv's
+  //     current state, and annotates every non-root package with
+  //     `# via <parent(s)>` — which is what lets uv-sourced scans get real
+  //     introduced_by/parents/dependency_sequences data, not just a flat
+  //     package list.
+  //
+  // One honesty note, same as pip: resolving a source-only package's
+  // metadata can require building an sdist, which can run arbitrary
+  // setup.py/build-backend code — this is inherent to how Python packaging
+  // resolution works, not something either pip's or uv's implementation
+  // can avoid. A wheel-only install doesn't have this gap.
+
+  assertUvAvailable() {
+    const r = spawnSync("which", ["uv"], { encoding: "utf8" });
+    if (r.status !== 0 || !r.stdout.trim()) {
+      throw new Error(
+        `'uv' was not found on PATH — ubel-uv requires uv to be installed ` +
+        `and on PATH, the same way ubel-pnpm requires pnpm.`
+      );
+    }
+  }
+
+  getUvVersion() {
+    try {
+      const r = spawnSync("uv", ["--version"], { encoding: "utf8" });
+      if (r.status !== 0) return null;
+      // "uv 0.11.7 (x86_64-unknown-linux-gnu)" → "0.11.7"
+      const m = /^uv\s+(\S+)/.exec((r.stdout || "").trim());
+      return m ? m[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  _runDryRunUv(initialArgs, venvDir) {
+    this.assertUvAvailable();
+    const python = this._venvPython(venvDir);
+
+    const uvVersion = this.getUvVersion();
+    if (uvVersion === null) throw new Error("Failed to determine uv version (`uv --version` did not succeed)");
+    this.engineVersion = uvVersion;
+
+    const args = initialArgs.filter(a => a !== "--");
+    const stdinInput = args.join("\n") + "\n";
+
+    const cmd = ["pip", "compile", "-", "--python", python, "--color", "never"];
+    const result = spawnSync("uv", cmd, {
+      input: stdinInput,
+      encoding: "utf8",
+      timeout: SUBPROCESS_TIMEOUT,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+
+    if (result.status !== 0) {
+      throw new Error(
+        `uv pip compile failed:\n` +
+        `CMD: uv ${cmd.join(" ")}\n` +
+        `stdout: ${result.stdout || ""}\n` +
+        `stderr: ${result.stderr || ""}`
+      );
+    }
+
+    // The pinned list + "# via" provenance is on stdout; progress/timing
+    // ("Resolved N packages in Xms") goes to stderr — confirmed by direct
+    // testing, and the opposite of where `uv pip install --dry-run` writes.
+    const { packages, requiredBy } = this._parseUvCompileOutput(result.stdout || "");
+
+    let components = [];
+    for (const [norm, pkg] of packages) {
+      components.push({
+        id: pkg.purl,
+        name: norm,
+        version: pkg.version,
+        type: "library",
+        license: "unknown", // uv's compile output doesn't expose license metadata
+        dependencies: [],   // filled in below, inverted from the parsed "via" (required-by) map
+        paths: [],
+        ecosystem: "python",
+        scopes: ["prod"],
+        state: "undetermined",
+      });
+    }
+
+    const byName = new Map(components.map(c => [c.name, c]));
+    for (const [childNorm, parents] of requiredBy) {
+      const child = byName.get(childNorm);
+      if (!child) continue;
+      for (const parentNorm of parents) {
+        const parent = byName.get(parentNorm);
+        if (parent && !parent.dependencies.includes(child.id)) parent.dependencies.push(child.id);
+      }
+    }
+
+    components.push({
+      id: `pkg:pypi/uv@${uvVersion}`,
+      name: "uv",
+      version: uvVersion,
+      type: "tool",
+      license: "Apache-2.0 OR MIT",
+      dependencies: [],
+      paths: [],
+      ecosystem: "python",
+      scopes: ["dev", "env", "prod"],
+      state: "undetermined",
+    });
+
+    components = this.mergeInventoryByPurl(components);
+    components = this.buildDependencySequences(components);
+
+    this.inventoryData = components;
+    return components.map(c => c.id);
+  }
+
+  /**
+   * Parses `uv pip compile`'s stdout into a name→{name,version,purl} map
+   * plus a child→Set(parents) "required by" map built from `# via <parent>`
+   * annotations. Handles both forms uv emits:
+   *   pkg==1.2.3
+   *       # via other-pkg              (single parent, inline)
+   *   pkg==1.2.3
+   *       # via
+   *       #   parent-a
+   *       #   parent-b                 (multiple parents, one per line)
+   * A package with no "# via" at all is a root (directly requested) — uv
+   * confirmed to omit the annotation entirely for root packages when
+   * specifiers are piped via stdin, so no "-r <file>" marker parsing is
+   * needed the way a file-based compile would need.
+   */
+  _parseUvCompileOutput(stdout) {
+    const packages   = new Map(); // normalizedName -> { name, version, purl }
+    const requiredBy = new Map(); // normalizedName -> Set(parent normalizedNames)
+
+    let current = null;
+    let collectingVia = false;
+
+    const recordVia = (childNorm, parentRaw) => {
+      const parentNorm = parentRaw.trim().toLowerCase();
+      if (!parentNorm || parentNorm.startsWith("-r ") || parentNorm.startsWith("-c ")) return;
+      if (!requiredBy.has(childNorm)) requiredBy.set(childNorm, new Set());
+      requiredBy.get(childNorm).add(parentNorm);
+    };
+
+    for (const line of stdout.split("\n")) {
+      if (!line.trim()) { collectingVia = false; continue; }
+
+      // Unindented "#" lines are header comments (e.g. "# This file was
+      // autogenerated..."), never a via-continuation (those are indented).
+      if (/^#/.test(line)) { collectingVia = false; continue; }
+
+      const pinMatch = /^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)\s*$/.exec(line);
+      if (pinMatch) {
+        const [, rawName, version] = pinMatch;
+        const norm = rawName.toLowerCase();
+        packages.set(norm, { name: norm, version, purl: this._purl(rawName, version) });
+        current = norm;
+        collectingVia = false;
+        continue;
+      }
+
+      const viaInline = /^\s+#\s*via\s+(.+)$/.exec(line);
+      if (viaInline && current) {
+        recordVia(current, viaInline[1]);
+        collectingVia = false;
+        continue;
+      }
+
+      const viaBare = /^\s+#\s*via\s*$/.exec(line);
+      if (viaBare && current) {
+        collectingVia = true;
+        continue;
+      }
+
+      const viaContinuation = /^\s+#\s+(\S.*)$/.exec(line);
+      if (collectingVia && viaContinuation && current) {
+        recordVia(current, viaContinuation[1]);
+        continue;
+      }
+
+      collectingVia = false;
+    }
+
+    return { packages, requiredBy };
+  }
+
   // ── run_real_install ─────────────────────────────────────────────────────────
 
   /**
-   * Install packages from fileName (a requirements file) into venvDir.
-   * Currently only engine="pip" is supported. The venv must already exist.
+   * Install packages from fileName (a requirements file — always the
+   * generated, exact-pinned file from _generateRequirementsFile() in
+   * engine.js, regardless of whether the dry-run source was CLI args,
+   * requirements.txt, or pyproject.toml) into venvDir. Supports
+   * engine="pip" or engine="uv". The venv must already exist.
    */
   runRealInstall(fileName, engine, venvDir) {
     const python = this._venvPython(venvDir);
@@ -308,6 +547,17 @@ export class PypiManagerInstance {
       if (r.status !== 0) {
         console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
         throw new Error(`pip install failed (exit ${r.status})`);
+      }
+      return r;
+    }
+
+    if (engine === "uv") {
+      this.assertUvAvailable();
+      const cmd = ["uv", "pip", "install", "--python", python, "-r", fileName];
+      const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
+      if (r.status !== 0) {
+        console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
+        throw new Error(`uv pip install failed (exit ${r.status})`);
       }
       return r;
     }

@@ -5,7 +5,7 @@
 UBEL is a zero-dependency, source-available application security toolkit. This package (`@arcane-spark/ubel-node`) ships multiple CLIs for dependency-security and source-level scanner:
 
 - **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [node/sca/README.md](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
-- **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, or `bun`'s install path, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-pipx` gate `pip install`/isolated CLI-tool installs behind a `pip install --dry-run` resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
+- **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, or `bun`'s install path, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
 - **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
@@ -26,6 +26,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does |
+| `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, targeting the same kind of venv, but driven by `uv` — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; only the dry-run mechanism differs internally (`uv pip compile`, not `pip install --dry-run`) |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | SCA + Firewall | Same `health`/`check`/`install` split, one binary per native package manager (no auto-detection between them, same as npm/pnpm/bun). Reports and policy live under `~/.ubel/local` so routine use never needs `sudo` — only the real package-manager install does |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls |
@@ -37,7 +38,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
 
-`ubel-pip`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`.
 
 Node.js `>=18.0.0` required.
 
@@ -64,7 +65,7 @@ A distinct mode of the same `ubel-npm` / `ubel-pnpm` / `ubel-bun` binaries: befo
 
 The same block-before-you-touch-it pattern applies to `ubel-docker`: `install` mode pulls the image, extracts its filesystem without ever running it (`docker create` + in-process tar extraction, no shell `tar`, no `ENTRYPOINT`/`CMD` execution), scans it, and removes the image again if policy blocks it.
 
-`ubel-pip`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run` resolves the candidate set into a report without installing anything, UBEL scans that report, and only then runs the real `pip install`. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about: pip's dry-run can still need to build an sdist to read its metadata when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run` (pip) or `uv pip compile` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
 
 ```bash
 
@@ -91,6 +92,10 @@ ubel-pip check requests==2.31.0
 ubel-pip install requests==2.31.0
 ubel-pip install                       # no args → falls back to ./requirements.txt, then ./pyproject.toml
 
+# Same, driven by uv instead of pip
+ubel-uv check requests==2.31.0
+ubel-uv install requests==2.31.0
+
 # Python CLI tool: scan-gated install into an isolated venv + global shim
 ubel-pipx install black
 
@@ -100,7 +105,7 @@ ubel-apt install curl
 # (ubel-dnf / ubel-yum work the same way, against dnf/yum instead)
 ```
 
-Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only — it isn't exposed as a subcommand on `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
+Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
 
 **Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — a failed scan is never treated as a pass.
 
@@ -233,7 +238,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`, `pip`, `pipx`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
 
 ### Calling the binaries directly
 
@@ -297,7 +302,7 @@ tooling, not an oversight.
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Python (pip/pipx/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Python (pip/uv/pipx/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -360,29 +365,51 @@ supply-chain vector most tools never consider.
 
 ---
 
-## Python — pip / pipx / venv
+## Python — pip / uv / pipx / venv
 
 **SCA:** Resolves dependencies by walking virtual environment directories
 directly (not just parsing `requirements.txt`), so it reflects the actual
 installed environment, including transitive packages a manifest wouldn't
 show on its own.
 
-**Firewall:** Available via `ubel-pip`/`ubel-pipx`, using `pip`'s own
+**Firewall:** Available via `ubel-pip`/`ubel-uv`/`ubel-pipx` — two
+installers, same firewall shape. `ubel-pip` uses `pip`'s own
 `install --dry-run --report` (pip ≥22.2) to resolve the candidate set into a
-machine-readable report without installing anything — UBEL scans that
-report and only then runs the real `pip install`. There's no lockfile
-here, so there's no revert step the way npm/pnpm/bun have one: a
-policy-blocked scan just means the real install never runs, nothing needs
-rolling back. `ubel-pip check`/`install` accept packages on the command
-line or fall back to `./requirements.txt` with no arguments. `ubel-pipx`
-installs CLI tools into isolated, managed per-tool virtual environments with
-a global shim on `PATH`, the same blast-radius reduction `pipx` itself
-provides — now gated by the same pre-install scan. One honesty note: unlike
-npm's lockfile dry-run, pip's dry-run isn't unconditionally side-effect-free
-— if a candidate package has no pre-built wheel available, resolving its
-metadata can require building an sdist, and building an sdist can execute
-arbitrary `setup.py`/build-backend code. Wheel-only installs (the common
-case) don't have this gap.
+machine-readable report without installing anything; `ubel-uv` uses
+`uv pip compile` instead (uv has no equivalent JSON report for
+`pip install --dry-run`, and that command's own dry-run only reports what would
+*change* — it prints nothing at all against an already-satisfied target,
+same limitation pip's own dry-run has; `compile` always resolves the full
+graph regardless of what's currently installed, and annotates each package
+with which parent(s) pulled it in). UBEL scans whichever resolution came
+back, and only then runs the real install — `pip install -r` or
+`uv pip install -r`, always against the same generated, exact-pinned
+requirements file either way. There's no lockfile here, so there's no
+revert step the way npm/pnpm/bun have one: a policy-blocked scan just means
+the real install never runs, nothing needs rolling back. `ubel-pip`/`ubel-uv`
+`check`/`install` accept packages on the command line, or fall back to
+`./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies,
+when none are given. `ubel-pipx` installs CLI tools into
+isolated, managed per-tool virtual environments with a global shim on
+`PATH`, the same blast-radius reduction `pipx` itself provides — now gated
+by the same pre-install scan; there's no `uv tool install`-equivalent CLI
+isolation mode here, only pip's.
+
+Two honesty notes:
+- Unlike npm's lockfile dry-run, neither pip's nor uv's dry-run is
+  unconditionally side-effect-free — if a candidate package has no
+  pre-built wheel available, resolving its metadata can require building an
+  sdist, and building an sdist can execute arbitrary `setup.py`/build-backend
+  code. This is inherent to Python packaging resolution generally, not a
+  gap specific to either tool. Wheel-only installs (the common case) don't
+  have this gap.
+- `uv`-sourced scans don't carry per-package license metadata the way
+  `pip`-sourced scans do — `uv pip compile`'s output has no equivalent
+  field to pip's report `license` metadata, so every uv-resolved component
+  reports `license: unknown` rather than an actual SPDX value. Vulnerability
+  scanning and dependency-provenance (introduced-by/parents) are unaffected;
+  license compliance specifically is the one thing that's weaker for `uv`
+  than for `pip` today.
 
 **SAST / Malware SAST:** Full coverage, same three-pass/two-pass pipelines.
 
@@ -574,8 +601,8 @@ with no auto-detection between them (the same one-binary-per-tool shape as
 `ubel-npm`/`ubel-pnpm`/`ubel-bun`; running `ubel-dnf` on a box that only has
 `apt` fails clearly rather than silently doing the wrong thing). Each uses
 its package manager's own native dry-run — `apt-get -s` (simulate) for
-Debian/Ubuntu, `dnf --assumeno` for RHEL 8+/AlmaLinux/Rocky, `yum
---assumeno` for RHEL 7 — to resolve what *would* be installed (name,
+Debian/Ubuntu, `dnf --assumeno` for RHEL 8+/AlmaLinux/Rocky,
+`yum --assumeno` for RHEL 7 — to resolve what *would* be installed (name,
 version, and for apt, the source repo/arch) without installing it. UBEL
 scans that resolution and only then runs the real
 `sudo apt/dnf/yum install -y`. As with pip, there's no lockfile, so a

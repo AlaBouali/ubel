@@ -45,6 +45,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-bun` | bun |
 | `ubel-yarn` | yarn — `health` mode only, no firewall (`check`/`install`) coverage; see note below |
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
+| `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
 | `ubel-pipx` | pip, CLI-tool isolation mode — installs into a dedicated per-tool venv with a global shim, same idea as upstream `pipx`, now scan-gated |
 | `ubel-apt` | apt (Debian/Ubuntu) |
 | `ubel-dnf` | dnf (RHEL 8+, AlmaLinux, Rocky) |
@@ -59,6 +60,8 @@ After installation, the following entry-point binaries are available:
 
 > **yarn** does not support a lockfile-only dry-run — `yarn add` always writes `node_modules`. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing.
 >
+> **uv** shares `ubel-pip`'s six modes, requirements.txt/pyproject.toml fallback, and generated-requirements-file real install, but its dry-run mechanism is internally different (`uv pip compile`, not `pip install --dry-run --report`) since uv has no equivalent JSON install report — see [Firewall Mechanics § uv](#uv) for the honest differences this creates (mainly: no per-package license metadata from uv's resolution).
+>
 > **apt / dnf / yum** are three separate binaries, each bound to exactly one native package manager — there's no auto-detection between them, the same one-binary-per-tool shape as `ubel-npm`/`ubel-pnpm`/`ubel-bun`. Running `ubel-dnf` on a host that only has `apt` fails with a clear "not found on PATH" error rather than silently falling back to a different manager.
 
 ---
@@ -67,7 +70,8 @@ After installation, the following entry-point binaries are available:
 
 - Node.js `>=18.0.0`
 - The package manager binary being targeted (`npm`, `pnpm`, or `bun`) must be available on `PATH`
-- `ubel-pip`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` — Node.js can't provision one itself, it only shells out to it to create/manage the venv
+- `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` — Node.js can't provision one itself, it only shells out to it to create/manage the venv
+- `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`
 - `ubel-apt`/`ubel-dnf`/`ubel-yum` additionally need their specific package manager on `PATH` (each binary targets exactly one — no auto-detection between them) and, for `install` mode only, passwordless-or-prompted `sudo` access; `health`/`check` never need elevated privileges
 
 ---
@@ -102,6 +106,7 @@ ubel-bun   <mode> [packages...]
 ubel-yarn  health              # health only — check/install unsupported, see below
 
 ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown
+ubel-uv    <mode> [packages...]        # same six modes, same shape as ubel-pip
 ubel-pipx  <mode> [package]
 
 ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
@@ -109,7 +114,7 @@ ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
 ```
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun use the existing lockfile in the working directory; `ubel-pip` falls back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun use the existing lockfile in the working directory; `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
 
 ---
 
@@ -174,14 +179,32 @@ Every `ubel-pip` invocation targets a venv: `<projectRoot>/venv` by default, or 
 
 **One honesty note, unlike npm's lockfile dry-run:** resolving a package's metadata during `pip install --dry-run` can require building an sdist when no pre-built wheel is available for the current platform, and building an sdist can execute arbitrary `setup.py`/build-backend code. A wheel-only install has no such gap; a source-only dependency does. This is a real, if narrow, difference from npm/pnpm/bun's guarantee, and it's inherent to how pip resolves packages — not something UBEL's scan step can close.
 
+### uv
+
+`ubel-uv` is `ubel-pip`'s sibling — same six modes, same venv-targeting shape, same requirements.txt/pyproject.toml fallback — driven by [uv](https://docs.astral.sh/uv/) instead of pip. It's implemented differently internally, though, for a reason worth explaining rather than glossing over.
+
+uv does have a `pip install --dry-run` flag, but (confirmed by testing directly against uv 0.11.7) it isn't a good fit here: it writes a flat `+ name==version` list to **stderr** with no dependency relationships between packages, and — like pip's own `--dry-run --report` — it only reports what would *change*, so a fully-satisfied target prints nothing at all. `ubel-uv` uses `uv pip compile -` instead (package specifiers piped via stdin): it always resolves the complete graph regardless of what's currently installed, writes its result to **stdout**, and annotates every non-root package with `# via <parent(s)>` — which is what lets `ubel-uv` reconstruct real dependency provenance (`introduced_by`/`parents`/`dependency_sequences`) for its scans, not just a flat package list.
+
+- **Clean** — the real install proceeds via `uv pip install -r <generated requirements file>` inside the target venv — the exact same generated file `ubel-pip` would produce for the same resolved set, just installed with `uv` instead of `pip -m pip`.
+- **Violation** — same as pip: the real install never runs, nothing to revert.
+
+Two differences from `ubel-pip` worth knowing about:
+- **No per-package license data.** `uv pip compile`'s output has no equivalent to pip's report `license` metadata field, so every uv-resolved component reports `license: unknown`. Vulnerability scanning is unaffected — that's purl-based, not license-based — but license-compliance findings specifically will be sparser from `ubel-uv` than from `ubel-pip` today.
+- **Same sdist-build caveat as pip, for the same reason.** Resolving a source-only package's metadata can still require building an sdist — that's inherent to how Python packaging resolution works, not specific to either tool's implementation.
+
+`uv` itself must be on `PATH`, separately from the `python3`/`python` interpreter used to create the venv — `ubel-uv` doesn't install or manage `uv`, only shells out to it, same as it shells out to a system Python for venv creation.
+
 ### pipx
 
-`ubel-pipx install <pkg>` runs the same `--dry-run --report` scan against a fresh, isolated venv created specifically for that one CLI tool (mirroring what upstream `pipx` does), then — if clean — installs the tool into that venv and writes a shim on `PATH` (`~/.ubel/bin` by default) so the tool is runnable globally without polluting any project's own environment. `ubel-pipx check <pkg>` runs the same dry-run scan without installing.
+`ubel-pipx install <pkg>` runs the same `--dry-run --report` scan against a fresh, isolated venv created specifically for that one CLI tool (mirroring what upstream `pipx` does), then — if clean — installs the tool into that venv and writes a shim on `PATH` (`~/.ubel/bin` by default) so the tool is runnable globally without polluting any project's own environment. `ubel-pipx check <pkg>` runs the same dry-run scan without installing. There's no `uv tool install`-equivalent CLI isolation mode here — `ubel-pipx` is pip-only.
 
 ```bash
 ubel-pip check requests==2.31.0
 ubel-pip install requests==2.31.0
 ubel-pip install                       # falls back to ./requirements.txt, then ./pyproject.toml
+
+ubel-uv check requests==2.31.0
+ubel-uv install requests==2.31.0       # same fallback and generated-requirements-file install as ubel-pip
 
 ubel-pipx check black
 ubel-pipx install black                # installs into an isolated venv + global shim
@@ -312,7 +335,7 @@ Each component is reported with its actual license or vendor EULA (see [License 
 
 ### `check`
 
-Dry-run: resolves the given packages (or, for npm/pnpm/bun, the existing lockfile) via each ecosystem's own dry-run mechanism, scans the resolved set, and exits. Nothing is installed; npm/pnpm/bun's lockfiles are fully reverted to their original state afterwards (pip/apt/dnf/yum have no lockfile to revert — see [Firewall Mechanics](#firewall-mechanics)).
+Dry-run: resolves the given packages (or, for npm/pnpm/bun, the existing lockfile) via each ecosystem's own dry-run mechanism, scans the resolved set, and exits. Nothing is installed; npm/pnpm/bun's lockfiles are fully reverted to their original state afterwards (pip/uv/apt/dnf/yum have no lockfile to revert — see [Firewall Mechanics](#firewall-mechanics)).
 
 ```bash
 # Scan specific packages without installing
@@ -323,6 +346,7 @@ ubel-npm check
 
 # Python and Linux equivalents
 ubel-pip check requests==2.31.0
+ubel-uv check requests==2.31.0
 ubel-apt check curl
 ```
 
@@ -332,7 +356,7 @@ Exits `0` if policy passes, `1` if policy blocks or the scan fails.
 
 ### `install`
 
-Same pipeline as `check`, but proceeds to install if and only if the policy decision is **allow** — via `npm ci` / `pnpm install --frozen-lockfile` / `bun install` for the npm family, `pip install -r <requirements>` for pip, or `sudo <apt|dnf|yum> install -y` for the Linux host binaries.
+Same pipeline as `check`, but proceeds to install if and only if the policy decision is **allow** — via `npm ci` / `pnpm install --frozen-lockfile` / `bun install` for the npm family, `pip install -r <requirements>` / `uv pip install -r <requirements>` for pip/uv (the same generated file either way), or `sudo <apt|dnf|yum> install -y` for the Linux host binaries.
 
 ```bash
 ubel-npm install lodash@4.17.21 express
@@ -343,18 +367,19 @@ ubel-bun install
 
 ubel-pip install requests==2.31.0
 ubel-pip install                          # resolves from ./requirements.txt
+ubel-uv install requests==2.31.0          # same fallback and generated-file install as ubel-pip
 ubel-pipx install black                   # isolated venv + global shim
 
 ubel-apt install curl                     # ubel-dnf / ubel-yum work the same way
 ```
 
-If the policy blocks, installation is aborted and the process exits `1`. For npm/pnpm/bun the lockfile is also reverted; pip/apt/dnf/yum have nothing to revert — the real install command simply never runs.
+If the policy blocks, installation is aborted and the process exits `1`. For npm/pnpm/bun the lockfile is also reverted; pip/uv/apt/dnf/yum have nothing to revert — the real install command simply never runs.
 
 ---
 
 ### `init`
 
-A no-op on npm/pnpm/bun/yarn (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`). On `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a pip venv at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those five binaries you run**, including the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager. `ubel-pip`/`ubel-pipx` also run this implicitly on first `check`/`install` if the venv doesn't exist yet, so calling it explicitly is only needed to provision ahead of time or at a non-default path.
+A no-op on npm/pnpm/bun/yarn (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`). On `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a pip venv at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those six binaries you run**, including `ubel-uv` and the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager (uv can target a stdlib-created venv directly — it doesn't need `pip` present inside it). `ubel-pip`/`ubel-uv`/`ubel-pipx` also run this implicitly on first `check`/`install` if the venv doesn't exist yet, so calling it explicitly is only needed to provision ahead of time or at a non-default path.
 
 ```bash
 ubel-pip init
@@ -372,6 +397,7 @@ ubel-npm threshold critical   # block critical only
 ubel-npm threshold none       # disable severity blocking
 
 ubel-pip threshold high
+ubel-uv threshold high
 ubel-apt threshold high       # ubel-dnf / ubel-yum work the same way
 ```
 
@@ -390,13 +416,14 @@ ubel-npm block-unknown true
 ubel-npm block-unknown false
 
 ubel-pip block-unknown true
+ubel-uv block-unknown true
 ```
 
 ---
 
 ### `license-risk`
 
-**npm/pnpm/bun/yarn only** — not exposed as a subcommand on `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower six-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`). Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
+**npm/pnpm/bun/yarn only** — not exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower six-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`). Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
 
 ```bash
 ubel-npm license-risk high     # block only high-risk licenses (e.g. GPL/AGPL, proprietary EULAs)
@@ -718,7 +745,7 @@ import { SCA_scan } from "@arcane-spark/ubel-node/sca";
 
 const report = await SCA_scan({
   projectRoot : "/abs/path/to/project",
-  engine      : "npm",   // npm | pnpm | bun | yarn | docker | pip | pipx | apt | dnf | yum
+  engine      : "npm",   // npm | pnpm | bun | yarn | docker | pip | uv | pipx | apt | dnf | yum
   mode        : "health",
   is_script   : true,
   save_reports: true,
@@ -730,12 +757,12 @@ const report = await SCA_scan({
 // report is the full finalJson object (inventory, vulnerabilities, decision, …)
 ```
 
-Two additional options only apply to `engine: "pip"`:
+Two additional options only apply to the pypi-family engines (`engine: "pip"` or `engine: "uv"`):
 
 ```js
 const report = await SCA_scan({
   projectRoot: "/abs/path/to/project",
-  engine     : "pip",
+  engine     : "pip",    // or "uv" — same two options either way
   mode       : "health",
   scan_venv  : true,     // default true — include the project's venv in a health scan
   venvDir    : "/abs/path/to/a/custom/venv",   // overrides the default `<projectRoot>/venv`
@@ -765,7 +792,7 @@ Every scan writes two files to a timestamped path and overwrites the `latest*` c
     <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
 ```
 
-`<ecosystem>` is `npm` for npm/pnpm/bun/yarn, `pypi` for pip/pipx, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `pip`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+`<ecosystem>` is `npm` for npm/pnpm/bun/yarn, `pypi` for pip/uv/pipx, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
 The HTML report is fully self-contained (no server required) and includes:
 
@@ -811,6 +838,12 @@ All CLI commands exit non-zero on policy violations, making them native to any C
     version: 0.10.0
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
+- uses: AlaBouali/ubel@<commit-sha>    # needs a preceding astral-sh/setup-uv step for `uv` itself
+  with:
+    command: uv
+    version: 0.10.0
+    args: install                     # same fallback + generated-file install as the pip example above
+
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: apt                      # dnf/yum work the same way, as their own `command` values
@@ -818,7 +851,7 @@ All CLI commands exit non-zero on policy violations, making them native to any C
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`, `pip`, `pipx`, `apt`, `dnf`, `yum`.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum`.
 
 **Calling the binaries directly** (self-hosted runners, non-GitHub CI, Dockerfiles):
 
@@ -835,6 +868,9 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 
 - name: UBEL Python firewall-gated install
   run: ubel-pip install
+
+- name: UBEL Python firewall-gated install (via uv)
+  run: ubel-uv install
 
 - name: UBEL apt firewall-gated install
   run: ubel-apt install curl
@@ -879,6 +915,10 @@ ubel-bun check
 ubel-pip check requests==2.31.0
 ubel-pip install requests==2.31.0
 ubel-pip install                          # no args → falls back to ./requirements.txt, then ./pyproject.toml
+
+# Same, driven by uv instead of pip — same fallback, same generated-file install
+ubel-uv check requests==2.31.0
+ubel-uv install requests==2.31.0
 
 # Python CLI tool, installed into an isolated venv + global shim
 ubel-pipx install black

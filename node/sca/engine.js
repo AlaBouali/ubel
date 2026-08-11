@@ -2528,13 +2528,16 @@ export class UbelEngineInstance {
     try {
       // ── Collect packages ──────────────────────────────────────────────────
       if (this.systemType === "pypi") {
-        // ── Python (pip / pipx) firewall ─────────────────────────────────────
+        // ── Python (pip / uv / pipx) firewall ────────────────────────────────
         if (needsRevert) {
           const venvDir = this.venvDir || path.join(projectRoot, "venv");
           if (this.engine === "pip") {
             const python = manager.initVenv(venvDir);
             manager.engineVersion = manager.getPipVersion(python) || "";
             purls = manager.runDryRun(args, venvDir);
+          } else if (this.engine === "uv") {
+            manager.initVenv(venvDir); // still a stdlib venv — uv targets it via --python, doesn't need pip inside it
+            purls = manager.runDryRun(args, venvDir); // sets manager.engineVersion internally (uv --version)
           } else if (this.engine === "pipx") {
             purls = manager.dryRunCli(args[0]);
           }
@@ -3106,10 +3109,10 @@ export class UbelEngineInstance {
         if (!is_script) console.log("[+] Backup lockfiles removed.");
 
       } else if (this.systemType === "pypi") {
-        // No lockfile/backup concept for pip — mirrors ubel_engine.py's
+        // No lockfile/backup concept for pip/uv — mirrors ubel_engine.py's
         // install branch, which installs directly with no revert step.
         try {
-          if (this.engine === "pip") {
+          if (this.engine === "pip" || this.engine === "uv") {
             const venvDir = this.venvDir || path.join(projectRoot, "venv");
             const reqFile = this._generateRequirementsFile(purls, projectRoot);
             manager.runRealInstall(reqFile, this.engine, venvDir);
