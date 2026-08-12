@@ -26,7 +26,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does |
-| `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, targeting the same kind of venv, but driven by `uv` — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; only the dry-run mechanism differs internally (`uv pip compile`, not `pip install --dry-run`) |
+| `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph or license data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | SCA + Firewall | Same `health`/`check`/`install` split, one binary per native package manager (no auto-detection between them, same as npm/pnpm/bun). Reports and policy live under `~/.ubel/local` so routine use never needs `sudo` — only the real package-manager install does |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls |
@@ -65,7 +65,7 @@ A distinct mode of the same `ubel-npm` / `ubel-pnpm` / `ubel-bun` binaries: befo
 
 The same block-before-you-touch-it pattern applies to `ubel-docker`: `install` mode pulls the image, extracts its filesystem without ever running it (`docker create` + in-process tar extraction, no shell `tar`, no `ENTRYPOINT`/`CMD` execution), scans it, and removes the image again if policy blocks it.
 
-`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run` (pip) or `uv pip compile` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
 
 ```bash
 
@@ -285,9 +285,10 @@ A quick note before the detail: **Firewall and SCA are not the same capability
 everywhere.** SCA (health scanning) works on anything UBEL can resolve a
 dependency tree for. Firewall (blocking a bad install *before* it lands)
 only exists where a package manager supports some form of dry-run
-resolution with no (or, for pip, no *typical*) side effects — today that's
-**npm, pnpm, bun, and Docker images** via a true lockfile-only dry-run, plus
-**pip/pipx** (`pip install --dry-run`) and **Linux host packages**
+resolution with no (or, for pip/uv, no *typical*) side effects — today
+that's **npm, pnpm, bun, and Docker images** via a true lockfile-only
+dry-run, plus **pip/uv/pipx** (`pip install --dry-run` /
+`uv pip install --dry-run`) and **Linux host packages**
 (`apt`/`dnf`/`yum`'s own native dry-run). PHP, Ruby, Rust, Go, Java/Kotlin,
 C#, and Windows remain SCA-covered but not firewall-covered below — their
 package managers genuinely have no dry-run-without-side-effects equivalent
@@ -373,27 +374,39 @@ installed environment, including transitive packages a manifest wouldn't
 show on its own.
 
 **Firewall:** Available via `ubel-pip`/`ubel-uv`/`ubel-pipx` — two
-installers, same firewall shape. `ubel-pip` uses `pip`'s own
-`install --dry-run --report` (pip ≥22.2) to resolve the candidate set into a
-machine-readable report without installing anything; `ubel-uv` uses
-`uv pip compile` instead (uv has no equivalent JSON report for
-`pip install --dry-run`, and that command's own dry-run only reports what would
-*change* — it prints nothing at all against an already-satisfied target,
-same limitation pip's own dry-run has; `compile` always resolves the full
-graph regardless of what's currently installed, and annotates each package
-with which parent(s) pulled it in). UBEL scans whichever resolution came
-back, and only then runs the real install — `pip install -r` or
-`uv pip install -r`, always against the same generated, exact-pinned
-requirements file either way. There's no lockfile here, so there's no
-revert step the way npm/pnpm/bun have one: a policy-blocked scan just means
-the real install never runs, nothing needs rolling back. `ubel-pip`/`ubel-uv`
-`check`/`install` accept packages on the command line, or fall back to
-`./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies,
-when none are given. `ubel-pipx` installs CLI tools into
-isolated, managed per-tool virtual environments with a global shim on
-`PATH`, the same blast-radius reduction `pipx` itself provides — now gated
-by the same pre-install scan; there's no `uv tool install`-equivalent CLI
-isolation mode here, only pip's.
+installers, same firewall shape, different dry-run mechanics under the
+hood. `ubel-pip` uses `pip`'s own `install --dry-run --report` (pip ≥22.2)
+to resolve the candidate set into a machine-readable report without
+installing anything; `ubel-uv` uses `uv pip install --dry-run` instead (uv
+has no equivalent JSON report — its output is a flat `+ name==version`
+list on stderr, see the honesty note below for what that costs). UBEL
+scans whichever resolution came back, and only then runs the real install
+— `pip install -r` or `uv pip install -r`, always against the same
+generated, exact-pinned requirements file either way. There's no lockfile
+here, so there's no revert step the way npm/pnpm/bun have one: a
+policy-blocked scan just means the real install never runs, nothing needs
+rolling back. `ubel-pip`/`ubel-uv` `check`/`install` accept packages on the
+command line, or fall back to `./requirements.txt`, then
+`./pyproject.toml`'s `[project]` dependencies, when none are given. A
+successful *real* (non-dry-run) `install` — either installer — also syncs
+whichever of those two files already exists in the project directory to
+match what's now actually installed: it's a re-run of the same scan
+`health` mode already does, not a separate `pip freeze`/`uv pip freeze`.
+Existing entries get their pinned version refreshed to the installed
+version; anything newly installed but not yet listed gets appended; lines
+for packages that *aren't* actually installed (comments, `-r`/`-e`/`-c`
+directives, a spec that failed to resolve) are left alone. Neither file is
+created if it doesn't already exist, and a sync failure is logged rather
+than failing the install — the install itself already succeeded by that
+point. `ubel-pipx` installs CLI tools into isolated, managed per-tool
+virtual environments with a global shim on `PATH`, the same blast-radius
+reduction `pipx` itself provides — now gated by the same pre-install scan;
+there's no `uv tool install`-equivalent CLI isolation mode here, only
+pip's. One more `uv`-specific difference: `ubel-uv init` (and the first
+`check`/`install` that needs a venv) provisions it via uv's own `uv init
+--bare` + `uv venv` rather than the stdlib `venv` module the other five
+engines use — a real uv-recognized project (`pyproject.toml` present),
+not just an interpreter uv happens to be pointed at via `--python`.
 
 Two honesty notes:
 - Unlike npm's lockfile dry-run, neither pip's nor uv's dry-run is
@@ -403,13 +416,16 @@ Two honesty notes:
   code. This is inherent to Python packaging resolution generally, not a
   gap specific to either tool. Wheel-only installs (the common case) don't
   have this gap.
-- `uv`-sourced scans don't carry per-package license metadata the way
-  `pip`-sourced scans do — `uv pip compile`'s output has no equivalent
-  field to pip's report `license` metadata, so every uv-resolved component
-  reports `license: unknown` rather than an actual SPDX value. Vulnerability
-  scanning and dependency-provenance (introduced-by/parents) are unaffected;
-  license compliance specifically is the one thing that's weaker for `uv`
-  than for `pip` today.
+- `uv`-sourced scans are flatter than `pip`-sourced ones on two fronts, not
+  one: `uv pip install --dry-run`'s output has no per-package license field
+  (every uv-resolved component reports `license: unknown`), *and* — because
+  it's a flat `+ name==version` list rather than a dependency-annotated
+  report — it carries no parent/child relationships either, so every
+  uv-resolved component comes back as its own root with empty
+  `introduced_by`/`parents`/`dependency_sequences`, unlike a pip-sourced
+  scan. Vulnerability scanning itself is unaffected by either gap — that's
+  purl-based, not graph- or license-based — but dependency-provenance and
+  license-compliance detail are both weaker for `uv` than for `pip` today.
 
 **SAST / Malware SAST:** Full coverage, same three-pass/two-pass pipelines.
 
@@ -738,17 +754,18 @@ not treated as an afterthought bolted onto the dependency scanner.
 
 To keep this document honest rather than aspirational:
 
-- Firewall/pre-install gating is **npm, pnpm, bun, Docker, pip/pipx, and
+- Firewall/pre-install gating is **npm, pnpm, bun, Docker, pip/uv/pipx, and
   Linux host packages (apt/dnf/yum) only** — not "every package manager,"
   because most package managers genuinely don't offer a dry-run resolution
   UBEL can safely gate against. PHP (Composer), Ruby (Bundler), Rust
   (Cargo), Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
   Windows host all remain without it for that reason — a hard mechanical
   constraint, not a roadmap gap.
-- pip's dry-run firewall is the one exception with a caveat rather than a
-  clean guarantee: resolving a source-only package's metadata can require
-  building an sdist, which can run arbitrary build-backend code. Wheel-only
-  installs don't have this gap; see the Python section above.
+- pip's and uv's dry-run firewalls are the one exception with a caveat
+  rather than a clean guarantee: resolving a source-only package's
+  metadata can require building an sdist, which can run arbitrary
+  build-backend code. Wheel-only installs don't have this gap; see the
+  Python section above.
 - Reachability analysis's import-confirmation half covers **8 of the 8
   SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question

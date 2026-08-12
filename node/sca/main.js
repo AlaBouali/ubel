@@ -5,8 +5,10 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | docker
+ *   engine    : npm | pnpm | bun | docker | pip | pipx | uv | apt | dnf | yum
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
+ *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
+ *     apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
@@ -51,6 +53,50 @@
  *     image to remove. Compressed tarballs (.tar.gz/.tgz) aren't supported
  *     — decompress first.
  *
+ *   Pip/pipx/uv/apt/dnf/yum mode (each gets its own dedicated bin/*.js —
+ *   ubel-pip, ubel-pipx, ubel-uv, ubel-apt, ubel-dnf, ubel-yum; no
+ *   auto-detection between them, same one-binary-per-tool shape as
+ *   npm/pnpm/bun):
+ *     node src/main.js <pip|uv> <health|check|install|init|threshold|block-unknown> [packages...]
+ *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown> <package>
+ *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]
+ *
+ *     `init` provisions a venv regardless of which of these six engines
+ *     it's called on (mirrors __main__.py's _run_mode(), which does the
+ *     same unconditionally) — uv gets its own project bootstrap (`uv init
+ *     --bare` + `uv venv`); every other engine here, apt/dnf/yum included,
+ *     still gets a stdlib `python -m venv`. That's a real Python venv
+ *     getting created even for `ubel-apt init`/`ubel-dnf init`/`ubel-yum
+ *     init` — ported as-is from the Python original's unconditional
+ *     behavior, not something reconsidered here.
+ *
+ *     pip/uv check/install with no package args fall back to
+ *     ./requirements.txt, then ./pyproject.toml's [project] dependencies
+ *     (see resolveDefaultPackages() in pypi_runner.js — installer-agnostic,
+ *     works identically for both). apt/dnf/yum have no such fallback.
+ *
+ *     A real (non-dry-run) `install` — pip and uv alike — also syncs any
+ *     requirements.txt/pyproject.toml already sitting in the project
+ *     directory to reflect what's now actually installed, by re-running the
+ *     same getInstalled() scan health mode uses and filtering to Python
+ *     packages (see _syncDependencyFiles() in pypi_runner.js). Only updates
+ *     files that already exist — never creates either one — and a sync
+ *     failure is logged, not thrown, since the install itself already
+ *     succeeded by that point.
+ *
+ *     pipx is CLI-tool isolation, not a shared project venv — each
+ *     package gets its own venv under ~/.ubel/tools (or the platform
+ *     equivalent) plus a global shim, via dryRunCli()/installCli() in
+ *     pypi_runner.js rather than the initVenv()/runDryRun()/
+ *     runRealInstall() path pip and uv use. No "uvx" equivalent is
+ *     implemented — pipx always uses the pip-based isolation methods
+ *     regardless of what else is installed.
+ *
+ *     apt/dnf/yum write reports/policy under $HOME (~/.ubel/local/...)
+ *     rather than the project-relative default, so invoking them never
+ *     requires sudo — only the real `apt/dnf/yum install` itself is
+ *     escalated, and only for `install` mode.
+ *
  * ── Programmatic usage (agent, platform, VS Code extension) ──────────────────
  *   import { main, dockerScan } from "./main.js";
  *
@@ -79,6 +125,10 @@
  *   bun    — yes  (--lockfile-only dry-run, node_modules untouched)
  *   yarn   — no   (no lockfile-only equivalent; yarn add always writes node_modules)
  *   docker — yes  (health/check/install all supported; see Docker mode above)
+ *   pip    — yes  (`pip install --dry-run --report`; real install syncs requirements.txt/pyproject.toml after)
+ *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
+ *   pipx   — yes  (isolated per-tool venv via dryRunCli()/installCli(), not the shared project venv)
+ *   apt/dnf/yum — yes (native OS package-manager dry-run; each engine bound to exactly one manager)
  */
 
 import path from "path";
@@ -151,14 +201,17 @@ function resolveManager(engine) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"docker"|"pip"|"pipx"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"docker"|"pip"|"pipx"|"uv"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
  * @param {boolean} [programmaticOptions.scan_os=false]
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
- * @param {string}  [programmaticOptions.venvDir]              engine:"pip" only — overrides the default `<projectRoot>/venv`.
+ * @param {string}  [programmaticOptions.venvDir]              engine:"pip"|"uv"|"pipx" only — overrides the default
+ *   `<projectRoot>/venv` used for check/install dry-run and real install (engine.js's systemType==="pypi"
+ *   branch). Also read by `init` mode for ANY of pip/pipx/uv/apt/dnf/yum (see the CLI usage note above) —
+ *   though only pip/uv/pipx's `init` actually provisions a Python venv there.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
  * @param {boolean} [programmaticOptions.scan_secrets=true]
@@ -374,11 +427,17 @@ async function main(programmaticOptions) {
     const effectiveMode = PIP_LINUX_VALID_MODES.includes(mode) ? mode : "health";
     eng.checkMode = effectiveMode;
 
-    // ── init — provisions a pip venv regardless of engine, matching
-    //    __main__.py's _run_mode(), which does the same unconditionally. ──
+    // ── init — provisions a venv regardless of engine, matching
+    //    __main__.py's _run_mode(), which does the same unconditionally.
+    //    uv gets its own project bootstrap (`uv init` + `uv venv`); every
+    //    other pypi/linux-family engine still gets the stdlib venv. ──
     if (effectiveMode === "init") {
       const venvDir = eng.venvDir || path.join(resolvedRoot, "venv");
-      new PypiManagerInstance().initVenv(venvDir);
+      if (engine === "uv") {
+        new PypiManagerInstance("uv").initUvVenv(venvDir);
+      } else {
+        new PypiManagerInstance().initVenv(venvDir);
+      }
       process.exit(0);
     }
 

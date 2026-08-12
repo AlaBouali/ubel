@@ -2536,7 +2536,7 @@ export class UbelEngineInstance {
             manager.engineVersion = manager.getPipVersion(python) || "";
             purls = manager.runDryRun(args, venvDir);
           } else if (this.engine === "uv") {
-            manager.initVenv(venvDir); // still a stdlib venv — uv targets it via --python, doesn't need pip inside it
+            manager.initUvVenv(venvDir); // uv-native project + venv (`uv init` + `uv venv`), not a bare stdlib venv
             purls = manager.runDryRun(args, venvDir); // sets manager.engineVersion internally (uv --version)
           } else if (this.engine === "pipx") {
             purls = manager.dryRunCli(args[0]);

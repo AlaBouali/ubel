@@ -7,35 +7,39 @@
 // `ubel-npm` gates `npm ci`:
 //
 //   initVenv(venvDir)               → create a venv at venvDir (idempotent)
+//   initUvVenv(venvDir)             → uv-native venv (`uv init --bare` + `uv venv`, idempotent)
 //   getPipVersion(python)           → pip version installed in the venv
-//   getUvVersion()                  → uv version on PATH
+//   getUvVersion()                  → uv version on PATH (resolved via _resolveUvBin())
 //   runDryRun(initialArgs, venvDir) → dry-run resolution, branches on
 //                                      this.installer ("pip" → `pip install
 //                                      --dry-run --report`; "uv" → `uv pip
-//                                      compile`, see below) — same returned
-//                                      component structure either way
+//                                      install --dry-run`, see below) — same
+//                                      returned component structure either way
 //   runRealInstall(fileName, engine, venvDir) → `pip install -r` / `uv pip
-//                                      install -r` inside the venv
+//                                      install -r` inside the venv, then
+//                                      syncs requirements.txt/pyproject.toml
+//                                      (see _syncDependencyFiles() below)
 //   dryRunCli(packageSpec)          → dry-run for a CLI package in an isolated venv (pip only)
 //   installCli(packageSpec)         → install a CLI package + expose global shims (pip only)
-//   getInstalled(startDir, opts)    → health-mode scan (delegates to PythonVenvScanner)
+//   getInstalled(startDir, opts)    → health-mode scan (delegates to PythonVenvScanner);
+//                                      also what runRealInstall() reuses post-install to
+//                                      learn what's actually now in the venv
 //
 // pip vs uv, and why they're NOT just "the same command, different binary":
 // pip's `--dry-run --report <path>` produces a JSON install plan with each
 // package's declared `requires_dist`, so the resulting dependency graph
-// (who depends on whom) comes straight from the report. uv has no
-// equivalent for `pip install` — `uv pip install --dry-run` exists, but
-// (confirmed by testing directly against uv 0.11.7) writes a flat
-// `+ name==version` list to **stderr**, with no dependency relationships,
-// and it only reports what would *change* — a fully-satisfied install
-// prints nothing at all, same limitation pip's own dry-run --report has.
-// `uv pip compile -` (piping specifiers via stdin) instead gives a full
-// resolution every time, on **stdout**, annotated with `# via <parent>`
-// per package — that's what runDryRun uses for the "uv" installer, and how
-// dependency provenance (introduced_by/parents/dependency_sequences) is
-// reconstructed for uv-sourced scans. Neither pip nor uv can resolve a
-// source-only package's metadata without potentially building an sdist —
-// see the caveat in _runDryRunUv()/the pip branch below.
+// (who depends on whom) comes straight from the report. uv has no direct
+// equivalent — `uv pip install --dry-run` is the closest, but (confirmed by
+// testing directly against uv 0.11.7) writes a flat `+ name==version` list
+// to **stderr**, with no dependency relationships, and it only reports what
+// would *change* — a fully-satisfied install prints nothing at all, same
+// limitation pip's own dry-run --report has. runDryRun() uses it anyway for
+// the "uv" installer (see the comment above _runDryRunUv() for the
+// resulting trade-off: uv-sourced components all come back as flat roots,
+// no introduced_by/parents/dependency_sequences the way pip's report-driven
+// branch gets). Neither pip nor uv can resolve a source-only package's
+// metadata without potentially building an sdist — see the caveat in
+// _runDryRunUv()/the pip branch below.
 //
 // Zero third-party runtime dependencies (Node stdlib only) — matches UBEL's
 // existing zero-dependency positioning.
@@ -229,9 +233,12 @@ export class PypiManagerInstance {
   /**
    * Dry-run resolution for initialArgs inside venvDir. Branches on
    * this.installer — "pip" (default) uses `pip install --dry-run --report`;
-   * "uv" uses `uv pip compile`. Either way: the venv must already exist
-   * (call initVenv() first), and returns a list of PURL id strings, with
-   * full records landing in this.inventoryData.
+   * "uv" uses `uv pip install --dry-run` (see the comment above
+   * _runDryRunUv() for the resulting trade-off: no dependency-graph
+   * provenance the way pip's --report gives). Either way: the venv must
+   * already exist first (initVenv() for pip, initUvVenv() for uv), and
+   * this returns a list of PURL id strings, with full records landing in
+   * this.inventoryData.
    */
   runDryRun(initialArgs, venvDir) {
     if (this.installer === "uv") return this._runDryRunUv(initialArgs, venvDir);
@@ -610,7 +617,11 @@ export class PypiManagerInstance {
    * generated, exact-pinned file from _generateRequirementsFile() in
    * engine.js, regardless of whether the dry-run source was CLI args,
    * requirements.txt, or pyproject.toml) into venvDir. Supports
-   * engine="pip" or engine="uv". The venv must already exist.
+   * engine="pip" or engine="uv" — the venv must already exist first
+   * (initVenv() for pip, initUvVenv() for uv). On success, also syncs any
+   * requirements.txt/pyproject.toml already present in venvDir's project
+   * directory to reflect what's now actually installed — see
+   * _syncDependencyFiles() below.
    */
   runRealInstall(fileName, engine, venvDir) {
     const python = this._venvPython(venvDir);
@@ -622,6 +633,7 @@ export class PypiManagerInstance {
         console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
         throw new Error(`pip install failed (exit ${r.status})`);
       }
+      this._trySyncDependencyFiles(venvDir);
       return r;
     }
 
@@ -634,10 +646,206 @@ export class PypiManagerInstance {
         console.error(`[!] Package install failed (exit ${r.status}): ${uvBin} ${cmd.join(" ")}`);
         throw new Error(`uv pip install failed (exit ${r.status})`);
       }
+      this._trySyncDependencyFiles(venvDir);
       return r;
     }
 
     throw new Error(`Unsupported engine: ${engine}`);
+  }
+
+  // ── post-install manifest sync ───────────────────────────────────────────────
+  //
+  // After a REAL (non-dry-run) install, refreshes any requirements.txt /
+  // pyproject.toml already sitting in the venv's project directory to
+  // reflect what's now actually installed. Reuses getInstalled() — the same
+  // PythonVenvScanner .dist-info scan `ubel-pip health` already relies on —
+  // rather than shelling out to a separate `pip freeze`/`uv pip freeze`, so
+  // this is exactly the same "what's installed" answer health mode would
+  // give right after this install.
+  //
+  // Deliberately does NOT create either file if it doesn't already exist —
+  // "update any EXISTING requirements.txt or toml file", not scaffold new
+  // ones. And a failure here is logged, never thrown, via
+  // _trySyncDependencyFiles() — the install itself already succeeded by the
+  // time this runs, so a manifest-sync hiccup shouldn't be surfaced as an
+  // install failure.
+  //
+  // Scope note: this pulls the FULL installed set — every transitive
+  // package, not just what was directly requested on the command line —
+  // into both files alike. That's normal for requirements.txt, which is
+  // routinely used as a full `pip freeze`-style lock of the exact
+  // environment. It's a real departure from PEP 621 convention for
+  // pyproject.toml's [project].dependencies, though, which is meant to
+  // list direct dependencies only (see the scope note above
+  // parsePyprojectDependencies()) — the transitive closure is normally
+  // uv.lock's job, not something hand-declared there. Implemented this way
+  // because that's what was asked for; flagging the tension here in case
+  // direct-deps-only semantics for the toml file are wanted later.
+  _trySyncDependencyFiles(venvDir) {
+    try {
+      this._syncDependencyFiles(venvDir);
+    } catch (err) {
+      console.error(`[!] Failed to sync requirements.txt/pyproject.toml after install: ${err.message}`);
+    }
+  }
+
+  _syncDependencyFiles(venvDir) {
+    const projectDir = path.dirname(path.resolve(venvDir));
+
+    // Re-scan rather than trust this.inventoryData from a preceding
+    // runDryRun() — dry-run reflects what WOULD be installed, this needs
+    // what actually now IS. scanOs: false — health mode's OS-package sweep
+    // is irrelevant to a Python requirements/pyproject sync.
+    this.getInstalled(projectDir, { scanVenv: true, scanOs: false });
+    const pythonPkgs = this.inventoryData.filter(c => c.ecosystem === "python");
+    if (!pythonPkgs.length) return;
+
+    // Component names off PythonVenvScanner are already normalized
+    // (lowercase, underscores→dashes — see _scanVenv() in python_runner.js),
+    // matching the normalization requirements.txt/pyproject.toml lines get
+    // below, so lookups by name just work without re-normalizing here.
+    const installedByName = new Map(pythonPkgs.map(c => [c.name, { name: c.name, version: c.version }]));
+
+    const pyprojectSynced = this._syncPyprojectToml(projectDir, installedByName);
+    if (pyprojectSynced) return;
+    fs.writeFileSync(path.join(projectDir, "requirements.txt"), "", { flag: "a" });
+    this._syncRequirementsTxt(projectDir, installedByName);
+  }
+
+  // Extracts the leading `name[extras]` portion of a requirement/PEP 508
+  // spec string — same char class _assignScopes()'s parseReqs() and
+  // _readDistInfo() already split on elsewhere in this codebase, for
+  // consistency. Returns null for a line that doesn't start with a name.
+  _splitReqNameExtras(spec) {
+    const m = /^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?/.exec(spec.trim());
+    if (!m) return null;
+    return { norm: m[1].toLowerCase().replace(/_/g, "-"), extras: m[2] || "" };
+  }
+
+  /**
+   * Updates an existing requirements.txt in place: any line whose package
+   * name matches something in installedByName gets its version pin
+   * rewritten to `name[extras]==<installed version>`; anything installed
+   * but not yet listed is appended as a new `name==version` line.
+   * Comments, blank lines, and directive lines (-r/-c/-e/--index-url/etc.)
+   * are left untouched — same "not a requirement line" filter
+   * _assignScopes()'s parseReqs() already uses. Lines for packages that
+   * *aren't* actually installed (failed install, platform-specific marker
+   * that didn't match this platform) are also left untouched — there's no
+   * installed version to pin them to.
+   */
+  _syncRequirementsTxt(projectDir, installedByName) {
+    const reqPath = path.join(projectDir, "requirements.txt");
+    if (!fs.existsSync(reqPath)) return;
+
+    const original = fs.readFileSync(reqPath, "utf8");
+    const hadTrailingNewline = original.endsWith("\n");
+    const lines = original.split("\n");
+    if (hadTrailingNewline && lines[lines.length - 1] === "") lines.pop();
+
+    const seen = new Set();
+    const updated = lines.map(line => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("-")) return line;
+
+      const parsed = this._splitReqNameExtras(trimmed);
+      const pkg = parsed && installedByName.get(parsed.norm);
+      if (!parsed || !pkg) return line;
+
+      seen.add(parsed.norm);
+      return `${pkg.name}${parsed.extras}==${pkg.version}`;
+    });
+
+    const additions = [];
+    for (const [norm, pkg] of installedByName) {
+      if (!seen.has(norm)) additions.push(`${pkg.name}==${pkg.version}`);
+    }
+    additions.sort();
+
+    const finalLines = [...updated, ...additions];
+    fs.writeFileSync(reqPath, finalLines.join("\n") + "\n");
+  }
+
+  /**
+   * Updates an existing pyproject.toml's [project].dependencies array in
+   * place, same rewrite/append rule as _syncRequirementsTxt(). Everything
+   * outside the array's line range is left byte-for-byte untouched; the
+   * array itself is always rewritten in a canonical one-entry-per-line
+   * form (matching what `uv add`/most build backends already produce)
+   * rather than trying to preserve the original's exact formatting —
+   * simpler and safer than reconstructing arbitrary single-line/multi-line
+   * array styles.
+   *
+   * No-ops (leaves the file untouched) if there's no [project] table or no
+   * dependencies array to find — same scope boundary
+   * parsePyprojectDependencies() already documents (no Poetry legacy
+   * table, no speculative insertion of a dependencies array that isn't
+   * there).
+   */
+  _syncPyprojectToml(projectDir, installedByName) {
+    const tomlPath = path.join(projectDir, "pyproject.toml");
+    if (!fs.existsSync(tomlPath)) return false;
+
+    const raw = fs.readFileSync(tomlPath, "utf8");
+    const lines = raw.split("\n");
+
+    let currentTable = null;
+    let inArray = false;
+    let arrayStart = -1, arrayEnd = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = this._stripTomlComment(lines[i]).trim();
+      if (!line) continue;
+
+      if (inArray) {
+        if (line.includes("]")) { arrayEnd = i; break; }
+        continue;
+      }
+
+      const tableMatch = /^\[([^\]]+)\]$/.exec(line);
+      if (tableMatch) { currentTable = tableMatch[1].trim(); continue; }
+
+      if (currentTable === "project") {
+        const depMatch = /^dependencies\s*=\s*(.*)$/.exec(line);
+        if (depMatch) {
+          arrayStart = i;
+          if (depMatch[1].includes("]")) { arrayEnd = i; break; }
+          inArray = true;
+        }
+      }
+    }
+
+    if (arrayStart === -1 || arrayEnd === -1) return false; // no [project].dependencies array — nothing to update
+
+    const existingDeps = this.parsePyprojectDependencies(tomlPath);
+    const seen = new Set();
+    const finalSpecs = [];
+
+    for (const spec of existingDeps) {
+      const parsed = this._splitReqNameExtras(spec);
+      const pkg = parsed && installedByName.get(parsed.norm);
+      if (!parsed || !pkg) { finalSpecs.push(spec); continue; }
+
+      seen.add(parsed.norm);
+      finalSpecs.push(`${pkg.name}${parsed.extras}==${pkg.version}`);
+    }
+
+    const additions = [];
+    for (const [norm, pkg] of installedByName) {
+      if (!seen.has(norm)) additions.push(`${pkg.name}==${pkg.version}`);
+    }
+    additions.sort();
+    finalSpecs.push(...additions);
+
+    const newBlock = [
+      "dependencies = [",
+      ...finalSpecs.map(s => `    "${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}",`),
+      "]",
+    ];
+
+    const newLines = [...lines.slice(0, arrayStart), ...newBlock, ...lines.slice(arrayEnd + 1)];
+    fs.writeFileSync(tomlPath, newLines.join("\n"));
+    return true;
   }
 
   // ── pyproject.toml dependency extraction (PEP 621 [project] table) ──────────
@@ -743,7 +951,6 @@ export class PypiManagerInstance {
   // (or a pyproject.toml exists but declares no [project] dependencies).
 
   resolveDefaultPackages(projectRoot) {
-    console.log(projectRoot)
     const reqPath = path.join(projectRoot, "requirements.txt");
     if (fs.existsSync(reqPath)) {
       return fs.readFileSync(reqPath, "utf8")
