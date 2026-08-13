@@ -26,7 +26,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does |
-| `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph or license data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions |
+| `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | SCA + Firewall | Same `health`/`check`/`install` split, one binary per native package manager (no auto-detection between them, same as npm/pnpm/bun). Reports and policy live under `~/.ubel/local` so routine use never needs `sudo` — only the real package-manager install does |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls |
@@ -342,12 +342,15 @@ it against policy, and only proceeds if it's clean. TOCTOU is closed with
 SHA-256 integrity checks on the lockfile and `package.json` before and after
 resolution, and any policy-blocked change is rolled back atomically via
 `revert_lock_to_original`. **Yarn is deliberately excluded from firewalling**
-— it has no side-effect-free dry-run equivalent; `yarn add` always writes
+— not because UBEL doesn't support it, but because yarn itself has no
+side-effect-free dry-run equivalent to hook into: `yarn add` always writes
 to `node_modules` before you'd get a chance to block it. Yarn projects still
 get full SCA, SAST, secrets, and license coverage — they just can't be
-gated pre-install the way npm/pnpm/bun can. (Python and Linux host packages
-also get a real pre-install gate now — see their sections below — just via
-a simpler revert-less mechanism, since neither has a lockfile to roll back.)
+gated pre-install the way npm/pnpm/bun can, because yarn's own CLI doesn't
+offer a resolution step that stops short of writing to disk. (Python and
+Linux host packages also get a real pre-install gate now — see their
+sections below — just via a simpler revert-less mechanism, since neither
+has a lockfile to roll back.)
 
 **SAST / Malware SAST:** Full three-pass (scan → verify → taint-trace)
 vulnerability pipeline and two-pass malware pipeline, JS/TS-aware chunking.
@@ -408,24 +411,30 @@ pip's. One more `uv`-specific difference: `ubel-uv init` (and the first
 engines use — a real uv-recognized project (`pyproject.toml` present),
 not just an interpreter uv happens to be pointed at via `--python`.
 
-Two honesty notes:
+Two honesty notes, both of them limits of the underlying tools rather than
+gaps in UBEL's own implementation:
 - Unlike npm's lockfile dry-run, neither pip's nor uv's dry-run is
   unconditionally side-effect-free — if a candidate package has no
   pre-built wheel available, resolving its metadata can require building an
   sdist, and building an sdist can execute arbitrary `setup.py`/build-backend
-  code. This is inherent to Python packaging resolution generally, not a
-  gap specific to either tool. Wheel-only installs (the common case) don't
-  have this gap.
-- `uv`-sourced scans are flatter than `pip`-sourced ones on two fronts, not
-  one: `uv pip install --dry-run`'s output has no per-package license field
-  (every uv-resolved component reports `license: unknown`), *and* — because
-  it's a flat `+ name==version` list rather than a dependency-annotated
-  report — it carries no parent/child relationships either, so every
-  uv-resolved component comes back as its own root with empty
+  code. This is inherent to Python packaging resolution generally — how
+  `pip`/`uv` themselves resolve source-only packages — not something a
+  scan step layered on top of either tool could close off. Wheel-only
+  installs (the common case) don't have this gap.
+- `uv`-sourced scans carry less detail than `pip`-sourced ones in one
+  respect, and it traces back to what `uv pip install --dry-run` itself
+  exposes rather than a choice UBEL made: its output is a flat
+  `+ name==version` list rather than a dependency-annotated report, so it
+  carries no parent/child relationships — every uv-resolved component
+  comes back as its own root with empty
   `introduced_by`/`parents`/`dependency_sequences`, unlike a pip-sourced
-  scan. Vulnerability scanning itself is unaffected by either gap — that's
-  purl-based, not graph- or license-based — but dependency-provenance and
-  license-compliance detail are both weaker for `uv` than for `pip` today.
+  scan (pip's `--dry-run --report` includes that provenance; uv's dry-run
+  output simply doesn't). Vulnerability scanning itself is unaffected —
+  that's purl-based, not graph-based — but dependency-provenance detail
+  specifically is weaker for `uv` than for `pip` today. License data isn't
+  part of this gap: license classification only ever runs on `health`-mode
+  scans for every ecosystem UBEL supports, not just Python, so it's not
+  something a `check`/`install` dry-run needs from any installer.
 
 **SAST / Malware SAST:** Full coverage, same three-pass/two-pass pipelines.
 
@@ -761,11 +770,20 @@ To keep this document honest rather than aspirational:
   (Cargo), Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
   Windows host all remain without it for that reason — a hard mechanical
   constraint, not a roadmap gap.
+- **Yarn** is the one Node.js package manager left out of that list, for
+  the same kind of reason, not a different one: `yarn add` always writes
+  to `node_modules` immediately, with no lockfile-only/dry-run mode the
+  way npm/pnpm/bun each have. That's yarn's own CLI design, not a gap in
+  UBEL's implementation — there's no side-effect-free resolution step here
+  to hook a scan into before something's already been written to disk.
 - pip's and uv's dry-run firewalls are the one exception with a caveat
-  rather than a clean guarantee: resolving a source-only package's
-  metadata can require building an sdist, which can run arbitrary
-  build-backend code. Wheel-only installs don't have this gap; see the
-  Python section above.
+  rather than a clean guarantee, and that caveat is Python's own packaging
+  model, not a shortcoming in how UBEL drives either tool: resolving a
+  source-only package's metadata can require building an sdist, which can
+  run arbitrary build-backend code, and neither `pip install --dry-run`
+  nor `uv pip install --dry-run` can avoid that — it's how sdist-based
+  resolution works generally, independent of which tool triggers it.
+  Wheel-only installs don't have this gap; see the Python section above.
 - Reachability analysis's import-confirmation half covers **8 of the 8
   SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question

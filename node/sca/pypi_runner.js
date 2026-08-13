@@ -707,7 +707,7 @@ export class PypiManagerInstance {
     const installedByName = new Map(pythonPkgs.map(c => [c.name, { name: c.name, version: c.version }]));
 
     const pyprojectSynced = this._syncPyprojectToml(projectDir, installedByName);
-    if (pyprojectSynced) return;
+    if (pyprojectSynced===true) return;
     fs.writeFileSync(path.join(projectDir, "requirements.txt"), "", { flag: "a" });
     this._syncRequirementsTxt(projectDir, installedByName);
   }
