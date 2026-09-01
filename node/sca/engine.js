@@ -13,12 +13,17 @@ import {getGitMetadata, getEditorVersion}         from "./git_info.js";
 import {filterFalsePositiveInfections} from "./filter_false_positive_infections.js";
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
+import { buildZip } from "./zip_writer.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
 import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
 import { PypiManagerInstance } from "./pypi_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
+import { getTailwindScript } from "./tailwindcss.js";
+import { getChartJSScript } from "./chartjs.js";
+import { getGoogleFontsScript } from "./googlefonts.js";
+
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,7 +47,7 @@ const OSV_VULN_BASE  = `${OSV_API_BASE}/v1/vulns`;
 import os_module from "os";
 import { time } from "console";
 
-function safeWriteJson(filePath, data, maxSizeMb = 100) {
+function safeJsonString(data, maxSizeMb = 100) {
   const json = JSON.stringify(data, null);
   if (json.length > maxSizeMb * 1024 * 1024) {
     console.warn(`[!] JSON report too large (${(json.length / (1024*1024)).toFixed(1)} MB). Truncating...`);
@@ -55,9 +60,13 @@ function safeWriteJson(filePath, data, maxSizeMb = 100) {
         item.paths = item.paths.slice(0, 50);
       }
     }
-    return safeWriteJson(filePath, trimmed, maxSizeMb);
+    return safeJsonString(trimmed, maxSizeMb);
   }
-  fs.writeFileSync(filePath, json);
+  return json;
+}
+
+function safeWriteJson(filePath, data, maxSizeMb = 100) {
+  fs.writeFileSync(filePath, safeJsonString(data, maxSizeMb));
 }
 
 function getLocalIPsSync() {
@@ -131,7 +140,7 @@ function escapeHTML(str) {
     }[m]));
 }
 
-function generateHTMLReport(data) {
+async function generateHTMLReport(data) {
     // Deep clone data to avoid mutating original
     const reportData = JSON.parse(JSON.stringify(data));
 
@@ -1075,9 +1084,9 @@ function generateHTMLReport(data) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>UBEL SCA — Security Report</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>${await getTailwindScript()}</script>
+    <script>${await getChartJSScript()}</script>
+    <style>${await getGoogleFontsScript()}</style>
     <style>
         :root { --bg: #0a0a0a; --card: #141414; --border: #262626; --accent: #ef4444; }
         body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #e5e5e5; }
@@ -2953,10 +2962,8 @@ export class UbelEngineInstance {
         return finalJson;
       }
 
-      const htmlReport = generateHTMLReport(finalJson);
-      const htmlPath   = jsonPath.replace(/\.json$/, ".html");
-      fs.writeFileSync(htmlPath, htmlReport);
-      safeWriteJson(jsonPath, finalJson, 1000);
+      const htmlReport       = await generateHTMLReport(finalJson);
+      const jsonReportString = safeJsonString(finalJson, 1000);
 
       if (!is_script) {
         console.log();
@@ -3026,7 +3033,7 @@ export class UbelEngineInstance {
       const latestHtmlPath  = path.join(latestDir, "latest.html");
       fs.mkdirSync(latestDir, { recursive: true });
       fs.writeFileSync(latestHtmlPath, htmlReport);
-      safeWriteJson(latestPath, finalJson, 1000);
+      fs.writeFileSync(latestPath, jsonReportString);
 
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       const sbomBuilder = new CycloneDXBuilder(finalJson);
@@ -3035,19 +3042,32 @@ export class UbelEngineInstance {
       const sarifBuilder = new SarifBuilder(finalJson);
       const sarifData    = sarifBuilder.generate();
 
-      const sbomPath  = jsonPath.replace(/\.json$/, ".cdx.json");
-      const sarifPath = jsonPath.replace(/\.json$/, ".sarif.json");
-      safeWriteJson(sbomPath, sbomData, 1000);
-      safeWriteJson(sarifPath, sarifData, 1000);
+      const sbomString  = safeJsonString(sbomData, 1000);
+      const sarifString = safeJsonString(sarifData, 1000);
 
       const latestSbom  = path.join(latestDir, "latest.cdx.json");
       const latestSarif = path.join(latestDir, "latest.sarif.json");
-      safeWriteJson(latestSbom, sbomData, 1000);
-      safeWriteJson(latestSarif, sarifData, 1000);
+      fs.writeFileSync(latestSbom, sbomString);
+      fs.writeFileSync(latestSarif, sarifString);
+
+      // ── Timestamped bundle ──────────────────────────────────────────────────
+      // json/html/sbom/sarif used to be written out as four separate files
+      // per scan alongside each other under outputDir; they're now bundled
+      // into a single baseName.zip to cut down on file count and storage as
+      // reports accumulate over time. The "latest" copies above are
+      // intentionally left as plain files, unzipped.
+      const zipPath = jsonPath.replace(/\.json$/, ".zip");
+      fs.writeFileSync(zipPath, buildZip([
+        { name: "report.json",       data: jsonReportString },
+        { name: "report.html",       data: htmlReport },
+        { name: "sbom.cdx.json",     data: sbomString },
+        { name: "report.sarif.json", data: sarifString },
+      ]));
 
       if (!is_script) {
         console.log(`Latest JSON report saved to: ${latestPath}`);
         console.log(`Latest HTML report saved to: ${latestHtmlPath}`);
+        console.log(`Timestamped report bundle saved to: ${zipPath}`);
         console.log();
         console.log();
       }

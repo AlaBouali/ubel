@@ -11,6 +11,7 @@ import { generateSastHTMLReport } from './html_report_generator.js';
 import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
+import { buildZip }               from '../sca/zip_writer.js';
 
 // ─── Shared CLI flag parser ────────────────────────────────────────────────────
 
@@ -74,10 +75,8 @@ async function writeAnalyzeReports(results, opts) {
   const latestDir = path.join(workingDir, '.ubel', 'reports');
   fs.mkdirSync(latestDir, { recursive: true });
 
-  const baseName  = `sast__${ts}`;
-  const jsonPath  = path.join(reportDir, `${baseName}.json`);
-  const htmlPath  = path.join(reportDir, `${baseName}.html`);
-  const sarifPath = path.join(reportDir, `${baseName}.sarif.json`);
+  const baseName = `sast__${ts}`;
+  const zipPath   = path.join(reportDir, `${baseName}.zip`);
 
   const latestJson  = path.join(latestDir, 'latest.sast.json');
   const latestHtml  = path.join(latestDir, 'latest.sast.html');
@@ -107,16 +106,26 @@ async function writeAnalyzeReports(results, opts) {
     }
   }
 
+  // ── Timestamped bundle ────────────────────────────────────────────────────
+  // json/html/sarif used to be written out as three separate files per scan
+  // alongside each other under reportDir; they're now bundled into a single
+  // baseName.zip to cut down on file count and storage as reports accumulate
+  // over time. The "latest" copies below are intentionally left as plain
+  // files, unzipped. Each piece only makes it into the bundle if it was
+  // generated successfully, matching the previous per-file tolerance for a
+  // failed HTML/SARIF generation step.
+  const bundleEntries = [];
+
   const jsonPayload = JSON.stringify({ generated_at: meta.generated_at, meta, results }, null, 2);
-  atomicWrite(jsonPath,  jsonPayload);
   atomicWrite(latestJson, jsonPayload);
-  console.log(`\n[ubel-sast] JSON  report : ${jsonPath}`);
+  bundleEntries.push({ name: 'report.json', data: jsonPayload });
+  console.log(`\n[ubel-sast] JSON  report : bundled in ${zipPath}`);
 
   try {
-    const htmlReport = generateSastHTMLReport(results, meta);
-    atomicWrite(htmlPath,  htmlReport);
+    const htmlReport = await generateSastHTMLReport(results, meta);
     atomicWrite(latestHtml, htmlReport);
-    console.log(`[ubel-sast] HTML  report : ${htmlPath}`);
+    bundleEntries.push({ name: 'report.html', data: htmlReport });
+    console.log(`[ubel-sast] HTML  report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`[ubel-sast] HTML report failed: ${e.message}`);
   }
@@ -124,14 +133,17 @@ async function writeAnalyzeReports(results, opts) {
   try {
     const sarifBuilder = new SastSarifBuilder(results, meta);
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
-    atomicWrite(sarifPath,  sarifPayload);
     atomicWrite(latestSarif, sarifPayload);
-    console.log(`[ubel-sast] SARIF report : ${sarifPath}`);
+    bundleEntries.push({ name: 'report.sarif.json', data: sarifPayload });
+    console.log(`[ubel-sast] SARIF report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`[ubel-sast] SARIF report failed: ${e.message}`);
   }
 
-  console.log(`\n[ubel-sast] Latest reports : ${latestDir}`);
+  atomicWrite(zipPath, buildZip(bundleEntries));
+
+  console.log(`\n[ubel-sast] Timestamped bundle : ${zipPath}`);
+  console.log(`[ubel-sast] Latest reports      : ${latestDir}`);
 
   // ── Console summary ────────────────────────────────────────────────────────
   const exploitableResults = results.filter(r =>
@@ -203,7 +215,7 @@ async function writeAnalyzeReports(results, opts) {
       if (detail) console.log(`  Detail: ${String(detail).slice(0, 150)}`);
     }
     if (unresolvedFindings.length > 10) {
-      console.log(`\n  … and ${unresolvedFindings.length - 10} more — see ${jsonPath}`);
+      console.log(`\n  … and ${unresolvedFindings.length - 10} more — see ${zipPath}`);
     }
   }
 
@@ -233,7 +245,7 @@ async function writeAnalyzeReports(results, opts) {
     console.log(`\n[ubel-sast] Exiting non-zero: no finding met the --fail-on ${failOn} bar, but ${unresolvedFindings.length} finding(s) could not be resolved either way (see "Unverified / untraced findings" above).`);
   }
 
-  return { jsonPath, htmlPath, sarifPath, meta, shouldFail };
+  return { zipPath, meta, shouldFail };
 }
 
 // ─── Shared report writer: `malware` ───────────────────────────────────────────
@@ -254,10 +266,8 @@ async function writeMalwareReports(results, opts) {
   const latestDir = path.join(workingDir, '.ubel', 'reports');
   fs.mkdirSync(latestDir, { recursive: true });
 
-  const baseName  = `malware__${ts}`;
-  const jsonPath  = path.join(reportDir, `${baseName}.json`);
-  const htmlPath  = path.join(reportDir, `${baseName}.html`);
-  const sarifPath = path.join(reportDir, `${baseName}.sarif.json`);
+  const baseName = `malware__${ts}`;
+  const zipPath   = path.join(reportDir, `${baseName}.zip`);
 
   const latestJson  = path.join(latestDir, 'latest.malware.json');
   const latestHtml  = path.join(latestDir, 'latest.malware.html');
@@ -278,16 +288,22 @@ async function writeMalwareReports(results, opts) {
     }
   }
 
+  // ── Timestamped bundle ────────────────────────────────────────────────────
+  // See writeAnalyzeReports() above — same rationale: json/html/sarif are
+  // now bundled into one baseName.zip instead of three separate files, and
+  // the "latest" copies stay as plain files.
+  const bundleEntries = [];
+
   const jsonPayload = JSON.stringify({ generated_at: meta.generated_at, meta, results }, null, 2);
-  atomicWrite(jsonPath,  jsonPayload);
   atomicWrite(latestJson, jsonPayload);
-  console.log(`\n[ubel-malware] JSON  report : ${jsonPath}`);
+  bundleEntries.push({ name: 'report.json', data: jsonPayload });
+  console.log(`\n[ubel-malware] JSON  report : bundled in ${zipPath}`);
 
   try {
-    const htmlReport = generateSastHTMLReport(results, meta);
-    atomicWrite(htmlPath,  htmlReport);
+    const htmlReport = await generateSastHTMLReport(results, meta);
     atomicWrite(latestHtml, htmlReport);
-    console.log(`[ubel-malware] HTML  report : ${htmlPath}`);
+    bundleEntries.push({ name: 'report.html', data: htmlReport });
+    console.log(`[ubel-malware] HTML  report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`[ubel-malware] HTML report failed: ${e.message}`);
   }
@@ -295,14 +311,17 @@ async function writeMalwareReports(results, opts) {
   try {
     const sarifBuilder = new SastSarifBuilder(results, meta);
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
-    atomicWrite(sarifPath,  sarifPayload);
     atomicWrite(latestSarif, sarifPayload);
-    console.log(`[ubel-malware] SARIF report : ${sarifPath}`);
+    bundleEntries.push({ name: 'report.sarif.json', data: sarifPayload });
+    console.log(`[ubel-malware] SARIF report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`[ubel-malware] SARIF report failed: ${e.message}`);
   }
 
-  console.log(`\n[ubel-malware] Latest reports : ${latestDir}`);
+  atomicWrite(zipPath, buildZip(bundleEntries));
+
+  console.log(`\n[ubel-malware] Timestamped bundle : ${zipPath}`);
+  console.log(`[ubel-malware] Latest reports      : ${latestDir}`);
 
   const allFindings   = results.flatMap(r => r.findings).filter(f => !f._parse_error);
   const confirmed      = allFindings.filter(f => f.is_valid === true);
@@ -344,7 +363,7 @@ async function writeMalwareReports(results, opts) {
     ? (confirmed.length > 0 || unresolved.length > 0)
     : allFindings.length > 0;
 
-  return { jsonPath, htmlPath, sarifPath, meta, shouldFail };
+  return { zipPath, meta, shouldFail };
 }
 
 // ─── `chunk` subcommand ─────────────────────────────────────────────────────────

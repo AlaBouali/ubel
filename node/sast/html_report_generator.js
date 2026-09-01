@@ -8,6 +8,9 @@
 // Output: HTML string (caller writes to disk)
 
 import { TOOL_NAME, TOOL_VERSION } from '../sca/info.js';
+import { getTailwindScript } from "../sca/tailwindcss.js";
+import { getChartJSScript } from "../sca/chartjs.js";
+import { getGoogleFontsScript } from "../sca/googlefonts.js";
 
 const SAST_TOOL = '@arcane-spark/ubel-sast';
 
@@ -793,7 +796,7 @@ init();
 
 // ─── main generator ──────────────────────────────────────────────────────────
 
-export function generateSastHTMLReport(results, meta = {}) {
+export async function generateSastHTMLReport(results, meta = {}) {
   const stats = buildStats(results);
 
   // Inventory: chunks stripped of code (no source in report)
@@ -852,9 +855,9 @@ export function generateSastHTMLReport(results, meta = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>UBEL SAST — Security Report</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>${await getTailwindScript()}</script>
+    <script>${await getChartJSScript()}</script>
+    <style>${await getGoogleFontsScript()}</style>
   <style>
     :root { --bg: #0a0a0a; --card: #141414; --border: #262626; --accent: #ef4444; }
     body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #e5e5e5; }
