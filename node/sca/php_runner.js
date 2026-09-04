@@ -19,16 +19,6 @@ export class PhpComposerScanner {
   }
 
   // ─────────────────────────────
-  // Detect composer project root
-  // ─────────────────────────────
-  _isComposerRoot(dir) {
-    return (
-      fs.existsSync(path.join(dir, "composer.json")) &&
-      fs.existsSync(path.join(dir, "vendor"))
-    );
-  }
-
-  // ─────────────────────────────
   // Read installed packages from
   // vendor/composer/installed.json  (Composer v1 & v2)
   // ─────────────────────────────
@@ -70,6 +60,7 @@ export class PhpComposerScanner {
 
   // ─────────────────────────────
   // Scan a single composer project
+  // using installed.json (if present)
   // ─────────────────────────────
   _scanProject(projectRoot) {
     const vendorDir = path.join(projectRoot, "vendor");
@@ -124,6 +115,78 @@ export class PhpComposerScanner {
         dev:          pkg["dev-requirements"] === true || pkg.dev === true  // set by Composer v2
       });
     }
+
+    return components;
+  }
+
+  // ─────────────────────────────
+  // Parse a composer.lock file and
+  // return components for all packages
+  // ─────────────────────────────
+  parseComposerLock(lockPath, projectRoot) {
+    let data;
+    try {
+      data = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    } catch {
+      return [];
+    }
+
+    const packages     = data.packages || [];
+    const devPackages  = data["packages-dev"] || [];
+    const allPackages  = [...packages, ...devPackages];
+
+    // Build name index for dependency resolution
+    const nameIndex = new Map();
+    for (const pkg of allPackages) {
+      const name = pkg.name;
+      if (!name) continue;
+      const norm = name.toLowerCase();
+      const version = this._normaliseVersion(pkg.version || "");
+      nameIndex.set(norm, { name, version, pkg });
+    }
+
+    const components = [];
+
+    const processSection = (pkgList, isDev) => {
+      for (const pkg of pkgList) {
+        const name = pkg.name;
+        if (!name) continue;
+        const norm = name.toLowerCase();
+        const version = this._normaliseVersion(pkg.version || "");
+        const id = this._composerPurl(name, version);
+        const license = this._extractLicense(pkg);
+
+        const requireMap = pkg.require || {};
+        const dependencies = Object.keys(requireMap)
+          .filter(dep => dep !== "php" && !dep.startsWith("ext-"))
+          .map(dep => {
+            const resolved = nameIndex.get(dep.toLowerCase());
+            return resolved
+              ? this._composerPurl(resolved.name, resolved.version)
+              : this._composerPurl(dep, "");
+          });
+
+        const installPath = path.join(projectRoot, "vendor", ...name.split("/"));
+
+        components.push({
+          id,
+          name: norm,
+          version,
+          type: "library",
+          license,
+          ecosystem: "php",
+          state: "undetermined",
+          scopes: isDev ? ["dev"] : ["prod"],   // initial scopes
+          dependencies,
+          paths: [installPath],
+          project_root: projectRoot,
+          dev: isDev,                           // used by _assignScopes
+        });
+      }
+    };
+
+    processSection(packages, false);
+    processSection(devPackages, true);
 
     return components;
   }
@@ -199,7 +262,7 @@ export class PhpComposerScanner {
       propagate(prod, "prod");
       propagate(dev,  "dev");
 
-      // Fallback – no manifest or empty require sections
+      // Fallback – only for components that have no scopes at all
       if (prod.size === 0 && dev.size === 0) {
         for (const c of comps) {
           if (c.scopes.length === 0) c.scopes.push("prod");
@@ -244,6 +307,21 @@ export class PhpComposerScanner {
     const visited = new Set();
     const raw     = [];
 
+    const collectComponents = (dir) => {
+      const comps = [];
+      const hasComposerJson = fs.existsSync(path.join(dir, "composer.json"));
+      const hasComposerLock = fs.existsSync(path.join(dir, "composer.lock"));
+
+      if (hasComposerJson) {
+        // _scanProject reads installed.json if present, otherwise returns []
+        comps.push(...this._scanProject(dir));
+      }
+      if (hasComposerLock) {
+        comps.push(...this.parseComposerLock(path.join(dir, "composer.lock"), dir));
+      }
+      return comps;
+    };
+
     const walk = (dir) => {
       let entries;
       try {
@@ -258,31 +336,30 @@ export class PhpComposerScanner {
 
         const full = path.join(dir, entry.name);
 
-        if (this._isComposerRoot(full)) {
+        // Check if this directory is a composer project (has composer.json or .lock)
+        const hasComposerJson = fs.existsSync(path.join(full, "composer.json"));
+        const hasComposerLock = fs.existsSync(path.join(full, "composer.lock"));
+        if (hasComposerJson || hasComposerLock) {
           const key = path.resolve(full);
           if (!visited.has(key)) {
             visited.add(key);
-            raw.push(...this._scanProject(full));
+            raw.push(...collectComponents(full));
           }
-          // Still descend — its own vendor/ is already excluded by the
-          // ignore list above, so this only picks up genuinely nested
-          // composer.json projects (e.g. a monorepo with packages/foo
-          // having its own composer.json + vendor), not a re-walk of
-          // the project we just scanned.
         }
 
+        // Descend into subdirectories
         walk(full);
       }
+    };
 
-      // Also check the startDir itself
-    }
-
-    // Check startDir itself before walking children
-    if (this._isComposerRoot(startDir)) {
+    // Check startDir itself
+    const startHasJson = fs.existsSync(path.join(startDir, "composer.json"));
+    const startHasLock = fs.existsSync(path.join(startDir, "composer.lock"));
+    if (startHasJson || startHasLock) {
       const key = path.resolve(startDir);
       if (!visited.has(key)) {
         visited.add(key);
-        raw.push(...this._scanProject(startDir));
+        raw.push(...collectComponents(startDir));
       }
     }
 
