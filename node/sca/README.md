@@ -3,12 +3,12 @@
 
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **Python** (pip, pipx), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
+This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Python** (pip, pipx), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
 ---
 
 ## Features
 
-- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; apt/dnf/yum via each manager's own simulate/assume-no flag)
+- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun/composer) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; apt/dnf/yum via each manager's own simulate/assume-no flag)
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
@@ -17,8 +17,8 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
 - `health` mode — scan the current project's installed dependencies
-- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun only — pip/uv/pipx/apt/dnf/yum have no lockfile to revert; see [Firewall Mechanics](#firewall-mechanics))
-- Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun only)
+- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/apt/dnf/yum have no lockfile to revert; see [Firewall Mechanics](#firewall-mechanics))
+- Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv))
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -43,6 +43,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-npm` | npm |
 | `ubel-pnpm` | pnpm |
 | `ubel-bun` | bun |
+| `ubel-composer` | Composer (PHP) |
 | `ubel-yarn` | yarn — `health` mode only, no firewall (`check`/`install`) coverage; see note below |
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
 | `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
@@ -60,6 +61,8 @@ After installation, the following entry-point binaries are available:
 
 > **yarn** does not support a lockfile-only dry-run — this is yarn's own CLI design, not a gap in UBEL's implementation: `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing.
 >
+> **composer** gets the same lockfile-backed firewall treatment as npm/pnpm/bun — see [Firewall Mechanics § composer](#composer) — via `composer require`/`update --no-install --no-scripts`, Composer's own equivalent of `--package-lock-only`. It needs the `composer` binary itself on `PATH`, separate from PHP — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`.
+>
 > **uv** shares `ubel-pip`'s six modes, requirements.txt/pyproject.toml fallback, generated-requirements-file real install, and post-install manifest sync, but its dry-run mechanism is internally different (`uv pip install --dry-run`, not `pip install --dry-run --report`) since uv has no equivalent JSON install report — see [Firewall Mechanics § uv](#uv) for the honest difference this creates (no dependency-graph provenance from uv's resolution).
 >
 > **apt / dnf / yum** are three separate binaries, each bound to exactly one native package manager — there's no auto-detection between them, the same one-binary-per-tool shape as `ubel-npm`/`ubel-pnpm`/`ubel-bun`. Running `ubel-dnf` on a host that only has `apt` fails with a clear "not found on PATH" error rather than silently falling back to a different manager.
@@ -69,7 +72,7 @@ After installation, the following entry-point binaries are available:
 ## Requirements
 
 - Node.js `>=18.0.0`
-- The package manager binary being targeted (`npm`, `pnpm`, or `bun`) must be available on `PATH`
+- The package manager binary being targeted (`npm`, `pnpm`, `bun`, or `composer`) must be available on `PATH`
 - `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` — Node.js can't provision one itself, it only shells out to it to create/manage the venv
 - `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`
 - `ubel-apt`/`ubel-dnf`/`ubel-yum` additionally need their specific package manager on `PATH` (each binary targets exactly one — no auto-detection between them) and, for `install` mode only, passwordless-or-prompted `sudo` access; `health`/`check` never need elevated privileges
@@ -103,6 +106,7 @@ ubel-npm health
 ubel-npm   <mode> [packages...]
 ubel-pnpm  <mode> [packages...]
 ubel-bun   <mode> [packages...]
+ubel-composer <mode> [packages...]
 ubel-yarn  health              # health only — check/install unsupported, see below
 
 ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown
@@ -114,7 +118,7 @@ ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
 ```
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun use the existing lockfile in the working directory; `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
 
 ---
 
@@ -134,6 +138,15 @@ Identical flow to npm, using pnpm's `--lockfile-only` flag. The candidate `pnpm-
 ### bun
 
 Uses bun's `--lockfile-only` flag. The candidate `bun.lock` is written and scanned before any `node_modules/` mutation. The revert path is identical to npm and pnpm.
+
+### composer
+
+`ubel-composer check` and `ubel-composer install <vendor/package>` invoke `composer require`/`update --no-install --no-scripts`, Composer's own equivalent of npm's `--package-lock-only` — it resolves the full dependency tree and writes a candidate `composer.lock` (and, for `require`, an updated `composer.json` with the requested constraint) without touching `vendor/`. UBEL scans the candidate lockfile, then makes the same binary decision as npm/pnpm/bun:
+
+- **Clean** — the candidate lockfile is accepted and the actual install proceeds via `composer install --no-scripts`.
+- **Violation** — `composer.json`/`composer.lock` are reverted to their pre-scan state from the disk backup. `vendor/` is never touched. The process exits non-zero.
+
+Unlike pip/apt/dnf/yum, this dry-run has no equivalent side-effect caveat: resolving a Composer dependency graph never runs a package's own code — build/lifecycle scripts (`scripts.pre-install-cmd`, `post-install-cmd`, etc., declared in `composer.json`) only fire on an actual `composer install`/`update`, which is why `--no-scripts` is passed on both the dry-run and the real install (same reasoning as npm's `--ignore-scripts` — see below). If no `composer.json` exists yet, UBEL writes a minimal one (`{"name": "ubel/scan-temp", "type": "project"}`) rather than shelling out to `composer init`, since non-interactive `init` behavior isn't consistent across Composer versions.
 
 ### docker
 
@@ -179,7 +192,7 @@ Every `ubel-pip` invocation targets a venv: `<projectRoot>/venv` by default, or 
 
 A successful **Clean** install additionally syncs whichever of `requirements.txt`/`pyproject.toml` already exists in the project directory to match what's now actually installed — this reuses the same `.dist-info` scan `health` mode already does (not a separate `pip freeze` shell-out), filtered to the venv's Python packages. For each file: an existing entry whose name matches an installed package gets its pin rewritten to the installed version; anything installed but not yet listed gets appended; comments, blank lines, and directives (`-r`/`-e`/`-c`/`--index-url` in requirements.txt, any table other than `[project].dependencies` in pyproject.toml) are left untouched. Neither file is created if it doesn't already exist, and a sync failure is logged rather than failing the install, since the install itself already succeeded by that point. One asymmetry worth knowing: pip's own bootstrap packages (`pip`, and on some Python versions `setuptools`) live inside a stdlib-created venv the same as anything else installed into it, so they can show up in a synced `requirements.txt` too — `uv venv`-created venvs don't have this since uv doesn't bundle pip into the venvs it creates (see the uv section below).
 
-**One honesty note, unlike npm's lockfile dry-run — a limit of Python packaging itself, not of UBEL's implementation:** resolving a package's metadata during `pip install --dry-run` can require building an sdist when no pre-built wheel is available for the current platform, and building an sdist can execute arbitrary `setup.py`/build-backend code. A wheel-only install has no such gap; a source-only dependency does. This is a real, if narrow, difference from npm/pnpm/bun's guarantee, and it's inherent to how pip resolves packages — not something UBEL's scan step can close.
+**One honesty note, unlike npm's (or composer's) lockfile dry-run — a limit of Python packaging itself, not of UBEL's implementation:** resolving a package's metadata during `pip install --dry-run` can require building an sdist when no pre-built wheel is available for the current platform, and building an sdist can execute arbitrary `setup.py`/build-backend code. A wheel-only install has no such gap; a source-only dependency does. This is a real, if narrow, difference from npm/pnpm/bun/composer's guarantee, and it's inherent to how pip resolves packages — not something UBEL's scan step can close.
 
 ### uv
 
@@ -236,26 +249,26 @@ ubel-apt install curl
 
 ### UBEL's firewall always blocks pre/post install scripts to prevent running malicious scripts
 
-npm/pnpm/bun-specific: all 3 package managers are triggered with the flag `--ignore-scripts`. pip/apt/dnf/yum don't have an equivalent opt-out flag for this document to invoke, because their dry-run modes don't run install-time lifecycle scripts to begin with — apt/dnf/yum's simulate flags never execute package maintainer scripts, and pip's `--dry-run` doesn't run a package's own `post_install` hooks (the sdist-build caveat above is a distinct, narrower concern: build-backend code, not install-time scripts).
+npm/pnpm/bun/composer-specific: npm/pnpm/bun are triggered with the flag `--ignore-scripts`; composer with `--no-scripts` (Composer's own name for the same opt-out) — every dry-run *and* real-install invocation across all four passes it. pip/apt/dnf/yum don't have an equivalent opt-out flag for this document to invoke, because their dry-run modes don't run install-time lifecycle scripts to begin with — apt/dnf/yum's simulate flags never execute package maintainer scripts, and pip's `--dry-run` doesn't run a package's own `post_install` hooks (the sdist-build caveat above is a distinct, narrower concern: build-backend code, not install-time scripts).
 
 ### Lockfile backup and recovery
 
-npm/pnpm/bun-specific — pip/apt/dnf/yum have no lockfile, so there's nothing to back up or recover here; see their sections above for what "clean vs. violation" means for them instead.
+npm/pnpm/bun/composer-specific — pip/apt/dnf/yum have no lockfile, so there's nothing to back up or recover here; see their sections above for what "clean vs. violation" means for them instead.
 
-Before any dry-run mutation, originals are backed up to `.ubel/lockfiles/<timestamp>/`. If the revert itself fails (e.g. a disk error mid-restore), the original lockfile is preserved at the backup path and its location is printed to stderr so the user can recover manually.
+Before any dry-run mutation, originals are backed up to `.ubel/lockfiles/<timestamp>/` (composer backs up both `composer.json` and `composer.lock` there, same as npm backs up `package.json`/`package-lock.json`). If the revert itself fails (e.g. a disk error mid-restore), the original lockfile is preserved at the backup path and its location is printed to stderr so the user can recover manually.
 
 ### TOCTOU integrity protection
 
-npm/pnpm/bun-specific, for the same reason as the backup/recovery section above — TOCTOU hashing exists to protect a *lockfile* between scan and install, and pip/apt/dnf/yum's revert-less design (nothing written to disk to gate on until the real install itself runs) doesn't have that window to close in the first place.
+npm/pnpm/bun/composer-specific, for the same reason as the backup/recovery section above — TOCTOU hashing exists to protect a *lockfile* between scan and install, and pip/apt/dnf/yum's revert-less design (nothing written to disk to gate on until the real install itself runs) doesn't have that window to close in the first place.
 
-After the dry-run completes and the scan passes policy, there is a window between the scan decision and the real install during which the on-disk lockfile or `package.json` could be mutated — by another process, a racing script, or a compromised tool. UBEL closes this window with SHA-256 integrity checks before any real install is allowed to proceed.
+After the dry-run completes and the scan passes policy, there is a window between the scan decision and the real install during which the on-disk lockfile or manifest could be mutated — by another process, a racing script, or a compromised tool. UBEL closes this window with SHA-256 integrity checks before any real install is allowed to proceed.
 
 At the end of every dry-run, UBEL captures two digests in memory:
 
-- **`_candidateLockfileHash`** — SHA-256 of the raw candidate lockfile bytes written to disk by the dry-run (`package-lock.json`, `pnpm-lock.yaml`, or `bun.lock`).
-- **`_candidatePackageJsonHash`** — SHA-256 of `package.json` as it exists on disk after the dry-run. For npm, this digest is re-captured after UBEL regenerates `package.json` with exact pinned versions from the lockfile, so the hash always reflects the file that will be present at install time.
+- **`_candidateLockfileHash`** — SHA-256 of the raw candidate lockfile bytes written to disk by the dry-run (`package-lock.json`, `pnpm-lock.yaml`, `bun.lock`, or `composer.lock`).
+- **`_candidatePackageJsonHash`** (`_candidateComposerJsonHash` for composer) — SHA-256 of `package.json`/`composer.json` as it exists on disk after the dry-run. For npm, this digest is re-captured after UBEL regenerates `package.json` with exact pinned versions from the lockfile, so the hash always reflects the file that will be present at install time; for composer, `composer require`/`update` already wrote the resolved constraint directly, so no separate reconciliation step is needed before the digest is taken.
 
-Immediately before invoking the real install command (`npm ci`, `pnpm install --frozen-lockfile`, `bun install --frozen-lockfile`), both files are re-hashed from disk and compared against the in-memory digests. If either hash does not match, the install is aborted and the lockfile is reverted — nothing is written to `node_modules/`. The mismatch details (expected hash, actual hash, file path) are printed to stderr.
+Immediately before invoking the real install command (`npm ci`, `pnpm install --frozen-lockfile`, `bun install --frozen-lockfile`, `composer install --no-scripts`), both files are re-hashed from disk and compared against the in-memory digests. If either hash does not match, the install is aborted and the lockfile is reverted — nothing is written to `node_modules/`/`vendor/`. The mismatch details (expected hash, actual hash, file path) are printed to stderr.
 
 ```
 Lockfile integrity check FAILED — the lockfile was modified after scanning.
@@ -274,12 +287,13 @@ This protection also extends to the backup manifest files created earlier before
 
 ### `health`
 
-Scans the current project's installed dependency graph without running any install. For npm/pnpm/bun/yarn this reads the existing lockfile directly; `ubel-pip` walks the target venv directly instead (see [Full-stack monorepo scanning](#full-stack-monorepo-scanning) below); `ubel-apt`/`ubel-dnf`/`ubel-yum` read the host's own package database. All of them submit the resolved packages to OSV.dev and NVD's APIs (or your configured mirrors — see [Environment Variables](#environment-variables)).
+Scans the current project's installed dependency graph without running any install. For npm/pnpm/bun/yarn/composer this reads the existing lockfile directly (`composer.lock` for composer); `ubel-pip` walks the target venv directly instead (see [Full-stack monorepo scanning](#full-stack-monorepo-scanning) below); `ubel-apt`/`ubel-dnf`/`ubel-yum` read the host's own package database. All of them submit the resolved packages to OSV.dev and NVD's APIs (or your configured mirrors — see [Environment Variables](#environment-variables)).
 
 ```bash
 ubel-npm health
 ubel-pnpm health
 ubel-bun health
+ubel-composer health
 ubel-yarn health
 
 ubel-pip health
@@ -294,7 +308,7 @@ When invoked programmatically with `full_stack: true`, `health` walks the entire
 |---|---|---|
 | Node.js | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
 | Python | pip / virtualenv | `.venv`, `venv`, virtualenv directories |
-| PHP | Composer | `vendor/` |
+| PHP | Composer | `vendor/`, `composer.lock` |
 | Rust | Cargo | `Cargo.lock` |
 | Go | Go Modules | `go.sum` |
 | C# / .NET | NuGet | `packages.lock.json` / `obj/project.assets.json` |
@@ -339,7 +353,7 @@ Each component is reported with its actual license or vendor EULA (see [License 
 
 ### `check`
 
-Dry-run: resolves the given packages (or, for npm/pnpm/bun, the existing lockfile) via each ecosystem's own dry-run mechanism, scans the resolved set, and exits. Nothing is installed; npm/pnpm/bun's lockfiles are fully reverted to their original state afterwards (pip/uv/apt/dnf/yum have no lockfile to revert — see [Firewall Mechanics](#firewall-mechanics)).
+Dry-run: resolves the given packages (or, for npm/pnpm/bun/composer, the existing lockfile) via each ecosystem's own dry-run mechanism, scans the resolved set, and exits. Nothing is installed; npm/pnpm/bun/composer's lockfiles are fully reverted to their original state afterwards (pip/uv/apt/dnf/yum have no lockfile to revert — see [Firewall Mechanics](#firewall-mechanics)).
 
 ```bash
 # Scan specific packages without installing
@@ -347,6 +361,10 @@ ubel-npm check lodash express
 
 # Scan the current lockfile with no changes
 ubel-npm check
+
+# PHP: scan a specific package, or the existing composer.lock with no changes
+ubel-composer check monolog/monolog
+ubel-composer check
 
 # Python and Linux equivalents
 ubel-pip check requests==2.31.0
@@ -360,7 +378,7 @@ Exits `0` if policy passes, `1` if policy blocks or the scan fails.
 
 ### `install`
 
-Same pipeline as `check`, but proceeds to install if and only if the policy decision is **allow** — via `npm ci` / `pnpm install --frozen-lockfile` / `bun install` for the npm family, `pip install -r <requirements>` / `uv pip install -r <requirements>` for pip/uv (the same generated file either way), or `sudo <apt|dnf|yum> install -y` for the Linux host binaries.
+Same pipeline as `check`, but proceeds to install if and only if the policy decision is **allow** — via `npm ci` / `pnpm install --frozen-lockfile` / `bun install` for the npm family, `composer install --no-scripts` for composer, `pip install -r <requirements>` / `uv pip install -r <requirements>` for pip/uv (the same generated file either way), or `sudo <apt|dnf|yum> install -y` for the Linux host binaries.
 
 ```bash
 ubel-npm install lodash@4.17.21 express
@@ -368,6 +386,9 @@ ubel-npm install                          # resolves from existing lockfile
 
 ubel-pnpm install react react-dom
 ubel-bun install
+
+ubel-composer install monolog/monolog:^3.0
+ubel-composer install                     # resolves from existing composer.lock
 
 ubel-pip install requests==2.31.0
 ubel-pip install                          # resolves from ./requirements.txt
@@ -377,13 +398,13 @@ ubel-pipx install black                   # isolated venv + global shim
 ubel-apt install curl                     # ubel-dnf / ubel-yum work the same way
 ```
 
-If the policy blocks, installation is aborted and the process exits `1`. For npm/pnpm/bun the lockfile is also reverted; pip/uv/apt/dnf/yum have nothing to revert — the real install command simply never runs.
+If the policy blocks, installation is aborted and the process exits `1`. For npm/pnpm/bun/composer the lockfile is also reverted; pip/uv/apt/dnf/yum have nothing to revert — the real install command simply never runs.
 
 ---
 
 ### `init`
 
-A no-op on npm/pnpm/bun/yarn (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`). On `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a stdlib `venv` at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those five binaries you run**, including the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager. `ubel-uv init` is the one exception: it provisions the venv via uv's own `uv init --bare` + `uv venv` instead, so the result is a project uv itself recognizes (`pyproject.toml` present), not just a stdlib interpreter uv is pointed at via `--python`; `--bare` skips uv's normal `README.md`/`main.py`/`.python-version`/`git init` scaffolding, since this is very often being run straight in the caller's real project root, not a fresh scratch directory. Both steps are skipped if already done (existing `pyproject.toml`, existing venv), so it's safe to call repeatedly. `ubel-pip`/`ubel-uv`/`ubel-pipx` all still run their respective provisioning implicitly on first `check`/`install` if the venv doesn't exist yet, so calling `init` explicitly is only needed to provision ahead of time or at a non-default path.
+A no-op on npm/pnpm/bun/yarn/composer (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`; for composer, a minimal `composer.json` is likewise created lazily on first `check`/`install` if one doesn't already exist — see [Firewall Mechanics § composer](#composer)). On `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a stdlib `venv` at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those five binaries you run**, including the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager. `ubel-uv init` is the one exception: it provisions the venv via uv's own `uv init --bare` + `uv venv` instead, so the result is a project uv itself recognizes (`pyproject.toml` present), not just a stdlib interpreter uv is pointed at via `--python`; `--bare` skips uv's normal `README.md`/`main.py`/`.python-version`/`git init` scaffolding, since this is very often being run straight in the caller's real project root, not a fresh scratch directory. Both steps are skipped if already done (existing `pyproject.toml`, existing venv), so it's safe to call repeatedly. `ubel-pip`/`ubel-uv`/`ubel-pipx` all still run their respective provisioning implicitly on first `check`/`install` if the venv doesn't exist yet, so calling `init` explicitly is only needed to provision ahead of time or at a non-default path.
 
 ```bash
 ubel-pip init
@@ -399,6 +420,8 @@ Sets the severity level at or above which vulnerabilities block the scan. Accept
 ubel-npm threshold high       # block high and critical
 ubel-npm threshold critical   # block critical only
 ubel-npm threshold none       # disable severity blocking
+
+ubel-composer threshold high  # composer works the same way
 
 ubel-pip threshold high
 ubel-uv threshold high
@@ -419,6 +442,8 @@ Controls whether packages with unknown-severity vulnerabilities are blocked. Ava
 ubel-npm block-unknown true
 ubel-npm block-unknown false
 
+ubel-composer block-unknown true
+
 ubel-pip block-unknown true
 ubel-uv block-unknown true
 ```
@@ -427,7 +452,7 @@ ubel-uv block-unknown true
 
 ### `license-risk`
 
-**npm/pnpm/bun/yarn only** — not exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower six-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`). Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
+**npm/pnpm/bun/yarn/composer only** — not exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower six-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`). Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
 
 ```bash
 ubel-npm license-risk high     # block only high-risk licenses (e.g. GPL/AGPL, proprietary EULAs)
@@ -441,7 +466,7 @@ Unlike `threshold`/`block-unknown`, this gate is only ever evaluated on `health`
 
 ### `license-block-unknown`
 
-**npm/pnpm/bun/yarn only**, same scope restriction as `license-risk` above. Separately controls whether packages whose license couldn't be classified at all cause a block — distinct from `license-risk` above, which only governs the `low`/`medium`/`high` buckets and deliberately never blocks on `unknown`.
+**npm/pnpm/bun/yarn/composer only**, same scope restriction as `license-risk` above. Separately controls whether packages whose license couldn't be classified at all cause a block — distinct from `license-risk` above, which only governs the `low`/`medium`/`high` buckets and deliberately never blocks on `unknown`.
 
 ```bash
 ubel-npm license-block-unknown true
@@ -734,6 +759,15 @@ name@version
 
 Specifiers containing shell metacharacters or other unsafe characters are rejected immediately.
 
+**composer** — validated against its own allow-list pattern, since Composer specifiers are always `vendor/package` rather than npm's `name`/`@scope/name` shape:
+
+```
+vendor/package
+vendor/package:constraint
+```
+
+Specifiers containing shell metacharacters or other unsafe characters are rejected immediately, same as npm/pnpm/bun.
+
 **pip/pipx/apt/dnf/yum** — validated more permissively, to allow the specifier shapes those ecosystems actually use (`black[d]>=24`, `requests==2.31.0`, a bare Linux package name): every character in `=._+-@/~[]<>!` is stripped from the specifier, and what remains must be alphanumeric. This still rejects shell metacharacters and anything else that isn't a legitimate part of a version/extras specifier — it's a different allow-list, not a weaker one.
 
 Either way, a rejected specifier exits non-zero before any filesystem or network operation occurs.
@@ -749,7 +783,7 @@ import { SCA_scan } from "@arcane-spark/ubel-node/sca";
 
 const report = await SCA_scan({
   projectRoot : "/abs/path/to/project",
-  engine      : "npm",   // npm | pnpm | bun | yarn | docker | pip | uv | pipx | apt | dnf | yum
+  engine      : "npm",   // npm | pnpm | bun | yarn | composer | docker | pip | uv | pipx | apt | dnf | yum
   mode        : "health",
   is_script   : true,
   save_reports: true,
@@ -796,7 +830,7 @@ Every scan writes two files to a timestamped path and overwrites the `latest*` c
     <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
 ```
 
-`<ecosystem>` is `npm` for npm/pnpm/bun/yarn, `pypi` for pip/uv/pipx, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+`<ecosystem>` is `npm` for npm/pnpm/bun/yarn/composer, `pypi` for pip/uv/pipx, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `composer`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
 The HTML report is fully self-contained (no server required) and includes:
 
@@ -842,6 +876,12 @@ All CLI commands exit non-zero on policy violations, making them native to any C
     version: 0.10.0
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
+    command: composer
+    version: 0.10.0
+    args: install                     # scan-gated `composer install --no-scripts`, resolved from the existing composer.lock
+
 - uses: AlaBouali/ubel@<commit-sha>    # needs a preceding astral-sh/setup-uv step for `uv` itself
   with:
     command: uv
@@ -855,7 +895,7 @@ All CLI commands exit non-zero on policy violations, making them native to any C
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum`.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum`.
 
 **Calling the binaries directly** (self-hosted runners, non-GitHub CI, Dockerfiles):
 
@@ -870,6 +910,9 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 - name: UBEL license compliance scan
   run: ubel-license .
 
+- name: UBEL PHP firewall-gated install
+  run: ubel-composer install
+
 - name: UBEL Python firewall-gated install
   run: ubel-pip install
 
@@ -883,6 +926,7 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 ```dockerfile
 # Dockerfile
 RUN ubel-npm install
+RUN ubel-composer install
 RUN ubel-apt install curl
 ```
 
@@ -914,6 +958,11 @@ ubel-npm health
 # Same workflows with pnpm and bun
 ubel-pnpm install react react-dom
 ubel-bun check
+
+# PHP: dry-run scan, then a scan-gated real install
+ubel-composer check monolog/monolog
+ubel-composer install monolog/monolog:^3.0
+ubel-composer install                     # no args → resolves from the existing composer.lock
 
 # Python: dry-run, then a scan-gated real install
 ubel-pip check requests==2.31.0

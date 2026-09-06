@@ -584,6 +584,7 @@ export function scanContent(data, options = {}) {
  * @returns {Promise<{ findings: Array, count: number, projectRoot: string }>}
  */
 export async function scanSecrets(projectRoot) {
+  console.log(`Scanning for secrets in ${projectRoot || process.cwd()}...`);
   const resolvedRoot = path.resolve(projectRoot || process.cwd());
 
   const files = [];

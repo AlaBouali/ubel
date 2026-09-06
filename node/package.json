@@ -20,6 +20,7 @@
     "ubel-pip": "bin/pip.js",
     "ubel-pipx": "bin/pipx.js",
     "ubel-uv": "bin/uv.js",
+    "ubel-composer": "bin/composer.js",
     "ubel-apt": "bin/apt.js",
     "ubel-dnf": "bin/dnf.js",
     "ubel-yum": "bin/yum.js",

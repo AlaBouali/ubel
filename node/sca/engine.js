@@ -2447,7 +2447,7 @@ export class UbelEngineInstance {
   // ── scan ────────────────────────────────────────────────────────────────────
 
   async scan(args, options = {}) {
-    const {
+    let {
       is_script           = false,
       save_reports        = true,
       scan_os             = false,
@@ -2462,7 +2462,18 @@ export class UbelEngineInstance {
     const projectRoot = this.projectRoot;
     const manager     = this.manager;
 
+    if (this.checkMode !== "health") {
+      scan_secrets = false;  // secrets scanning is only supported in health mode
+    }
+
     const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+
+    // Composer specifiers are always "vendor/package", optionally with a
+    // ":constraint" suffix (e.g. "monolog/monolog:^3.0") — the npm-shape
+    // regex above requires no "/" in the bare name and would reject every
+    // composer arg outright, so composer gets its own pattern rather than
+    // being folded into the npm-family check.
+    const COMPOSER_PKG_ARG_RE = /^[a-z0-9]([_.-]?[a-z0-9]+)*\/[a-z0-9]([_.-]?[a-z0-9]+)*(:[^\s;&|`$(){}\\'"<>]+)?$/i;
 
     // pip specifiers use `==`/`>=`/extras (`black[d]>=24`) and Linux package
     // names/versions don't follow the npm @scope/name@version shape at all,
@@ -2475,14 +2486,18 @@ export class UbelEngineInstance {
     };
 
     if (args.length) {
-      const bad = this.systemType === "npm"
-        ? args.filter(a => !PKG_ARG_RE.test(a))
-        : args.filter(a => !validatePkgArgsLoose(a));
+      const bad = this.engine === "composer"
+        ? args.filter(a => !COMPOSER_PKG_ARG_RE.test(a))
+        : this.systemType === "npm"
+          ? args.filter(a => !PKG_ARG_RE.test(a))
+          : args.filter(a => !validatePkgArgsLoose(a));
       if (bad.length) {
         console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
-        console.error(this.systemType === "npm"
-          ? "[!] Expected format: name, name@version, or @scope/name@version"
-          : "[!] Expected format: a package name, optionally with a version/extras specifier");
+        console.error(this.engine === "composer"
+          ? "[!] Expected format: vendor/package or vendor/package:constraint"
+          : this.systemType === "npm"
+            ? "[!] Expected format: name, name@version, or @scope/name@version"
+            : "[!] Expected format: a package name, optionally with a version/extras specifier");
         process.exit(1);
       }
     }
@@ -2933,7 +2948,7 @@ export class UbelEngineInstance {
       try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
-      if (scan_secrets) {
+      if (scan_secrets || this.checkMode === "health") {
         try {
           const secretsResult = await scanSecrets(projectRoot);
           const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
@@ -3115,12 +3130,12 @@ export class UbelEngineInstance {
         try {
           const installResult = await manager.runRealInstall(this.engine, projectRoot);
           if (installResult.status !== 0) {
-            if (!is_script) console.error(`[!] npm ci failed (exit ${installResult.status}) — dependencies were NOT installed.`);
+            if (!is_script) console.error(`[!] ${this.engine} install failed (exit ${installResult.status}) — dependencies were NOT installed.`);
             manager.revert_lock_to_original(this.engine, projectRoot);
             process.exit(1);
           }
         } catch (err) {
-          if (!is_script) console.error("[!] Failed to run npm ci:", err.message);
+          if (!is_script) console.error(`[!] Failed to run ${this.engine} install:`, err.message);
           manager.revert_lock_to_original(this.engine, projectRoot);
           process.exit(1);
         }

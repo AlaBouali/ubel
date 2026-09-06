@@ -5,7 +5,7 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | docker | pip | pipx | uv | apt | dnf | yum
+ *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | apt | dnf | yum
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
  *     apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
@@ -124,6 +124,7 @@
  *   pnpm   — yes  (--lockfile-only dry-run)
  *   bun    — yes  (--lockfile-only dry-run, node_modules untouched)
  *   yarn   — no   (no lockfile-only equivalent; yarn add always writes node_modules)
+ *   composer — yes (`composer require/update --no-install --no-scripts` dry-run; vendor/ untouched)
  *   docker — yes  (health/check/install all supported; see Docker mode above)
  *   pip    — yes  (`pip install --dry-run --report`; real install syncs requirements.txt/pyproject.toml after)
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
@@ -135,6 +136,7 @@ import path from "path";
 import os from "os";
 import { UbelEngineInstance, PolicyViolationError } from "./engine.js";
 import { NodeManagerInstance }  from "./node_runner.js";
+import { PhpComposerScanner }   from "./php_runner.js";
 import { PypiManagerInstance }  from "./pypi_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
@@ -157,7 +159,9 @@ const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
-const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun"]);
+// composer joins this set via `--no-install`, composer's own equivalent of
+// npm's `--package-lock-only` — see php_runner.js's ENGINE_CONFIG.
+const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun", "composer"]);
 
 // pip/pipx/uv/apt/dnf/yum are dispatched through their own dedicated CLI
 // branch below (mirroring __main__.py's _run_mode), not through the
@@ -188,6 +192,14 @@ function resolveManager(engine) {
   if (LINUX_ENGINES.has(engine)) {
     return { manager: new LinuxManagerInstance(engine), systemType: "linux" };
   }
+  if (engine === "composer") {
+    // PhpComposerScanner implements the same runDryRun/revert_lock_to_
+    // original/runRealInstall/saveCandidateLockfile/cleanupLockfileBackup
+    // contract as NodeManagerInstance, so it shares the "npm" systemType
+    // bucket (engine.js's lockfile-based dry-run/verify/revert/install
+    // path) rather than getting a fourth bucket of its own.
+    return { manager: new PhpComposerScanner(), systemType: "php" };
+  }
   return { manager: new NodeManagerInstance(), systemType: "npm" };
 }
 
@@ -201,7 +213,7 @@ function resolveManager(engine) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"docker"|"pip"|"pipx"|"uv"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
@@ -599,7 +611,7 @@ async function main(programmaticOptions) {
   // ── check/install require lockfile-only dry-run support ─────────────────────
   if (!CHECK_INSTALL_ENGINES.has(engine)) {
     console.error(`[!] '${engine}' is not supported.`);
-    console.error("[!] Supported engines: npm, pnpm, bun");
+    console.error("[!] Supported engines: npm, pnpm, bun, composer");
     process.exit(1);
   }
 
