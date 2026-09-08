@@ -45,7 +45,7 @@ The VS Code extension imports the Node.js engine directly from `node/src/` at pa
 - Full-stack monorepo scanning — all supported ecosystems in a single pass
 - Platform scanning — Linux (dpkg/apk/rpm) and Windows (registry/PowerShell), no elevated privileges required
 - Atomic lockfile revert with TOCTOU SHA-256 integrity protection (Node.js)
-- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** + **HTML** + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - Zero external runtime dependencies (stdlib only, in both Python and Node.js)
 - Complete, compliant, and enriched SBOM CycloneDX v1.6 with full dependency graph and vulnerabilities in VEX format
 - Complete, compliant, and enriched SARIF v2.1.0 output
@@ -213,10 +213,7 @@ Every scan writes files to a timestamped path and overwrites the `latest.*` conv
 .ubel/reports/latest.sarif.json
 
 .ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
-    <ecosystem>_<mode>_<engine>__<timestamp>.json
-    <ecosystem>_<mode>_<engine>__<timestamp>.html
-    <ecosystem>_<mode>_<engine>__<timestamp>.cdx.json
-    <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.zip
 ```
 
 The HTML report is fully self-contained (no server required) and includes:

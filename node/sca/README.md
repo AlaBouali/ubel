@@ -20,7 +20,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/apt/dnf/yum have no lockfile to revert; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv))
-- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
+- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -824,10 +824,7 @@ Every scan writes two files to a timestamped path and overwrites the `latest*` c
 .ubel/reports/latest.sarif.json          ← always current
 
 .ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
-    <ecosystem>_<mode>_<engine>__<timestamp>.json
-    <ecosystem>_<mode>_<engine>__<timestamp>.html
-    <ecosystem>_<mode>_<engine>__<timestamp>.cdx.json
-    <ecosystem>_<mode>_<engine>__<timestamp>.sarif.json
+    <ecosystem>_<mode>_<engine>__<timestamp>.zip
 ```
 
 `<ecosystem>` is `npm` for npm/pnpm/bun/yarn/composer, `pypi` for pip/uv/pipx, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `composer`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.

@@ -18,7 +18,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - `--only-diff` mode — scan only chunks touched by a git diff, while still building the full chunk set so cross-file taint chains keep resolving correctly
 - Configurable `--fail-on` exit-code gate (`any` / `valid` / `exploitable` for SAST, `any` / `confirmed` for malware) — reports always contain every finding regardless of this flag; it only changes the CI exit code
 - Pluggable LLM provider registry — OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, and local/Docker-hosted models (Ollama-compatible), selectable per run with no code changes
-- Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.*` convenience links, kept in a separate namespace per scan type so SAST and malware runs never collide
+- Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.*` convenience links, kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 
 ---
@@ -353,9 +353,7 @@ Every `analyze` run writes:
 .ubel/reports/latest.sast.sarif.json    ← always current
 
 .ubel/local/reports/sast/<YYYY>/<MM>/<DD>/
-    sast__<timestamp>.json
-    sast__<timestamp>.html
-    sast__<timestamp>.sarif.json
+    sast__<timestamp>.zip
 ```
 
 Every `malware` run writes the equivalent set under its own namespace:
@@ -366,9 +364,7 @@ Every `malware` run writes the equivalent set under its own namespace:
 .ubel/reports/latest.malware.sarif.json
 
 .ubel/local/reports/malware/<YYYY>/<MM>/<DD>/
-    malware__<timestamp>.json
-    malware__<timestamp>.html
-    malware__<timestamp>.sarif.json
+    malware__<timestamp>.zip
 ```
 
 The HTML report is fully self-contained (no server required) and includes a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable), and run metadata (git commit, OS, provider/model used). The JSON report is the full machine-readable equivalent; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
