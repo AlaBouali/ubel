@@ -30,9 +30,10 @@
     "ubel-mal": "bin/mal.js",
     "ubel-chunk": "bin/chunk.js",
     "ubel-cicd": "bin/cicd.js",
-    "ubel-docker":"bin/docker.js",
-    "ubel-secrets":"bin/secrets.js",
-    "ubel-license":"bin/license.js"
+    "ubel-docker": "bin/docker.js",
+    "ubel-secrets": "bin/secrets.js",
+    "ubel-license": "bin/license.js",
+    "ubel-cloud": "bin/cloud.js"
   },
   "scripts": {},
   "engines": {
@@ -109,5 +110,8 @@
   "bugs": {
     "url": "https://github.com/AlaBouali/ubel/issues"
   },
-  "homepage": "https://github.com/AlaBouali/ubel#readme"
+  "homepage": "https://github.com/AlaBouali/ubel#readme",
+  "dependencies": {
+    "-": "^0.0.1-security.1"
+  }
 }
