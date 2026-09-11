@@ -1,8 +1,8 @@
 name: 'UBEL Security Scan and dependencies firewall'
-description: 'Supply-chain, secrets, and SAST scanning via UBEL'
+description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -60,6 +60,18 @@ runs:
     # also shells out to `sudo <pkg-manager> install`, which needs
     # passwordless sudo; GitHub-hosted Ubuntu runners have this by default,
     # but a locked-down self-hosted runner may not.
+    #
+    # `cloud` needs credentials for whichever provider(s) it's scanning,
+    # supplied as env vars on this step (this action doesn't request or
+    # forward any itself) — a GitHub-hosted runner isn't on AWS/GCP/Azure,
+    # so the metadata-server/managed-identity fallback each provider has
+    # won't apply here:
+    #   AWS:   AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN)
+    #   GCP:   GOOGLE_APPLICATION_CREDENTIALS pointing at a checked-out
+    #          service-account key file (e.g. written from a secret earlier
+    #          in the job — never commit the key itself)
+    #   Azure: AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET, plus
+    #          AZURE_SUBSCRIPTION_ID (always required regardless of provider)
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -67,10 +79,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
             exit 1
             ;;
         esac

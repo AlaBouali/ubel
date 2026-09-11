@@ -9,6 +9,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
 - **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
+- **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [node/cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md).
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 
@@ -20,7 +21,7 @@ Everything runs on your own infrastructure: no source code egress, no credential
 npm install -g @arcane-spark/ubel-node
 ```
 
-This installs the binaries for both the SCA/firewall CLI and the SAST module:
+This installs the binaries for the SCA/firewall CLI, the SAST module, and the cloud scanner:
 
 | Binary | Covers | What it does |
 |---|---|---|
@@ -38,6 +39,7 @@ This installs the binaries for both the SCA/firewall CLI and the SAST module:
 | `ubel-sast` | SAST | Static analysis for accidental vulnerabilities (injection, XSS, insecure deserialization, hardcoded secrets, …) |
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
+| `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
 
 `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
 
@@ -201,6 +203,28 @@ Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-h
 
 ---
 
+## Cloud — AWS / GCP / Azure Misconfiguration Scanning
+
+Scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API — live account state, not a static IaC/manifest scan, and nothing is deployed or modified. Covers public storage/database/network exposure (S3/GCS/Storage buckets, RDS/Cloud SQL/Azure SQL, security groups/NSGs/firewall rules open to the internet), IAM posture (overly permissive policies, missing MFA, stale access keys, permissive trust policies), Kubernetes cluster authorization (GKE/AKS control-plane exposure, RBAC/ABAC, legacy auth), missing encryption (EBS, RDS, CloudTrail, storage accounts), and disabled audit logging (CloudTrail, GuardDuty, VPC flow logs). Credentials are only ever used for that run — nothing stored or reused, same model as SAST's LLM credentials.
+
+```bash
+# Scan whichever providers you have credentials for (default: aws,gcp,azure)
+ubel-cloud
+
+# Scan a specific provider only
+ubel-cloud --provider aws
+
+# Explicit AWS region override — skips DescribeRegions auto-discovery
+ubel-cloud --provider aws --regions us-east-1,eu-west-1
+```
+
+Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Exit codes:** governed by `--fail-on` (default `critical`), same severity-threshold/count syntax as the rest of UBEL — reports on disk always contain every finding regardless of this flag.
+
+**Full documentation — every check, per-provider credential setup, and all flags:**
+[**node/cloud/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md)
+
+---
+
 ## CI/CD Integration
 
 All binaries exit non-zero on findings that clear their respective gate, so any of them fit natively into a CI runner.
@@ -238,6 +262,11 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
+    command: cloud
+    args: --provider aws,gcp,azure --fail-on high
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
     command: pip
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
@@ -252,7 +281,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
 
 ### Calling the binaries directly
 
@@ -277,6 +306,9 @@ Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 
 - name: UBEL license compliance scan
   run: ubel-license .
+
+- name: UBEL cloud misconfiguration scan
+  run: ubel-cloud --fail-on high
 ```
 
 ```dockerfile
@@ -338,6 +370,8 @@ ecosystem's tooling, not an oversight.
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
 
 ✅ = built and shipped · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
+
+Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
 ---
 
@@ -820,9 +854,12 @@ To keep this document honest rather than aspirational:
   SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question
   for those.
-- Kubernetes and IaC coverage is **static file analysis**, not live
-  cluster/cloud posture management — there is no drift detection against
-  what's actually deployed.
+- Kubernetes *manifest* and IaC coverage is **static file analysis**, not
+  live cluster posture management — there is no drift detection against
+  what's actually running in a cluster. (Live account-level posture for
+  the AWS, GCP, and Azure resources themselves — as opposed to Kubernetes
+  clusters running on them — is covered separately by `ubel-cloud`, via
+  each provider's own API; see the Cloud section above.)
 - Every ecosystem here — including the OS-level ones (apt/dnf/yum and
   Windows) — gets full SCA **and** license compliance regardless of
   firewall status; firewalling and inventory/license coverage are tracked
@@ -841,5 +878,6 @@ Source-available, internal-use license. Modification for internal needs is permi
 - Issues: https://github.com/AlaBouali/ubel/issues
 - SCA docs: https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md
 - SAST docs: https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md
+- Cloud docs: https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md
 
 *UBEL — Find the bug before it finds production.*
