@@ -3067,7 +3067,7 @@ export class UbelEngineInstance {
       try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
-      if (scan_secrets || this.checkMode === "health") {
+      if (scan_secrets=== true || (this.checkMode === "health" && scan_scope !== "developer_platform")) {
         try {
           const secretsResult = await scanSecrets(projectRoot);
           const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
