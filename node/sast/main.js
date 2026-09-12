@@ -12,6 +12,13 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
+import {
+  getComplianceForSastFinding,
+  getComplianceForMalwareFinding,
+  getCwesForSastClass,
+  getCwesForMalwareClass,
+  summarizeCompliance,
+} from '../sca/compliance_mappings.js';
 
 // ─── Shared CLI flag parser ────────────────────────────────────────────────────
 
@@ -103,8 +110,13 @@ async function writeAnalyzeReports(results, opts) {
       if (f.verification_reason && !f.reason) {
         f.reason = f.verification_reason;
       }
+      f.compliance = getComplianceForSastFinding(f.vuln_class);
+      f.cwe = getCwesForSastClass(f.vuln_class);
     }
   }
+  meta.compliance_summary = summarizeCompliance(
+    results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
+  );
 
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // json/html/sarif used to be written out as three separate files per scan
@@ -285,8 +297,13 @@ async function writeMalwareReports(results, opts) {
       if (f.verification_reason && !f.reason) {
         f.reason = f.verification_reason;
       }
+      f.compliance = getComplianceForMalwareFinding();
+      f.cwe = getCwesForMalwareClass(f.vuln_class);
     }
   }
+  meta.compliance_summary = summarizeCompliance(
+    results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
+  );
 
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // See writeAnalyzeReports() above — same rationale: json/html/sarif are

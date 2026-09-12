@@ -496,6 +496,12 @@ export class SarifBuilder {
         rule.properties.reachability_tags       = v.reachability.tags || [];
       }
 
+      // Attach compliance framework mapping (see compliance_mappings.js).
+      if (v.compliance) {
+        rule.properties.compliance_categories = v.compliance.categories || [];
+        rule.properties.compliance_frameworks = v.compliance.frameworks || [];
+      }
+
       // Indicators of Compromise — populated on OSV malicious-package
       // entries (e.g. MAL-*) only; omitted entirely otherwise.
       if (v.iocs) {
@@ -643,6 +649,8 @@ export class SarifBuilder {
             : null,
 
           iocs: v.iocs || null,
+
+          compliance: v.compliance || null,
         },
       });
     }
@@ -920,6 +928,8 @@ export class SarifBuilder {
         properties: {
           category: f.category || null,
           severity: f.severity || "unknown",
+          compliance_categories: f.compliance?.categories || [],
+          compliance_frameworks: f.compliance?.frameworks || [],
         },
         defaultConfiguration: {
           level: this._severityToLevel(f.severity),
@@ -965,6 +975,7 @@ export class SarifBuilder {
       properties: {
         category: f.category || null,
         severity: f.severity || "unknown",
+        compliance: f.compliance || null,
       },
     }));
   }

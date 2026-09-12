@@ -207,12 +207,46 @@ function validBadge(isValid) {
   return '<span class="px-1.5 py-0.5 rounded border text-[10px] text-neutral-600 border-neutral-700">UNVERIFIED</span>';
 }
 
+// CWE + compliance-framework mapping for a finding (see compliance_mappings.js).
+// Written with string concatenation rather than a template literal since
+// this whole file is itself embedded inside an outer template literal —
+// keeping this one templating-free sidesteps another layer of escaping.
+function renderCweAndCompliance(f) {
+  var cwes = f.cwe || [];
+  var compliance = f.compliance;
+  var hasCompliance = compliance && compliance.frameworks && compliance.frameworks.length;
+  if (!cwes.length && !hasCompliance) return '';
+
+  var cweHtml = '';
+  if (cwes.length) {
+    var cweBadges = cwes.map(function(c) {
+      return '<a href="https://cwe.mitre.org/data/definitions/' + c + '.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-' + c + '</a>';
+    }).join('');
+    cweHtml = '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-2">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">' + cweBadges + '</div></div>';
+  }
+
+  var complianceHtml = '';
+  if (hasCompliance) {
+    var frameworksHtml = compliance.frameworks.map(function(fw) {
+      var controlsHtml = fw.controls.map(function(c) {
+        return '<span class="text-[10px] bg-neutral-800 border border-neutral-700 px-2 py-1 rounded text-neutral-300" title="' + escH(c.title) + '">' + escH(c.id) + '</span>';
+      }).join('');
+      return '<div class="flex flex-col gap-1"><span class="text-xs font-semibold text-orange-400">' + escH(fw.name) + '</span><div class="flex flex-wrap gap-1.5">' + controlsHtml + '</div></div>';
+    }).join('');
+    complianceHtml = '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-2">Compliance Frameworks</h4><div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 space-y-2">' + frameworksHtml + '</div></div>';
+  }
+
+  return cweHtml + complianceHtml;
+}
+
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
 
 function updateTabCounts() {
   const s = reportData.stats;
   document.getElementById('tab-findings').textContent  = 'Findings(' + s.totalFindings + ')';
   document.getElementById('tab-inventory').textContent = 'Chunk Inventory(' + s.totalChunks + ')';
+  const cs = reportData.meta && reportData.meta.compliance_summary;
+  document.getElementById('tab-compliance').textContent = 'Compliance(' + (cs && cs.frameworks ? cs.frameworks.length : 0) + ')';
 }
 
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
@@ -515,6 +549,8 @@ function _renderFindingModal({chunk, finding: f}) {
         \${taintHtml}
       </div>
 
+      \${renderCweAndCompliance(f)}
+
       <div class="border-t border-neutral-800 pt-4">
         <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Chunk Context</h4>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -739,6 +775,35 @@ function renderSystem() {
   s('os-version', os.os_version||'N/A');
 }
 
+// ── COMPLIANCE ─────────────────────────────────────────────────────────────────
+
+function renderCompliance() {
+  const cs = reportData.meta && reportData.meta.compliance_summary;
+  const disclaimerEl = document.getElementById('compliance-disclaimer');
+  if (disclaimerEl) disclaimerEl.textContent = (cs && cs.disclaimer) || '';
+  const grid = document.getElementById('compliance-frameworks-grid');
+  if (!cs || !cs.frameworks || !cs.frameworks.length) {
+    document.getElementById('compliance-empty').classList.remove('hidden');
+    grid.innerHTML = '';
+    return;
+  }
+  grid.innerHTML = cs.frameworks.map(fw => {
+    const controlRows = fw.controls.map(c =>
+      '<div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">' +
+        '<div class="flex flex-col"><span class="mono text-orange-400">' + escH(c.id) + '</span><span class="text-neutral-500">' + escH(c.title) + '</span></div>' +
+        '<span class="mono text-neutral-400 whitespace-nowrap">' + c.findings_count + '</span>' +
+      '</div>'
+    ).join('');
+    return '<div class="glass p-6 rounded-xl space-y-4">' +
+      '<div class="flex items-center justify-between">' +
+        '<h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3>' +
+        '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">' + fw.findings_count + ' finding' + (fw.findings_count === 1 ? '' : 's') + '</span>' +
+      '</div>' +
+      '<div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">' + controlRows + '</div>' +
+    '</div>';
+  }).join('');
+}
+
 // ── FILTERS & DROPDOWNS ──────────────────────────────────────────────────────
 
 function setupFilters() {
@@ -784,6 +849,7 @@ function init() {
   renderInventory();
   renderStats();
   renderSystem();
+  renderCompliance();
   setupFilters();
 }
 
@@ -825,6 +891,8 @@ export async function generateSastHTMLReport(results, meta = {}) {
       reason:             f.reason             || null,
       verification_error: f.verification_error || null,
       taint:              f.taint || null,
+      cwe:                f.cwe                || [],
+      compliance:         f.compliance         || null,
       _parse_error:       f._parse_error       || false,
     })),
   }));
@@ -842,6 +910,7 @@ export async function generateSastHTMLReport(results, meta = {}) {
       runtime_version: process.version.replace(/^v/,''),
       gitMetadata:     meta.gitMetadata     || null,
       osMetadata:      meta.osMetadata      || null,
+      compliance_summary: meta.compliance_summary || null,
     },
     chunks: inventory,
   };
@@ -905,6 +974,7 @@ export async function generateSastHTMLReport(results, meta = {}) {
       <button onclick="switchTab('findings')"       id="tab-findings"       class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
       <button onclick="switchTab('inventory')"      id="tab-inventory"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Chunk Inventory(0)</button>
       <button onclick="switchTab('stats')"          id="tab-stats"          class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
+      <button onclick="switchTab('compliance')"     id="tab-compliance"     class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
       <button onclick="switchTab('system')"         id="tab-system"         class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
     </div>
   </nav>
@@ -1081,6 +1151,13 @@ export async function generateSastHTMLReport(results, meta = {}) {
         </div>
 
       </div>
+    </section>
+
+    <!-- Compliance -->
+    <section id="section-compliance" class="hidden space-y-8">
+      <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+      <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>
 
     <!-- System Info -->

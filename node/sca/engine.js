@@ -18,6 +18,7 @@ import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem } from "./version_recommender.js"
 import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
+import { getComplianceForVulnerability, getComplianceForSecret, summarizeCompliance } from "./compliance_mappings.js";
 import { PypiManagerInstance } from "./pypi_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { getTailwindScript } from "./tailwindcss.js";
@@ -464,6 +465,7 @@ async function generateHTMLReport(data) {
             renderStats();
             renderSystem();
             renderSecrets();
+            renderCompliance();
             setupFilters();
             populatePackageSelect();
             setupCounts();
@@ -481,6 +483,8 @@ async function generateHTMLReport(data) {
             document.getElementById('tab-secrets').textContent = \`Secrets(\${reportData.secrets?.count || 0})\`;
             document.getElementById('tab-vulnerabilities').textContent = \`Vulnerabilities(\${reportData.stats.total_vulnerabilities})\`;
             document.getElementById('tab-inventory').textContent = \`Inventory(\${reportData.stats.inventory_size})\`;
+            const cs = reportData.compliance_summary;
+            document.getElementById('tab-compliance').textContent = \`Compliance(\${cs && cs.frameworks ? cs.frameworks.length : 0})\`;
         }
 
         function switchTab(tabId) {
@@ -733,6 +737,34 @@ async function generateHTMLReport(data) {
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
+        }
+
+        function renderCompliance() {
+            const cs = reportData.compliance_summary;
+            document.getElementById('compliance-disclaimer').textContent = cs?.disclaimer || '';
+            const grid = document.getElementById('compliance-frameworks-grid');
+            if (!cs || !cs.frameworks || !cs.frameworks.length) {
+                document.getElementById('compliance-empty').classList.remove('hidden');
+                grid.innerHTML = '';
+                return;
+            }
+            grid.innerHTML = cs.frameworks.map(fw => \`
+                <div class="glass p-6 rounded-xl space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${fw.name}</h3>
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
+                    </div>
+                    <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                        \${fw.controls.map(c => \`
+                        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">
+                            <div class="flex flex-col">
+                                <span class="mono text-orange-400">\${c.id}</span>
+                                <span class="text-neutral-500">\${c.title}</span>
+                            </div>
+                            <span class="mono text-neutral-400 whitespace-nowrap">\${c.findings_count}</span>
+                        </div>\`).join('')}
+                    </div>
+                </div>\`).join('');
         }
 
         function renderSystem() {
@@ -1022,6 +1054,7 @@ async function generateHTMLReport(data) {
                         </div>
                     </div>\` : ''}
                     \${(v.cwes && v.cwes.length > 0) ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Weaknesses (CWE)</h4><div class="flex flex-wrap gap-2">\${v.cwes.map(c => \`<a href="https://cwe.mitre.org/data/definitions/\${c}.html" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-orange-400 hover:text-orange-300 mono">CWE-\${c}</a>\`).join('')}</div></div>\` : ''}
+                    \${renderComplianceSection(v.compliance)}
                     \${v.iocs ? \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Indicators of Compromise</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">\${renderIocTable(v.iocs)}</div></div>\` : ''}
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">References</h4><div class="flex flex-wrap gap-2">\${v.references.map(r => \`<a href="\${r.url}" target="_blank" class="text-[10px] bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-400 hover:text-white">\${r.type}</a>\`).join('')}</div></div>
                     <div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Description</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 whitespace-pre-wrap">\${v.description}</div></div>
@@ -1030,6 +1063,23 @@ async function generateHTMLReport(data) {
 
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
+        }
+
+        // Compliance framework helpers
+        function renderComplianceBadges(compliance) {
+            if (!compliance || !compliance.frameworks || !compliance.frameworks.length) return '';
+            return compliance.frameworks.map(fw => \`<span class="text-[9px] bg-neutral-800 border border-neutral-700 px-1.5 py-0.5 rounded text-neutral-400" title="\${fw.controls.map(c => c.id + ' — ' + c.title).join('; ')}">\${fw.name}</span>\`).join('');
+        }
+
+        function renderComplianceSection(compliance) {
+            if (!compliance || !compliance.frameworks || !compliance.frameworks.length) return '';
+            return \`<div><h4 class="text-sm font-semibold mb-2 text-neutral-300">Compliance Frameworks</h4><div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 space-y-2">
+                \${compliance.frameworks.map(fw => \`
+                <div class="flex flex-col gap-1">
+                    <span class="text-xs font-semibold text-orange-400">\${fw.name}</span>
+                    <div class="flex flex-wrap gap-1.5">\${fw.controls.map(c => \`<span class="text-[10px] bg-neutral-800 border border-neutral-700 px-2 py-1 rounded text-neutral-300" title="\${c.title}">\${c.id}</span>\`).join('')}</div>
+                </div>\`).join('')}
+            </div></div>\`;
         }
 
 
@@ -1119,6 +1169,7 @@ async function generateHTMLReport(data) {
             <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Inventory(0)</button>
             <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Sequences</button>
             <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
+            <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
             <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
         </div>
     </nav>
@@ -1174,6 +1225,12 @@ async function generateHTMLReport(data) {
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3><div class="h-48"><canvas id="statsEcoChart"></canvas></div><div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">License Risk</h3><div class="h-48"><canvas id="statsLicenseChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Classified</span><span class="mono" id="stats-license-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-green-400" id="stats-license-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-license-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-license-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-license-unk">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">OSI Approved</span><span class="mono text-blue-400" id="stats-license-osi">0</span></div></div></div>
             </div>
+        </section>
+        <!-- Compliance Section -->
+        <section id="section-compliance" class="hidden space-y-8">
+            <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+            <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+            <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
         </section>
         <!-- System Section -->
         <section id="section-system" class="hidden space-y-8">
@@ -2761,6 +2818,7 @@ export class UbelEngineInstance {
 
       for (const v of vulnerabilities) {
         this.vulns_ids_found.add(v.id);
+        v.compliance = getComplianceForVulnerability(v.cwes, v.is_infection);
         if (v.is_infection) {
           infectionCount++;
           infectedPurls.add(v.affected_package_id);
@@ -2955,6 +3013,7 @@ export class UbelEngineInstance {
           for (const f of secretsResult.findings) {
             const key = (f.severity || "unknown").toLowerCase();
             bySeverity[key] = (bySeverity[key] || 0) + 1;
+            f.compliance = getComplianceForSecret();
           }
           finalJson.secrets = {
             enabled: true,
@@ -2969,6 +3028,15 @@ export class UbelEngineInstance {
       } else {
         finalJson.secrets = { enabled: false, count: 0, findings: [], stats: { by_severity: {} } };
       }
+
+      // ── Compliance framework mapping summary ────────────────────────────────
+      // Aggregates the per-finding `.compliance` attached to vulnerabilities
+      // (above) and secrets findings (above) into report-level framework/
+      // control coverage counts. See compliance_mappings.js.
+      finalJson.compliance_summary = summarizeCompliance([
+        ...finalJson.vulnerabilities.map(v => v.compliance),
+        ...finalJson.secrets.findings.map(f => f.compliance),
+      ]);
 
       const [allowed, reason] = evaluatePolicy(finalJson);
       finalJson.decision = { allowed, reason, policy_violations: policyViolations };

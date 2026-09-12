@@ -19,44 +19,13 @@ import crypto from 'crypto';
 import { TOOL_NAME, TOOL_VERSION } from '../sca/info.js';
 import { getGitMetadata }           from '../sca/git_info.js';
 import { getOSMetadata }            from '../sca/os_metadata.js';
+import { getCwesForSastClass, getCwesForMalwareClass } from '../sca/compliance_mappings.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const SARIF_VERSION = '2.1.0';
 const SARIF_SCHEMA  = 'https://json.schemastore.org/sarif-2.1.0.json';
 const SAST_TOOL     = '@arcane-spark/ubel-sast';
-
-// CWE integers per vuln_class name.
-// Keys must match the canonical names in vulnCatalog.js DEFAULT_VULN_CLASSES exactly
-// (after the CWE suffix has been stripped by the normalizer in main.js).
-const VULN_CLASS_CWE = {
-  // ── canonical names (vulnCatalog.js) ────────────────────────────────────
-  'hardcoded secret or credential':                      [798],
-  'SQL injection':                                       [89],
-  'command injection':                                   [78],
-  'path traversal':                                      [22],
-  'unsafe deserialization':                              [502],
-  'XSS / template injection':                            [79, 94],
-  'open redirect':                                       [601],
-  'XXE injection':                                       [611],
-  'SSRF':                                                [918],
-  'missing authentication check':                        [306],
-  'broken access control / privilege escalation':        [269],
-  'prototype pollution':                                 [1321],
-  'code injection / dangerous eval':                     [95],
-  'unsafe file upload':                                  [434],
-  'sensitive data exposure / information disclosure':    [200],
-  'cryptographic weakness':                              [327],
-  'integer overflow / underflow':                        [190, 191],
-  'null / nil dereference':                              [476],
-  'use after free / memory safety':                      [416, 119],
-  'buffer overflow / out-of-bounds access':              [120],
-  'format string vulnerability':                         [134],
-  'race condition / TOCTOU':                             [362],
-  'insecure direct object reference (IDOR)':             [639],
-  'HTTP header injection / response splitting':          [113],
-  'regex denial of service (ReDoS)':                     [1333],
-};
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -179,21 +148,19 @@ export class SastSarifBuilder {
 
   // ── CWE helpers ──────────────────────────────────────────────────────────
 
-  _cwesForClass(vulnClass) {
-    const key = String(vulnClass || '').toLowerCase().trim()
-      // Strip any trailing " (CWE-NNN)" suffix that may have slipped through
-      .replace(/\s*\(cwe-[\d\s/,]+\)\s*$/i, '').trim();
-    for (const [k, cwes] of Object.entries(VULN_CLASS_CWE)) {
-      if (k.toLowerCase() === key) return cwes;
-    }
-    return [];
+  _cwesForClass(finding) {
+    if (Array.isArray(finding?.cwe) && finding.cwe.length) return finding.cwe;
+    const vulnClass = finding?.vuln_class || finding; // tolerate a bare string for back-compat
+    const sastCwes = getCwesForSastClass(vulnClass);
+    if (sastCwes.length) return sastCwes;
+    return getCwesForMalwareClass(vulnClass);
   }
 
   _collectAllCwes() {
     if (this._allCwes) return this._allCwes;
     const s = new Set();
     for (const { finding } of this._allFindings()) {
-      for (const c of this._cwesForClass(finding.vuln_class)) s.add(c);
+      for (const c of this._cwesForClass(finding)) s.add(c);
     }
     this._allCwes = s;
     return s;
@@ -238,7 +205,7 @@ export class SastSarifBuilder {
       const ruleId = ruleIdForClass(vc);
       if (rulesMap.has(ruleId)) continue;
 
-      const cwes = this._cwesForClass(vc);
+      const cwes = this._cwesForClass(finding);
       const relationships = cwes.map(c => ({
         target: {
           id:            `CWE-${c}`,
@@ -283,6 +250,8 @@ export class SastSarifBuilder {
           vuln_class: vc,
           cwes,
           tags: ['security', 'sast', 'ubel'],
+          compliance_categories: finding.compliance?.categories || [],
+          compliance_frameworks: finding.compliance?.frameworks || [],
         },
       };
 
@@ -394,6 +363,8 @@ export class SastSarifBuilder {
           confidence:      finding.confidence  || null,
           severity:        finding.severity    || null,
           line:            finding.line        || null,
+          cwe:             finding.cwe         || [],
+          compliance:      finding.compliance  || null,
 
           // Verification pass
           is_valid:             isValid    ?? null,
@@ -502,6 +473,7 @@ export class SastSarifBuilder {
         high_confidence:      highConf,
         medium_confidence:    medConf,
         parse_errors:         parseErrors,
+        compliance_summary:   m.compliance_summary || null,
       },
     }];
   }

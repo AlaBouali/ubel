@@ -22,6 +22,7 @@ const TOOL_NAME = 'cloud-scanner';
 import { getTailwindScript } from "../../sca/tailwindcss.js";
 import { getChartJSScript } from "../../sca/chartjs.js";
 import { getGoogleFontsScript } from "../../sca/googlefonts.js";
+import { summarizeCompliance } from "../../sca/compliance_mappings.js";
 
 async function loadScaStatics() {
   try {
@@ -82,6 +83,7 @@ function buildStats(findings) {
 function buildReportPayload(reporter, meta = {}) {
   const findings = reporter.sorted();
   const stats = buildStats(findings);
+  const complianceSummary = summarizeCompliance(findings.map(f => f.compliance));
 
   return {
     generated_at: meta.generated_at || new Date().toISOString(),
@@ -90,6 +92,7 @@ function buildReportPayload(reporter, meta = {}) {
     providers: meta.providers || [],
     regions: meta.regions || {},
     stats,
+    compliance_summary: complianceSummary,
     findings,
   };
 }
@@ -155,6 +158,7 @@ async function generateHtmlReport(reportPayload) {
     <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
       <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
       <button onclick="switchTab('findings')"  id="tab-findings"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
+      <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
       <button onclick="switchTab('scaninfo')"  id="tab-scaninfo"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Scan Info</button>
     </div>
   </nav>
@@ -239,6 +243,13 @@ async function generateHtmlReport(reportPayload) {
       </div>
     </section>
 
+    <!-- Compliance -->
+    <section id="section-compliance" class="hidden space-y-8">
+      <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+      <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
+    </section>
+
     <!-- Scan Info -->
     <section id="section-scaninfo" class="hidden space-y-8">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -305,6 +316,50 @@ function sevClass(s) {
   return {critical:'severity-critical',high:'severity-high',medium:'severity-medium',low:'severity-low',info:'severity-info'}[s] || 'severity-info';
 }
 
+// ── COMPLIANCE ─────────────────────────────────────────────────────────────────
+
+function renderComplianceSection(compliance) {
+  if (!compliance || !compliance.frameworks || !compliance.frameworks.length) return '';
+  return \`<div>
+    <p class="text-xs text-neutral-500 uppercase font-semibold mb-2">Compliance Frameworks</p>
+    <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800 space-y-2">
+      \${compliance.frameworks.map(fw => \`
+      <div class="flex flex-col gap-1">
+        <span class="text-xs font-semibold text-red-400">\${escH(fw.name)}</span>
+        <div class="flex flex-wrap gap-1.5">\${fw.controls.map(c => \`<span class="text-[10px] bg-neutral-800 border border-neutral-700 px-2 py-1 rounded text-neutral-300" title="\${escH(c.title)}">\${escH(c.id)}</span>\`).join('')}</div>
+      </div>\`).join('')}
+    </div>
+  </div>\`;
+}
+
+function renderCompliance() {
+  const cs = reportData.compliance_summary;
+  document.getElementById('compliance-disclaimer').textContent = (cs && cs.disclaimer) || '';
+  const grid = document.getElementById('compliance-frameworks-grid');
+  if (!cs || !cs.frameworks || !cs.frameworks.length) {
+    document.getElementById('compliance-empty').classList.remove('hidden');
+    grid.innerHTML = '';
+    return;
+  }
+  grid.innerHTML = cs.frameworks.map(fw => \`
+    <div class="glass p-6 rounded-xl space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${escH(fw.name)}</h3>
+        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
+      </div>
+      <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+        \${fw.controls.map(c => \`
+        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">
+          <div class="flex flex-col">
+            <span class="mono text-red-400">\${escH(c.id)}</span>
+            <span class="text-neutral-500">\${escH(c.title)}</span>
+          </div>
+          <span class="mono text-neutral-400 whitespace-nowrap">\${c.findings_count}</span>
+        </div>\`).join('')}
+      </div>
+    </div>\`).join('');
+}
+
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 
 function switchTab(id) {
@@ -344,12 +399,15 @@ document.addEventListener('DOMContentLoaded', () => {
   populateProviderFilter();
   applyFilters();
   renderScanInfo();
+  renderCompliance();
 });
 
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
 
 function updateTabCounts() {
   document.getElementById('tab-findings').textContent = 'Findings(' + reportData.stats.total + ')';
+  const cs = reportData.compliance_summary;
+  document.getElementById('tab-compliance').textContent = 'Compliance(' + (cs && cs.frameworks ? cs.frameworks.length : 0) + ')';
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
@@ -488,6 +546,7 @@ function openFindingModal(idx) {
         <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Remediation</p>
         <p class="text-sm text-neutral-300 mono bg-neutral-900 p-3 rounded-lg break-all">\${escH(f.remediation)}</p>
       </div>
+      \${renderComplianceSection(f.compliance)}
     </div>
   \`);
 }

@@ -1,5 +1,6 @@
 'use strict';
 import fs from 'fs';
+import { getComplianceForCloudCheck } from '../../sca/compliance_mappings.js';
 
 const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
@@ -21,7 +22,12 @@ class Reporter {
    * @param {string} f.remediation
    */
   add(f) {
-    this.findings.push({ region: '', ...f, timestamp: new Date().toISOString() });
+    this.findings.push({
+      region: '',
+      ...f,
+      compliance: getComplianceForCloudCheck(f.check),
+      timestamp: new Date().toISOString(),
+    });
   }
 
   sorted() {
