@@ -1,5 +1,5 @@
 'use strict';
-// html-report.js — HTML report generator for cloud-scanner findings
+// html_report.js — HTML report generator for cloud-scanner findings
 //
 // Input:  reporter (src/lib/report.js Reporter instance), meta
 //   meta — { generated_at, providers, regions, tool_version }
@@ -14,7 +14,7 @@
 // dynamic import() (works against either a CJS or ESM sca build) rather
 // than a top-level `require`.
 //
-// NOTE: the shared path itself lives in ./sca-path.js (single source of
+// NOTE: the shared path itself lives in ./sca_path.js (single source of
 // truth — history.js's zip helper points at the same place).
 
 const TOOL_NAME = 'cloud-scanner';
@@ -73,7 +73,7 @@ function buildStats(findings) {
  * Builds the exact data object the HTML report renders from — also used
  * verbatim as the JSON report, so the two are never allowed to diverge.
  *
- * @param {import('./report').Reporter} reporter
+ * @param {import('./report.js').Reporter} reporter
  * @param {object} [meta]
  * @param {string} [meta.generated_at]  ISO timestamp; defaults to now
  * @param {string[]} [meta.providers]   providers that were actually scanned, e.g. ['aws','gcp']
@@ -246,6 +246,14 @@ async function generateHtmlReport(reportPayload) {
     <!-- Compliance -->
     <section id="section-compliance" class="hidden space-y-8">
       <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+      <div id="compliance-coverage" class="glass p-4 rounded-xl flex items-center justify-between text-sm hidden">
+        <span class="text-neutral-400">Findings mapped to a compliance framework</span>
+        <span id="compliance-coverage-value" class="mono text-neutral-200 font-semibold"></span>
+      </div>
+      <div id="compliance-owasp-section" class="hidden space-y-3">
+        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">By OWASP Top 10 Category</h3>
+        <div id="compliance-owasp-grid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
+      </div>
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
       <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>
@@ -335,21 +343,52 @@ function renderComplianceSection(compliance) {
 function renderCompliance() {
   const cs = reportData.compliance_summary;
   document.getElementById('compliance-disclaimer').textContent = (cs && cs.disclaimer) || '';
+
+  const coverageEl = document.getElementById('compliance-coverage');
+  const coverageValueEl = document.getElementById('compliance-coverage-value');
+  if (cs && cs.coverage && cs.coverage.total_findings) {
+    const { mapped_findings, total_findings, coverage_pct } = cs.coverage;
+    coverageValueEl.textContent = mapped_findings + ' / ' + total_findings + ' (' + coverage_pct + '%)';
+    coverageEl.classList.remove('hidden');
+  } else {
+    coverageEl.classList.add('hidden');
+  }
+
+  const owaspSection = document.getElementById('compliance-owasp-section');
+  const owaspGrid = document.getElementById('compliance-owasp-grid');
+  if (cs && cs.by_owasp_category && cs.by_owasp_category.length) {
+    owaspGrid.innerHTML = cs.by_owasp_category.map(o => \`
+      <div class="glass p-4 rounded-xl flex items-start justify-between gap-3 text-xs">
+        <div class="flex flex-col gap-1">
+          <span class="mono text-red-400">\${escH(o.id)}</span>
+          <span class="text-neutral-400">\${escH(o.title)}</span>
+          <span class="text-neutral-600">via: \${escH((o.categories || []).join(', '))}</span>
+        </div>
+        <span class="mono text-neutral-300 whitespace-nowrap">\${o.findings_count}</span>
+      </div>\`).join('');
+    owaspSection.classList.remove('hidden');
+  } else {
+    owaspSection.classList.add('hidden');
+  }
+
   const grid = document.getElementById('compliance-frameworks-grid');
   if (!cs || !cs.frameworks || !cs.frameworks.length) {
     document.getElementById('compliance-empty').classList.remove('hidden');
     grid.innerHTML = '';
     return;
   }
-  grid.innerHTML = cs.frameworks.map(fw => \`
+  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => \`
     <div class="glass p-6 rounded-xl space-y-4">
       <div class="flex items-center justify-between">
-        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${escH(fw.name)}</h3>
+        <div class="flex flex-col">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${escH(fw.name)}</h3>
+          \${fw.version ? \`<span class="text-[10px] text-neutral-500 mono">\${escH(fw.version)}</span>\` : ''}
+        </div>
         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
       </div>
       <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-        \${fw.controls.map(c => \`
-        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">
+        \${fw.controls.map((c, cIdx) => \`
+        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" data-fw-idx="\${fwIdx}" data-control-idx="\${cIdx}">
           <div class="flex flex-col">
             <span class="mono text-red-400">\${escH(c.id)}</span>
             <span class="text-neutral-500">\${escH(c.title)}</span>
@@ -358,6 +397,53 @@ function renderCompliance() {
         </div>\`).join('')}
       </div>
     </div>\`).join('');
+}
+
+// Holds the exact findings array most recently rendered by
+// openComplianceModal() below, so the delegated click listener can index
+// straight into it — consistent with how dynamic finding data is handled
+// everywhere else in this file: never re-embedded into an onclick="..."
+// string, always read back from a real in-memory reference via data
+// attributes + a stable listener.
+let _currentComplianceMatches = null;
+
+function openComplianceModal(fwIdx, cIdx) {
+  const cs = reportData.compliance_summary;
+  const fw = cs && cs.frameworks && cs.frameworks[fwIdx];
+  const control = fw && fw.controls && fw.controls[cIdx];
+  if (!fw || !control) return;
+
+  const matches = (reportData.findings || []).filter(f =>
+    f.compliance && f.compliance.frameworks &&
+    f.compliance.frameworks.some(x => x.name === fw.name && x.controls.some(c => c.id === control.id))
+  );
+  _currentComplianceMatches = matches;
+
+  const rows = matches.length ? matches.map((f, idx) => \`
+    <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" data-finding-index="\${idx}">
+      <div class="flex items-center gap-3">
+        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(f.severity)}">\${escH(f.severity)}</span>
+        <span class="text-xs uppercase text-neutral-500">\${escH(f.provider)}</span>
+        <span class="text-sm text-white">\${escH(f.title)}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]">\${escH(f.resource)}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>\`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
+
+  openModal(\`
+    <div class="space-y-4">
+      <div>
+        <div class="flex items-center gap-3 mb-1 flex-wrap">
+          <span class="mono text-red-400 text-sm">\${escH(control.id)}</span>
+          <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
+        </div>
+        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} — \${matches.length} finding\${matches.length === 1 ? '' : 's'}</p>
+      </div>
+      <div>\${rows}</div>
+    </div>
+  \`);
 }
 
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
@@ -392,6 +478,24 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!row) return;
     const idx = parseInt(row.dataset.findingIndex, 10);
     openFindingModal(idx);
+  });
+
+  const complianceGrid = document.getElementById('compliance-frameworks-grid');
+  complianceGrid.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-fw-idx]');
+    if (!row) return;
+    openComplianceModal(parseInt(row.dataset.fwIdx, 10), parseInt(row.dataset.controlIdx, 10));
+  });
+
+  const modalBody = document.getElementById('modal-body');
+  modalBody.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-finding-index]');
+    if (!row || !modalBody.contains(row)) return;
+    e.stopPropagation();
+    const idx = parseInt(row.dataset.findingIndex, 10);
+    const f = _currentComplianceMatches && _currentComplianceMatches[idx];
+    if (!f) return;
+    renderFindingDetail(f);
   });
 
   updateTabCounts();
@@ -523,6 +627,14 @@ function renderFindingsTable() {
 function openFindingModal(idx) {
   const f = _filtered[idx];
   if (!f) return;
+  renderFindingDetail(f);
+}
+
+// Pulled out of openFindingModal() so the compliance-control modal below can
+// open a finding's full detail view directly from a matched finding object,
+// without needing that finding's index into whatever the Findings tab's
+// current filter state (_filtered) happens to be.
+function renderFindingDetail(f) {
   openModal(\`
     <div class="space-y-4">
       <div class="flex items-center gap-3">

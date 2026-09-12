@@ -287,6 +287,12 @@ function openModal(html) {
 // as code.
 let _currentModalChunkId = null;
 
+// Set by openComplianceModal() below to the exact {chunk, finding} list it
+// rendered (a real in-memory array, never re-stringified), so the delegated
+// click handler can index straight into it — the same escaping hazard noted
+// above applies here too, since these findings can come from any chunk.
+let _currentComplianceMatches = null;
+
 // Single delegated listener on the stable #modal-body container — it
 // persists across every openModal() call (which only replaces the
 // container's innerHTML), so this only needs to run once at load time.
@@ -297,8 +303,21 @@ document.addEventListener('DOMContentLoaded', () => {
     const row = event.target.closest('[data-finding-index]');
     if (!row || !modalBody.contains(row)) return;
     event.stopPropagation();
-    const chunkId = _currentModalChunkId;
     const fi = parseInt(row.dataset.findingIndex, 10);
+
+    if (_currentComplianceMatches) {
+      const item = _currentComplianceMatches[fi];
+      closeModal();
+      setTimeout(() => {
+        if (!item) return;
+        window._filteredFindings = null;
+        renderFindings();
+        _renderFindingModal(item);
+      }, 60);
+      return;
+    }
+
+    const chunkId = _currentModalChunkId;
     closeModal();
     setTimeout(() => {
       window._filteredFindings = null;
@@ -621,6 +640,7 @@ function openInvModal(chunkId) {
   const chunk = reportData.chunks.find(c => c.id === chunkId);
   if (!chunk) return;
   _currentModalChunkId = chunkId;
+  _currentComplianceMatches = null;
 
   const findings = (chunk.findings||[]).filter(f=>!f._parse_error);
   const errors   = (chunk.findings||[]).filter(f=> f._parse_error);
@@ -781,27 +801,113 @@ function renderCompliance() {
   const cs = reportData.meta && reportData.meta.compliance_summary;
   const disclaimerEl = document.getElementById('compliance-disclaimer');
   if (disclaimerEl) disclaimerEl.textContent = (cs && cs.disclaimer) || '';
+
+  const coverageEl = document.getElementById('compliance-coverage');
+  const coverageValueEl = document.getElementById('compliance-coverage-value');
+  if (coverageEl && coverageValueEl) {
+    if (cs && cs.coverage && cs.coverage.total_findings) {
+      const { mapped_findings, total_findings, coverage_pct } = cs.coverage;
+      coverageValueEl.textContent = mapped_findings + ' / ' + total_findings + ' (' + coverage_pct + '%)';
+      coverageEl.classList.remove('hidden');
+    } else {
+      coverageEl.classList.add('hidden');
+    }
+  }
+
+  const owaspSection = document.getElementById('compliance-owasp-section');
+  const owaspGrid = document.getElementById('compliance-owasp-grid');
+  if (owaspSection && owaspGrid) {
+    if (cs && cs.by_owasp_category && cs.by_owasp_category.length) {
+      owaspGrid.innerHTML = cs.by_owasp_category.map(o =>
+        '<div class="glass p-4 rounded-xl flex items-start justify-between gap-3 text-xs">' +
+          '<div class="flex flex-col gap-1">' +
+            '<span class="mono text-orange-400">' + escH(o.id) + '</span>' +
+            '<span class="text-neutral-400">' + escH(o.title) + '</span>' +
+            '<span class="text-neutral-600">via: ' + escH((o.categories || []).join(', ')) + '</span>' +
+          '</div>' +
+          '<span class="mono text-neutral-300 whitespace-nowrap">' + o.findings_count + '</span>' +
+        '</div>'
+      ).join('');
+      owaspSection.classList.remove('hidden');
+    } else {
+      owaspSection.classList.add('hidden');
+    }
+  }
+
   const grid = document.getElementById('compliance-frameworks-grid');
   if (!cs || !cs.frameworks || !cs.frameworks.length) {
     document.getElementById('compliance-empty').classList.remove('hidden');
     grid.innerHTML = '';
     return;
   }
-  grid.innerHTML = cs.frameworks.map(fw => {
-    const controlRows = fw.controls.map(c =>
-      '<div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">' +
+  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => {
+    const controlRows = fw.controls.map((c, cIdx) =>
+      '<div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" onclick="openComplianceModal(' + fwIdx + ',' + cIdx + ')">' +
         '<div class="flex flex-col"><span class="mono text-orange-400">' + escH(c.id) + '</span><span class="text-neutral-500">' + escH(c.title) + '</span></div>' +
         '<span class="mono text-neutral-400 whitespace-nowrap">' + c.findings_count + '</span>' +
       '</div>'
     ).join('');
+    const versionBadge = fw.version ? '<span class="text-[10px] text-neutral-500 mono">' + escH(fw.version) + '</span>' : '';
     return '<div class="glass p-6 rounded-xl space-y-4">' +
       '<div class="flex items-center justify-between">' +
-        '<h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3>' +
+        '<div class="flex flex-col"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3>' + versionBadge + '</div>' +
         '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">' + fw.findings_count + ' finding' + (fw.findings_count === 1 ? '' : 's') + '</span>' +
       '</div>' +
       '<div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">' + controlRows + '</div>' +
     '</div>';
   }).join('');
+}
+
+// Opens a modal listing every finding mapped to a single compliance control,
+// in the same row style as the chunk-inventory modal's per-chunk finding list
+// (openInvModal above) — severity badge, vuln class/title, valid/taint
+// badges, chevron. fwIdx/cIdx are plain array indices into
+// meta.compliance_summary (never re-embedded strings), used only to look up
+// fw.name / control.id for comparison against each finding's own
+// \`.compliance.frameworks\` mapping — see the note above _currentModalChunkId
+// for why chunk-derived data never gets embedded directly into onclick.
+function openComplianceModal(fwIdx, cIdx) {
+  const cs = reportData.meta && reportData.meta.compliance_summary;
+  const fw = cs && cs.frameworks && cs.frameworks[fwIdx];
+  const control = fw && fw.controls && fw.controls[cIdx];
+  if (!fw || !control) return;
+
+  const matches = getAllFindings().filter(({ finding: f }) =>
+    f.compliance && f.compliance.frameworks &&
+    f.compliance.frameworks.some(x => x.name === fw.name && x.controls.some(c => c.id === control.id))
+  );
+
+  _currentModalChunkId = null;
+  _currentComplianceMatches = matches;
+
+  const rows = matches.length ? matches.map(({ finding: f }, idx) => \`
+    <div class="flex items-center justify-between py-2.5 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors"
+         data-finding-index="\${idx}">
+      <div class="flex items-center gap-3">
+        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(f.severity)}">\${escH(f.severity||'?')}</span>
+        <span class="text-sm font-medium">\${escH(f.vuln_class||'unknown')}</span>
+        <span class="text-xs text-neutral-500">\${escH(f.title||'')}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        \${validBadge(f.is_valid)}
+        \${taintBadge(f.taint)}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>
+    </div>
+  \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
+
+  openModal(\`
+    <div class="space-y-4">
+      <div>
+        <div class="flex items-center gap-3 mb-1 flex-wrap">
+          <span class="mono text-orange-400 text-sm">\${escH(control.id)}</span>
+          <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
+        </div>
+        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} — \${matches.length} finding\${matches.length === 1 ? '' : 's'}</p>
+      </div>
+      <div>\${rows}</div>
+    </div>
+  \`);
 }
 
 // ── FILTERS & DROPDOWNS ──────────────────────────────────────────────────────
@@ -1156,6 +1262,14 @@ export async function generateSastHTMLReport(results, meta = {}) {
     <!-- Compliance -->
     <section id="section-compliance" class="hidden space-y-8">
       <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+      <div id="compliance-coverage" class="glass p-4 rounded-xl flex items-center justify-between text-sm hidden">
+        <span class="text-neutral-400">Findings mapped to a compliance framework</span>
+        <span id="compliance-coverage-value" class="mono text-neutral-200 font-semibold"></span>
+      </div>
+      <div id="compliance-owasp-section" class="hidden space-y-3">
+        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">By OWASP Top 10 Category</h3>
+        <div id="compliance-owasp-grid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
+      </div>
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
       <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>

@@ -748,15 +748,15 @@ async function generateHTMLReport(data) {
                 grid.innerHTML = '';
                 return;
             }
-            grid.innerHTML = cs.frameworks.map(fw => \`
+            grid.innerHTML = cs.frameworks.map((fw, fwIdx) => \`
                 <div class="glass p-6 rounded-xl space-y-4">
                     <div class="flex items-center justify-between">
                         <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${fw.name}</h3>
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
                     </div>
                     <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-                        \${fw.controls.map(c => \`
-                        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0">
+                        \${fw.controls.map((c, cIdx) => \`
+                        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" onclick="openComplianceModal(\${fwIdx}, \${cIdx})">
                             <div class="flex flex-col">
                                 <span class="mono text-orange-400">\${c.id}</span>
                                 <span class="text-neutral-500">\${c.title}</span>
@@ -765,6 +765,67 @@ async function generateHTMLReport(data) {
                         </div>\`).join('')}
                     </div>
                 </div>\`).join('');
+        }
+
+        // Opens a modal listing every finding (vulnerability or secret) mapped
+        // to a single compliance control, in the same row style used by the
+        // inventory tab's per-package vulnerability list (openInvModal above).
+        // fwIdx/cIdx are plain array indices into compliance_summary — never
+        // re-embedded strings — so there's nothing to escape/quote here; they
+        // only look up fw.name / control.id, which are then compared against
+        // (not interpolated into) each finding's own \`.compliance.frameworks\`.
+        function openComplianceModal(fwIdx, cIdx) {
+            const cs = reportData.compliance_summary;
+            const fw = cs && cs.frameworks && cs.frameworks[fwIdx];
+            const control = fw && fw.controls && fw.controls[cIdx];
+            if (!fw || !control) return;
+
+            const mapsToControl = (item) => !!(item.compliance && item.compliance.frameworks &&
+                item.compliance.frameworks.some(f => f.name === fw.name && f.controls.some(c => c.id === control.id)));
+
+            const vulnMatches = (reportData.vulnerabilities || []).filter(mapsToControl);
+            const secretMatches = ((reportData.secrets || {}).findings || []).filter(mapsToControl);
+
+            const vulnRows = vulnMatches.map(v => \`
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openVulnModal('\${v.id}'), 50)">
+                    <div class="flex items-center gap-3">
+                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${v.severity}">\${v.severity}</span>
+                        <span class="mono text-xs text-white">\${v.id}</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
+                        \${v.is_policy_violation ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>' : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </div>
+                </div>\`).join('');
+
+            const secretRows = secretMatches.map(f => \`
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 px-2 rounded">
+                    <div class="flex items-center gap-3">
+                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-\${(f.severity || 'unknown').toLowerCase()}">\${escapeHtml(f.severity || 'unknown')}</span>
+                        <span class="text-xs text-white">\${escapeHtml(f.title || 'Secret finding')}</span>
+                    </div>
+                    <span class="mono text-[10px] text-neutral-500">\${escapeHtml(f.file_path || '')}</span>
+                </div>\`).join('');
+
+            const emptyRow = (!vulnMatches.length && !secretMatches.length)
+                ? '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>' : '';
+
+            document.getElementById('modal-body').innerHTML = \`
+                <div class="space-y-4">
+                    <div>
+                        <div class="flex items-center gap-3 mb-1 flex-wrap">
+                            <span class="mono text-orange-400 text-sm">\${control.id}</span>
+                            <h2 class="text-lg font-semibold text-white">\${control.title}</h2>
+                        </div>
+                        <p class="text-xs text-neutral-500">\${fw.name}\${fw.version ? ' · ' + fw.version : ''} — \${vulnMatches.length + secretMatches.length} finding\${(vulnMatches.length + secretMatches.length) === 1 ? '' : 's'}</p>
+                    </div>
+                    <div>\${vulnRows}\${secretRows}\${emptyRow}</div>
+                </div>
+            \`;
+
+            document.getElementById('modal-overlay').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
         }
 
         function renderSystem() {

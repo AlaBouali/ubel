@@ -1,6 +1,6 @@
 'use strict';
 // Single source of truth for where the shared `sca` module lives relative
-// to this package, so every consumer here (html-report.js's Tailwind/
+// to this package, so every consumer here (html_report.js's Tailwind/
 // Chart.js/Google Fonts assets, history.js's zip helper) points at the
 // same place instead of each hardcoding its own relative path.
 //

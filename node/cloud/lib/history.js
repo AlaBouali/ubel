@@ -1,7 +1,7 @@
 'use strict';
 import fs from 'fs';
 import path from 'path';
-import { SCA_STATIC_PATH } from './sca-path.js';
+import { SCA_STATIC_PATH } from './sca_path.js';
 
 /**
  * "Zipping is for history, not the live report": each run's
@@ -10,14 +10,14 @@ import { SCA_STATIC_PATH } from './sca-path.js';
  * one gets overwritten, whatever's already there from the previous run
  * is folded into a timestamped zip under history/ instead of being
  * clobbered, using sca's own zip module — the same shared module
- * html-report.js already pulls tailwindcss.js/chartjs.js/googlefonts.js
+ * html_report.js already pulls tailwindcss.js/chartjs.js/googlefonts.js
  * from — rather than a new zip implementation living in this package.
  *
  * NOTE: this assumes sca/zip.js exports a `createZip(entries)` returning
  * a Buffer/Uint8Array, where `entries` is `[{ name, content }]` — the
  * same shape used elsewhere in this codebase for in-memory file lists.
  * If sca's actual export name/signature differs, update the call below
- * (same spirit as the SCA_STATIC_PATH note in ./sca-path.js).
+ * (same spirit as the SCA_STATIC_PATH note in ./sca_path.js).
  */
 
 import { buildZip } from '../../sca/zip_writer.js';

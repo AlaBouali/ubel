@@ -457,7 +457,7 @@ up in a CI job or container layer.
 - No SARIF output — findings don't currently plug into code-scanning
   dashboards (GitHub Advanced Security, etc.) the way the SCA and SAST
   modules' reports do; JSON + HTML only for now.
-- `lib/history.js` and `lib/sca-path.js` are present in the codebase but
+- `lib/history.js` and `lib/sca_path.js` are present in the codebase but
   not on the active report-writing path — `index.js`'s own
   `writeCloudReports()` writes reports directly under `.ubel/` (see
   [Reports](#reports)) and imports `sca`'s zip writer itself, rather than

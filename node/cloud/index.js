@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
-import { generateHtmlReport, buildReportPayload } from './lib/html-report.js';
+import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';

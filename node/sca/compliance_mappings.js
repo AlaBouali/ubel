@@ -34,15 +34,33 @@ const COMPLIANCE_DISCLAIMER =
   'for an audit.';
 
 // ── Framework registry ──────────────────────────────────────────────────────
+// Each entry carries the exact version/edition this mapping was written
+// against (`name` is just the framework, unversioned) so a report can state
+// "mapped against PCI DSS v4.0" without the reader having to go find that
+// out for themselves — frameworks get revised, and a mapping silently goes
+// stale otherwise. See COMPLIANCE_DISCLAIMER: verify these are still the
+// versions your audit needs.
+//
+// CIS_BENCHMARK entries (cis_aws_foundations / cis_azure_foundations /
+// cis_gcp_foundations) are a different kind of thing from CIS Controls v8:
+// Controls v8 is the vendor-agnostic 18-control list, "CIS Benchmarks" are
+// the per-platform technical hardening guides auditors actually cite for a
+// cloud finding (e.g. "CIS AWS Foundations Benchmark 3.1"). Only cloud
+// findings with a check-specific benchmark mapping (CIS_BENCHMARK_CONTROLS
+// below) get one of these three attached; everything else still gets
+// Controls v8 via CATEGORY_CONTROLS like before.
 const FRAMEWORKS = {
-  owasp_top10_2021:    'OWASP Top 10 (2021)',
-  pci_dss_4_0:          'PCI DSS v4.0',
-  hipaa_security_rule:  'HIPAA Security Rule',
-  soc2:                 'SOC 2 (Trust Services Criteria)',
-  iso_27001_2022:       'ISO/IEC 27001:2022 (Annex A)',
-  nist_800_53_r5:       'NIST SP 800-53 Rev. 5',
-  gdpr:                 'GDPR',
-  cis_controls_v8:      'CIS Controls v8',
+  owasp_top10_2021:      { name: 'OWASP Top 10',                            version: '2021' },
+  pci_dss_4_0:            { name: 'PCI DSS',                                  version: 'v4.0' },
+  hipaa_security_rule:    { name: 'HIPAA Security Rule',                      version: null },
+  soc2:                   { name: 'SOC 2 (Trust Services Criteria)',         version: '2017' },
+  iso_27001_2022:         { name: 'ISO/IEC 27001 (Annex A)',                 version: '2022' },
+  nist_800_53_r5:         { name: 'NIST SP 800-53',                          version: 'Rev. 5' },
+  gdpr:                   { name: 'GDPR',                                    version: null },
+  cis_controls_v8:        { name: 'CIS Controls',                            version: 'v8' },
+  cis_aws_foundations:    { name: 'CIS Amazon Web Services Foundations Benchmark', version: 'v1.5.0' },
+  cis_azure_foundations:  { name: 'CIS Microsoft Azure Foundations Benchmark',     version: 'v2.0.0' },
+  cis_gcp_foundations:    { name: 'CIS Google Cloud Platform Foundation Benchmark', version: 'v1.3.0' },
 };
 
 // ── Category → framework control references ────────────────────────────────
@@ -230,9 +248,42 @@ const CWE_CATEGORY = {
   824: 'memory_safety', 840: 'business_logic', 843: 'business_logic', 862: 'broken_access_control',
   863: 'broken_access_control', 909: 'security_misconfiguration', 916: 'cryptography',
   917: 'injection', 918: 'ssrf', 937: 'vulnerable_components', 942: 'security_misconfiguration',
-  943: 'injection', 1004: 'session_management', 1104: 'security_misconfiguration',
+  943: 'injection', 1004: 'session_management', 1104: 'vulnerable_components',
   1236: 'memory_safety', 1321: 'security_misconfiguration', 1333: 'availability_dos',
 };
+
+// ── Consistency guard: CWE_CATEGORY vs. SAST_CLASS_COMPLIANCE ──────────────
+// These two tables answer two different questions and are allowed to
+// disagree on purpose: CWE_CATEGORY says "what's the generic category for
+// this bare CWE number, with no other context" (used for SCA/CVE findings
+// that only ever carry a CWE number); SAST_CLASS_COMPLIANCE says "what's
+// the best category for this specific, already-written-up vuln class"
+// (used for SAST findings, which carry a class name from vulnCatalog.js,
+// not just a CWE). A SAST class is free to pick a more specific category
+// than its CWE's generic default — e.g. "publicly exposed cloud resource"
+// (CWE-284) is filed under `public_exposure`, a more specific read than
+// CWE-284's own generic `broken_access_control` default — and that's a
+// deliberate editorial call, not drift.
+//
+// What IS drift: a class's category disagreeing with its CWE's generic
+// default for no such reason — i.e. nobody actually intended a different
+// read, one table just fell out of sync with the other after an edit.
+// findCategoryDivergences() below surfaces every disagreement (intentional
+// or not) so a test can snapshot the intentional ones; any new, unreviewed
+// entry in its output on top of that snapshot is drift to look at, not a
+// silent surprise days later in a customer's audit report.
+function findCategoryDivergences() {
+  const divergences = [];
+  for (const [name, info] of Object.entries(SAST_CLASS_COMPLIANCE)) {
+    for (const cwe of info.cwes) {
+      const defaultCategory = CWE_CATEGORY[cwe];
+      if (defaultCategory && defaultCategory !== info.category) {
+        divergences.push({ sastClass: name, cwe, sastCategory: info.category, cweDefaultCategory: defaultCategory });
+      }
+    }
+  }
+  return divergences;
+}
 
 // ── SAST catalog: canonical vuln_class name (lowercased) → { cwes, category } ──
 // Mirrors the `name`/`cwe` pairs in sast/src/analyzer/vulnCatalog.js. Kept as
@@ -400,6 +451,60 @@ const CHECK_CATEGORY = {
   'gke-public-control-plane-no-authorized-networks':  ['public_exposure'],
 };
 
+// ── Cloud checks: check id → CIS Benchmark control ──────────────────────────
+// CIS *Controls* (v8, above) are the vendor-agnostic 18-control list; CIS
+// *Benchmarks* are the per-platform technical hardening guides (AWS/Azure/
+// GCP) that a cloud audit actually cites for a specific finding — e.g. "CIS
+// AWS Foundations Benchmark 3.1", not just "CIS 8". Unlike CATEGORY_CONTROLS
+// (one mapping per internal risk category, shared across every check in
+// that category), a Benchmark control is specific to one exact check, so
+// this table is keyed by check id, not category.
+//
+// Each control number below was verified against the named benchmark
+// version (not just recalled/guessed) — see FRAMEWORKS above for the
+// pinned version. This is intentionally NOT a mapping for every check in
+// CHECK_CATEGORY: a check with no entry here still gets its normal
+// category-based frameworks (including CIS Controls v8) from
+// getComplianceForCloudCheck, it just doesn't get an extra Benchmark
+// control until one is verified and added. Treat a missing entry as "not
+// yet mapped", not "this check has no Benchmark equivalent" — most of
+// these do; this table just doesn't claim numbers nobody has checked.
+const CIS_BENCHMARK_CONTROLS = {
+  // AWS — CIS Amazon Web Services Foundations Benchmark v1.5.0
+  'iam-no-password-policy':          { framework: 'cis_aws_foundations', control: '1.8',   title: 'Ensure IAM password policy requires minimum length of 14 or greater' },
+  'iam-console-user-no-mfa':         { framework: 'cis_aws_foundations', control: '1.10',  title: 'Ensure MFA is enabled for all IAM users that have a console password' },
+  'iam-access-key-not-rotated':      { framework: 'cis_aws_foundations', control: '1.14',  title: 'Ensure access keys are rotated every 90 days or less' },
+  'iam-policy-full-admin':           { framework: 'cis_aws_foundations', control: '1.16',  title: 'Ensure IAM policies that allow full "*:*" administrative privileges are not attached' },
+  's3-encryption-disabled':          { framework: 'cis_aws_foundations', control: '2.1.1', title: 'Ensure all S3 buckets employ encryption-at-rest' },
+  's3-acl-public':                   { framework: 'cis_aws_foundations', control: '2.1.5', title: "Ensure that S3 Buckets are configured with 'Block public access (bucket settings)'" },
+  's3-acl-authenticated-users':      { framework: 'cis_aws_foundations', control: '2.1.5', title: "Ensure that S3 Buckets are configured with 'Block public access (bucket settings)'" },
+  's3-policy-public':                { framework: 'cis_aws_foundations', control: '2.1.5', title: "Ensure that S3 Buckets are configured with 'Block public access (bucket settings)'" },
+  's3-public-access-block':          { framework: 'cis_aws_foundations', control: '2.1.5', title: "Ensure that S3 Buckets are configured with 'Block public access (bucket settings)'" },
+  's3-object-acl-public-sample':     { framework: 'cis_aws_foundations', control: '2.1.5', title: "Ensure that S3 Buckets are configured with 'Block public access (bucket settings)'" },
+  'ebs-default-encryption-disabled': { framework: 'cis_aws_foundations', control: '2.2.1', title: 'Ensure EBS Volume Encryption is Enabled in all Regions' },
+  'ebs-volume-not-encrypted':        { framework: 'cis_aws_foundations', control: '2.2.1', title: 'Ensure EBS Volume Encryption is Enabled in all Regions' },
+  'rds-publicly-accessible':         { framework: 'cis_aws_foundations', control: '2.3.3', title: 'Ensure that public access is not given to RDS Instance' },
+  'cloudtrail-no-multiregion-trail': { framework: 'cis_aws_foundations', control: '3.1',   title: 'Ensure CloudTrail is enabled in all regions' },
+  'cloudtrail-logging-stopped':      { framework: 'cis_aws_foundations', control: '3.1',   title: 'Ensure CloudTrail is enabled in all regions' },
+  'cloudtrail-log-validation-disabled': { framework: 'cis_aws_foundations', control: '3.2', title: 'Ensure CloudTrail log file validation is enabled' },
+  'cloudtrail-not-kms-encrypted':    { framework: 'cis_aws_foundations', control: '3.7',   title: 'Ensure CloudTrail logs are encrypted at rest using KMS CMKs' },
+  'vpc-flow-logs-disabled':          { framework: 'cis_aws_foundations', control: '3.9',   title: 'Ensure VPC flow logging is enabled in all VPCs' },
+  'sg-open-sensitive-port':          { framework: 'cis_aws_foundations', control: '5.2',   title: 'Ensure no security groups allow ingress from 0.0.0.0/0 to remote server administration ports' },
+
+  // Azure — CIS Microsoft Azure Foundations Benchmark v2.0.0
+  'azure-storage-outdated-tls':          { framework: 'cis_azure_foundations', control: '3.15', title: "Ensure the 'Minimum TLS version' for storage accounts is set to 'Version 1.2'" },
+  'azure-storage-container-public-access': { framework: 'cis_azure_foundations', control: '3.7', title: "Ensure that 'Public access level' is disabled for storage accounts with blob containers" },
+  'azure-storage-public-blob-access':    { framework: 'cis_azure_foundations', control: '3.7',  title: "Ensure that 'Public access level' is disabled for storage accounts with blob containers" },
+  'azure-keyvault-purge-protection-disabled': { framework: 'cis_azure_foundations', control: '8.5', title: 'Ensure the Key Vault is Recoverable' },
+  'azure-keyvault-public-network-access': { framework: 'cis_azure_foundations', control: '8.7', title: 'Ensure that Private Endpoints are used for Azure Key Vault' },
+
+  // GCP — CIS Google Cloud Platform Foundation Benchmark v1.3.0
+  'cloudsql-ssl-not-required':          { framework: 'cis_gcp_foundations', control: '6.4', title: 'Ensure that the Cloud SQL database instance requires all incoming connections to use SSL' },
+  'cloudsql-authorized-network-open':   { framework: 'cis_gcp_foundations', control: '6.5', title: 'Ensure that Cloud SQL database instances do not implicitly whitelist all public IP addresses' },
+  'cloudsql-public-ip-enabled':         { framework: 'cis_gcp_foundations', control: '6.6', title: 'Ensure that Cloud SQL database instances do not have public IPs' },
+  'gcp-fw-open-sensitive-port':         { framework: 'cis_gcp_foundations', control: '3.6 / 3.7', title: 'Ensure that SSH / RDP access is restricted from the Internet (most directly applicable to the port-22/3389 case; other sensitive ports in this finding are covered only by analogy)' },
+};
+
 // ── Core builder ─────────────────────────────────────────────────────────────
 
 /**
@@ -416,17 +521,57 @@ function buildCompliance(categories) {
   for (const cat of cats) {
     for (const entry of CATEGORY_CONTROLS[cat]) {
       if (!byFramework.has(entry.framework)) byFramework.set(entry.framework, new Map());
-      byFramework.get(entry.framework).set(entry.control, entry.title);
+      const controls = byFramework.get(entry.framework);
+      // Keyed by framework:control (the nesting above already scopes this
+      // Map to one framework, so `entry.control` alone is the composite
+      // key). First title wins and is never silently overwritten by a
+      // later category that happens to reference the same control — two
+      // categories citing the same control with differently-worded titles
+      // would otherwise flip which title shows depending on category
+      // iteration order, which is exactly the kind of footgun that isn't
+      // wrong today but would be an invisible, order-dependent bug the
+      // first time it happened.
+      if (!controls.has(entry.control)) controls.set(entry.control, entry.title);
     }
   }
 
   const frameworks = [...byFramework.entries()].map(([id, controls]) => ({
     id,
-    name: FRAMEWORKS[id] || id,
+    name: FRAMEWORKS[id]?.name || id,
+    version: FRAMEWORKS[id]?.version ?? null,
     controls: [...controls.entries()].map(([id2, title]) => ({ id: id2, title })),
   }));
 
   return { categories: cats, frameworks };
+}
+
+/**
+ * Attach one extra framework/control to an already-built compliance object
+ * — used for CIS Benchmark controls, which are looked up per check id
+ * (CIS_BENCHMARK_CONTROLS) rather than per category (CATEGORY_CONTROLS),
+ * so they can't just be folded into buildCompliance's category loop above.
+ * `compliance` may be null (a finding with no category-based mapping at
+ * all); this still attaches the benchmark control in that case rather than
+ * silently dropping it. Never mutates its input.
+ */
+function addBenchmarkControl(compliance, entry) {
+  const base = compliance || { categories: [], frameworks: [] };
+  const frameworks = base.frameworks.map(fw => ({ ...fw, controls: [...fw.controls] }));
+  const controlObj = { id: entry.control, title: entry.title };
+
+  const idx = frameworks.findIndex(fw => fw.id === entry.framework);
+  if (idx === -1) {
+    frameworks.push({
+      id: entry.framework,
+      name: FRAMEWORKS[entry.framework]?.name || entry.framework,
+      version: FRAMEWORKS[entry.framework]?.version ?? null,
+      controls: [controlObj],
+    });
+  } else if (!frameworks[idx].controls.some(c => c.id === controlObj.id)) {
+    frameworks[idx].controls.push(controlObj);
+  }
+
+  return { categories: base.categories, frameworks };
 }
 
 /** Normalize a CWE array (ints or "CWE-89" strings) to plain ints. */
@@ -463,18 +608,33 @@ function getComplianceForSecret() {
 
 /**
  * Compliance mapping for a ubel-sast finding, looked up by the finding's
- * (already-normalized, CWE-suffix-stripped) `vuln_class` string. Falls back
- * to a CWE-only lookup if the class name isn't in the catalog (e.g. an
- * older report, or a custom vuln class), then to null if nothing matches.
+ * (already-normalized, CWE-suffix-stripped) `vuln_class` string.
+ *
+ * If the class name isn't in the catalog (e.g. an older report, or a
+ * custom/LLM vuln class outside vulnCatalog.js) and the caller separately
+ * has CWE numbers for the finding, those are used as a fallback instead.
+ * The SAST analyzer doesn't emit CWEs independently of `vuln_class` today
+ * (see vulnCatalog.js: "cwe — primary CWE for reference, not emitted in
+ * output"), so `cwes` will typically be omitted and this falls through to
+ * null — which is the honest answer, not a guess.
+ *
+ * (This replaces a previous fallback that searched every known SAST class's
+ * CWE numbers for a substring match against `key`. `key` is a prose class
+ * name, never a bare CWE number, so that search could never match anything
+ * a real finding would produce — it looked defensive but was dead code.)
  */
-function getComplianceForSastFinding(vulnClass) {
+function getComplianceForSastFinding(vulnClass, cwes) {
   const key = String(vulnClass || '').toLowerCase().trim();
   const entry = SAST_CLASS_COMPLIANCE[key];
   if (entry) return buildCompliance([entry.category]);
 
-  // Fallback: try each known CWE for a coarse category match.
-  for (const [, info] of Object.entries(SAST_CLASS_COMPLIANCE)) {
-    if (info.cwes.some(c => key.includes(String(c)))) return buildCompliance([info.category]);
+  if (cwes && cwes.length) {
+    const categories = new Set();
+    for (const cwe of normalizeCwes(cwes)) {
+      const cat = CWE_CATEGORY[cwe];
+      if (cat) categories.add(cat);
+    }
+    if (categories.size) return buildCompliance([...categories]);
   }
   return null;
 }
@@ -501,35 +661,70 @@ function getCwesForMalwareClass(vulnClass) {
 /** Compliance mapping for a cloud-scanner finding, looked up by its `check` id. */
 function getComplianceForCloudCheck(checkId) {
   const categories = CHECK_CATEGORY[checkId];
-  return buildCompliance(categories || ['security_misconfiguration']);
+  const compliance = buildCompliance(categories || ['security_misconfiguration']);
+  const benchmarkEntry = CIS_BENCHMARK_CONTROLS[checkId];
+  return benchmarkEntry ? addBenchmarkControl(compliance, benchmarkEntry) : compliance;
 }
 
 // ── Public API: report-level summaries ───────────────────────────────────────
 
 /**
  * Aggregate a list of `compliance` objects (as attached to individual
- * findings, `null`s allowed and skipped) into a report-level summary:
- * per-framework finding counts + per-control finding counts, plus a
- * per-category breakdown.
+ * findings — one entry per finding, `null` for an unmapped finding, in
+ * both cases) into a report-level summary: per-framework finding counts +
+ * per-control finding counts, a per-category breakdown, an OWASP-Top-10
+ * rollup, and overall mapping coverage.
+ *
+ * `complianceList` is expected to have one entry per finding the report
+ * covers (including `null` for findings that didn't map to anything) —
+ * every call site in this codebase already builds it that way — so its
+ * length doubles as the report's total finding count for the coverage
+ * stat below.
  */
 function summarizeCompliance(complianceList) {
-  const frameworkAgg = new Map(); // id -> { name, findings_count, controls: Map(controlId -> {title, count}) }
+  const frameworkAgg = new Map(); // id -> { name, version, findings_count, controls: Map(controlId -> {title, count}) }
   const byCategory = {};
+  // OWASP Top 10 is the rollup auditors ask for first, and it's also the
+  // one place two of our internal categories can legitimately land on the
+  // same headline risk: `cryptography` and `secrets_management` are
+  // different CATEGORY_CONTROLS entries (so they read as unrelated in
+  // by_category), but OWASP files both under A02:2021 "Cryptographic
+  // Failures". Grouping by the *OWASP control* instead of the internal
+  // category surfaces that overlap instead of splitting it across two
+  // rows that don't obviously belong together.
+  const byOwaspAgg = new Map(); // controlId -> { title, findings_count, categories: Set }
+  let mappedFindings = 0;
 
   for (const c of complianceList) {
     if (!c) continue;
+    mappedFindings++;
     for (const cat of c.categories || []) {
       byCategory[cat] = (byCategory[cat] || 0) + 1;
     }
     for (const fw of c.frameworks || []) {
       if (!frameworkAgg.has(fw.id)) {
-        frameworkAgg.set(fw.id, { name: fw.name, findings_count: 0, controls: new Map() });
+        frameworkAgg.set(fw.id, { name: fw.name, version: fw.version ?? null, findings_count: 0, controls: new Map() });
       }
       const agg = frameworkAgg.get(fw.id);
       agg.findings_count++;
       for (const ctrl of fw.controls || []) {
         if (!agg.controls.has(ctrl.id)) agg.controls.set(ctrl.id, { title: ctrl.title, findings_count: 0 });
         agg.controls.get(ctrl.id).findings_count++;
+      }
+
+      if (fw.id === 'owasp_top10_2021') {
+        for (const ctrl of fw.controls || []) {
+          if (!byOwaspAgg.has(ctrl.id)) {
+            byOwaspAgg.set(ctrl.id, { title: ctrl.title, findings_count: 0, categories: new Set() });
+          }
+          const o = byOwaspAgg.get(ctrl.id);
+          o.findings_count++;
+          for (const cat of c.categories || []) {
+            const ownsThisControl = (CATEGORY_CONTROLS[cat] || [])
+              .some(entry => entry.framework === 'owasp_top10_2021' && entry.control === ctrl.id);
+            if (ownsThisControl) o.categories.add(cat);
+          }
+        }
       }
     }
   }
@@ -538,6 +733,7 @@ function summarizeCompliance(complianceList) {
     .map(([id, agg]) => ({
       id,
       name: agg.name,
+      version: agg.version,
       findings_count: agg.findings_count,
       controls: [...agg.controls.entries()]
         .map(([id2, v]) => ({ id: id2, title: v.title, findings_count: v.findings_count }))
@@ -545,10 +741,21 @@ function summarizeCompliance(complianceList) {
     }))
     .sort((a, b) => b.findings_count - a.findings_count);
 
+  const byOwaspCategory = [...byOwaspAgg.entries()]
+    .map(([id, v]) => ({ id, title: v.title, findings_count: v.findings_count, categories: [...v.categories] }))
+    .sort((a, b) => b.findings_count - a.findings_count);
+
+  const totalFindings = complianceList.length;
   return {
     disclaimer: COMPLIANCE_DISCLAIMER,
     frameworks,
     by_category: byCategory,
+    by_owasp_category: byOwaspCategory,
+    coverage: {
+      mapped_findings: mappedFindings,
+      total_findings: totalFindings,
+      coverage_pct: totalFindings ? Math.round((mappedFindings / totalFindings) * 1000) / 10 : null,
+    },
   };
 }
 
@@ -563,4 +770,6 @@ export {
   getCwesForMalwareClass,
   getComplianceForCloudCheck,
   summarizeCompliance,
+  findCategoryDivergences,
+  CIS_BENCHMARK_CONTROLS,
 };
