@@ -19,6 +19,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - Configurable `--fail-on` exit-code gate (`any` / `valid` / `exploitable` for SAST, `any` / `confirmed` for malware) — reports always contain every finding regardless of this flag; it only changes the CI exit code
 - Pluggable LLM provider registry — OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, and local/Docker-hosted models (Ollama-compatible), selectable per run with no code changes
 - Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.*` convenience links, kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
+- **Compliance framework mapping** — every finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Zero external runtime dependencies (Node.js stdlib only)
 
 ---
@@ -367,7 +368,32 @@ Every `malware` run writes the equivalent set under its own namespace:
     malware__<timestamp>.zip
 ```
 
-The HTML report is fully self-contained (no server required) and includes a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable), and run metadata (git commit, OS, provider/model used). The JSON report is the full machine-readable equivalent; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+The HTML report is fully self-contained (no server required) and includes a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+
+---
+
+## Compliance Framework Mapping
+
+Every finding — from both the `analyze` (vulnerability) and `malware` pipelines — is mapped onto industry compliance/security frameworks by default, no separate flag needed, across every report format.
+
+Each finding's `vuln_class` (e.g. `"SQL injection"`, `"reverse shell / remote command execution backdoor"`) resolves to one or more internal risk categories (e.g. `injection`, `malicious_code_supply_chain`) via the same lookup table used to derive its CWE — every malicious-code finding maps to `malicious_code_supply_chain` regardless of its specific mechanism, since intentional malicious code is a supply-chain integrity concern first. Each category carries a fixed list of framework control references: **OWASP Top 10 (2021)**, **PCI DSS v4.0**, **HIPAA Security Rule**, **SOC 2**, **ISO/IEC 27001:2022**, **NIST SP 800-53 Rev. 5**, **GDPR**, and **CIS Controls v8**. As with [the SCA module's Compliance Framework Mapping](../sca/README.md#compliance-framework-mapping), this is best-effort guidance derived from public framework documentation, not a certified compliance assessment — every report's `compliance_summary.disclaimer` field says so verbatim.
+
+Each finding gets a `cwe` array and a `compliance` object:
+
+```json
+{
+  "vuln_class": "SQL injection",
+  "cwe": [89],
+  "compliance": {
+    "categories": ["injection"],
+    "frameworks": [
+      { "id": "owasp_top10_2021", "name": "OWASP Top 10 (2021)", "controls": [{ "id": "A03:2021", "title": "Injection" }] }
+    ]
+  }
+}
+```
+
+`meta.compliance_summary` on the report aggregates every finding into per-framework, per-control finding counts (same shape as the SCA module's `compliance_summary` — see its README for the full example). In the HTML report this powers a dedicated Compliance tab (one card per framework) plus a Compliance Frameworks section in each finding's detail view; in SARIF, `compliance_categories`/`compliance_frameworks` sit on each rule and the full `compliance` object sits on each result, with `compliance_summary` also attached to the run's `invocations[].properties`.
 
 ---
 

@@ -27,6 +27,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
+- **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary; included by default in every scan, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
 ---
 
@@ -744,6 +745,77 @@ The top-level `stats.license_stats` field summarizes the whole inventory:
 
 ---
 
+## Compliance Framework Mapping
+
+Every dependency vulnerability and secrets-in-source finding is mapped onto industry compliance/security frameworks by default — no separate flag or mode needed, and included in every report format. This is distinct from [License Compliance](#license-compliance) above, which is about license-obligation risk on installed software; this section is about mapping *security* findings onto the frameworks an org is typically audited against.
+
+Mapping works by first assigning each finding one or more internal risk categories (e.g. `injection`, `secrets_management`, `vulnerable_components`) — for a dependency vulnerability, from its advisory's CWE(s), always including `vulnerable_components` as a baseline since every SCA finding is a known-vulnerable-component finding by definition; for a secrets finding, always `secrets_management`. Each category then carries a fixed list of framework control references, so two findings with the same underlying risk always map identically.
+
+### Frameworks covered
+
+| Framework | Notes |
+|---|---|
+| OWASP Top 10 (2021) | Category codes (`A01:2021`–`A10:2021`) |
+| PCI DSS v4.0 | Requirement numbers |
+| HIPAA Security Rule | §164.312 / §164.308 citations |
+| SOC 2 (Trust Services Criteria) | `CC*`/`A1.*` codes |
+| ISO/IEC 27001:2022 (Annex A) | `A.*` control numbers |
+| NIST SP 800-53 Rev. 5 | Control IDs (e.g. `SI-10`, `AC-3`) |
+| GDPR | Article citations |
+| CIS Controls v8 | Numbered controls |
+
+**This is best-effort guidance, not a certified compliance assessment.** Control identifiers are the stable, publicly documented ones for each framework, but framework text, versioning, and applicable scope can change, and always depend on the org's own environment. Every report carries this disclaimer verbatim in `compliance_summary.disclaimer` — treat the mapping as a starting point for an audit conversation, not a citation to quote in one.
+
+### Output fields
+
+Each vulnerability and secrets finding gets a `compliance` object:
+
+```json
+{
+  "compliance": {
+    "categories": ["vulnerable_components", "injection"],
+    "frameworks": [
+      {
+        "id": "owasp_top10_2021",
+        "name": "OWASP Top 10 (2021)",
+        "controls": [
+          { "id": "A06:2021", "title": "Vulnerable and Outdated Components" },
+          { "id": "A03:2021", "title": "Injection" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The top-level `compliance_summary` field aggregates every vulnerability and secrets finding in the report into per-framework, per-control finding counts:
+
+```json
+{
+  "disclaimer": "Compliance framework references are best-effort guidance ...",
+  "frameworks": [
+    {
+      "id": "owasp_top10_2021",
+      "name": "OWASP Top 10 (2021)",
+      "findings_count": 14,
+      "controls": [
+        { "id": "A06:2021", "title": "Vulnerable and Outdated Components", "findings_count": 11 },
+        { "id": "A03:2021", "title": "Injection", "findings_count": 3 }
+      ]
+    }
+  ],
+  "by_category": { "vulnerable_components": 11, "injection": 3, "secrets_management": 2 }
+}
+```
+
+### Output
+
+- **HTML report**: a dedicated Compliance tab with one card per framework (control breakdown + finding counts), plus a Compliance Frameworks section in each vulnerability's detail modal.
+- **JSON report**: `compliance` on every vulnerability and secrets finding, plus the report-level `compliance_summary` described above.
+- **SARIF 2.1.0**: `compliance_categories` / `compliance_frameworks` on each rule, and the full `compliance` object on each result — in both the dependency-vulnerability run and the secrets run.
+
+---
+
 ## Package Argument Validation
 
 All package specifiers passed to `check` and `install` are validated before any subprocess is invoked — the exact rule differs by ecosystem, since npm/pip/apt specifiers don't share a syntax.
@@ -838,6 +910,7 @@ The HTML report is fully self-contained (no server required) and includes:
 - Per-vulnerability detail modals (CVSS vector, fix recommendations, OSV/NVD references)
 - Dedicated Secrets tab (category, severity, file/line, redacted match preview)
 - License Risk stats card (low/medium/high/unknown breakdown, OSI-approved count) — populated on `health`-mode scans, see [License Compliance](#license-compliance)
+- Dedicated Compliance tab — per-framework cards showing which controls a scan's findings touch and how often, see [Compliance Framework Mapping](#compliance-framework-mapping)
 - System and runtime metadata (OS, local network interfaces, git info, engine/tool versions)
 
 The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
