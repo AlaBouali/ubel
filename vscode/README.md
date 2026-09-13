@@ -25,7 +25,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - Vulnerability scanning via batched API queries to OSV.dev and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
-- Policy engine — block/allow by severity threshold and unknown-severity packages
+- Policy engine — block/allow by severity threshold, unknown-severity packages, and license risk
 - Malicious package (infection) detection — always blocked regardless of policy
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, Stripe restricted keys, Twilio SIDs, URL-embedded git credentials, and more). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
@@ -35,6 +35,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
+- **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
 ---
 
@@ -218,6 +219,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, reachability level, and policy decision |
 | **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count |
 | **Graph** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
+| **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
 | **Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **System** | OS metadata, Node.js version, scan engine info |
 
@@ -296,6 +298,35 @@ Results appear in the **Inventory** tab of the HTML report (per-package license,
 
 ---
 
+## Compliance Framework Mapping
+
+Every dependency vulnerability and secrets-in-source finding is mapped onto industry compliance/security frameworks by default — no separate flag or mode needed, and included in every report format. This is distinct from [License Compliance](#license-compliance) above, which is about license-obligation risk on installed software; this is about mapping *security* findings onto the frameworks an org is typically audited against.
+
+Each finding is first assigned one or more internal risk categories (e.g. `injection`, `secrets_management`, `vulnerable_components` — the latter always applied to a dependency finding as a baseline, since every SCA finding is a known-vulnerable-component finding by definition), and each category carries a fixed list of framework control references, so two findings with the same underlying risk always map identically.
+
+**Frameworks covered**
+
+| Framework | Notes |
+|---|---|
+| OWASP Top 10 (2021) | Category codes (`A01:2021`–`A10:2021`) |
+| PCI DSS v4.0 | Requirement numbers |
+| HIPAA Security Rule | §164.312 / §164.308 citations |
+| SOC 2 (Trust Services Criteria) | `CC*`/`A1.*` codes |
+| ISO/IEC 27001:2022 (Annex A) | `A.*` control numbers |
+| NIST SP 800-53 Rev. 5 | Control IDs (e.g. `SI-10`, `AC-3`) |
+| GDPR | Article citations |
+| CIS Controls v8 | Numbered controls |
+
+**This is best-effort guidance, not a certified compliance assessment.** Control identifiers are the stable, publicly documented ones for each framework, but framework text, versioning, and applicable scope can change, and always depend on the org's own environment. Every report carries this disclaimer verbatim in `compliance_summary.disclaimer` — treat the mapping as a starting point for an audit conversation, not a citation to quote in one.
+
+**Output**
+
+- **HTML report**: a dedicated **Compliance** tab with one card per framework (control breakdown + finding counts), plus a Compliance Frameworks section in each vulnerability's detail modal.
+- **JSON report**: a `compliance` object on every vulnerability and secrets finding, plus a report-level `compliance_summary` aggregating all findings into per-framework, per-control counts.
+- **SARIF report**: `compliance_categories` / `compliance_frameworks` on each rule, and the full `compliance` object on each result.
+
+---
+
 ## Policy
 
 All package managers share the same policy engine. Policy is stored per-project in `.ubel/local/policy/config.json`.
@@ -304,9 +335,11 @@ All package managers share the same policy engine. Policy is stored per-project 
 |---|---|---|---|
 | `severity_threshold` | `low` `medium` `high` `critical` `none` | `high` | Block packages at or above this severity |
 | `block_unknown_vulnerabilities` | `true` `false` | `true` | Block packages with CVEs but no CVSS score |
+| `license_risk_threshold` | `none` `low` `medium` `high` | `none` | Block packages whose license risk is at or above this level; never blocks on `unknown` regardless of setting (see `block_unknown_license_risk`) |
+| `block_unknown_license_risk` | `true` `false` | `false` | Separately block packages whose license couldn't be classified at all |
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
-The threshold is inclusive — `high` blocks both `high` and `critical`. Setting `none` disables severity blocking but infections are still blocked.
+The severity threshold is inclusive — `high` blocks both `high` and `critical`. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every extension scan runs in `health` mode, where these two gates are active.
 
 ---
 
