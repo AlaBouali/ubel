@@ -536,8 +536,21 @@ export async function generateHtmlReport(reportPayload) {
     <!-- Compliance -->
     <section id="section-compliance" class="hidden space-y-8">
       <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
+
+      <div class="glass p-4 rounded-xl border border-neutral-800">
+        <p class="text-xs text-neutral-400 leading-relaxed">
+          <span class="font-semibold uppercase tracking-wide text-neutral-300">How to read the counts.</span>
+          Each framework and control is scored in <span class="text-white font-semibold">distinct CVEs</span> — the same
+          CVE affecting three component versions counts once here, because a compliance control is not violated three
+          times by the same bug. The secondary figure is the number of <span class="text-white font-semibold">affected
+          components</span> — that is the raw CVE-to-component pairing and shows how widely each issue is deployed.
+          A control showing <span class="mono text-neutral-300">12 CVEs · 20 components</span> means twelve distinct
+          bugs landed on twenty pieces of software, not twelve findings total.
+        </p>
+      </div>
+
       <div id="compliance-coverage" class="glass p-4 rounded-xl flex items-center justify-between text-sm hidden">
-        <span class="text-neutral-400">Vulnerabilities mapped to a compliance framework</span>
+        <span class="text-neutral-400">Distinct CVEs mapped to at least one framework control</span>
         <span id="compliance-coverage-value" class="mono text-neutral-200 font-semibold"></span>
       </div>
       <div id="compliance-owasp-section" class="hidden space-y-3">
@@ -810,6 +823,19 @@ function vulnSeverityKey(v) {
   return v.is_infection ? 'infection' : (v.severity || 'unknown').toLowerCase();
 }
 
+// A vulnerability's (id) alone is NOT unique within a report: the same CVE
+// routinely appears multiple times when it affects several component
+// versions (e.g. CVE-2025-55182 against React 19.0.0 and React 19.1.0). The
+// composite (id, affected_package_id) tuple is what every UI element that
+// needs to point at one specific row must key on — using just id silently
+// resolves to whichever variant appears first in the vulnerabilities array,
+// which is exactly the wrong behaviour when the user clicked a row that
+// visibly carries a different component label.
+function vulnKey(v) {
+  if (!v) return '';
+  return (v.id || '') + '@@' + (v.affected_package_id || '');
+}
+
 function hostsOf(item) {
   return [...new Set((item.assets || []).map(a => a.host + (a.port ? ':' + a.port : '')))];
 }
@@ -822,6 +848,60 @@ function componentLabel(id) {
 function hostsOfComponentId(id) {
   const item = reportData.inventory.find(i => i.id === id);
   return item ? hostsOf(item) : [];
+}
+
+// ── COMPLIANCE HELPERS ────────────────────────────────────────────────────────
+//
+// The compliance_summary shipped in reportData is built server-side by
+// summarizeCompliance() and counts each (vulnerability, affected-component)
+// pair once. That's a fine raw number but it reads as "N distinct problems"
+// when it is really "one CVE seen on N component versions" — which is what
+// makes a report say "85 PCI DSS findings" for what is, in this scan, about
+// a dozen distinct CVEs spread across a couple of dozen components.
+//
+// These helpers recompute a per-control breakdown from the raw vulnerability
+// list so the UI can lead with the honest unit (distinct CVEs) and show the
+// component count as a secondary figure. The server-side summary is left
+// untouched so JSON consumers keep seeing whatever shape they already rely on.
+
+function complianceMatchesFor(fwName, controlId) {
+  return (reportData.vulnerabilities || []).filter(v =>
+    v.compliance && v.compliance.frameworks &&
+    v.compliance.frameworks.some(x =>
+      x.name === fwName && x.controls.some(c => c.id === controlId)
+    )
+  );
+}
+
+function complianceStatsFromMatches(matches) {
+  const cves = new Set();
+  const components = new Set();
+  const hosts = new Set();
+  const inventoryById = new Map();
+  for (const item of reportData.inventory || []) inventoryById.set(item.id, item);
+  for (const v of matches) {
+    cves.add(v.id);
+    components.add(v.affected_package_id);
+    const item = inventoryById.get(v.affected_package_id);
+    for (const a of item?.assets || []) hosts.add(a.target);
+  }
+  return {
+    cveCount: cves.size,
+    componentCount: components.size,
+    hostCount: hosts.size,
+    matchCount: matches.length,
+  };
+}
+
+// For the framework card's headline figure — the same CVE can appear under
+// several controls of one framework (e.g. a path-traversal RCE maps to both
+// A06 and A01), so dedupe before counting.
+function complianceFrameworkTotals(fw) {
+  const allMatches = [];
+  for (const c of fw.controls || []) {
+    allMatches.push(...complianceMatchesFor(fw.name, c.id));
+  }
+  return complianceStatsFromMatches(allMatches);
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
@@ -995,7 +1075,7 @@ function openScopeModal(target) {
         <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerabilities (\${vulns.length})</p>
         <div class="bg-neutral-900 rounded-lg border border-neutral-800 divide-y divide-neutral-800 max-h-56 overflow-y-auto">
           \${vulns.length ? vulns.map(v => \`
-            <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-vuln-id="\${escH(v.id)}">
+            <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-vuln-key="\${escH(vulnKey(v))}">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold \${sevClass(vulnSeverityKey(v))} shrink-0">\${escH(v.is_infection ? 'infection' : v.severity)}</span>
                 <span class="mono text-xs text-neutral-200 shrink-0">\${escH(v.id)}</span>
@@ -1093,7 +1173,7 @@ function openComponentModal(id) {
         <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerabilities</p>
         <div class="bg-neutral-900 rounded-lg border border-neutral-800 divide-y divide-neutral-800 max-h-56 overflow-y-auto">
           \${vulns.length ? vulns.map(v => \`
-            <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-vuln-id="\${escH(v.id)}">
+            <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-vuln-key="\${escH(vulnKey(v))}">
               <div class="flex items-center gap-2">
                 <span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold \${sevClass(vulnSeverityKey(v))}">\${escH(v.is_infection ? 'infection' : v.severity)}</span>
                 <span class="mono text-xs text-neutral-200">\${escH(v.id)}</span>
@@ -1141,7 +1221,7 @@ function renderVulnsTable() {
   _filteredVulns.forEach((v) => {
     const row = document.createElement('tr');
     row.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
-    row.dataset.vulnId = v.id;
+    row.dataset.vulnKey = vulnKey(v);
     const hosts = hostsOfComponentId(v.affected_package_id);
     const recommendedFix = v.fix_versions_ranked && v.fix_versions_ranked.find(r => r.recommended);
     const fix = v.has_fix ? (recommendedFix ? recommendedFix.version : (v.fixed_versions || [])[0] || 'available') : 'none published';
@@ -1157,8 +1237,8 @@ function renderVulnsTable() {
   });
 }
 
-function openVulnModal(id) {
-  const v = (reportData.vulnerabilities || []).find(x => x.id === id);
+function openVulnModal(key) {
+  const v = (reportData.vulnerabilities || []).find(x => vulnKey(x) === key);
   if (!v) return;
 
   const refs = (v.references || []).slice(0, 12);
@@ -1307,59 +1387,96 @@ function renderCompliance() {
   const cs = reportData.compliance_summary;
   document.getElementById('compliance-disclaimer').textContent = (cs && cs.disclaimer) || '';
 
+  // Coverage pill — reframed from "component-mappings mapped" to
+  // "distinct CVEs that carry at least one framework control". The old
+  // "85 / 85 (100%)" figure was technically true and rhetorically hollow:
+  // every CVE in a CVE-based scan maps to A06 / RA-5 / Req. 6.3, so the
+  // metric was guaranteed to read as 100% and told the reader nothing.
   const coverageEl = document.getElementById('compliance-coverage');
   const coverageValueEl = document.getElementById('compliance-coverage-value');
-  if (cs && cs.coverage && cs.coverage.total_findings) {
-    const { mapped_findings, total_findings, coverage_pct } = cs.coverage;
-    coverageValueEl.textContent = mapped_findings + ' / ' + total_findings + ' (' + coverage_pct + '%)';
+  const allVulns = reportData.vulnerabilities || [];
+  const distinctCves = new Set(allVulns.map(v => v.id));
+  const mappedCves = new Set();
+  for (const v of allVulns) {
+    if (v.compliance && v.compliance.frameworks && v.compliance.frameworks.length) {
+      mappedCves.add(v.id);
+    }
+  }
+  if (distinctCves.size > 0) {
+    const pct = Math.round((mappedCves.size / distinctCves.size) * 100);
+    coverageValueEl.textContent = mappedCves.size + ' of ' + distinctCves.size + ' (' + pct + '%)';
     coverageEl.classList.remove('hidden');
   } else {
     coverageEl.classList.add('hidden');
   }
 
+  // OWASP by-category — recompute distinct-CVE counts from the raw
+  // vulnerability list rather than trusting the summary's raw count.
   const owaspSection = document.getElementById('compliance-owasp-section');
   const owaspGrid = document.getElementById('compliance-owasp-grid');
   if (cs && cs.by_owasp_category && cs.by_owasp_category.length) {
-    owaspGrid.innerHTML = cs.by_owasp_category.map(o => \`
-      <div class="glass p-4 rounded-xl flex items-start justify-between gap-3 text-xs">
-        <div class="flex flex-col gap-1">
-          <span class="mono text-red-400">\${escH(o.id)}</span>
-          <span class="text-neutral-400">\${escH(o.title)}</span>
-          <span class="text-neutral-600">via: \${escH((o.categories || []).join(', '))}</span>
-        </div>
-        <span class="mono text-neutral-300 whitespace-nowrap">\${o.findings_count}</span>
-      </div>\`).join('');
+    owaspGrid.innerHTML = cs.by_owasp_category.map(o => {
+      const stats = complianceStatsFromMatches(complianceMatchesFor('OWASP Top 10', o.id));
+      return \`
+        <div class="glass p-4 rounded-xl flex items-start justify-between gap-3 text-xs">
+          <div class="flex flex-col gap-1">
+            <span class="mono text-red-400">\${escH(o.id)}</span>
+            <span class="text-neutral-400">\${escH(o.title)}</span>
+            <span class="text-neutral-600">via: \${escH((o.categories || []).join(', '))}</span>
+          </div>
+          <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
+            <span class="mono text-neutral-200 font-semibold">\${stats.cveCount} CVE\${stats.cveCount === 1 ? '' : 's'}</span>
+            <span class="mono text-neutral-500 text-[10px]">\${stats.componentCount} component\${stats.componentCount === 1 ? '' : 's'}</span>
+          </div>
+        </div>\`;
+    }).join('');
     owaspSection.classList.remove('hidden');
   } else {
     owaspSection.classList.add('hidden');
   }
 
+  // Framework cards — recompute from raw vulnerabilities so the badge
+  // says "N CVEs · M components" rather than "N findings". The data-fw-idx
+  // / data-control-idx keys still point into compliance_summary.frameworks
+  // so openComplianceModal() continues to work unchanged.
   const grid = document.getElementById('compliance-frameworks-grid');
   if (!cs || !cs.frameworks || !cs.frameworks.length) {
     document.getElementById('compliance-empty').classList.remove('hidden');
     grid.innerHTML = '';
     return;
   }
-  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => \`
+  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => {
+    const fwStats = complianceFrameworkTotals(fw);
+    return \`
     <div class="glass p-6 rounded-xl space-y-4">
-      <div class="flex items-center justify-between">
+      <div class="flex items-start justify-between gap-3">
         <div class="flex flex-col">
           <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${escH(fw.name)}</h3>
           \${fw.version ? \`<span class="text-[10px] text-neutral-500 mono">\${escH(fw.version)}</span>\` : ''}
         </div>
-        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
+        <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
+          <span class="mono text-neutral-200 font-semibold text-xs">\${fwStats.cveCount} CVE\${fwStats.cveCount === 1 ? '' : 's'}</span>
+          <span class="mono text-neutral-500 text-[10px]">\${fwStats.componentCount} component\${fwStats.componentCount === 1 ? '' : 's'}</span>
+        </div>
       </div>
       <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-        \${fw.controls.map((c, cIdx) => \`
-        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" data-fw-idx="\${fwIdx}" data-control-idx="\${cIdx}">
-          <div class="flex flex-col">
-            <span class="mono text-red-400">\${escH(c.id)}</span>
-            <span class="text-neutral-500">\${escH(c.title)}</span>
-          </div>
-          <span class="mono text-neutral-400 whitespace-nowrap">\${c.findings_count}</span>
-        </div>\`).join('')}
+        \${fw.controls.map((c, cIdx) => {
+          const stats = complianceStatsFromMatches(complianceMatchesFor(fw.name, c.id));
+          return \`
+          <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" data-fw-idx="\${fwIdx}" data-control-idx="\${cIdx}">
+            <div class="flex flex-col min-w-0">
+              <span class="mono text-red-400">\${escH(c.id)}</span>
+              <span class="text-neutral-500">\${escH(c.title)}</span>
+            </div>
+            <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
+              <span class="mono text-neutral-200">\${stats.cveCount} CVE\${stats.cveCount === 1 ? '' : 's'}</span>
+              <span class="mono text-neutral-500 text-[10px]">\${stats.componentCount} comp.</span>
+            </div>
+          </div>\`;
+        }).join('')}
       </div>
-    </div>\`).join('');
+    </div>\`;
+  }).join('');
 }
 
 let _currentComplianceMatches = null;
@@ -1370,11 +1487,9 @@ function openComplianceModal(fwIdx, cIdx) {
   const control = fw && fw.controls && fw.controls[cIdx];
   if (!fw || !control) return;
 
-  const matches = (reportData.vulnerabilities || []).filter(v =>
-    v.compliance && v.compliance.frameworks &&
-    v.compliance.frameworks.some(x => x.name === fw.name && x.controls.some(c => c.id === control.id))
-  );
+  const matches = complianceMatchesFor(fw.name, control.id);
   _currentComplianceMatches = matches;
+  const stats = complianceStatsFromMatches(matches);
 
   const rows = matches.length ? matches.map((v, idx) => \`
     <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" data-match-index="\${idx}">
@@ -1395,7 +1510,13 @@ function openComplianceModal(fwIdx, cIdx) {
           <span class="mono text-red-400 text-sm">\${escH(control.id)}</span>
           <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
         </div>
-        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} — \${matches.length} finding\${matches.length === 1 ? '' : 's'}</p>
+        <p class="text-xs text-neutral-500">
+          \${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} —
+          \${stats.cveCount} distinct CVE\${stats.cveCount === 1 ? '' : 's'} across
+          \${stats.componentCount} component\${stats.componentCount === 1 ? '' : 's'}
+          on \${stats.hostCount} host\${stats.hostCount === 1 ? '' : 's'}
+          (\${stats.matchCount} component-CVE pair\${stats.matchCount === 1 ? '' : 's'} total)
+        </p>
       </div>
       <div>\${rows}</div>
     </div>
@@ -1963,9 +2084,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('vulns-table-body').addEventListener('click', (e) => {
-    const row = e.target.closest('[data-vuln-id]');
+    const row = e.target.closest('[data-vuln-key]');
     if (!row) return;
-    openVulnModal(row.dataset.vulnId);
+    openVulnModal(row.dataset.vulnKey);
   });
 
   document.getElementById('misconfigs-table-body').addEventListener('click', (e) => {
@@ -1994,10 +2115,10 @@ document.addEventListener('DOMContentLoaded', () => {
       openComponentModal(compRow.dataset.componentId);
       return;
     }
-    const vulnRow = e.target.closest('[data-vuln-id]');
+    const vulnRow = e.target.closest('[data-vuln-key]');
     if (vulnRow && modalBody.contains(vulnRow)) {
       e.stopPropagation();
-      openVulnModal(vulnRow.dataset.vulnId);
+      openVulnModal(vulnRow.dataset.vulnKey);
       return;
     }
     const matchRow = e.target.closest('[data-match-index]');
@@ -2005,7 +2126,7 @@ document.addEventListener('DOMContentLoaded', () => {
       e.stopPropagation();
       const idx = parseInt(matchRow.dataset.matchIndex, 10);
       const v = _currentComplianceMatches && _currentComplianceMatches[idx];
-      if (v) openVulnModal(v.id);
+      if (v) openVulnModal(vulnKey(v));
     }
   });
 

@@ -153,10 +153,12 @@ export function extractScripts(html, pageUrl) {
   while ((m = LINK_TAG_RE.exec(html)) !== null) {
     const attrs = m[1] || "";
     const hrefMatch = HREF_ATTR_RE.exec(attrs);
-    if (!hrefMatch) continue;
-    if (!hrefMatch[1].endsWith(".js")) continue;
+    if (!hrefMatch) continue;                         
     const raw = (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3] ?? "").trim();
+    if (raw==="") continue;
     if (!raw || raw.startsWith("data:")) continue;
+    if (!raw.endsWith(".js")) continue;
+
     let resolved;
     try {
       resolved = new URL(raw, pageUrl).toString();
