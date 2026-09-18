@@ -1,0 +1,12 @@
+export { AngularScanner } from "./angular.js";
+export { AngularJsScanner } from "./angularjs.js";
+export { VueJsScanner } from "./vuejs.js";
+export { ReactJsScanner } from "./react.js";
+export { FlutterScanner } from "./flutter.js";
+export { GatsbyJsScanner } from "./gatsbyjs.js";
+export { MeteorJsScanner } from "./meteorjs.js";
+export { NextJsScanner } from "./nextjs.js";
+export { NodeRedScanner } from "./nodered.js";
+export { NuxtJsScanner } from "./nuxtjs.js";
+export { SailsJsScanner } from "./sailsjs.js";
+export { StrapiJsScanner } from "./strapijs.js";

@@ -45,7 +45,7 @@ function _vr_compatLevel(dist) {
 // ── semver ──
 // optional v prefix, relaxed minor/patch, 4th security segment for Ruby gems (e.g. rack 2.2.6.3)
 const _VR_SEMVER_RE = /^[vV]?(?<major>\d+)(?:\.(?<minor>\d+))?(?:\.(?<patch>\d+))?(?:\.(?<security>\d+))?(?:-(?<pre>[a-zA-Z0-9._-]+))?(?:\+(?<build>[^\s]+))?$/;
-function _vr_parseSemver(v) {
+export function _vr_parseSemver(v) {
   const m = _VR_SEMVER_RE.exec(v.trim());
   if (!m || !m.groups) return null;
   const { major, minor, patch, security, pre } = m.groups;
@@ -78,7 +78,7 @@ function _vr_cmpPre(a, b) {
   }
   return 0;
 }
-function _vr_semverGt(a, b) {
+export function _vr_semverGt(a, b) {
   if (a.major !== b.major) return a.major > b.major;
   if (a.minor !== b.minor) return a.minor > b.minor;
   if (a.patch !== b.patch) return a.patch > b.patch;

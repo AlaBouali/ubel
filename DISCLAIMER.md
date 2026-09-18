@@ -42,3 +42,32 @@ not exploitable" label means our best guess is that it's mitigated, not a
 guarantee — and the absence of a finding for some piece of code isn't proof
 that code is clean. Treat every finding, and every part of your codebase, as
 something to verify yourself before relying on this tool's read of it.
+
+# Disclaimer for EASM / `ubel-url` and `ubel-domain`:
+
+These CLIs identifies software and versions purely from what a remote server
+chooses to disclose over plain HTTP(S) — response headers, banners, and page
+markup — via passive pattern matching against a fixed set of registered
+fingerprints (see `easm/fingerprint/README.md`). It does not inspect
+running processes, filesystems, or anything else only reachable with
+authenticated/local access, and it does not verify a match beyond that
+pattern match. This means:
+
+- A false positive is possible when a server's banner/markup happens to
+  match a fingerprint's pattern without actually running that software.
+- A false negative is possible, and likely, whenever an operator has
+  changed or removed the identifying banner/header (a common, deliberate
+  hardening practice) or is running a version/product this scanner simply
+  has no fingerprint for. Absence of a finding is not evidence of absence
+  of a vulnerability, or even of the underlying software itself.
+- A version string, once matched, is passed to OSV/NVD as-is for CVE
+  lookup. If a vendor backports a security fix without changing the
+  version string a server reports (common for enterprise/LTS branches),
+  this tool has no way to know that and will report the CVE as unresolved
+  regardless.
+
+None of this is a defect to "fix" so much as an inherent limit of
+unauthenticated, remote, banner-based identification versus actually
+having access to the host. Every finding here is a lead to verify against
+the authoritative advisory and the actual deployed software/patch level —
+not a confirmed, exploitable vulnerability on its own.

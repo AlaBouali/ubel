@@ -28,6 +28,21 @@ import { getGoogleFontsScript } from "./googlefonts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// ── Cross-module reuse ────────────────────────────────────────────────────────
+// A handful of the low-level OSV/NVD query + enrichment primitives below
+// (submitToOsv, submitToNvd, getVulnById, getFix, scoreToSeverity,
+// getEcosystemFromPurl, deduplicateVulnerabilitiesByAlias,
+// sortVulnerabilities) are exported not because UbelEngineInstance itself
+// needs them from outside, but so other UBEL modules can drive the same
+// vulnerability-scanning core against inventory that didn't come from a
+// dependency-tree resolution. The EASM module (../easm/) is the first
+// consumer: it feeds CPE ids built from passive HTTP fingerprinting
+// (product/version banners, not a package manager) through submitToNvd
+// (submitToOsv is a no-op there — it only matches "pkg:"-scheme ids) to get
+// the same OSV.dev/NVD-backed CVE data, minus everything that assumes a
+// resolvable dependency graph (license classification, dependency
+// sequences/tree, reachability analysis — see easm/lib/scan.js).
+
 // OSV API base — overridable via UBEL_OSV_ENDPOINT for self-hosted/air-gapped
 // mirrors (e.g. an internal proxy in front of a local OSV database dump).
 // Expected to expose the same REST path shape as the public API
@@ -1593,7 +1608,7 @@ function fetchJSON(url, method = "GET", body = null, opts = {}) {
 }
 
 // ── PURL helpers ──────────────────────────────────────────────────────────────
-function getDependencyFromPurl(purl) {
+export function getDependencyFromPurl(purl) {
   if (!purl || typeof purl !== "string" || !purl.startsWith("pkg:")) {
     return ["unknown", ""];
   }
@@ -1667,7 +1682,7 @@ function getDependencyFromPurl(purl) {
   }
 }
 
-function getEcosystemFromPurl(purl) {
+export function getEcosystemFromPurl(purl) {
   if (purl.startsWith("cpe:"))        return "windows";
   if (purl.startsWith("pkg:gem/"))        return "ruby";
   if (purl.startsWith("pkg:nuget/"))      return "dotnet";
@@ -1751,7 +1766,7 @@ function extractNvdCvss(metrics = {}) {
 /**
  * Map a CVSS base score to a severity label.
  */
-function scoreToSeverity(score) {
+export function scoreToSeverity(score) {
   if (score == null) return "unknown";
   if (score >= 9.0)  return "critical";
   if (score >= 7.0)  return "high";
@@ -1922,7 +1937,7 @@ async function queryNvdForCpe(cpe, name, version, ecosystem) {
   return { status: 200, vulns: items };
 }
 
-async function submitToNvd(inventory) {
+export async function submitToNvd(inventory) {
   console.log("[*] Submitting CPE items to NVD for enrichment...");
 
   const cpeItems = inventory.filter(item => !item.id.startsWith("pkg:"));
@@ -1978,7 +1993,7 @@ async function submitToNvd(inventory) {
 }
 
 // ── OSV querying ──────────────────────────────────────────────────────────────
-async function submitToOsv(purlsList) {
+export async function submitToOsv(purlsList) {
   purlsList = purlsList.filter(p => p.startsWith("pkg:"));
   if (!purlsList.length) return [];
 
@@ -2060,7 +2075,7 @@ function get_last_affected_versions(vuln) {
   return [...new Set(lastAffected)];
 }
 
-function getFix(vuln) {
+export function getFix(vuln) {
   const remediations = [];
   const dep = vuln.affected_dependency;
 
@@ -2092,7 +2107,7 @@ function getFix(vuln) {
     : [];
 }
 
-async function getVulnById({ vulnerability_id, purl, dependency, affected_version }) {
+export async function getVulnById({ vulnerability_id, purl, dependency, affected_version }) {
   const res = await fetchJSON(`${OSV_VULN_BASE}/${vulnerability_id}`);
   if (res.status !== 200) return null;
 
@@ -2240,7 +2255,7 @@ const SEV_ORDER = { infection: -1, critical: 0, high: 1, medium: 2, low: 3, unkn
  * @param {{ id: string, aliases?: string[], affected_package_id?: string }[]} vulns
  * @returns same type, deduplicated
  */
-function deduplicateVulnerabilitiesByAlias(vulns) {
+export function deduplicateVulnerabilitiesByAlias(vulns) {
   // Group by PURL so alias dedup is scoped per package (an alias chain for
   // pkg A should never suppress a real finding for pkg B).
   const byPurl = new Map();
@@ -2358,7 +2373,7 @@ function summarizeVulnerabilities(vulnerabilities,inventory) {
   return Object.fromEntries(sorted.map((p) => [p.name, p]));
 }
 
-function sortVulnerabilities(vulns) {
+export function sortVulnerabilities(vulns) {
   return [...vulns].sort((a, b) => {
     const sevA = a.is_infection ? "infection" : (a.severity || "unknown").toLowerCase();
     const sevB = b.is_infection ? "infection" : (b.severity || "unknown").toLowerCase();
@@ -2599,7 +2614,7 @@ export class UbelEngineInstance {
     // ubel_engine.py's validate_pkg_args (strip the allowed punctuation, what
     // remains must be alphanumeric).
     const validatePkgArgsLoose = (arg) => {
-      const stripped = arg.replace(/[=._+\-@/~[\]<>!]/g, "");
+      const stripped = arg.replace(/[=,._+\-@/~\[\]<>!]/g, "");
       return /^[a-z0-9]+$/i.test(stripped);
     };
 

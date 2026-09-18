@@ -1,0 +1,21 @@
+// Registers every devops/project-management scanner (side-effect import) and
+// re-exports each for direct use.
+export { ConsulScanner } from "./consul.js";
+export { JenkinsScanner } from "./jenkins.js";
+export { JiraScanner } from "./jira.js";
+export { PuppetScanner } from "./puppet.js";
+export { SupervisorScanner } from "./supervisor.js";
+export { NagiosScanner } from "./nagios.js";
+export { PortainerScanner } from "./portainer.js";
+export { SonarQubeScanner } from "./sonarqube.js";
+export { JFrogArtifactoryScanner } from "./jfrogArtifactory.js";
+export { UpstashKafkaServerScanner } from "./upstashKafka.js";
+export { KibanaScanner } from "./kibana.js";
+export { SplunkScanner } from "./splunk.js";
+export { KafkaManagerScanner } from "./kafkaManager.js";
+export { GraylogScanner } from "./graylog.js";
+export { WazuhScanner } from "./wazuh.js";
+export { NexusScanner } from "./nexus.js";
+export { DockerHttpApiScanner } from "./dockerHttpApi.js";
+export { KubernetesHttpApiScanner } from "./kubernetes.js";
+export { PrometheusScanner } from "./prometheus.js";

@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -72,6 +72,20 @@ runs:
     #          in the job — never commit the key itself)
     #   Azure: AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET, plus
     #          AZURE_SUBSCRIPTION_ID (always required regardless of provider)
+    #
+    # `url` (EASM/`ubel-url`) is different from every other command above in
+    # one important way: the thing it acts on — the target domain/URL — is
+    # itself part of `args`, not a separately-credentialed resource. Unlike
+    # `cloud` (gated by credentials you control) or `npm`/`pip`/etc. (acting
+    # on this repo's own checked-out manifest), a workflow that builds `args`
+    # from anything less trusted than its own hardcoded config (a PR title,
+    # an issue body, another job's output) could be tricked into having your
+    # CI runner send live requests to a target you never intended to scan.
+    # `ubel-url` itself only ever fingerprints + queries OSV/NVD — it doesn't
+    # exploit anything — but per its own README, only ever pass it a target
+    # your organization owns or is explicitly authorized to test; treat
+    # `args` here with the same care as any other step that makes outbound
+    # network calls to a caller-influenced destination.
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -79,10 +93,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
             exit 1
             ;;
         esac

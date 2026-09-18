@@ -11,6 +11,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [node/cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md).
+- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation) and checks the result against OSV.dev/NVD, the same vulnerability-lookup engine the SCA module uses. Runs via `ubel-url`. **Authorized use only — see [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md).**
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 
@@ -22,7 +23,7 @@ Everything runs on your own infrastructure: no source code egress, no credential
 npm install -g @arcane-spark/ubel-node
 ```
 
-This installs the binaries for the SCA/firewall CLI, the SAST module, and the cloud scanner:
+This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud scanner, and the EASM scanner:
 
 | Binary | Covers | What it does |
 |---|---|---|
@@ -41,6 +42,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, and the cl
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
+| `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD vulnerability lookup on what it finds — **authorized use only, against infrastructure you own** |
 
 `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
 
@@ -240,6 +242,52 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 
 ---
 
+## EASM — External Attack Surface Fingerprinting
+
+> **⚠ Authorized use only.** `ubel-url` sends live, unauthenticated requests to
+> every target you give it and discloses what it fingerprints to OSV.dev/NVD.
+> Only ever run it against infrastructure you own or have explicit,
+> documented authorization to test — the same own-infrastructure-only rule
+> every other UBEL module already holds you to. See
+> [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+> for the full notice.
+
+Passively fingerprints the software exposed on a domain/URL over plain
+HTTP(S) — server banners, version headers, page markup, a small set of
+well-known paths — turns what it finds into candidate CPE identifiers, and
+feeds those through the exact same OSV.dev/NVD vulnerability-lookup engine
+the SCA module uses. No authentication, no brute forcing, no exploitation —
+just unauthenticated GETs and a lookup against public vulnerability data.
+
+It's a deliberate subset of an SCA report: no license compliance (no
+manifest to read one off of), no dependency sequences/graph (nothing here
+is resolved from a lockfile), no reachability analysis (no source code to
+trace), and no SBOM/SARIF — JSON and HTML only. CVSS scoring, fix-version
+recommendations, and the same compliance framework mapping every other
+module uses are all still included. Every detected component is reported
+with `scopes: ["prod"]` — anything fingerprinted over the network is, by
+definition, already running.
+
+```bash
+# One domain, safety guard on by default (skips private/self-IP targets)
+ubel-url example.com
+
+# Several targets in one run, one report
+ubel-url a.example.com b.example.com --fail-on high
+
+# A lab/localhost target you own
+ubel-url localhost:8080 --allow-private
+```
+
+Outputs JSON and HTML only. **Exit codes:** governed by `--fail-on` (default
+`critical`), same severity-threshold/count syntax as the rest of UBEL —
+reports on disk always contain every finding regardless of this flag.
+
+**Full documentation — the responsible-use notice, safety guard, and all flags:**
+[**node/easm/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+
+---
+
 ## CI/CD Integration
 
 All binaries exit non-zero on findings that clear their respective gate, so any of them fit natively into a CI runner.
@@ -282,6 +330,11 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
+    command: url                      # EASM — only ever point `args` at infrastructure you own, see node/easm/README.md
+    args: staging.your-own-domain.example --fail-on high
+
+- uses: AlaBouali/ubel@<commit-sha>
+  with:
     command: pip
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
@@ -296,7 +349,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
 
 ### Calling the binaries directly
 
@@ -324,6 +377,9 @@ Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 
 - name: UBEL cloud misconfiguration scan
   run: ubel-cloud --fail-on high
+
+- name: UBEL external attack surface scan (only against infra you own — see node/easm/README.md)
+  run: ubel-url staging.your-own-domain.example --fail-on high
 ```
 
 ```dockerfile
@@ -879,6 +935,18 @@ To keep this document honest rather than aspirational:
   Windows) — gets full SCA **and** license compliance regardless of
   firewall status; firewalling and inventory/license coverage are tracked
   and reported independently.
+- This entire matrix is about **the SCA/firewall/reachability/license/SBOM
+  pipeline for dependency trees you resolve locally** (a manifest, a
+  lockfile, an installed package set, a container image). `ubel-url`
+  (EASM) is a genuinely separate thing — passive HTTP fingerprinting of a
+  remote domain/URL, not a dependency-tree scan — and deliberately doesn't
+  carry license compliance, dependency sequences, reachability analysis,
+  or SBOM/SARIF output, none of which are meaningful concepts for
+  something fingerprinted over the network rather than resolved from a
+  manifest. See the EASM section above and
+  [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+  for what it does carry over (OSV/NVD lookup, CVSS, fix recommendations,
+  compliance mapping) and why.
 
 ---
 
@@ -894,5 +962,6 @@ Source-available, internal-use license. Modification for internal needs is permi
 - SCA docs: https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md
 - SAST docs: https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md
 - Cloud docs: https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md
+- EASM docs: https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md
 
 *UBEL — Find the bug before it finds production.*

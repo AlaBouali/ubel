@@ -71,7 +71,17 @@ const NAMED_FILE_ALLOW = new Set([
   "settings.xml", "settings-security.xml", // path-scoped Maven rules target these
 ]);
 
-const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB — skip anything larger
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB — skip anything larger
+
+// A matched "secret" longer than this is almost always a regex match that
+// spanned a minified/bundled line rather than a real credential, so we
+// allow dropping it. This is deliberately generous — the old cap of 4096
+// silently discarded legitimate long tokens (large JWTs, PEM bodies,
+// base64 blobs). Nothing in the finding object scales with the match
+// length: `match_preview` is redacted to ~26 chars by redact(), and
+// column_end is just a number. A single line can never exceed the file
+// size, so MAX_FILE_SIZE is the true upper bound.
+const MAX_SECRET_LENGTH = 40960; 
 
 // extra-rules.js
 export const extraRules = [
@@ -463,7 +473,7 @@ function scanLines(lines, filePath, projectRoot) {
       const previewSource = secretText || match[0];
       const match_preview = redact(previewSource);
 
-      if (!existing) {
+      if (!existing && !(secretText && secretText.length > MAX_SECRET_LENGTH)) {
         lineFindings.set(lineNum, {
           finding: {
             id: rule.id,
