@@ -42,7 +42,7 @@ all of them in one run. The flow end to end:
 ```
 domain  →  crt.sh subdomain discovery  →  fingerprint every host
         →  group techs by name+version (with the host list for each)
-        →  vulnerability lookup  →  one report
+        →  vulnerability lookup + misconfiguration checks  →  one report
 ```
 
 The grouping step is a property of the shared scanning engine, not something
@@ -78,6 +78,15 @@ whether that CVE is actually reachable, patched out-of-band, or mitigated by
 something in front of it (a WAF, a reverse proxy stripping the banner that
 would've disproved the version, etc.). Treat every finding as a lead to
 verify, not a confirmed compromise.
+
+Alongside that CVE lookup, every scan also runs a small, fixed set of
+**misconfiguration checks** against each live host — exposed `.env`/`.git`,
+WordPress-specific probes, TLS/certificate weaknesses, and missing security
+headers — see [Misconfiguration checks](#misconfiguration-checks) below.
+These stay within the same posture as everything else here: a single
+well-known path per HTTP check (or one TLS handshake), no exploitation, no
+brute-forcing. It's a second, independent finding type layered on the same
+passive scan, not a change to what the module does or how it behaves.
 
 This is deliberately a **subset** of what the SCA module's report shows for
 a dependency-tree scan, not a re-implementation of all of it. Specifically
@@ -140,6 +149,19 @@ dependency; if it's answering HTTP requests, it's running.
   rule set as `ubel-secrets`, reporting the exact URL and line:column of
   every hardcoded credential a visitor could read out of the page (values
   redacted in the report). Disable with `--no-secrets`
+- **Web misconfiguration checks** — every live host is also probed for a
+  fixed set of well-known issues: an exposed `.env` file (cross-referenced
+  against the same secrets rule set), an exposed `.git` directory (readable
+  `HEAD`, with a best-effort remote-URL read from `.git/config`), exposed
+  `phpinfo()` output, and — only on hosts the fingerprinter already
+  identified as WordPress — a reachable `xmlrpc.php` and unauthenticated
+  user enumeration via `wp-json/wp/v2/users`. Every host is also checked for
+  TLS/certificate weaknesses (expiry, untrusted/self-signed, hostname
+  mismatch, weak negotiated protocol/cipher, explicit TLS 1.0/1.1 downgrade
+  acceptance, or no working HTTPS listener at all) and missing/weak HTTP
+  security headers (HSTS presence and `max-age`, clickjacking protection via
+  `X-Frame-Options`/CSP `frame-ancestors`). Runs automatically on every
+  scan — see [Misconfiguration checks](#misconfiguration-checks)
 - **DNS pre-resolution** — every target is resolved before probing; a
   hostname with no DNS record is marked `dead` in the report and skipped
   rather than probed to a timeout, so "this host is gone" is never confused
@@ -167,9 +189,12 @@ binary. There's no separate package to install — EASM ships as part of
 ## Requirements
 
 - Node.js `>=18.0.0`
-- Outbound network access to: the target(s) you're scanning (HTTP/HTTPS),
-  `api.osv.dev`, `services.nvd.nist.gov`, and `www.wpvulnerability.net`
-  (plus `crt.sh` for `ubel-domain`) — or your own internal mirrors, see
+- Outbound network access to: the target(s) you're scanning — HTTP(S)
+  requests for fingerprinting/misconfiguration checks, plus a raw TLS
+  handshake to port 443 for the certificate/protocol checks (see
+  [Misconfiguration checks](#misconfiguration-checks)) — `api.osv.dev`,
+  `services.nvd.nist.gov`, and `www.wpvulnerability.net` (plus `crt.sh` for
+  `ubel-domain`) — or your own internal mirrors, see
   [Vulnerability data sources](#vulnerability-data-sources)
 - No credentials of any kind — this doesn't authenticate to anything
 
@@ -272,6 +297,107 @@ to always exit `0`, or `--fail-on <count>:<severity>` — e.g. `5:high` — to
 fail only once MORE than `<count>` matches at or above `<severity>` exist,
 for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1`
 on a fatal/unexpected error (including `ubel-domain` finding no hosts).
+`--fail-on` gates only on **vulnerabilities** (and infections) — a scan that
+finds nothing but critical misconfigurations still exits `0`; misconfiguration
+severity isn't part of the exit-code gate today (see [Known
+limitations](#known-limitations--natural-next-steps)).
+
+---
+
+## Misconfiguration checks
+
+Both `ubel-url` and `ubel-domain` run the same fixed set of misconfiguration
+probes against every live host, in addition to the CVE lookup the rest of
+this document describes — implemented in
+[`lib/misconfig_scan.js`](./lib/misconfig_scan.js). This runs automatically
+on every scan; there's currently no CLI flag to disable or retime it (see
+[Known limitations](#known-limitations--natural-next-steps)).
+
+Every check fetches one specific, well-known path with redirects disabled
+(a redirect away from `/.env` means it isn't directly exposed, which is the
+opposite of a finding). A single baseline request to a random, guaranteed-
+nonexistent path is made per host first, so a target that returns HTTP 200
+for everything (a catch-all SPA route, for instance) can't be misread as
+every probed path genuinely existing.
+
+**Exposed File**
+- `exposed-env-file` — a publicly readable `.env`. Cross-referenced against
+  the same rule set `ubel-secrets` uses: `critical` if it matches a known
+  credential pattern, `high` otherwise.
+- `exposed-git-directory` — a publicly readable `.git/HEAD` (validated as an
+  actual ref or commit hash, not just a 200 response), with a best-effort
+  remote URL read from `.git/config` when available. Always `critical` — the
+  entire repository history, including deleted branches, is typically
+  reconstructable from this alone.
+- `exposed-phpinfo` — `phpinfo()` output reachable at `/info.php` or
+  `/phpinfo.php`, disclosing the PHP version, loaded extensions, and
+  absolute server paths. `high`.
+
+**WordPress** — only run on hosts the fingerprinter's own component
+inventory already flagged as WordPress (`wp_kind` set on a detected
+component); a WordPress install the fingerprinter didn't identify as such
+won't get these two checks, even though every other check below still runs.
+- `wp-xmlrpc-exposed` — `xmlrpc.php` reachable and responding as an XML-RPC
+  server, usable for pingback-based DDoS amplification and for brute-forcing
+  many password guesses in a single request. `medium`.
+- `wp-user-enumeration` — `wp-json/wp/v2/users` publicly lists user
+  accounts, disclosing usernames/slugs for targeted login brute-forcing.
+  `medium`.
+
+**TLS/SSL** — one raw TLS handshake to the host's HTTPS port (443, or the
+target's own port when the resolved URL is already HTTPS) via Node's own
+`tls` module — no external tool (nmap, testssl.sh, openssl CLI) and no
+third-party TLS library.
+- `tls-no-https` — no working TLS listener at all on an HTTP-only target.
+  `medium`.
+- `tls-broken` — the resolved URL is HTTPS, but the handshake itself fails —
+  worse than no HTTPS, since clients try HTTPS first and hard-fail.
+  `critical`.
+- `tls-cert-expired` / `tls-cert-expiring-soon` — expired (`critical`), or
+  expiring within 14 days (`high`) or 30 days (`medium`).
+- `tls-cert-not-yet-valid` — the certificate's validity window hasn't
+  started yet (usually clock skew). `medium`.
+- `tls-cert-untrusted` — self-signed or otherwise fails chain verification.
+  `high`.
+- `tls-hostname-mismatch` — the certificate doesn't cover the hostname it's
+  served on. `high`.
+- `tls-weak-protocol-negotiated` — SSLv3/TLS 1.0 negotiated by default
+  (`high`), or TLS 1.1 (`medium`).
+- `tls-weak-cipher` — a legacy cipher (RC4, DES/3DES, export-grade,
+  anonymous/NULL) negotiated by default. `medium`.
+- `tls-legacy-protocol-supported` — the server still *accepts* an explicit
+  TLS 1.0 (`high`) or TLS 1.1 (`medium`) request even when it doesn't
+  negotiate one by default — a separate probe from the one above, since a
+  downgrade attack would request the weak version explicitly rather than
+  wait for it to be offered. A refused probe here isn't treated as proof of
+  safety: it's equally consistent with the server correctly refusing and
+  with this runtime's own OpenSSL build refusing to attempt the handshake at
+  all — either way, nothing conclusive is reported for that specific outcome.
+
+**Security Headers** — evaluated on one root-page fetch, over HTTPS when a
+working listener was found (HSTS can only be observed over HTTPS; browsers
+ignore it over plain HTTP) or HTTP otherwise.
+- `missing-hsts` — no `Strict-Transport-Security` header on an HTTPS
+  response, leaving an SSL-stripping window on the first request of every
+  new session. `medium`.
+- `hsts-disabled` — HSTS present but `max-age=0`, which actively tells
+  browsers to discard any previously stored HSTS policy. `medium`.
+- `hsts-short-max-age` — HSTS present with `max-age` below the ~6-month
+  (15768000s) floor commonly recommended (and required for preload-list
+  submission). `low`.
+- `missing-clickjacking-protection` — neither a valid `X-Frame-Options`
+  (`DENY`/`SAMEORIGIN`) nor a CSP `frame-ancestors` directive is set.
+  `medium`.
+- `weak-clickjacking-protection` — `X-Frame-Options` is set, but to a value
+  modern browsers ignore (e.g. the deprecated `ALLOW-FROM`). `low`.
+
+Findings are grouped by rule id in the report (not one row per host) — see
+[Reports](#reports) — with a deduplicated "seen on" host list per rule, the
+same shape Components/Vulnerabilities already use. A host contributes
+entries to `misconfigurations_errors` (not a false "no findings") when a
+probe fails outright — a timeout, a connection reset, an unparseable
+response — so a clean-looking host and an unprobeable one are never
+conflated.
 
 ---
 
@@ -399,6 +525,15 @@ other UBEL report vendors them) and includes:
   with a per-finding modal listing every page that referenced a shared
   script. A "not scanned" panel lists URLs that couldn't be fetched, so an
   empty result is never mistaken for a clean one
+- **Misconfigurations tab** — findings from
+  [Misconfiguration checks](#misconfiguration-checks), one row per rule id
+  (e.g. `missing-hsts`, `exposed-git-directory`) rather than one per
+  occurrence — each row shows severity, category (Exposed File / WordPress /
+  TLS-SSL / Security Headers), and how many distinct hosts it was seen on.
+  Filterable by severity, category, and free text; a per-finding modal lists
+  every occurrence (host, URL, description, evidence, remediation). An
+  errors panel lists probes that couldn't complete, same pattern as Secrets'
+  "not scanned" panel
 - Dedicated Compliance tab — one card per framework, same shape as every
   other UBEL module's compliance tab
 - **Detailed Stats tab**, same idea as the SAST/SCA reports': target
@@ -407,8 +542,10 @@ other UBEL report vendors them) and includes:
   multi-id coverage, vulnerability counts by severity and fix availability,
   charts for findings-by-data-source and components-by-type, exposed-secret
   counts by severity with crawl coverage (pages, inline blocks, external
-  scripts), the full dead host list, and a busiest-hosts ranking by
-  component count
+  scripts), misconfiguration counts (distinct rules and total occurrences,
+  hosts checked/affected, hosts checked for the WordPress-only checks) with
+  charts by severity and by category plus a per-host occurrence ranking, the
+  full dead host list, and a busiest-hosts ranking by component count
 - Scan Info tab: the full responsible-use notice, tool version,
   generated-at timestamp, `--allow-private`/endpoint configuration used for
   the run, host/runtime provenance (platform, arch, Node version), a
@@ -417,11 +554,13 @@ other UBEL report vendors them) and includes:
   count for each)
 
 The JSON report is the full machine-readable equivalent — `stats` (including
-`stats.resolution` with the dead-host list), `compliance_summary`,
-`usage_notice`, `assets` (per-target status, resolved IP), the complete
-`inventory` (fingerprinted components), the complete `vulnerabilities`
-array, and `secrets` / `secrets_errors` (exposed credentials with URL and
-position) — and can be consumed by CI/CD tooling directly.
+`stats.resolution` with the dead-host list and `stats.misconfigurations`),
+`compliance_summary`, `usage_notice`, `assets` (per-target status, resolved
+IP), the complete `inventory` (fingerprinted components), the complete
+`vulnerabilities` array, `secrets` / `secrets_errors` (exposed credentials
+with URL and position), and `misconfigurations` / `misconfigurations_errors`
+(one entry per rule id, each carrying its own occurrence list) — and can be
+consumed by CI/CD tooling directly.
 
 ---
 
@@ -482,6 +621,25 @@ import { resolveTargets } from "../easm/lib/resolve.js";
 
 const { alive, dead } = await resolveTargets(hosts);
 ```
+
+[Misconfiguration checks](#misconfiguration-checks) are available on their
+own via `easm/lib/misconfig_scan.js`'s `scanMisconfigurations(assets,
+inventory, opts)` — `assets` and `inventory` are the shapes `scanTargets()`
+already returns (only `assets` entries with `status: "scanned"` are probed;
+`inventory` is used solely to gate the WordPress-only checks on hosts whose
+inventory carries a `wp_kind`), and `opts` accepts `concurrency`, `timeout`
+(seconds per probe, default 8), and `log`:
+
+```js
+import { scanMisconfigurations } from "../easm/lib/misconfig_scan.js";
+
+const { findings, errors, stats } = await scanMisconfigurations(assets, inventory, { timeout: 8 });
+```
+
+This is also the only way to skip or retime the misconfiguration checks
+today — `scanTargets()`'s own `scanMisconfigs`/`misconfigTimeout` options
+(see [Misconfiguration checks](#misconfiguration-checks)) aren't wired up to
+either CLI's argv parser yet.
 
 Like `ubel-cloud`, none of this is yet wired into `package.json`'s `exports`
 map (only `./sca` and `./sast` are) — reachable via a relative import within
@@ -587,6 +745,38 @@ involved — there's nothing extra to clean up in a CI job or container layer.
   through a specific egress point is a reasonable follow-up.
 - No authenticated/credentialed scanning mode — everything is unauthenticated
   GETs by design (see [What this is, and isn't](#what-this-is-and-isnt)).
+- [Misconfiguration checks](#misconfiguration-checks) run unconditionally on
+  every scan. `scanTargets()` already accepts `scanMisconfigs`/
+  `misconfigTimeout` options to disable or retime them, but — unlike
+  `--no-secrets` for the client-side crawl — neither `ubel-url` nor
+  `ubel-domain`'s CLI exposes a flag for either one yet; skipping or
+  retiming them today means calling `scanTargets()` (or
+  `scanMisconfigurations()` directly) programmatically instead of through
+  the binaries.
+- `--fail-on` only gates on vulnerabilities/infections, not on
+  misconfiguration findings — a scan that turns up only critical
+  misconfigurations (an exposed `.git` directory, say) with no matching
+  vulnerability still exits `0`. The findings are still written to every
+  report regardless; there's just no CI gate on them yet, unlike
+  `ubel-cloud`'s misconfiguration checks.
+- The console summary (`printScanSummary`, what prints to the terminal at
+  the end of a run) reports vulnerability and secrets counts but not
+  misconfiguration counts — nothing about them appears in stdout today; the
+  HTML report's Misconfigurations tab or the JSON report's
+  `misconfigurations`/`stats.misconfigurations` are the only places to see
+  them short of `--verbose`'s per-host log line.
+- The WordPress-gated checks (`wp-xmlrpc-exposed`, `wp-user-enumeration`)
+  only run on hosts the fingerprinter's own inventory already identified as
+  WordPress. A WordPress install the fingerprinter fails to recognize (e.g.
+  a heavily customized theme that strips every usual marker) won't get
+  those two checks, even though the ungated ones (exposed files, TLS,
+  headers) still run against it like any other host.
+- Every misconfiguration check probes exactly one well-known path (or, for
+  TLS, one handshake) per host — the same fixed-list, no-wordlist posture as
+  the rest of this module. A non-default `.env` location, a `.git` directory
+  served from somewhere other than the web root, or any issue outside the
+  fixed rule list in [Misconfiguration checks](#misconfiguration-checks)
+  simply isn't checked for.
 
 ---
 

@@ -11,7 +11,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [node/cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md).
-- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation) and checks the result against OSV.dev/NVD, the same vulnerability-lookup engine the SCA module uses. Runs via `ubel-url`. **Authorized use only — see [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md).**
+- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD (the same vulnerability-lookup engine the SCA module uses), and separately checks every host for a fixed set of common misconfigurations (exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing security headers). Runs via `ubel-url` against hosts you already know, or `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs first and scan all of them in one run. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 
@@ -42,7 +42,8 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
-| `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD vulnerability lookup on what it finds — **authorized use only, against infrastructure you own** |
+| `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
+| `ubel-domain` | EASM | Same as `ubel-url`, but discovers its own target list first — enumerates a domain's subdomains via Certificate Transparency logs (crt.sh), then runs the same fingerprinting/vulnerability/misconfiguration scan against all of them — **authorized use only, against infrastructure you own** |
 
 `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
 
@@ -246,10 +247,12 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 
 > **⚠ Authorized use only.** `ubel-url` sends live, unauthenticated requests to
 > every target you give it and discloses what it fingerprints to OSV.dev/NVD.
-> Only ever run it against infrastructure you own or have explicit,
-> documented authorization to test — the same own-infrastructure-only rule
-> every other UBEL module already holds you to. See
-> [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+> `ubel-domain` does the same, but discovers its own target list from
+> Certificate Transparency logs first — so it can end up scanning hosts you
+> didn't explicitly name. Only ever run either against infrastructure you own
+> or have explicit, documented authorization to test — the same
+> own-infrastructure-only rule every other UBEL module already holds you to.
+> See [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
 > for the full notice.
 
 Passively fingerprints the software exposed on a domain/URL over plain
@@ -258,6 +261,20 @@ well-known paths — turns what it finds into candidate CPE identifiers, and
 feeds those through the exact same OSV.dev/NVD vulnerability-lookup engine
 the SCA module uses. No authentication, no brute forcing, no exploitation —
 just unauthenticated GETs and a lookup against public vulnerability data.
+`ubel-domain` runs the identical scan, with the target list discovered for
+you first: give it a root domain and it enumerates every subdomain a public
+CA has logged a certificate for (via crt.sh), then fingerprints all of them
+in one run — `--list-only` prints that discovered list without sending a
+single request to any of those hosts, so you can review and trim it
+(`--exclude`) before authorizing the real scan.
+
+Every host is also checked, automatically, for a fixed set of common
+misconfigurations, independent of the CVE lookup above: an exposed
+`.env`/`.git`, exposed `phpinfo()` output, TLS/certificate weaknesses
+(expiry, trust, hostname mismatch, weak/legacy protocol and cipher support),
+missing security headers (HSTS, clickjacking protection), and — on hosts
+already identified as WordPress — a reachable `xmlrpc.php` and unauthenticated
+user enumeration.
 
 It's a deliberate subset of an SCA report: no license compliance (no
 manifest to read one off of), no dependency sequences/graph (nothing here
@@ -277,14 +294,24 @@ ubel-url a.example.com b.example.com --fail-on high
 
 # A lab/localhost target you own
 ubel-url localhost:8080 --allow-private
+
+# See what a domain-wide sweep would touch, without touching anything
+ubel-domain your-company.example --list-only
+
+# Discover every subdomain of a domain you own, then scan them all
+ubel-domain your-company.example --fail-on high
 ```
 
 Outputs JSON and HTML only. **Exit codes:** governed by `--fail-on` (default
 `critical`), same severity-threshold/count syntax as the rest of UBEL —
-reports on disk always contain every finding regardless of this flag.
+reports on disk always contain every finding (vulnerabilities and
+misconfigurations alike) regardless of this flag; note that `--fail-on`
+itself currently gates on vulnerabilities/infections only, not on
+misconfiguration findings.
 
-**Full documentation — the responsible-use notice, safety guard, and all flags:**
-[**node/easm/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+**Full documentation — the responsible-use notice, safety guard, the full
+misconfiguration-check list, and every flag:**
+[**easm/README.md**](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
 
 ---
 
@@ -330,7 +357,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
-    command: url                      # EASM — only ever point `args` at infrastructure you own, see node/easm/README.md
+    command: url                      # EASM — only ever point `args` at infrastructure you own, see easm/README.md
     args: staging.your-own-domain.example --fail-on high
 
 - uses: AlaBouali/ubel@<commit-sha>
@@ -349,7 +376,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `ubel-domain` isn't in this allow-list yet, so a domain-wide EASM sweep isn't available through the packaged action today — call the binary directly instead (see below).
 
 ### Calling the binaries directly
 
@@ -378,8 +405,11 @@ Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 - name: UBEL cloud misconfiguration scan
   run: ubel-cloud --fail-on high
 
-- name: UBEL external attack surface scan (only against infra you own — see node/easm/README.md)
+- name: UBEL external attack surface scan (only against infra you own — see easm/README.md)
   run: ubel-url staging.your-own-domain.example --fail-on high
+
+- name: UBEL domain-wide attack surface sweep (discovers subdomains first — only against a domain you own)
+  run: ubel-domain your-own-domain.example --fail-on high
 ```
 
 ```dockerfile
@@ -937,14 +967,15 @@ To keep this document honest rather than aspirational:
   and reported independently.
 - This entire matrix is about **the SCA/firewall/reachability/license/SBOM
   pipeline for dependency trees you resolve locally** (a manifest, a
-  lockfile, an installed package set, a container image). `ubel-url`
-  (EASM) is a genuinely separate thing — passive HTTP fingerprinting of a
-  remote domain/URL, not a dependency-tree scan — and deliberately doesn't
-  carry license compliance, dependency sequences, reachability analysis,
-  or SBOM/SARIF output, none of which are meaningful concepts for
+  lockfile, an installed package set, a container image). `ubel-url`/
+  `ubel-domain` (EASM) are a genuinely separate thing — passive HTTP
+  fingerprinting of a remote domain/URL (plus a fixed set of
+  misconfiguration checks), not a dependency-tree scan — and deliberately
+  doesn't carry license compliance, dependency sequences, reachability
+  analysis, or SBOM/SARIF output, none of which are meaningful concepts for
   something fingerprinted over the network rather than resolved from a
   manifest. See the EASM section above and
-  [node/easm/README.md](https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md)
+  [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
   for what it does carry over (OSV/NVD lookup, CVSS, fix recommendations,
   compliance mapping) and why.
 
@@ -962,6 +993,6 @@ Source-available, internal-use license. Modification for internal needs is permi
 - SCA docs: https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md
 - SAST docs: https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md
 - Cloud docs: https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md
-- EASM docs: https://github.com/AlaBouali/ubel/blob/main/node/easm/README.md
+- EASM docs: https://github.com/AlaBouali/ubel/blob/main/easm/README.md
 
 *UBEL — Find the bug before it finds production.*
