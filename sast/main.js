@@ -623,7 +623,7 @@ EXAMPLES
   ubel-chunk /path/to/project --max-chunk-size 8000
 
 Full documentation (pipeline mechanics, token-cost breakdown, CI examples):
-  node/sast/README.md`);
+  sast/README.md`);
 }
 
 // ─── Unified entry point ────────────────────────────────────────────────────────

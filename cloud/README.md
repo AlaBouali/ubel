@@ -9,8 +9,8 @@ maps every finding onto industry compliance frameworks.
 
 This document covers the **cloud misconfiguration scanner** (`ubel-cloud`),
 one of the CLIs shipped in the `@arcane-spark/ubel-node` package alongside
-the SCA/firewall CLI ([node/sca/README.md](../sca/README.md)) and the
-AI-powered SAST/malware scanner ([node/sast/README.md](../sast/README.md)).
+the SCA/firewall CLI ([sca/README.md](../sca/README.md)) and the
+AI-powered SAST/malware scanner ([sast/README.md](../sast/README.md)).
 
 Written against **Node.js's standard library only** — no AWS SDK, no
 `googleapis`, no `@azure/*` packages, zero runtime `dependencies` in

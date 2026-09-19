@@ -4,13 +4,13 @@
 
 UBEL is a zero-dependency, source-available application security toolkit. This package (`@arcane-spark/ubel-node`) ships multiple CLIs for dependency-security and source-level scanner:
 
-- **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [node/sca/README.md](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
+- **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
-- **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
+- **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
 - **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
-- **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [node/cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md).
+- **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
 - **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD (the same vulnerability-lookup engine the SCA module uses), and separately checks every host for a fixed set of common misconfigurations (exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing security headers). Runs via `ubel-url` against hosts you already know, or `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs first and scan all of them in one run. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
@@ -125,7 +125,7 @@ Policy (severity threshold, unknown-severity blocking) is configurable via `ubel
 **Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — a failed scan is never treated as a pass.
 
 **Full documentation — every mode, policy config, reachability decision ladder, and programmatic API:**
-[**node/sca/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md)
+[**sca/README.md**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md)
 
 ---
 
@@ -146,13 +146,13 @@ ubel-platform
 ```
 
 **Full documentation — exact flags per binary and how they differ from `ubel-secrets`/`ubel-license`:**
-[**node/sca/README.md#fixed-configuration-scan-clis**](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#fixed-configuration-scan-clis)
+[**sca/README.md#fixed-configuration-scan-clis**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#fixed-configuration-scan-clis)
 
 ---
 
 ## Secrets Detection
 
-Built on Trivy's ported secret-scanning ruleset (Apache-2.0, attributed in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/node/sca/vendor/trivy/NOTICE)), extended with rules for vendors not yet covered by Trivy's current upstream ruleset: HashiCorp Vault tokens, Google Cloud API keys and OAuth tokens, Anthropic and OpenRouter API keys, Firebase tokens, Stripe restricted keys, Twilio Account/App SIDs, Square and Braintree credentials, and URL-embedded git credentials. Match previews in every report are redacted — the raw secret value is never written to disk.
+Built on Trivy's ported secret-scanning ruleset (Apache-2.0, attributed in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with rules for vendors not yet covered by Trivy's current upstream ruleset: HashiCorp Vault tokens, Google Cloud API keys and OAuth tokens, Anthropic and OpenRouter API keys, Firebase tokens, Stripe restricted keys, Twilio Account/App SIDs, Square and Braintree credentials, and URL-embedded git credentials. Match previews in every report are redacted — the raw secret value is never written to disk.
 
 ```bash
 # Standalone secrets-only scan — no dependency resolution, no LLM calls
@@ -177,7 +177,7 @@ ubel-license /path/to/project
 
 Surfaced per-package in the HTML report's inventory table and detail view, as `license.osi_approved` / `license.risk` / `license.category` properties on every SBOM component, and as its own SARIF run (`ubel-license-compliance`) that flags any non-OSI-approved or high-risk license as a finding.
 
-**Full documentation:** [node/sca/README.md#license-compliance](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#license-compliance)
+**Full documentation:** [sca/README.md#license-compliance](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#license-compliance)
 
 ---
 
@@ -191,7 +191,7 @@ Every finding gets a `compliance` object (categories + per-framework control lis
 
 **This is best-effort guidance, not a certified compliance assessment** — control identifiers are the stable, publicly documented ones for each framework, but framework text, versioning, and applicable scope can change and depend on your own environment. Every report carries this disclaimer verbatim in `compliance_summary.disclaimer`.
 
-**Full documentation:** [node/sca/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md#compliance-framework-mapping) (canonical framework/category reference) · [node/sast/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md#compliance-framework-mapping) · [node/cloud/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md#compliance-framework-mapping)
+**Full documentation:** [sca/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#compliance-framework-mapping) (canonical framework/category reference) · [sast/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/sast/README.md#compliance-framework-mapping) · [cloud/README.md#compliance-framework-mapping](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md#compliance-framework-mapping)
 
 ---
 
@@ -217,7 +217,7 @@ Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-h
 - `ubel-mal` (`malware`): `any` *(default)* fails on any finding, including unresolved ones; `confirmed` fails only on findings verified `is_valid: true` — an unresolved finding still fails the build, since "couldn't determine" is never treated as clean.
 
 **Full documentation — pipeline mechanics, every flag, token-cost breakdown, and CI examples:**
-[**node/sast/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md)
+[**sast/README.md**](https://github.com/AlaBouali/ubel/blob/main/sast/README.md)
 
 ---
 
@@ -239,7 +239,7 @@ ubel-cloud --provider aws --regions us-east-1,eu-west-1
 Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Exit codes:** governed by `--fail-on` (default `critical`), same severity-threshold/count syntax as the rest of UBEL — reports on disk always contain every finding regardless of this flag.
 
 **Full documentation — every check, per-provider credential setup, and all flags:**
-[**node/cloud/README.md**](https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md)
+[**cloud/README.md**](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md)
 
 ---
 
@@ -990,9 +990,9 @@ Source-available, internal-use license. Modification for internal needs is permi
 
 - Repository: https://github.com/AlaBouali/ubel
 - Issues: https://github.com/AlaBouali/ubel/issues
-- SCA docs: https://github.com/AlaBouali/ubel/blob/main/node/sca/README.md
-- SAST docs: https://github.com/AlaBouali/ubel/blob/main/node/sast/README.md
-- Cloud docs: https://github.com/AlaBouali/ubel/blob/main/node/cloud/README.md
+- SCA docs: https://github.com/AlaBouali/ubel/blob/main/sca/README.md
+- SAST docs: https://github.com/AlaBouali/ubel/blob/main/sast/README.md
+- Cloud docs: https://github.com/AlaBouali/ubel/blob/main/cloud/README.md
 - EASM docs: https://github.com/AlaBouali/ubel/blob/main/easm/README.md
 
 *UBEL — Find the bug before it finds production.*
