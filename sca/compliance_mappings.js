@@ -2,11 +2,26 @@
 // compliance_mappings.js — shared compliance-framework mapping engine.
 //
 // Single source of truth for mapping a finding (SCA vulnerability, SAST
-// finding, malicious-code finding, secrets-in-source finding, or cloud
-// misconfiguration) onto industry compliance/security frameworks, so the
-// SCA, SAST, and cloud modules all attach the same shape of `compliance`
-// data to their findings and all three report formats (JSON, HTML, SARIF —
-// SARIF only where the module already emits it) stay consistent.
+// finding, malicious-code finding, secrets-in-source finding, cloud
+// misconfiguration, or EASM web misconfiguration) onto industry
+// compliance/security frameworks, so the SCA, SAST, cloud, and EASM
+// (ubel-url/ubel-domain) modules all attach the same shape of `compliance`
+// data to their findings and every report format (JSON, HTML, SARIF —
+// SARIF only where the module already emits it) stays consistent.
+//
+// EASM's two CWE-less finding types — web misconfigurations
+// (easm/lib/misconfig_scan.js) and secrets leaked in client-side JavaScript
+// (easm/lib/secrets_crawl.js) — used to be mapped by a separate,
+// hand-rolled framework/control table in easm/lib/compliance_easm.js that
+// re-derived its own spellings and tried to align them with this module's
+// output by regex. That table is folded in here instead (see
+// WEB_MISCONFIG_CATEGORY below and getComplianceForMisconfig()): every
+// finding in the report — CVE, SAST, malware, cloud, or EASM — now goes
+// through the same CATEGORY_CONTROLS registry and comes out with identical
+// framework ids/names/control ids from the start, so no alignment step is
+// needed downstream. Client-side secrets reuse getComplianceForSecret()
+// unchanged — a credential exposed in shipped JS is the same
+// secrets_management failure as one committed to source.
 //
 // Design: every finding is assigned one or more internal risk CATEGORIES
 // (e.g. "injection", "public_exposure"). Each category has a fixed list of
@@ -505,6 +520,85 @@ const CIS_BENCHMARK_CONTROLS = {
   'gcp-fw-open-sensitive-port':         { framework: 'cis_gcp_foundations', control: '3.6 / 3.7', title: 'Ensure that SSH / RDP access is restricted from the Internet (most directly applicable to the port-22/3389 case; other sensitive ports in this finding are covered only by analogy)' },
 };
 
+// ── EASM web misconfigurations (easm/lib/misconfig_scan.js): rule id → category ──
+// A different rule-id namespace from the cloud scanner's CHECK_CATEGORY
+// above (these are ubel-url/ubel-domain's own-process TLS, header, cookie,
+// CORS and exposed-file/WordPress probes, not cloud-resource checks), so
+// kept as its own table rather than merged into CHECK_CATEGORY. Each rule
+// gets the single existing CATEGORY_CONTROLS category that best matches how
+// it's already categorized elsewhere in this file — e.g. the cookie/CORS/
+// header rules land on the same categories as the equivalent SAST classes
+// above ('insecure session cookie attributes', 'insecure cors policy',
+// 'missing / misconfigured security headers'), and exposed .env/.git/
+// phpinfo/user-enum findings land on sensitive_data_exposure, the same
+// category CWE-200 (Information Exposure) gets everywhere else in this
+// file — rather than inventing EASM-specific categories.
+const WEB_MISCONFIG_CATEGORY = {
+  // Exposed files / WordPress — same category as CWE-200 elsewhere in this file
+  'exposed-env-file': ['sensitive_data_exposure'],
+  'exposed-git-directory': ['sensitive_data_exposure'],
+  'exposed-phpinfo': ['sensitive_data_exposure'],
+  'wp-user-enumeration': ['sensitive_data_exposure'],
+  'wp-xmlrpc-exposed': ['security_misconfiguration'],
+
+  // TLS — transport encryption, same category cloud's TLS/SSL checks use
+  // (azure-storage-outdated-tls, cloudsql-ssl-not-required, ...)
+  'tls-no-https': ['cryptography'],
+  'tls-weak-protocol-negotiated': ['cryptography'],
+  'tls-legacy-protocol-supported': ['cryptography'],
+  'tls-weak-cipher': ['cryptography'],
+  'tls-broken': ['cryptography'],
+  'tls-cert-expired': ['cryptography'],
+  'tls-cert-expiring-soon': ['cryptography'],
+  'tls-cert-not-yet-valid': ['cryptography'],
+  'tls-cert-untrusted': ['cryptography'],
+  'tls-hostname-mismatch': ['cryptography'],
+
+  // Security headers — HSTS is a transport-encryption control; the rest are
+  // general security-misconfiguration, same as SAST's
+  // 'missing / misconfigured security headers' (CWE-693)
+  'missing-hsts': ['cryptography'],
+  'hsts-disabled': ['cryptography'],
+  'hsts-short-max-age': ['cryptography'],
+  'missing-clickjacking-protection': ['security_misconfiguration'],
+  'weak-clickjacking-protection': ['security_misconfiguration'],
+  'missing-csp': ['security_misconfiguration'],
+  'missing-x-content-type-options': ['security_misconfiguration'],
+  'invalid-x-content-type-options': ['security_misconfiguration'],
+  'missing-referrer-policy': ['security_misconfiguration'],
+  'weak-referrer-policy': ['security_misconfiguration'],
+  'missing-permissions-policy': ['security_misconfiguration'],
+
+  // Cookies — same category as SAST's 'insecure session cookie attributes' (CWE-614/1004)
+  'cookie-missing-secure': ['session_management'],
+  'cookie-missing-httponly': ['session_management'],
+  'cookie-samesite-none-insecure': ['session_management'],
+  'cookie-missing-samesite': ['session_management'],
+
+  // HTTP methods / CORS — same category as SAST's 'insecure cors policy' (CWE-942)
+  'risky-http-methods-allowed': ['security_misconfiguration'],
+  'trace-method-enabled': ['security_misconfiguration'],
+  'cors-reflected-origin-with-credentials': ['security_misconfiguration'],
+  'cors-reflected-origin': ['security_misconfiguration'],
+  'cors-wildcard-with-credentials': ['security_misconfiguration'],
+  'cors-null-origin-allowed': ['security_misconfiguration'],
+};
+
+// Fallback for a misconfig_scan.js rule id added later without a matching
+// entry above: keyed by the finding's `category` label, which
+// misconfig_scan.js always sets, so a new rule still lands on a sensible
+// category instead of going unmapped. Mirrors compliance_easm.js's old
+// CATEGORY_PROFILES fallback.
+const WEB_MISCONFIG_CATEGORY_FALLBACK = {
+  'TLS/SSL': ['cryptography'],
+  'Security Headers': ['security_misconfiguration'],
+  'Cookies': ['session_management'],
+  'CORS': ['security_misconfiguration'],
+  'HTTP Methods': ['security_misconfiguration'],
+  'Exposed File': ['sensitive_data_exposure'],
+  'WordPress': ['sensitive_data_exposure'],
+};
+
 // ── Core builder ─────────────────────────────────────────────────────────────
 
 /**
@@ -666,6 +760,23 @@ function getComplianceForCloudCheck(checkId) {
   return benchmarkEntry ? addBenchmarkControl(compliance, benchmarkEntry) : compliance;
 }
 
+// ── Public API: EASM (ubel-url / ubel-domain) ────────────────────────────────
+
+/**
+ * Compliance mapping for an EASM web-misconfiguration finding
+ * (easm/lib/misconfig_scan.js), looked up by its rule `id` (e.g.
+ * "tls-no-https"), falling back to its `category` label (e.g. "TLS/SSL")
+ * for a rule id not yet in WEB_MISCONFIG_CATEGORY, and finally to
+ * security_misconfiguration so a brand-new rule still maps to something
+ * rather than going unmapped.
+ */
+function getComplianceForMisconfig(ruleId, category) {
+  const categories = WEB_MISCONFIG_CATEGORY[ruleId]
+    || WEB_MISCONFIG_CATEGORY_FALLBACK[category]
+    || ['security_misconfiguration'];
+  return buildCompliance(categories);
+}
+
 // ── Public API: report-level summaries ───────────────────────────────────────
 
 /**
@@ -769,6 +880,7 @@ export {
   getComplianceForMalwareFinding,
   getCwesForMalwareClass,
   getComplianceForCloudCheck,
+  getComplianceForMisconfig,
   summarizeCompliance,
   findCategoryDivergences,
   CIS_BENCHMARK_CONTROLS,

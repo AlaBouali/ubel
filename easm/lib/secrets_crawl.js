@@ -31,7 +31,7 @@ import { scanContent } from "../../sca/secrets.js";
 // stops being worth it and the line/column position stops being useful to
 // a human anyway (a single 3MB line). Same spirit as MAX_FILE_SIZE in
 // sca/secrets.js.
-const MAX_SCRIPT_BYTES = 3 * 1024 * 1024;
+const MAX_SCRIPT_BYTES = 10 * 1024 * 1024;
 // Per-host ceiling on external scripts. A page referencing hundreds of
 // script tags is either a build artifact dump or hostile; either way,
 // fetching all of them turns one target into a burst of requests against

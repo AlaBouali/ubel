@@ -12,8 +12,14 @@
 // no license tab, no dependency-sequence/graph tab, no reachability column
 // or filter — see ../README.md for why. What's kept: severity/CVSS detail,
 // fix-version recommendations, and the same compliance-framework mapping
-// (OWASP/PCI/HIPAA/SOC2/ISO 27001/NIST/GDPR/CIS) the rest of UBEL uses, via
-// the shared sca/compliance_mappings.js.
+// (OWASP/PCI/HIPAA/SOC2/ISO 27001/NIST/GDPR/CIS) the rest of UBEL uses, all
+// from the shared sca/compliance_mappings.js — getComplianceForVulnerability()
+// for CVEs, getComplianceForMisconfig() for web misconfigurations, and
+// getComplianceForSecret() for secrets leaked in client-side JavaScript (the
+// same function the SCA module uses for secrets found in source). All three
+// finding types are attached the same `compliance` shape below and folded
+// into one summarizeCompliance() call, so there's no separate EASM-only
+// mapping table to keep in sync with the shared one.
 //
 // Static assets (Tailwind, Chart.js, Google Fonts) are pulled from the
 // shared sca module, same as the cloud scanner's report, so this stays a
@@ -22,7 +28,11 @@
 import { getTailwindScript } from "../../sca/tailwindcss.js";
 import { getChartJSScript } from "../../sca/chartjs.js";
 import { getGoogleFontsScript } from "../../sca/googlefonts.js";
-import { summarizeCompliance } from "../../sca/compliance_mappings.js";
+import {
+  summarizeCompliance,
+  getComplianceForMisconfig,
+  getComplianceForSecret,
+} from "../../sca/compliance_mappings.js";
 
 const TOOL_NAME = "ubel-url";
 
@@ -221,7 +231,6 @@ function buildMisconfigStats(misconfigResult, grouped) {
 export function buildReportPayload(scanResult, meta = {}) {
   const { assets, inventory, vulnerabilities, resolution, secrets, misconfigurations } = scanResult;
   const stats = buildStats(inventory, vulnerabilities, resolution);
-  const complianceSummary = summarizeCompliance(vulnerabilities.map((v) => v.compliance));
   const secretsResult = secrets || { findings: [], errors: [], stats: { total: 0 } };
   stats.secrets = secretsResult.stats || { total: 0 };
   const misconfigResult = misconfigurations || {
@@ -229,8 +238,41 @@ export function buildReportPayload(scanResult, meta = {}) {
     errors: [],
     stats: { total: 0, by_severity: {}, by_category: {} },
   };
-  const groupedMisconfigs = groupMisconfigurationsByType(misconfigResult.findings || []);
+  const groupedMisconfigs = groupMisconfigurationsByType(misconfigResult.findings || []).map((g) => ({
+    ...g,
+    compliance: getComplianceForMisconfig(g.id, g.category),
+  }));
   stats.misconfigurations = buildMisconfigStats(misconfigResult, groupedMisconfigs);
+
+  // Client-side secrets get the exact same compliance mapping the SCA
+  // module attaches to secrets found in source (secrets_management) — a
+  // credential is the same class of failure regardless of where it leaked
+  // from.
+  const secretFindings = (secretsResult.findings || []).map((f) => ({
+    ...f,
+    compliance: getComplianceForSecret(),
+  }));
+
+  // CVEs, web misconfigurations and leaked secrets are three different
+  // finding shapes, but every one of them now carries the same
+  // `compliance` shape from the same sca/compliance_mappings.js registry
+  // (getComplianceForVulnerability / getComplianceForMisconfig /
+  // getComplianceForSecret), so a single summarizeCompliance() call covers
+  // all three — no separate EASM-only summary to fold in afterwards, and
+  // `coverage.total_findings` below now honestly counts every finding in
+  // the report, not just the CVEs.
+  const complianceSummary = summarizeCompliance([
+    ...vulnerabilities.map((v) => v.compliance),
+    ...groupedMisconfigs.map((m) => m.compliance),
+    ...secretFindings.map((f) => f.compliance),
+  ]);
+  if (groupedMisconfigs.length || secretFindings.length) {
+    complianceSummary.disclaimer =
+      `${complianceSummary.disclaimer} Misconfiguration and exposed-secret findings are mapped to ` +
+      "controls by rule class (for example, every weak-TLS finding maps to the same " +
+      "transport-encryption controls), not assessed against your scope or how a given control " +
+      "is actually implemented.";
+  }
 
   return {
     generated_at: meta.generated_at || new Date().toISOString(),
@@ -255,7 +297,7 @@ export function buildReportPayload(scanResult, meta = {}) {
     assets,
     inventory,
     vulnerabilities,
-    secrets: secretsResult.findings || [],
+    secrets: secretFindings,
     secrets_errors: secretsResult.errors || [],
     misconfigurations: groupedMisconfigs,
     misconfigurations_errors: misconfigResult.errors || [],
@@ -540,17 +582,21 @@ export async function generateHtmlReport(reportPayload) {
       <div class="glass p-4 rounded-xl border border-neutral-800">
         <p class="text-xs text-neutral-400 leading-relaxed">
           <span class="font-semibold uppercase tracking-wide text-neutral-300">How to read the counts.</span>
-          Each framework and control is scored in <span class="text-white font-semibold">distinct CVEs</span> — the same
-          CVE affecting three component versions counts once here, because a compliance control is not violated three
-          times by the same bug. The secondary figure is the number of <span class="text-white font-semibold">affected
-          components</span> — that is the raw CVE-to-component pairing and shows how widely each issue is deployed.
-          A control showing <span class="mono text-neutral-300">12 CVEs · 20 components</span> means twelve distinct
-          bugs landed on twenty pieces of software, not twelve findings total.
+          Three kinds of finding map to controls, each counted in its own unit.
+          <span class="text-white font-semibold">CVEs</span> are counted distinctly — the same CVE affecting three
+          component versions counts once, because a control is not violated three times by the same bug — with the
+          number of <span class="text-white font-semibold">affected components</span> shown beneath it.
+          <span class="text-white font-semibold">Misconfigs</span> are distinct misconfiguration types (one per rule,
+          however many hosts it was seen on).
+          <span class="text-white font-semibold">Secrets</span> are individual credentials found in client-side JavaScript.
+          A control showing <span class="mono text-neutral-300">12 CVEs · 20 comp.</span> and
+          <span class="mono text-neutral-300">3 misconfigs</span> has twelve distinct bugs on twenty pieces of software
+          plus three distinct configuration weaknesses — the units are not added together.
         </p>
       </div>
 
       <div id="compliance-coverage" class="glass p-4 rounded-xl flex items-center justify-between text-sm hidden">
-        <span class="text-neutral-400">Distinct CVEs mapped to at least one framework control</span>
+        <span class="text-neutral-400">Findings mapped to at least one framework control</span>
         <span id="compliance-coverage-value" class="mono text-neutral-200 font-semibold"></span>
       </div>
       <div id="compliance-owasp-section" class="hidden space-y-3">
@@ -558,7 +604,7 @@ export async function generateHtmlReport(reportPayload) {
         <div id="compliance-owasp-grid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
       </div>
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
-      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No vulnerabilities mapped to a compliance framework.</div>
+      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No vulnerabilities, misconfigurations or exposed secrets mapped to a compliance framework.</div>
     </section>
 
     <!-- Secrets -->
@@ -852,56 +898,106 @@ function hostsOfComponentId(id) {
 
 // ── COMPLIANCE HELPERS ────────────────────────────────────────────────────────
 //
-// The compliance_summary shipped in reportData is built server-side by
-// summarizeCompliance() and counts each (vulnerability, affected-component)
-// pair once. That's a fine raw number but it reads as "N distinct problems"
-// when it is really "one CVE seen on N component versions" — which is what
-// makes a report say "85 PCI DSS findings" for what is, in this scan, about
-// a dozen distinct CVEs spread across a couple of dozen components.
+// Three kinds of finding can map to a control: CVEs (vulnerabilities),
+// misconfiguration rules, and secrets leaked in client-side JavaScript. All
+// three carry the same compliance.frameworks[].controls[] block, so they join
+// to a control the same way — but they are deliberately NOT summed into one
+// figure, because they are not the same unit.
 //
-// These helpers recompute a per-control breakdown from the raw vulnerability
-// list so the UI can lead with the honest unit (distinct CVEs) and show the
-// component count as a secondary figure. The server-side summary is left
-// untouched so JSON consumers keep seeing whatever shape they already rely on.
+// The compliance_summary shipped in reportData is built server-side and, for
+// CVEs, counts each (vulnerability, affected-component) pair once. That's a
+// fine raw number but it reads as "N distinct problems" when it is really
+// "one CVE seen on N component versions" — which is what makes a report say
+// "85 PCI DSS findings" for what is, in this scan, about a dozen distinct
+// CVEs spread across a couple of dozen components.
+//
+// These helpers recompute a per-control breakdown from the raw finding lists
+// so the UI can lead with the honest unit for each kind (distinct CVEs,
+// distinct misconfiguration types, individual secrets). The server-side
+// summary is left untouched so JSON consumers keep seeing whatever shape they
+// already rely on.
 
+function hasComplianceControl(item, fwName, controlId) {
+  const fws = item && item.compliance && item.compliance.frameworks;
+  return !!fws && fws.some(x => x.name === fwName && (x.controls || []).some(c => c.id === controlId));
+}
+
+// Everything in the report that maps to one control, grouped by kind.
 function complianceMatchesFor(fwName, controlId) {
-  return (reportData.vulnerabilities || []).filter(v =>
-    v.compliance && v.compliance.frameworks &&
-    v.compliance.frameworks.some(x =>
-      x.name === fwName && x.controls.some(c => c.id === controlId)
-    )
-  );
+  const pick = (list) => (list || []).filter(x => hasComplianceControl(x, fwName, controlId));
+  return {
+    vulns: pick(reportData.vulnerabilities),
+    misconfigs: pick(reportData.misconfigurations),
+    secrets: pick(reportData.secrets),
+  };
 }
 
 function complianceStatsFromMatches(matches) {
   const cves = new Set();
   const components = new Set();
   const hosts = new Set();
+  const misconfigHosts = new Set();
   const inventoryById = new Map();
   for (const item of reportData.inventory || []) inventoryById.set(item.id, item);
-  for (const v of matches) {
+  for (const v of matches.vulns) {
     cves.add(v.id);
     components.add(v.affected_package_id);
     const item = inventoryById.get(v.affected_package_id);
     for (const a of item?.assets || []) hosts.add(a.target);
   }
+  for (const m of matches.misconfigs) {
+    for (const t of m.targets || []) misconfigHosts.add(t);
+  }
   return {
     cveCount: cves.size,
     componentCount: components.size,
     hostCount: hosts.size,
-    matchCount: matches.length,
+    matchCount: matches.vulns.length,
+    misconfigCount: matches.misconfigs.length,
+    misconfigHostCount: misconfigHosts.size,
+    secretCount: matches.secrets.length,
   };
 }
 
-// For the framework card's headline figure — the same CVE can appear under
+// For the framework card's headline figure — the same finding can appear under
 // several controls of one framework (e.g. a path-traversal RCE maps to both
-// A06 and A01), so dedupe before counting.
+// A06 and A01; a cookie-flag rule maps to both A05 and A07), so dedupe before
+// counting.
 function complianceFrameworkTotals(fw) {
-  const allMatches = [];
+  const acc = { vulns: new Set(), misconfigs: new Set(), secrets: new Set() };
   for (const c of fw.controls || []) {
-    allMatches.push(...complianceMatchesFor(fw.name, c.id));
+    const m = complianceMatchesFor(fw.name, c.id);
+    m.vulns.forEach(x => acc.vulns.add(x));
+    m.misconfigs.forEach(x => acc.misconfigs.add(x));
+    m.secrets.forEach(x => acc.secrets.add(x));
   }
-  return complianceStatsFromMatches(allMatches);
+  return complianceStatsFromMatches({
+    vulns: [...acc.vulns],
+    misconfigs: [...acc.misconfigs],
+    secrets: [...acc.secrets],
+  });
+}
+
+// Right-hand count column for a framework card, control row or OWASP tile.
+// One line per kind that has any matches; components sit beneath the CVE line
+// as the secondary figure, as before.
+function complianceCountsHtml(stats, primaryClass, compact) {
+  const line = (cls, text) => '<span class="' + cls + '">' + text + '</span>';
+  const minor = 'mono text-neutral-500 text-[10px]';
+  const out = [];
+  if (stats.cveCount) {
+    out.push(line(primaryClass, stats.cveCount + ' CVE' + (stats.cveCount === 1 ? '' : 's')));
+    out.push(line(minor, stats.componentCount + (compact ? ' comp.' : ' component' + (stats.componentCount === 1 ? '' : 's'))));
+  }
+  if (stats.misconfigCount) out.push(line(primaryClass, stats.misconfigCount + ' misconfig' + (stats.misconfigCount === 1 ? '' : 's')));
+  if (stats.secretCount) out.push(line(primaryClass, stats.secretCount + ' secret' + (stats.secretCount === 1 ? '' : 's')));
+  if (!out.length) out.push(line(primaryClass, '0'));
+  return out.join('');
+}
+
+// Same key openSecretModal() resolves on.
+function secretKey(s) {
+  return s.url + '::' + s.id + '::' + s.line + '::' + s.column_start;
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
@@ -1387,31 +1483,34 @@ function renderCompliance() {
   const cs = reportData.compliance_summary;
   document.getElementById('compliance-disclaimer').textContent = (cs && cs.disclaimer) || '';
 
-  // Coverage pill — reframed from "component-mappings mapped" to
-  // "distinct CVEs that carry at least one framework control". The old
-  // "85 / 85 (100%)" figure was technically true and rhetorically hollow:
-  // every CVE in a CVE-based scan maps to A06 / RA-5 / Req. 6.3, so the
-  // metric was guaranteed to read as 100% and told the reader nothing.
+  // Coverage pill — one figure per kind of finding: how many carry at least
+  // one framework control. (The old "85 / 85 (100%)" CVE-only figure was
+  // technically true and rhetorically hollow: every CVE in a CVE-based scan
+  // maps to A06 / RA-5 / Req. 6.3, so it read 100% and told the reader
+  // nothing. It's more useful now because misconfiguration rules can
+  // genuinely fall outside the mapping.)
   const coverageEl = document.getElementById('compliance-coverage');
   const coverageValueEl = document.getElementById('compliance-coverage-value');
+  const mapped = (item) => !!(item.compliance && item.compliance.frameworks && item.compliance.frameworks.length);
   const allVulns = reportData.vulnerabilities || [];
+  const allMisconfigs = reportData.misconfigurations || [];
+  const allSecrets = reportData.secrets || [];
   const distinctCves = new Set(allVulns.map(v => v.id));
-  const mappedCves = new Set();
-  for (const v of allVulns) {
-    if (v.compliance && v.compliance.frameworks && v.compliance.frameworks.length) {
-      mappedCves.add(v.id);
-    }
-  }
-  if (distinctCves.size > 0) {
-    const pct = Math.round((mappedCves.size / distinctCves.size) * 100);
-    coverageValueEl.textContent = mappedCves.size + ' of ' + distinctCves.size + ' (' + pct + '%)';
+  const mappedCves = new Set(allVulns.filter(v => mapped(v)).map(v => v.id));
+  const parts = [];
+  const addPart = (label, m, t) => { if (t > 0) parts.push(label + ' ' + m + ' of ' + t); };
+  addPart('CVEs', mappedCves.size, distinctCves.size);
+  addPart('Misconfigurations', allMisconfigs.filter(m => mapped(m)).length, allMisconfigs.length);
+  addPart('Secrets', allSecrets.filter(x => mapped(x)).length, allSecrets.length);
+  if (parts.length) {
+    coverageValueEl.textContent = parts.join(' · ');
     coverageEl.classList.remove('hidden');
   } else {
     coverageEl.classList.add('hidden');
   }
 
-  // OWASP by-category — recompute distinct-CVE counts from the raw
-  // vulnerability list rather than trusting the summary's raw count.
+  // OWASP by-category — recompute counts from the raw finding lists rather
+  // than trusting the summary's raw count.
   const owaspSection = document.getElementById('compliance-owasp-section');
   const owaspGrid = document.getElementById('compliance-owasp-grid');
   if (cs && cs.by_owasp_category && cs.by_owasp_category.length) {
@@ -1425,8 +1524,7 @@ function renderCompliance() {
             <span class="text-neutral-600">via: \${escH((o.categories || []).join(', '))}</span>
           </div>
           <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
-            <span class="mono text-neutral-200 font-semibold">\${stats.cveCount} CVE\${stats.cveCount === 1 ? '' : 's'}</span>
-            <span class="mono text-neutral-500 text-[10px]">\${stats.componentCount} component\${stats.componentCount === 1 ? '' : 's'}</span>
+            \${complianceCountsHtml(stats, 'mono text-neutral-200 font-semibold', false)}
           </div>
         </div>\`;
     }).join('');
@@ -1435,10 +1533,11 @@ function renderCompliance() {
     owaspSection.classList.add('hidden');
   }
 
-  // Framework cards — recompute from raw vulnerabilities so the badge
-  // says "N CVEs · M components" rather than "N findings". The data-fw-idx
-  // / data-control-idx keys still point into compliance_summary.frameworks
-  // so openComplianceModal() continues to work unchanged.
+  // Framework cards — recompute from the raw finding lists so each badge
+  // reads "N CVEs · M components" / "N misconfigs" / "N secrets" rather than
+  // a single undifferentiated "N findings". The data-fw-idx / data-control-idx
+  // keys still point into compliance_summary.frameworks so
+  // openComplianceModal() continues to work unchanged.
   const grid = document.getElementById('compliance-frameworks-grid');
   if (!cs || !cs.frameworks || !cs.frameworks.length) {
     document.getElementById('compliance-empty').classList.remove('hidden');
@@ -1455,8 +1554,7 @@ function renderCompliance() {
           \${fw.version ? \`<span class="text-[10px] text-neutral-500 mono">\${escH(fw.version)}</span>\` : ''}
         </div>
         <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
-          <span class="mono text-neutral-200 font-semibold text-xs">\${fwStats.cveCount} CVE\${fwStats.cveCount === 1 ? '' : 's'}</span>
-          <span class="mono text-neutral-500 text-[10px]">\${fwStats.componentCount} component\${fwStats.componentCount === 1 ? '' : 's'}</span>
+          \${complianceCountsHtml(fwStats, 'mono text-neutral-200 font-semibold text-xs', false)}
         </div>
       </div>
       <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
@@ -1469,8 +1567,7 @@ function renderCompliance() {
               <span class="text-neutral-500">\${escH(c.title)}</span>
             </div>
             <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
-              <span class="mono text-neutral-200">\${stats.cveCount} CVE\${stats.cveCount === 1 ? '' : 's'}</span>
-              <span class="mono text-neutral-500 text-[10px]">\${stats.componentCount} comp.</span>
+              \${complianceCountsHtml(stats, 'mono text-neutral-200', true)}
             </div>
           </div>\`;
         }).join('')}
@@ -1488,20 +1585,75 @@ function openComplianceModal(fwIdx, cIdx) {
   if (!fw || !control) return;
 
   const matches = complianceMatchesFor(fw.name, control.id);
-  _currentComplianceMatches = matches;
+  // Only the vulnerability rows use data-match-index (resolved through this
+  // array by the modal click handler); misconfig and secret rows carry their
+  // own keys.
+  _currentComplianceMatches = matches.vulns;
   const stats = complianceStatsFromMatches(matches);
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
-  const rows = matches.length ? matches.map((v, idx) => \`
-    <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" data-match-index="\${idx}">
+  const rowCls = 'flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors';
+  const chevron = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>';
+
+  const vulnRows = matches.vulns.map((v, idx) => \`
+    <div class="\${rowCls}" data-match-index="\${idx}">
       <div class="flex items-center gap-3">
         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(vulnSeverityKey(v))}">\${escH(v.is_infection ? 'infection' : v.severity)}</span>
         <span class="text-sm text-white">\${escH(v.id)}</span>
       </div>
       <div class="flex items-center gap-3">
         <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]">\${escH(componentLabel(v.affected_package_id))}</span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        \${chevron}
       </div>
-    </div>\`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities mapped to this control.</p>';
+    </div>\`).join('');
+
+  const misconfigRows = matches.misconfigs.map(m => \`
+    <div class="\${rowCls}" data-misconfig-key="\${escH(m.id)}">
+      <div class="flex items-center gap-3">
+        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(misconfigSeverityKey(m))}">\${escH(misconfigSeverityKey(m))}</span>
+        <span class="text-sm text-white">\${escH(m.title || m.id)}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]">\${escH(plural(m.hosts_affected || 0, 'host', 'hosts'))}</span>
+        \${chevron}
+      </div>
+    </div>\`).join('');
+
+  const secretRows = matches.secrets.map(s => \`
+    <div class="\${rowCls}" data-secret-key="\${escH(secretKey(s))}">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(secretSeverityKey(s))}">\${escH(secretSeverityKey(s))}</span>
+        <span class="text-sm text-white truncate">\${escH(s.secret_type || s.title || s.id)}</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]" title="\${escH(s.url)}">\${escH(s.url)}:\${escH(s.line)}</span>
+        \${chevron}
+      </div>
+    </div>\`).join('');
+
+  const section = (title, count, rows) => rows
+    ? '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">' + title + ' (' + count + ')</p>' + rows + '</div>'
+    : '';
+  const body =
+    section('Vulnerabilities', matches.vulns.length, vulnRows) +
+    section('Misconfigurations', matches.misconfigs.length, misconfigRows) +
+    section('Exposed secrets', matches.secrets.length, secretRows);
+
+  const bits = [];
+  if (stats.cveCount) {
+    bits.push(
+      plural(stats.cveCount, 'distinct CVE', 'distinct CVEs') + ' across ' +
+      plural(stats.componentCount, 'component', 'components') + ' on ' +
+      plural(stats.hostCount, 'host', 'hosts') + ' (' +
+      plural(stats.matchCount, 'component-CVE pair', 'component-CVE pairs') + ' total)'
+    );
+  }
+  if (stats.misconfigCount) {
+    bits.push(plural(stats.misconfigCount, 'misconfiguration type', 'misconfiguration types') + ' on ' + plural(stats.misconfigHostCount, 'host', 'hosts'));
+  }
+  if (stats.secretCount) {
+    bits.push(plural(stats.secretCount, 'exposed secret', 'exposed secrets') + ' in client-side JavaScript');
+  }
 
   openModal(\`
     <div class="space-y-4">
@@ -1511,14 +1663,10 @@ function openComplianceModal(fwIdx, cIdx) {
           <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
         </div>
         <p class="text-xs text-neutral-500">
-          \${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} —
-          \${stats.cveCount} distinct CVE\${stats.cveCount === 1 ? '' : 's'} across
-          \${stats.componentCount} component\${stats.componentCount === 1 ? '' : 's'}
-          on \${stats.hostCount} host\${stats.hostCount === 1 ? '' : 's'}
-          (\${stats.matchCount} component-CVE pair\${stats.matchCount === 1 ? '' : 's'} total)
+          \${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''}\${bits.length ? ' — ' + escH(bits.join('; ')) : ''}
         </p>
       </div>
-      <div>\${rows}</div>
+      <div class="space-y-4">\${body || '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>'}</div>
     </div>
   \`);
 }
@@ -1662,6 +1810,8 @@ function openMisconfigModal(key) {
           \${remediations.map(r => \`<p class="text-xs text-neutral-300 leading-relaxed">\${escH(r)}</p>\`).join('')}
         </div>
       </div>\` : ''}
+
+      \${renderComplianceSection(m.compliance)}
     </div>
   \`);
 }
@@ -1793,6 +1943,8 @@ function openSecretModal(key) {
           anyone who already fetched the page.
         </p>
       </div>
+
+      \${renderComplianceSection(s.compliance)}
     </div>
   \`);
 }
@@ -2119,6 +2271,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (vulnRow && modalBody.contains(vulnRow)) {
       e.stopPropagation();
       openVulnModal(vulnRow.dataset.vulnKey);
+      return;
+    }
+    const misconfigRow = e.target.closest('[data-misconfig-key]');
+    if (misconfigRow && modalBody.contains(misconfigRow)) {
+      e.stopPropagation();
+      openMisconfigModal(misconfigRow.dataset.misconfigKey);
+      return;
+    }
+    const secretRow = e.target.closest('[data-secret-key]');
+    if (secretRow && modalBody.contains(secretRow)) {
+      e.stopPropagation();
+      openSecretModal(secretRow.dataset.secretKey);
       return;
     }
     const matchRow = e.target.closest('[data-match-index]');

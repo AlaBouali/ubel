@@ -754,6 +754,69 @@ async function generateHTMLReport(data) {
             });
         }
 
+        // ── COMPLIANCE HELPERS ──────────────────────────────────────────────
+        // A single CVE can be the reason several package versions in the
+        // inventory get flagged, so a raw finding count conflates two
+        // different things: "how many distinct bugs" and "how many pieces of
+        // software are affected". These helpers recompute both from the raw
+        // vulnerability/secret lists per control, the same way the EASM
+        // report does it, instead of trusting one undifferentiated number.
+        function hasComplianceControl(item, fwName, controlId) {
+            const fws = item && item.compliance && item.compliance.frameworks;
+            return !!fws && fws.some(f => f.name === fwName && (f.controls || []).some(c => c.id === controlId));
+        }
+
+        function complianceMatchesFor(fwName, controlId) {
+            const pick = (list) => (list || []).filter(x => hasComplianceControl(x, fwName, controlId));
+            return {
+                vulns: pick(reportData.vulnerabilities),
+                secrets: pick((reportData.secrets || {}).findings),
+            };
+        }
+
+        function complianceStatsFromMatches(matches) {
+            const cves = new Set();
+            const components = new Set();
+            for (const v of matches.vulns) {
+                cves.add(v.id);
+                components.add(v.affected_package_id);
+            }
+            return {
+                cveCount: cves.size,
+                componentCount: components.size,
+                matchCount: matches.vulns.length,
+                secretCount: matches.secrets.length,
+            };
+        }
+
+        // Framework-card headline — a CVE can map to more than one control in
+        // the same framework, so dedupe across controls before counting.
+        function complianceFrameworkTotals(fw) {
+            const acc = { vulns: new Set(), secrets: new Set() };
+            for (const c of (fw.controls || [])) {
+                const m = complianceMatchesFor(fw.name, c.id);
+                m.vulns.forEach(x => acc.vulns.add(x));
+                m.secrets.forEach(x => acc.secrets.add(x));
+            }
+            return complianceStatsFromMatches({ vulns: [...acc.vulns], secrets: [...acc.secrets] });
+        }
+
+        // Right-hand count column for a framework card or control row: one
+        // line per kind that has any matches, components as the secondary
+        // figure under the CVE line.
+        function complianceCountsHtml(stats, primaryClass, compact) {
+            const line = (cls, text) => \`<span class="\${cls}">\${text}</span>\`;
+            const minor = 'mono text-neutral-500 text-[10px]';
+            const out = [];
+            if (stats.cveCount) {
+                out.push(line(primaryClass, stats.cveCount + ' CVE' + (stats.cveCount === 1 ? '' : 's')));
+                out.push(line(minor, stats.componentCount + (compact ? ' comp.' : ' component' + (stats.componentCount === 1 ? '' : 's'))));
+            }
+            if (stats.secretCount) out.push(line(primaryClass, stats.secretCount + ' secret' + (stats.secretCount === 1 ? '' : 's')));
+            if (!out.length) out.push(line(primaryClass, '0'));
+            return out.join('');
+        }
+
         function renderCompliance() {
             const cs = reportData.compliance_summary;
             document.getElementById('compliance-disclaimer').textContent = cs?.disclaimer || '';
@@ -765,18 +828,18 @@ async function generateHTMLReport(data) {
             }
             grid.innerHTML = cs.frameworks.map((fw, fwIdx) => \`
                 <div class="glass p-6 rounded-xl space-y-4">
-                    <div class="flex items-center justify-between">
+                    <div class="flex items-start justify-between gap-3">
                         <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${fw.name}</h3>
-                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
+                        <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">\${complianceCountsHtml(complianceFrameworkTotals(fw), 'mono text-red-400 font-semibold text-xs', false)}</div>
                     </div>
                     <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                         \${fw.controls.map((c, cIdx) => \`
                         <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" onclick="openComplianceModal(\${fwIdx}, \${cIdx})">
-                            <div class="flex flex-col">
-                                <span class="mono text-orange-400">\${c.id}</span>
+                            <div class="flex flex-col min-w-0">
+                                <span class="mono text-red-400">\${c.id}</span>
                                 <span class="text-neutral-500">\${c.title}</span>
                             </div>
-                            <span class="mono text-neutral-400 whitespace-nowrap">\${c.findings_count}</span>
+                            <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">\${complianceCountsHtml(complianceStatsFromMatches(complianceMatchesFor(fw.name, c.id)), 'mono text-neutral-200', true)}</div>
                         </div>\`).join('')}
                     </div>
                 </div>\`).join('');
@@ -826,14 +889,27 @@ async function generateHTMLReport(data) {
             const emptyRow = (!vulnMatches.length && !secretMatches.length)
                 ? '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>' : '';
 
+            const modalStats = complianceStatsFromMatches({ vulns: vulnMatches, secrets: secretMatches });
+            const modalBits = [];
+            if (modalStats.cveCount) {
+                modalBits.push(
+                    modalStats.cveCount + (modalStats.cveCount === 1 ? ' distinct CVE' : ' distinct CVEs') +
+                    ' across ' + modalStats.componentCount + (modalStats.componentCount === 1 ? ' component' : ' components') +
+                    (modalStats.matchCount !== modalStats.cveCount ? ' (' + modalStats.matchCount + ' component-CVE pairs total)' : '')
+                );
+            }
+            if (modalStats.secretCount) {
+                modalBits.push(modalStats.secretCount + (modalStats.secretCount === 1 ? ' exposed secret' : ' exposed secrets'));
+            }
+
             document.getElementById('modal-body').innerHTML = \`
                 <div class="space-y-4">
                     <div>
                         <div class="flex items-center gap-3 mb-1 flex-wrap">
-                            <span class="mono text-orange-400 text-sm">\${control.id}</span>
+                            <span class="mono text-red-400 text-sm">\${control.id}</span>
                             <h2 class="text-lg font-semibold text-white">\${control.title}</h2>
                         </div>
-                        <p class="text-xs text-neutral-500">\${fw.name}\${fw.version ? ' · ' + fw.version : ''} — \${vulnMatches.length + secretMatches.length} finding\${(vulnMatches.length + secretMatches.length) === 1 ? '' : 's'}</p>
+                        <p class="text-xs text-neutral-500">\${fw.name}\${fw.version ? ' · ' + fw.version : ''}\${modalBits.length ? ' — ' + modalBits.join('; ') : ''}</p>
                     </div>
                     <div>\${vulnRows}\${secretRows}\${emptyRow}</div>
                 </div>

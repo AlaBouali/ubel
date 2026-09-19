@@ -231,7 +231,7 @@ function renderCweAndCompliance(f) {
       var controlsHtml = fw.controls.map(function(c) {
         return '<span class="text-[10px] bg-neutral-800 border border-neutral-700 px-2 py-1 rounded text-neutral-300" title="' + escH(c.title) + '">' + escH(c.id) + '</span>';
       }).join('');
-      return '<div class="flex flex-col gap-1"><span class="text-xs font-semibold text-orange-400">' + escH(fw.name) + '</span><div class="flex flex-wrap gap-1.5">' + controlsHtml + '</div></div>';
+      return '<div class="flex flex-col gap-1"><span class="text-xs font-semibold text-red-400">' + escH(fw.name) + '</span><div class="flex flex-wrap gap-1.5">' + controlsHtml + '</div></div>';
     }).join('');
     complianceHtml = '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-2">Compliance Frameworks</h4><div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800 space-y-2">' + frameworksHtml + '</div></div>';
   }
@@ -797,6 +797,59 @@ function renderSystem() {
 
 // ── COMPLIANCE ─────────────────────────────────────────────────────────────────
 
+// ── COMPLIANCE HELPERS ───────────────────────────────────────────────────────
+// A SAST finding's compliance mapping is keyed off its vuln_class (see
+// getComplianceForSastFinding() in main.js) — every finding of the same
+// vuln_class maps to the exact same controls, the same way every finding of
+// the same CVE does in the EASM/SCA reports. A raw finding count conflates
+// "how many distinct kinds of bug" with "how many places it showed up", so
+// these helpers recompute both from the underlying findings per control
+// instead of trusting one undifferentiated number.
+function hasComplianceControl(f, fwName, controlId) {
+  return !!(f.compliance && f.compliance.frameworks &&
+    f.compliance.frameworks.some(x => x.name === fwName && x.controls.some(c => c.id === controlId)));
+}
+
+function complianceMatchesFor(fwName, controlId) {
+  return getAllFindings().filter(({ finding: f }) => hasComplianceControl(f, fwName, controlId));
+}
+
+function complianceStatsFromMatches(matches) {
+  const vulnClasses = new Set();
+  const chunks = new Set();
+  for (const { chunk, finding: f } of matches) {
+    vulnClasses.add(f.vuln_class || 'unknown');
+    chunks.add(chunk.id);
+  }
+  return {
+    vulnClassCount: vulnClasses.size,
+    chunkCount: chunks.size,
+    matchCount: matches.length,
+  };
+}
+
+// Framework-card headline — the same vuln_class can map to more than one
+// control in a framework, so dedupe across controls before counting.
+// getAllFindings() caches its {chunk, finding} pairs, so the same pair is
+// the same object across calls and a Set correctly dedupes them.
+function complianceFrameworkTotals(fw) {
+  const acc = new Set();
+  for (const c of (fw.controls || [])) {
+    complianceMatchesFor(fw.name, c.id).forEach(m => acc.add(m));
+  }
+  return complianceStatsFromMatches([...acc]);
+}
+
+// Right-hand count column for a framework card, control row, or OWASP tile:
+// distinct vuln classes as the headline figure, affected chunks underneath
+// as the secondary one.
+function complianceCountsHtml(stats, primaryClass) {
+  const line = (cls, text) => \`<span class="\${cls}">\${text}</span>\`;
+  const minor = 'mono text-neutral-500 text-[10px]';
+  return line(primaryClass, stats.vulnClassCount + ' vuln class' + (stats.vulnClassCount === 1 ? '' : 'es')) +
+    line(minor, stats.chunkCount + ' chunk' + (stats.chunkCount === 1 ? '' : 's'));
+}
+
 function renderCompliance() {
   const cs = reportData.meta && reportData.meta.compliance_summary;
   const disclaimerEl = document.getElementById('compliance-disclaimer');
@@ -821,11 +874,13 @@ function renderCompliance() {
       owaspGrid.innerHTML = cs.by_owasp_category.map(o =>
         '<div class="glass p-4 rounded-xl flex items-start justify-between gap-3 text-xs">' +
           '<div class="flex flex-col gap-1">' +
-            '<span class="mono text-orange-400">' + escH(o.id) + '</span>' +
+            '<span class="mono text-red-400">' + escH(o.id) + '</span>' +
             '<span class="text-neutral-400">' + escH(o.title) + '</span>' +
             '<span class="text-neutral-600">via: ' + escH((o.categories || []).join(', ')) + '</span>' +
           '</div>' +
-          '<span class="mono text-neutral-300 whitespace-nowrap">' + o.findings_count + '</span>' +
+          '<div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">' +
+            complianceCountsHtml(complianceStatsFromMatches(complianceMatchesFor('OWASP Top 10', o.id)), 'mono text-neutral-200 font-semibold') +
+          '</div>' +
         '</div>'
       ).join('');
       owaspSection.classList.remove('hidden');
@@ -843,15 +898,16 @@ function renderCompliance() {
   grid.innerHTML = cs.frameworks.map((fw, fwIdx) => {
     const controlRows = fw.controls.map((c, cIdx) =>
       '<div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" onclick="openComplianceModal(' + fwIdx + ',' + cIdx + ')">' +
-        '<div class="flex flex-col"><span class="mono text-orange-400">' + escH(c.id) + '</span><span class="text-neutral-500">' + escH(c.title) + '</span></div>' +
-        '<span class="mono text-neutral-400 whitespace-nowrap">' + c.findings_count + '</span>' +
+        '<div class="flex flex-col min-w-0"><span class="mono text-red-400">' + escH(c.id) + '</span><span class="text-neutral-500">' + escH(c.title) + '</span></div>' +
+        '<div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">' + complianceCountsHtml(complianceStatsFromMatches(complianceMatchesFor(fw.name, c.id)), 'mono text-neutral-200') + '</div>' +
       '</div>'
     ).join('');
     const versionBadge = fw.version ? '<span class="text-[10px] text-neutral-500 mono">' + escH(fw.version) + '</span>' : '';
+    const fwStats = complianceFrameworkTotals(fw);
     return '<div class="glass p-6 rounded-xl space-y-4">' +
-      '<div class="flex items-center justify-between">' +
+      '<div class="flex items-start justify-between gap-3">' +
         '<div class="flex flex-col"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3>' + versionBadge + '</div>' +
-        '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-orange-500/20 text-orange-400 border border-orange-500/50">' + fw.findings_count + ' finding' + (fw.findings_count === 1 ? '' : 's') + '</span>' +
+        '<div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">' + complianceCountsHtml(fwStats, 'mono text-neutral-200 font-semibold text-xs') + '</div>' +
       '</div>' +
       '<div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">' + controlRows + '</div>' +
     '</div>';
@@ -896,14 +952,21 @@ function openComplianceModal(fwIdx, cIdx) {
     </div>
   \`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
 
+  const stats = complianceStatsFromMatches(matches);
+  const bit = stats.vulnClassCount
+    ? stats.vulnClassCount + (stats.vulnClassCount === 1 ? ' distinct vuln class' : ' distinct vuln classes') +
+      ' across ' + stats.chunkCount + (stats.chunkCount === 1 ? ' chunk' : ' chunks') +
+      (stats.matchCount !== stats.vulnClassCount ? ' (' + stats.matchCount + ' finding' + (stats.matchCount === 1 ? '' : 's') + ' total)' : '')
+    : '';
+
   openModal(\`
     <div class="space-y-4">
       <div>
         <div class="flex items-center gap-3 mb-1 flex-wrap">
-          <span class="mono text-orange-400 text-sm">\${escH(control.id)}</span>
+          <span class="mono text-red-400 text-sm">\${escH(control.id)}</span>
           <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
         </div>
-        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} — \${matches.length} finding\${matches.length === 1 ? '' : 's'}</p>
+        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''}\${bit ? ' — ' + bit : ''}</p>
       </div>
       <div>\${rows}</div>
     </div>

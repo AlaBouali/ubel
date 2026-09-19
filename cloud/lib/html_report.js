@@ -159,6 +159,7 @@ async function generateHtmlReport(reportPayload) {
       <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
       <button onclick="switchTab('findings')"  id="tab-findings"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
+      <button onclick="switchTab('stats')"      id="tab-stats"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
       <button onclick="switchTab('scaninfo')"  id="tab-scaninfo"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Scan Info</button>
     </div>
   </nav>
@@ -258,6 +259,53 @@ async function generateHtmlReport(reportPayload) {
       <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>
 
+    <!-- Detailed Stats -->
+    <section id="section-stats" class="hidden space-y-8">
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+
+        <div class="glass p-6 rounded-xl space-y-4">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Misconfiguration Counts</h3>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Distinct issue types</span><span class="mono" id="stats-distinct-checks">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Total occurrences</span><span class="mono" id="stats-total-findings">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="severity-critical">Critical</span><span class="mono severity-critical" id="stats-sev-critical">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="severity-high">High</span><span class="mono severity-high" id="stats-sev-high">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="severity-medium">Medium</span><span class="mono severity-medium" id="stats-sev-medium">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="severity-low">Low</span><span class="mono severity-low" id="stats-sev-low">0</span></div>
+            <div class="flex justify-between"><span class="severity-info">Info</span><span class="mono severity-info" id="stats-sev-info">0</span></div>
+          </div>
+        </div>
+
+        <div class="glass p-6 rounded-xl space-y-4">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Scope Counts</h3>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Resources affected</span><span class="mono" id="stats-distinct-resources">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Providers scanned</span><span class="mono" id="stats-provider-count">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Services affected</span><span class="mono" id="stats-service-count">0</span></div>
+            <div class="flex justify-between"><span class="text-neutral-500">Regions affected</span><span class="mono" id="stats-region-count">0</span></div>
+          </div>
+        </div>
+
+        <div class="glass p-6 rounded-xl space-y-4">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by Region</h3>
+          <div class="h-48"><canvas id="regionChart"></canvas></div>
+        </div>
+
+        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Common Checks</h3>
+          <p class="text-[11px] text-neutral-500">Distinct check IDs ranked by how many resources they fired on.</p>
+          <div id="stats-top-checks" class="space-y-0"></div>
+        </div>
+
+        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Busiest Resources</h3>
+          <p class="text-[11px] text-neutral-500">Resources ranked by how many findings they're carrying.</p>
+          <div id="stats-hot-resources" class="space-y-0"></div>
+        </div>
+
+      </div>
+    </section>
+
     <!-- Scan Info -->
     <section id="section-scaninfo" class="hidden space-y-8">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -324,6 +372,66 @@ function sevClass(s) {
   return {critical:'severity-critical',high:'severity-high',medium:'severity-medium',low:'severity-low',info:'severity-info'}[s] || 'severity-info';
 }
 
+// ── COMPLIANCE HELPERS ────────────────────────────────────────────────────────
+//
+// The compliance_summary shipped in reportData is built server-side and
+// counts one unit per finding — so a control tripped by one check (e.g.
+// "S3 bucket public read") sitting on 12 buckets shows as "12 findings".
+// That's a fine raw number but it reads as "12 distinct problems" when it
+// is really "one misconfiguration type seen on 12 resources" — the same
+// pair/unit distinction ubel-url's (easm) compliance tab draws between
+// "distinct CVEs" and "component-CVE pairs".
+//
+// These helpers recompute a per-control breakdown from the raw findings
+// list so the UI can lead with the honest unit: distinct checks (rule
+// types) and distinct affected resources, not just a finding count. The
+// server-side summary is left untouched so JSON consumers keep seeing
+// whatever shape they already rely on.
+
+function hasComplianceControl(f, fwName, controlId) {
+  const fws = f && f.compliance && f.compliance.frameworks;
+  return !!fws && fws.some(x => x.name === fwName && (x.controls || []).some(c => c.id === controlId));
+}
+
+function complianceMatchesFor(fwName, controlId) {
+  return (reportData.findings || []).filter(f => hasComplianceControl(f, fwName, controlId));
+}
+
+function complianceStatsFromMatches(matches) {
+  const checks = new Set();
+  const resources = new Set();
+  for (const f of matches) {
+    checks.add(f.check);
+    resources.add(\`\${f.provider}::\${f.service}::\${f.resource}\`);
+  }
+  return {
+    checkCount: checks.size,
+    resourceCount: resources.size,
+    matchCount: matches.length,
+  };
+}
+
+// For the framework card's headline figure — the same finding can appear
+// under several controls of one framework, so dedupe before counting.
+function complianceFrameworkTotals(fw) {
+  const acc = new Set();
+  for (const c of fw.controls || []) {
+    complianceMatchesFor(fw.name, c.id).forEach(f => acc.add(f));
+  }
+  return complianceStatsFromMatches([...acc]);
+}
+
+// Right-hand count column for a framework card or control row: distinct
+// checks as the primary figure, distinct resources as the secondary one.
+function complianceCountsHtml(stats, primaryClass, compact) {
+  const line = (cls, text) => '<span class="' + cls + '">' + text + '</span>';
+  const minor = 'mono text-neutral-500 text-[10px]';
+  const out = [];
+  out.push(line(primaryClass, stats.checkCount + ' check' + (stats.checkCount === 1 ? '' : 's')));
+  out.push(line(minor, stats.resourceCount + (compact ? ' res.' : ' resource' + (stats.resourceCount === 1 ? '' : 's'))));
+  return out.join('');
+}
+
 // ── COMPLIANCE ─────────────────────────────────────────────────────────────────
 
 function renderComplianceSection(compliance) {
@@ -377,26 +485,36 @@ function renderCompliance() {
     grid.innerHTML = '';
     return;
   }
-  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => \`
+  grid.innerHTML = cs.frameworks.map((fw, fwIdx) => {
+    const fwStats = complianceFrameworkTotals(fw);
+    return \`
     <div class="glass p-6 rounded-xl space-y-4">
-      <div class="flex items-center justify-between">
+      <div class="flex items-start justify-between gap-3">
         <div class="flex flex-col">
           <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">\${escH(fw.name)}</h3>
           \${fw.version ? \`<span class="text-[10px] text-neutral-500 mono">\${escH(fw.version)}</span>\` : ''}
         </div>
-        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/50">\${fw.findings_count} finding\${fw.findings_count === 1 ? '' : 's'}</span>
+        <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
+          \${complianceCountsHtml(fwStats, 'mono text-neutral-200 font-semibold text-xs', false)}
+        </div>
       </div>
       <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
-        \${fw.controls.map((c, cIdx) => \`
-        <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" data-fw-idx="\${fwIdx}" data-control-idx="\${cIdx}">
-          <div class="flex flex-col">
-            <span class="mono text-red-400">\${escH(c.id)}</span>
-            <span class="text-neutral-500">\${escH(c.title)}</span>
-          </div>
-          <span class="mono text-neutral-400 whitespace-nowrap">\${c.findings_count}</span>
-        </div>\`).join('')}
+        \${fw.controls.map((c, cIdx) => {
+          const stats = complianceStatsFromMatches(complianceMatchesFor(fw.name, c.id));
+          return \`
+          <div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" data-fw-idx="\${fwIdx}" data-control-idx="\${cIdx}">
+            <div class="flex flex-col min-w-0">
+              <span class="mono text-red-400">\${escH(c.id)}</span>
+              <span class="text-neutral-500">\${escH(c.title)}</span>
+            </div>
+            <div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0">
+              \${complianceCountsHtml(stats, 'mono text-neutral-200', true)}
+            </div>
+          </div>\`;
+        }).join('')}
       </div>
-    </div>\`).join('');
+    </div>\`;
+  }).join('');
 }
 
 // Holds the exact findings array most recently rendered by
@@ -413,24 +531,33 @@ function openComplianceModal(fwIdx, cIdx) {
   const control = fw && fw.controls && fw.controls[cIdx];
   if (!fw || !control) return;
 
-  const matches = (reportData.findings || []).filter(f =>
-    f.compliance && f.compliance.frameworks &&
-    f.compliance.frameworks.some(x => x.name === fw.name && x.controls.some(c => c.id === control.id))
-  );
+  const matches = complianceMatchesFor(fw.name, control.id);
   _currentComplianceMatches = matches;
+  const stats = complianceStatsFromMatches(matches);
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 
   const rows = matches.length ? matches.map((f, idx) => \`
     <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" data-finding-index="\${idx}">
       <div class="flex items-center gap-3">
         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(f.severity)}">\${escH(f.severity)}</span>
-        <span class="text-xs uppercase text-neutral-500">\${escH(f.provider)}</span>
+        <span class="text-xs uppercase text-neutral-500">\${escH(f.provider)}/\${escH(f.service)}</span>
         <span class="text-sm text-white">\${escH(f.title)}</span>
       </div>
       <div class="flex items-center gap-3">
-        <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]">\${escH(f.resource)}</span>
+        <span class="mono text-[10px] text-neutral-500 truncate max-w-[220px]" title="\${escH(f.resource)}">\${escH(f.resource)}\${f.region ? ' · ' + escH(f.region) : ''}</span>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
       </div>
-    </div>\`).join('') : '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
+    </div>\`).join('') : '';
+
+  const body = matches.length
+    ? '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Misconfigurations (' + matches.length + ')</p>' + rows + '</div>'
+    : '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
+
+  const bits = stats.checkCount
+    ? plural(stats.checkCount, 'distinct check', 'distinct checks') + ' across ' +
+      plural(stats.resourceCount, 'resource', 'resources') + ' (' +
+      plural(stats.matchCount, 'finding', 'findings') + ' total)'
+    : '';
 
   openModal(\`
     <div class="space-y-4">
@@ -439,9 +566,11 @@ function openComplianceModal(fwIdx, cIdx) {
           <span class="mono text-red-400 text-sm">\${escH(control.id)}</span>
           <h2 class="text-lg font-semibold text-white">\${escH(control.title)}</h2>
         </div>
-        <p class="text-xs text-neutral-500">\${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''} — \${matches.length} finding\${matches.length === 1 ? '' : 's'}</p>
+        <p class="text-xs text-neutral-500">
+          \${escH(fw.name)}\${fw.version ? ' · ' + escH(fw.version) : ''}\${bits ? ' — ' + escH(bits) : ''}
+        </p>
       </div>
-      <div>\${rows}</div>
+      <div class="space-y-4">\${body}</div>
     </div>
   \`);
 }
@@ -504,6 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
   applyFilters();
   renderScanInfo();
   renderCompliance();
+  renderStats();
 });
 
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
@@ -680,6 +810,115 @@ function renderScanInfo() {
   regionsEl.innerHTML = entries.map(([provider, regions]) =>
     '<div><span class="text-neutral-500">' + escH(provider.toUpperCase()) + ':</span> ' + escH((regions||[]).join(', ')) + '</div>'
   ).join('');
+}
+
+// ── DETAILED STATS ────────────────────────────────────────────────────────────
+// Deliberately doesn't re-chart severity/provider/service — those already
+// have a chart each on the Dashboard. This tab covers dimensions that
+// aren't shown anywhere else: findings by region, which distinct check
+// types are firing most often, and which individual resources are
+// carrying the most findings.
+
+function renderStats() {
+  const s = reportData.stats || {};
+  const findings = reportData.findings || [];
+
+  const checks = new Set();
+  const resources = new Set();
+  const providers = new Set();
+  const services = new Set();
+  const regions = new Set();
+  const byCheck = {};
+  const byResource = {};
+  for (const f of findings) {
+    checks.add(f.check);
+    const resKey = \`\${f.provider}::\${f.service}::\${f.resource}\`;
+    resources.add(resKey);
+    providers.add(f.provider);
+    services.add(\`\${f.provider}/\${f.service}\`);
+    if (f.region) regions.add(f.region);
+    byCheck[f.check] = (byCheck[f.check] || 0) + 1;
+    if (!byResource[resKey]) byResource[resKey] = { label: f.resource, count: 0 };
+    byResource[resKey].count++;
+  }
+
+  const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  const sev = s.bySeverity || {};
+  set('stats-distinct-checks', checks.size);
+  set('stats-total-findings', findings.length);
+  set('stats-sev-critical', sev.critical || 0);
+  set('stats-sev-high', sev.high || 0);
+  set('stats-sev-medium', sev.medium || 0);
+  set('stats-sev-low', sev.low || 0);
+  set('stats-sev-info', sev.info || 0);
+  set('stats-distinct-resources', resources.size);
+  set('stats-provider-count', providers.size);
+  set('stats-service-count', services.size);
+  set('stats-region-count', regions.size);
+
+  // Most common checks — mirrors the "Misconfigurations by Category" ranked
+  // list, ranked here by how many resources each check id fired on.
+  const topEl = document.getElementById('stats-top-checks');
+  if (topEl) {
+    const byCheckEntries = Object.entries(byCheck).sort((a, b) => b[1] - a[1]).slice(0, 15);
+    const maxC = byCheckEntries.length ? byCheckEntries[0][1] : 0;
+    topEl.innerHTML = byCheckEntries.length
+      ? byCheckEntries.map(([check, count]) => \`
+        <div class="flex items-center gap-3 py-1.5 border-b border-neutral-800 last:border-0">
+          <span class="mono text-xs text-neutral-300 truncate flex-1">\${escH(check)}</span>
+          <div class="w-40 bg-neutral-800 rounded-full h-1.5 shrink-0">
+            <div class="bg-red-500 h-1.5 rounded-full" style="width: \${maxC ? (count / maxC) * 100 : 0}%"></div>
+          </div>
+          <span class="mono text-xs text-neutral-400 w-8 text-right shrink-0">\${count}</span>
+        </div>\`).join('')
+      : '<p class="text-xs text-neutral-500 italic">No findings detected.</p>';
+  }
+
+  // Busiest resources — same ranked-bar pattern, this time by individual
+  // resource rather than check type, so a single hot bucket/instance/user
+  // tripping several different checks stands out.
+  const hotEl = document.getElementById('stats-hot-resources');
+  if (hotEl) {
+    const byResourceEntries = Object.values(byResource).sort((a, b) => b.count - a.count).slice(0, 15);
+    const max = byResourceEntries.length ? byResourceEntries[0].count : 0;
+    hotEl.innerHTML = byResourceEntries.length
+      ? byResourceEntries.map(r => \`
+        <div class="flex items-center gap-3 py-1.5 border-b border-neutral-800 last:border-0">
+          <span class="mono text-xs text-neutral-300 truncate flex-1">\${escH(r.label)}</span>
+          <div class="w-40 bg-neutral-800 rounded-full h-1.5 shrink-0">
+            <div class="bg-red-500 h-1.5 rounded-full" style="width: \${max ? (r.count / max) * 100 : 0}%"></div>
+          </div>
+          <span class="mono text-xs text-neutral-400 w-8 text-right shrink-0">\${r.count}</span>
+        </div>\`).join('')
+      : '<p class="text-xs text-neutral-500 italic">No findings detected.</p>';
+  }
+
+  renderStatsCharts(s);
+}
+
+function renderStatsCharts(s) {
+  if (typeof Chart === 'undefined') return;
+
+  const regionEntries = Object.entries(s.byRegion || {}).sort((a, b) => b[1] - a[1]).slice(0, 12);
+  const regionCanvas = document.getElementById('regionChart');
+  if (regionCanvas && regionEntries.length) {
+    new Chart(regionCanvas, {
+      type: 'bar',
+      data: {
+        labels: regionEntries.map(([k]) => k),
+        datasets: [{ data: regionEntries.map(([, v]) => v), backgroundColor: '#a855f7aa', borderRadius: 4 }],
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { beginAtZero: true, ticks: { color: '#737373', font: { size: 10 }, precision: 0 }, grid: { color: '#262626' } },
+          y: { ticks: { color: '#a3a3a3', font: { size: 10 } }, grid: { display: false } },
+        },
+      },
+    });
+  }
 }
 `;
 }

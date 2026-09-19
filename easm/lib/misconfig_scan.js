@@ -15,6 +15,21 @@
 //         "explicitly disabled" max-age=0 case
 //       * clickjacking protection via X-Frame-Options and/or a CSP
 //         frame-ancestors directive
+//       * Content-Security-Policy — general presence, independent of the
+//         frame-ancestors-specific check above
+//       * X-Content-Type-Options: nosniff
+//       * Referrer-Policy — presence, and the unsafe-url special case
+//       * Permissions-Policy — presence
+//   - Set-Cookie attributes on the site root response: Secure, HttpOnly,
+//     and SameSite (including the SameSite=None-without-Secure case)
+//   - risky HTTP methods: the OPTIONS Allow header advertising
+//     PUT/DELETE/TRACE/CONNECT, plus an actual (non-destructive) TRACE
+//     request to detect Cross-Site Tracing (XST) — see the note above
+//     checkHttpMethods() for why PUT/DELETE are read from Allow only and
+//     never actually sent
+//   - CORS misconfiguration: arbitrary-Origin reflection, reflection
+//     combined with Access-Control-Allow-Credentials: true, a wildcard
+//     paired with credentials, and acceptance of the 'null' Origin
 //   - TLS/certificate weaknesses: expiry, trust, hostname match, weak
 //     protocol/cipher, explicit legacy-protocol (TLS 1.0/1.1) downgrade
 //     acceptance — and outright absence of a working HTTPS listener on a
@@ -33,13 +48,27 @@
 // routing (SPAs that return 200 + their index page for any path) being
 // misread as every probed path existing.
 //
+// The method/CORS checks need an explicit request method and custom
+// headers (Origin, a marker header for TRACE) that httpClient's GET-only
+// wrapper doesn't expose, so they go straight to Node's stdlib http/https
+// modules instead — the same reasoning the TLS checks already apply to
+// node:tls. rejectUnauthorized is left false there too, for the same
+// reason: a host with a broken cert should still get probed for these
+// findings rather than have the connection refused outright.
+//
 // Same posture as the rest of this module (see ../README.md): passive,
-// one well-known path per check, no brute-forcing, no wordlists.
+// one well-known path per check, no brute-forcing, no wordlists. PUT and
+// DELETE are never actually sent, only read off the OPTIONS Allow header —
+// issuing a real PUT/DELETE against an unknown, possibly-production
+// endpoint is an active write, not a passive check, and out of scope here
+// regardless of what Allow advertises.
 
 import { httpClient } from "../fingerprint/src/core/httpClient.js";
 import { mapLimit } from "../../cloud/lib/concurrency.js";
 import { scanContent } from "../../sca/secrets.js";
 import tls from "node:tls";
+import http from "node:http";
+import https from "node:https";
 import { URL } from "node:url";
 
 const MAX_CHECK_BODY_BYTES = 2 * 1024 * 1024;
@@ -101,6 +130,58 @@ async function getSoft404Baseline(origin, timeout) {
 function isSoft404(res, baseline) {
   if (!baseline || baseline.status !== 200 || res.status_code !== 200) return false;
   return res.text.length === baseline.bodyLength && res.text.slice(0, 500) === baseline.bodySample;
+}
+
+// ── Raw HTTP requests (method/headers httpClient doesn't expose) ────────
+
+/**
+ * Minimal request supporting an explicit method and custom headers, for
+ * the handful of checks httpClient's GET-only interface doesn't fit
+ * (method enumeration via OPTIONS/TRACE, Origin-reflection probing for
+ * CORS). Same non-verifying TLS posture as checkTls below, for the same
+ * reason: a broken cert shouldn't hide a finding that has nothing to do
+ * with the cert.
+ *
+ * Resolves even on early body truncation (past MAX_CHECK_BODY_BYTES) by
+ * destroying the socket and settling from the resulting "close" event —
+ * every check here only needs status/headers or a short echoed body, never
+ * the full response.
+ */
+function rawRequest(urlStr, { method = "GET", headers = {}, timeoutMs = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(urlStr);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const lib = u.protocol === "https:" ? https : http;
+    let settled = false;
+    const finish = (result, err) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve(result);
+    };
+
+    const req = lib.request(u, { method, headers, timeout: timeoutMs, rejectUnauthorized: false }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (c) => {
+        size += c.length;
+        if (size <= MAX_CHECK_BODY_BYTES) chunks.push(c);
+        else req.destroy();
+      });
+      const settle = () =>
+        finish({ status_code: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString("utf8") });
+      res.on("end", settle);
+      res.on("close", settle);
+    });
+    req.on("timeout", () => req.destroy(new Error(`request timed out after ${timeoutMs}ms`)));
+    req.on("error", (e) => finish(null, e));
+    req.end();
+  });
 }
 
 // ── HTTP-based checks ────────────────────────────────────────────────────
@@ -687,6 +768,388 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
         "Send `X-Frame-Options: SAMEORIGIN` (or `DENY` for pages never meant to be framed even by same-origin content) for legacy browser coverage, plus `Content-Security-Policy: frame-ancestors 'self'` for modern browsers. CSP frame-ancestors takes precedence where both are present, so setting both is safe.",
     });
   }
+
+  // ── General CSP presence ─────────────────────────────────────────────
+  // Independent of the frame-ancestors-specific check above: this fires
+  // only when CSP is entirely absent. A CSP that's present but missing
+  // just frame-ancestors is already covered by the clickjacking finding
+  // above, so it isn't re-flagged here.
+  if (!csp) {
+    findings.push({
+      id: "missing-csp",
+      title: "Missing Content-Security-Policy header",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description:
+        "No Content-Security-Policy header is set. Beyond the frame-ancestors/clickjacking case already checked separately, CSP is the primary browser-side mitigation against injected-script execution (XSS) and restricts which origins scripts, styles, and other resources may load from.",
+      evidence: [],
+      remediation:
+        "Start with Content-Security-Policy-Report-Only to see what a policy would break, then move to enforcing mode. Even a baseline `default-src 'self'` with explicit exceptions for genuinely third-party resources is far better than no policy at all.",
+    });
+  }
+
+  // ── X-Content-Type-Options ───────────────────────────────────────────
+  const xcto = pickHeader(h, "x-content-type-options");
+  if (!xcto) {
+    findings.push({
+      id: "missing-x-content-type-options",
+      title: "Missing X-Content-Type-Options header",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description:
+        "The X-Content-Type-Options header is not set, so browsers may MIME-sniff a response's content instead of trusting its declared Content-Type — this is what lets a file that's actually HTML/JS get interpreted (and executed) as such even when served with a benign content type.",
+      evidence: [],
+      remediation: "Send `X-Content-Type-Options: nosniff` on every response.",
+    });
+  } else if (!/^\s*nosniff\s*$/i.test(xcto)) {
+    findings.push({
+      id: "invalid-x-content-type-options",
+      title: "X-Content-Type-Options set to an unrecognized value",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description: `X-Content-Type-Options is set to "${xcto}", but the only value browsers act on is "nosniff" — anything else is equivalent to the header being absent.`,
+      evidence: [`X-Content-Type-Options: ${xcto}`],
+      remediation: "Set the header to exactly `X-Content-Type-Options: nosniff`.",
+    });
+  }
+
+  // ── Referrer-Policy ───────────────────────────────────────────────────
+  const referrerPolicy = pickHeader(h, "referrer-policy");
+  if (!referrerPolicy) {
+    findings.push({
+      id: "missing-referrer-policy",
+      title: "Missing Referrer-Policy header",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description:
+        "No Referrer-Policy header is set, so the browser's own default applies (which varies by browser and can leak the full referring URL — including path and query string — to third-party sites linked from this page).",
+      evidence: [],
+      remediation:
+        "Send `Referrer-Policy: strict-origin-when-cross-origin` (a safe, widely-supported default), or `no-referrer` if even the bare origin shouldn't be disclosed cross-origin.",
+    });
+  } else if (/unsafe-url/i.test(referrerPolicy)) {
+    findings.push({
+      id: "weak-referrer-policy",
+      title: "Referrer-Policy set to unsafe-url",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description: `Referrer-Policy is explicitly set to "${referrerPolicy}", which sends the full referring URL — including path and query string — on every cross-origin navigation and subresource request, even from HTTPS down to HTTP.`,
+      evidence: [`Referrer-Policy: ${referrerPolicy}`],
+      remediation: "Use `strict-origin-when-cross-origin` or a more restrictive policy instead of unsafe-url.",
+    });
+  }
+
+  // ── Permissions-Policy ────────────────────────────────────────────────
+  const permissionsPolicy = pickHeader(h, "permissions-policy") || pickHeader(h, "feature-policy");
+  if (!permissionsPolicy) {
+    findings.push({
+      id: "missing-permissions-policy",
+      title: "Missing Permissions-Policy header",
+      category: "Security Headers",
+      severity: "low",
+      url,
+      target: asset.target,
+      description:
+        "No Permissions-Policy (or legacy Feature-Policy) header is set. This header lets a page explicitly disable powerful browser features it doesn't use (camera, microphone, geolocation, USB, payment, etc.), denying an attacker who achieves script execution the ability to invoke them.",
+      evidence: [],
+      remediation:
+        "Send a Permissions-Policy header disabling any feature the site doesn't actively use, e.g. `Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()`.",
+    });
+  }
+
+  checkCookieFlags(h, url, asset, isHttps, findings);
+}
+
+const SESSION_COOKIE_NAME_RE = /session|token|auth|jwt|\bsid\b|csrf/i;
+
+/**
+ * Case-/shape-tolerant extraction of every Set-Cookie value on a response.
+ * Node's raw response headers (what rawRequest() and most fetch polyfills
+ * return) already give an array for repeated headers; Headers-like objects
+ * expose getSetCookie(). Deliberately not routed through pickHeader():
+ * that function comma-joins repeated headers, which corrupts this one
+ * specifically, since Expires values inside a cookie string routinely
+ * contain commas of their own.
+ */
+function getSetCookieList(headers) {
+  if (!headers) return [];
+  if (typeof headers.getSetCookie === "function") return headers.getSetCookie();
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === "set-cookie") {
+      const v = headers[k];
+      return Array.isArray(v) ? v : [v];
+    }
+  }
+  return [];
+}
+
+function parseSetCookie(cookieStr) {
+  const parts = String(cookieStr).split(";").map((p) => p.trim());
+  const name = (parts[0].split("=")[0] || "").trim();
+  const attrs = parts.slice(1);
+  const lowerAttrs = attrs.map((a) => a.toLowerCase());
+  const sameSiteAttr = attrs.find((a) => a.toLowerCase().startsWith("samesite"));
+  const sameSite = sameSiteAttr ? (sameSiteAttr.split("=")[1] || "").trim() : null;
+  return {
+    name: name || "(unnamed)",
+    secure: lowerAttrs.includes("secure"),
+    httpOnly: lowerAttrs.includes("httponly"),
+    sameSite, // null | "Strict" | "Lax" | "None" | ""
+  };
+}
+
+/**
+ * Set-Cookie attribute checks on the same site-root response the other
+ * header checks already fetched — no extra request. Aggregated per host
+ * rather than per cookie: a site with ten cookies missing HttpOnly gets
+ * one finding naming all ten, not ten findings.
+ */
+function checkCookieFlags(headers, url, asset, isHttps, findings) {
+  const cookies = getSetCookieList(headers).map(parseSetCookie);
+  if (!cookies.length) return;
+
+  const missingSecure = isHttps ? cookies.filter((c) => !c.secure) : [];
+  const missingHttpOnly = cookies.filter((c) => !c.httpOnly);
+  const missingSameSite = cookies.filter((c) => !c.sameSite);
+  const noneWithoutSecure = cookies.filter((c) => c.sameSite && /^none$/i.test(c.sameSite) && !c.secure);
+
+  if (missingSecure.length) {
+    findings.push({
+      id: "cookie-missing-secure",
+      title: "Cookie set without the Secure attribute",
+      category: "Cookies",
+      severity: "medium",
+      url,
+      target: asset.target,
+      description: `${missingSecure.length} cookie(s) set on this HTTPS response lack the Secure attribute (${missingSecure.map((c) => c.name).join(", ")}), so they could still be sent over a plain HTTP request — a downgrade, a misconfigured link, or a network attacker forcing plaintext — exposing the cookie's value in transit.`,
+      evidence: missingSecure.map((c) => c.name),
+      remediation: "Add the Secure attribute to every cookie set on an HTTPS response.",
+    });
+  }
+
+  if (missingHttpOnly.length) {
+    const sensitive = missingHttpOnly.filter((c) => SESSION_COOKIE_NAME_RE.test(c.name));
+    findings.push({
+      id: "cookie-missing-httponly",
+      title: "Cookie set without the HttpOnly attribute",
+      category: "Cookies",
+      severity: sensitive.length ? "medium" : "low",
+      url,
+      target: asset.target,
+      description: `${missingHttpOnly.length} cookie(s) lack the HttpOnly attribute (${missingHttpOnly.map((c) => c.name).join(", ")})${sensitive.length ? `, including ${sensitive.map((c) => c.name).join(", ")} which look session/auth-related by name` : ""} — any JavaScript running on the page, including script injected via XSS, can read these cookies' values directly.`,
+      evidence: missingHttpOnly.map((c) => c.name),
+      remediation:
+        "Add HttpOnly to every cookie that client-side JavaScript doesn't genuinely need to read — session/auth cookies almost never need to be readable from script.",
+    });
+  }
+
+  if (noneWithoutSecure.length) {
+    findings.push({
+      id: "cookie-samesite-none-insecure",
+      title: "Cookie sets SameSite=None without Secure",
+      category: "Cookies",
+      severity: "medium",
+      url,
+      target: asset.target,
+      description: `${noneWithoutSecure.length} cookie(s) set SameSite=None without also setting Secure (${noneWithoutSecure.map((c) => c.name).join(", ")}). SameSite=None requires Secure under the current cookie spec — browsers that enforce this reject the cookie outright, and any that don't yet enforce it are left with the full cross-site exposure SameSite=None opts into, with no compensating transport protection.`,
+      evidence: noneWithoutSecure.map((c) => c.name),
+      remediation: "Add Secure to every cookie that sets SameSite=None, or switch to Lax/Strict if cross-site delivery isn't actually required.",
+    });
+  }
+
+  if (missingSameSite.length) {
+    findings.push({
+      id: "cookie-missing-samesite",
+      title: "Cookie set without an explicit SameSite attribute",
+      category: "Cookies",
+      severity: "low",
+      url,
+      target: asset.target,
+      description: `${missingSameSite.length} cookie(s) don't set SameSite explicitly (${missingSameSite.map((c) => c.name).join(", ")}). Chromium-based browsers default an unset cookie to Lax, but that default isn't universal across every browser/version still in use, and an explicit value is what actually documents the intended behavior.`,
+      evidence: missingSameSite.map((c) => c.name),
+      remediation: "Set SameSite explicitly on every cookie — Lax is a reasonable default; Strict for cookies that never need to be sent on cross-site navigation.",
+    });
+  }
+}
+
+// ── HTTP method + CORS checks ────────────────────────────────────────────
+
+const RISKY_METHODS = ["PUT", "DELETE", "TRACE", "CONNECT"];
+
+/**
+ * Enumerates methods the server advertises via the OPTIONS Allow header,
+ * flagging any of RISKY_METHODS found there, then separately sends one
+ * real TRACE request — TRACE is read-only by definition (the server is
+ * only expected to echo the request back), so actually sending it is safe
+ * in a way actually sending PUT/DELETE would not be. PUT/DELETE are never
+ * sent; see the module-level note above for why.
+ */
+async function checkHttpMethods(origin, asset, timeout, findings, errors) {
+  const url = origin + "/";
+
+  let res;
+  try {
+    res = await rawRequest(url, { method: "OPTIONS", timeoutMs: timeout * 1000 });
+  } catch (e) {
+    errors.push({ target: asset.target, check: "http-methods", url, error: e.message });
+    return;
+  }
+
+  const allowRaw = pickHeader(res.headers, "allow") || pickHeader(res.headers, "access-control-allow-methods");
+  if (allowRaw) {
+    const methods = allowRaw.split(",").map((m) => m.trim().toUpperCase()).filter(Boolean);
+    const risky = methods.filter((m) => RISKY_METHODS.includes(m));
+    if (risky.length) {
+      const severity = risky.some((m) => m === "PUT" || m === "DELETE") ? "high" : "medium";
+      findings.push({
+        id: "risky-http-methods-allowed",
+        title: "Potentially dangerous HTTP methods advertised",
+        category: "HTTP Methods",
+        severity,
+        url,
+        target: asset.target,
+        description: `The server's Allow header advertises ${risky.join(", ")} alongside its other supported methods (${methods.join(", ")}). PUT/DELETE can permit arbitrary file write/deletion if the handler behind them isn't strictly authenticated; TRACE enables Cross-Site Tracing (see the separate finding below if it's actually reachable); CONNECT exposed on a web-facing origin usually indicates a proxy misconfiguration.`,
+        evidence: [`Allow: ${allowRaw}`],
+        remediation:
+          "Restrict routing to only the methods each endpoint actually needs (typically GET/POST/HEAD for a normal web app) and return 405 for the rest. If PUT/DELETE are intentionally used by an API, confirm every route behind them enforces authentication and authorization — advertising them in Allow isn't itself the vulnerability, an unauthenticated handler behind them is.",
+      });
+    }
+  }
+
+  try {
+    const marker = Math.random().toString(36).slice(2);
+    const traceRes = await rawRequest(url, {
+      method: "TRACE",
+      headers: { "X-Ubel-Trace-Probe": marker },
+      timeoutMs: timeout * 1000,
+    });
+    if (traceRes.status_code === 200 && traceRes.text.includes(marker)) {
+      findings.push({
+        id: "trace-method-enabled",
+        title: "HTTP TRACE method enabled (Cross-Site Tracing)",
+        category: "HTTP Methods",
+        severity: "medium",
+        url,
+        target: asset.target,
+        description:
+          "The server responds to TRACE requests by echoing the request back verbatim, including headers. Combined with an XSS bug elsewhere on the site, TRACE lets an attacker's script retrieve headers — including cookies — that JavaScript can't normally read directly, the classic Cross-Site Tracing (XST) technique for defeating HttpOnly.",
+        evidence: [],
+        remediation:
+          "Disable the TRACE method at the web server/load balancer (e.g. `TraceEnable off` on Apache; an explicit method restriction on nginx/IIS).",
+      });
+    }
+  } catch {
+    /* refused or unsupported here — nothing to report either way */
+  }
+}
+
+/**
+ * Origin-reflection CORS checks: sends the site root a fabricated Origin
+ * it could never have legitimately allow-listed and checks whether the
+ * response reflects it back — the standard way to distinguish "reflects
+ * any origin" from "has a real allowlist that happens to include mine."
+ * Then, separately, checks whether Origin: null is accepted, since that's
+ * the value sandboxed iframes and data: URIs send.
+ */
+async function checkCorsMisconfig(origin, asset, timeout, findings, errors) {
+  const url = origin + "/";
+  const probeOrigin = `https://ubel-cors-probe-${Math.random().toString(36).slice(2)}.example`;
+
+  let res;
+  try {
+    res = await rawRequest(url, { method: "GET", headers: { Origin: probeOrigin }, timeoutMs: timeout * 1000 });
+  } catch (e) {
+    errors.push({ target: asset.target, check: "cors-misconfiguration", url, error: e.message });
+    return;
+  }
+
+  const acao = pickHeader(res.headers, "access-control-allow-origin");
+  const acac = pickHeader(res.headers, "access-control-allow-credentials");
+
+  if (acao) {
+    const reflectsArbitraryOrigin = acao === probeOrigin;
+    const allowsCredentials = /^\s*true\s*$/i.test(String(acac || ""));
+
+    if (reflectsArbitraryOrigin && allowsCredentials) {
+      findings.push({
+        id: "cors-reflected-origin-with-credentials",
+        title: "CORS reflects arbitrary Origin with credentials allowed",
+        category: "CORS",
+        severity: "critical",
+        url,
+        target: asset.target,
+        description: `The server reflects any Origin header back verbatim in Access-Control-Allow-Origin (tested with a fabricated, never-before-seen origin: ${probeOrigin}) and also sets Access-Control-Allow-Credentials: true. Any other website can therefore issue a credentialed (cookie-carrying) cross-origin request to this site and read the response — a near-complete same-origin-policy bypass for anyone with an active session here.`,
+        evidence: [`Origin sent: ${probeOrigin}`, `Access-Control-Allow-Origin: ${acao}`, `Access-Control-Allow-Credentials: ${acac}`],
+        remediation:
+          "Never reflect an arbitrary Origin when Access-Control-Allow-Credentials is true. Maintain an explicit allowlist of trusted origins, echo back only an origin that matches it, and add `Vary: Origin` so caches don't serve one origin's CORS headers to another.",
+      });
+    } else if (reflectsArbitraryOrigin) {
+      findings.push({
+        id: "cors-reflected-origin",
+        title: "CORS reflects arbitrary Origin",
+        category: "CORS",
+        severity: "medium",
+        url,
+        target: asset.target,
+        description: `The server reflects any Origin header back verbatim in Access-Control-Allow-Origin (tested with a fabricated origin: ${probeOrigin}), without credentials involved. This still lets any website read non-credentialed responses cross-origin — only safe if those responses genuinely contain nothing sensitive to an unauthenticated visitor.`,
+        evidence: [`Origin sent: ${probeOrigin}`, `Access-Control-Allow-Origin: ${acao}`],
+        remediation:
+          "Restrict Access-Control-Allow-Origin to an explicit allowlist rather than reflecting whatever was sent — even without credentials, unauthenticated responses can leak information (rate-limit counters, internal IDs, feature flags) that shouldn't be broadly readable.",
+      });
+    } else if (acao === "*" && allowsCredentials) {
+      // Technically invalid per the Fetch spec — browsers reject this
+      // exact combination outright — but worth flagging: it signals the
+      // same "allow everything" intent as the reflection case above, and
+      // some intermediaries (CDNs, reverse proxies) rewrite a wildcard
+      // into a reflected origin, which would reintroduce the credentialed
+      // bypass this spec restriction is meant to prevent.
+      findings.push({
+        id: "cors-wildcard-with-credentials",
+        title: "CORS wildcard Origin combined with credentials",
+        category: "CORS",
+        severity: "medium",
+        url,
+        target: asset.target,
+        description:
+          "The server sends Access-Control-Allow-Origin: * together with Access-Control-Allow-Credentials: true. Browsers reject this exact combination as-is, so it doesn't currently work, but it signals a CORS policy not built around a real origin allowlist — one that may fail open elsewhere, e.g. behind a proxy that rewrites `*` into the request's actual Origin.",
+        evidence: [`Access-Control-Allow-Origin: ${acao}`, `Access-Control-Allow-Credentials: ${acac}`],
+        remediation:
+          "Replace the wildcard with an explicit allowlist of trusted origins anywhere credentials are involved, and confirm no intermediary rewrites the wildcard into a reflected origin.",
+      });
+    }
+  }
+
+  let nullRes;
+  try {
+    nullRes = await rawRequest(url, { method: "GET", headers: { Origin: "null" }, timeoutMs: timeout * 1000 });
+  } catch {
+    return;
+  }
+  const acaoNull = pickHeader(nullRes.headers, "access-control-allow-origin");
+  if (acaoNull === "null") {
+    findings.push({
+      id: "cors-null-origin-allowed",
+      title: "CORS allows the 'null' Origin",
+      category: "CORS",
+      severity: "high",
+      url,
+      target: asset.target,
+      description:
+        "The server sets Access-Control-Allow-Origin: null in response to a request sending Origin: null. Browsers send exactly that value from sandboxed iframes, data: URIs, and some redirect chains — contexts that are untrusted by design — so allow-listing it removes a boundary the browser sandbox model depends on.",
+      evidence: [`Access-Control-Allow-Origin: ${acaoNull}`],
+      remediation: "Remove 'null' from any Origin allowlist; treat it as untrusted and never echo it back.",
+    });
+  }
 }
 
 // ── Orchestration ────────────────────────────────────────────────────────
@@ -753,6 +1216,8 @@ export async function scanMisconfigurations(assets, inventory, opts = {}) {
       await checkWpUserEnum(origin, asset, baseline, timeout, findings, errors);
     }
     await checkInfoPhp(origin, asset, baseline, timeout, findings, errors);
+    await checkHttpMethods(origin, asset, timeout, findings, errors);
+    await checkCorsMisconfig(origin, asset, timeout, findings, errors);
 
     const tlsResult = await checkTls(asset, timeout).catch(() => ({ findings: [], httpsAvailable: false }));
     findings.push(...tlsResult.findings);

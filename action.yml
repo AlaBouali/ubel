@@ -6,7 +6,7 @@ inputs:
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
-    default: '0.8.0'
+    default: '0.14.2'
   args:
     description: 'Extra flags, e.g. --fail-on high'
     default: ''
@@ -93,10 +93,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|npm|pnpm|bun|yarn|docker|pip|pipx|uv|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|npm|pnpm|bun|yarn|docker|pip|pipx|uv|composer|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, npm, pnpm, bun, yarn, docker, pip, pipx, uv, composer, apt, dnf, yum"
             exit 1
             ;;
         esac
