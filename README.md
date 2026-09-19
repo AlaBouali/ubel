@@ -11,7 +11,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
-- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD (the same vulnerability-lookup engine the SCA module uses), and separately checks every host for a fixed set of common misconfigurations (exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing security headers). Runs via `ubel-url` against hosts you already know, or `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs first and scan all of them in one run. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
+- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD (the same vulnerability-lookup engine the SCA module uses), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, or `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 
@@ -261,20 +261,38 @@ well-known paths — turns what it finds into candidate CPE identifiers, and
 feeds those through the exact same OSV.dev/NVD vulnerability-lookup engine
 the SCA module uses. No authentication, no brute forcing, no exploitation —
 just unauthenticated GETs and a lookup against public vulnerability data.
+
 `ubel-domain` runs the identical scan, with the target list discovered for
-you first: give it a root domain and it enumerates every subdomain a public
-CA has logged a certificate for (via crt.sh), then fingerprints all of them
-in one run — `--list-only` prints that discovered list without sending a
-single request to any of those hosts, so you can review and trim it
-(`--exclude`) before authorizing the real scan.
+you first:
+
+```
+domain  →  crt.sh subdomain discovery  →  fingerprint every host
+        →  group techs by name+version (with the host list for each)
+        →  vulnerability lookup + misconfiguration checks  →  one report
+```
+
+Give it a root domain and it enumerates every subdomain a public CA has
+logged a certificate for (via [crt.sh](https://crt.sh)) — passive discovery
+only, no DNS brute-forcing, no zone-transfer attempts — then fingerprints
+all of them in one run through the same engine `ubel-url` uses, so a
+technology found on forty subdomains is one inventory row with a forty-host
+list, not forty near-identical rows. `--list-only` prints that discovered
+list without sending a single request to any of those hosts, so you can
+review and trim it (`--exclude`, or add hosts crt.sh missed with
+`--include`) before authorizing the real scan.
 
 Every host is also checked, automatically, for a fixed set of common
 misconfigurations, independent of the CVE lookup above: an exposed
 `.env`/`.git`, exposed `phpinfo()` output, TLS/certificate weaknesses
 (expiry, trust, hostname mismatch, weak/legacy protocol and cipher support),
-missing security headers (HSTS, clickjacking protection), and — on hosts
-already identified as WordPress — a reachable `xmlrpc.php` and unauthenticated
-user enumeration.
+missing/weak security headers and cookie flags (HSTS, CSP, clickjacking
+protection, `X-Content-Type-Options`, `Referrer-Policy`,
+`Permissions-Policy`, `Secure`/`HttpOnly`/`SameSite` on any `Set-Cookie`),
+risky HTTP methods (`PUT`/`DELETE`/`TRACE`/`CONNECT` advertised, plus an
+actual Cross-Site Tracing probe), CORS misconfiguration (arbitrary-Origin
+reflection, a wildcard paired with credentials, the `null` Origin), SPF/
+DMARC/DKIM email-authentication gaps, and — on hosts already identified as
+WordPress — a reachable `xmlrpc.php` and unauthenticated user enumeration.
 
 It's a deliberate subset of an SCA report: no license compliance (no
 manifest to read one off of), no dependency sequences/graph (nothing here

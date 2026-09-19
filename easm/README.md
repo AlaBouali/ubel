@@ -81,12 +81,15 @@ verify, not a confirmed compromise.
 
 Alongside that CVE lookup, every scan also runs a small, fixed set of
 **misconfiguration checks** against each live host — exposed `.env`/`.git`,
-WordPress-specific probes, TLS/certificate weaknesses, and missing security
-headers — see [Misconfiguration checks](#misconfiguration-checks) below.
-These stay within the same posture as everything else here: a single
-well-known path per HTTP check (or one TLS handshake), no exploitation, no
-brute-forcing. It's a second, independent finding type layered on the same
-passive scan, not a change to what the module does or how it behaves.
+WordPress-specific probes, TLS/certificate weaknesses, missing/weak security
+headers and cookie flags, risky HTTP methods, CORS misconfiguration, and
+SPF/DMARC/DKIM email-authentication gaps — see
+[Misconfiguration checks](#misconfiguration-checks) below. These stay within
+the same posture as everything else here: a single well-known path per HTTP
+check (or one TLS handshake, or a short list of well-known DNS names for the
+email-authentication checks), no exploitation, no brute-forcing. It's a
+second, independent finding type layered on the same passive scan, not a
+change to what the module does or how it behaves.
 
 This is deliberately a **subset** of what the SCA module's report shows for
 a dependency-tree scan, not a re-implementation of all of it. Specifically
@@ -158,9 +161,16 @@ dependency; if it's answering HTTP requests, it's running.
   user enumeration via `wp-json/wp/v2/users`. Every host is also checked for
   TLS/certificate weaknesses (expiry, untrusted/self-signed, hostname
   mismatch, weak negotiated protocol/cipher, explicit TLS 1.0/1.1 downgrade
-  acceptance, or no working HTTPS listener at all) and missing/weak HTTP
-  security headers (HSTS presence and `max-age`, clickjacking protection via
-  `X-Frame-Options`/CSP `frame-ancestors`). Runs automatically on every
+  acceptance, or no working HTTPS listener at all), missing/weak HTTP
+  security headers (HSTS, CSP, clickjacking protection via
+  `X-Frame-Options`/`frame-ancestors`, `X-Content-Type-Options`,
+  `Referrer-Policy`, `Permissions-Policy`), missing/weak `Set-Cookie`
+  attributes (`Secure`/`HttpOnly`/`SameSite`), risky HTTP methods
+  (`PUT`/`DELETE`/`TRACE`/`CONNECT` advertised in `Allow`, plus an actual
+  Cross-Site Tracing probe), CORS misconfiguration (arbitrary-Origin
+  reflection with/without credentials, a wildcard paired with credentials,
+  the `null` Origin), and SPF/DMARC/DKIM email-authentication gaps (the one
+  DNS-only check in the set — see below). Runs automatically on every
   scan — see [Misconfiguration checks](#misconfiguration-checks)
 - **DNS pre-resolution** — every target is resolved before probing; a
   hostname with no DNS record is marked `dead` in the report and skipped
@@ -190,9 +200,11 @@ binary. There's no separate package to install — EASM ships as part of
 
 - Node.js `>=18.0.0`
 - Outbound network access to: the target(s) you're scanning — HTTP(S)
-  requests for fingerprinting/misconfiguration checks, plus a raw TLS
-  handshake to port 443 for the certificate/protocol checks (see
-  [Misconfiguration checks](#misconfiguration-checks)) — `api.osv.dev`,
+  requests for fingerprinting/misconfiguration checks, a raw TLS handshake
+  to port 443 for the certificate/protocol checks, and outbound DNS TXT
+  queries (to the target's own domain, `_dmarc.<host>`, and a short list of
+  `_domainkey.<host>` selector names) for the email-authentication checks
+  (see [Misconfiguration checks](#misconfiguration-checks)) — `api.osv.dev`,
   `services.nvd.nist.gov`, and `www.wpvulnerability.net` (plus `crt.sh` for
   `ubel-domain`) — or your own internal mirrors, see
   [Vulnerability data sources](#vulnerability-data-sources)
@@ -313,12 +325,14 @@ this document describes — implemented in
 on every scan; there's currently no CLI flag to disable or retime it (see
 [Known limitations](#known-limitations--natural-next-steps)).
 
-Every check fetches one specific, well-known path with redirects disabled
-(a redirect away from `/.env` means it isn't directly exposed, which is the
-opposite of a finding). A single baseline request to a random, guaranteed-
-nonexistent path is made per host first, so a target that returns HTTP 200
-for everything (a catch-all SPA route, for instance) can't be misread as
-every probed path genuinely existing.
+Every HTTP-based check fetches one specific, well-known path with redirects
+disabled (a redirect away from `/.env` means it isn't directly exposed,
+which is the opposite of a finding). A single baseline request to a random,
+guaranteed-nonexistent path is made per host first, so a target that returns
+HTTP 200 for everything (a catch-all SPA route, for instance) can't be
+misread as every probed path genuinely existing. The email-authentication
+checks are the one exception to "HTTP-based" — they read DNS TXT records
+instead; see **Email Security** below.
 
 **Exposed File**
 - `exposed-env-file` — a publicly readable `.env`. Cross-referenced against
@@ -390,14 +404,128 @@ ignore it over plain HTTP) or HTTP otherwise.
   `medium`.
 - `weak-clickjacking-protection` — `X-Frame-Options` is set, but to a value
   modern browsers ignore (e.g. the deprecated `ALLOW-FROM`). `low`.
+- `missing-csp` — no `Content-Security-Policy` header at all (independent of
+  the frame-ancestors-specific clickjacking check above — a CSP present but
+  missing only `frame-ancestors` is covered by that check, not re-flagged
+  here). `low`.
+- `missing-x-content-type-options` — no `X-Content-Type-Options` header, so
+  browsers may MIME-sniff a response instead of trusting its declared
+  content type. `low`.
+- `invalid-x-content-type-options` — the header is set, but to something
+  other than `nosniff`, the only value browsers act on. `low`.
+- `missing-referrer-policy` — no `Referrer-Policy` header, so the browser's
+  own (browser-dependent) default applies. `low`.
+- `weak-referrer-policy` — `Referrer-Policy: unsafe-url`, which leaks the
+  full referring URL — path and query string included — on every
+  cross-origin request, even HTTPS→HTTP. `low`.
+- `missing-permissions-policy` — no `Permissions-Policy` (or legacy
+  `Feature-Policy`) header restricting powerful browser features (camera,
+  microphone, geolocation, USB, payment, …). `low`.
+
+**Cookies** — `Set-Cookie` attributes on the same root-page response the
+header checks already fetched (no extra request), aggregated per host: a
+site with ten cookies missing `HttpOnly` gets one finding naming all ten,
+not ten.
+- `cookie-missing-secure` — a cookie set on an HTTPS response lacks
+  `Secure`, so it could still be sent over a plaintext downgrade. `medium`.
+- `cookie-missing-httponly` — a cookie lacks `HttpOnly`, so client-side
+  JavaScript (including an XSS payload) can read it. `medium` if the
+  cookie's name looks session/auth-related (matches
+  `/session|token|auth|jwt|\bsid\b|csrf/i`), `low` otherwise.
+- `cookie-samesite-none-insecure` — `SameSite=None` set without `Secure`,
+  which browsers reject outright but which signals the same
+  not-really-configured cookie policy either way. `medium`.
+- `cookie-missing-samesite` — no explicit `SameSite` attribute (browser
+  defaults vary). `low`.
+
+**HTTP Methods** — one `OPTIONS` request to the site root, plus a
+non-destructive `TRACE` probe carrying a random marker header. `PUT`/
+`DELETE` are read only from the `Allow` header and never actually sent —
+see the note above `checkHttpMethods()` in the source for why.
+- `risky-http-methods-allowed` — the `Allow` (or
+  `Access-Control-Allow-Methods`) header advertises `PUT`, `DELETE`,
+  `TRACE`, or `CONNECT` alongside the site's other supported methods.
+  `high` if `PUT`/`DELETE` is among them, `medium` otherwise.
+- `trace-method-enabled` — the server echoes a `TRACE` request back
+  verbatim, including headers — the classic Cross-Site Tracing (XST)
+  technique for reading otherwise-`HttpOnly` cookies via an XSS bug
+  elsewhere on the site. `medium`.
+
+**CORS** — the site root is requested with a fabricated, never-before-seen
+`Origin` to distinguish "reflects any origin" from "has a real allowlist
+that happens to include mine," then again with `Origin: null` (what
+sandboxed iframes and `data:` URIs send).
+- `cors-reflected-origin-with-credentials` — the fabricated origin is
+  reflected back in `Access-Control-Allow-Origin` *and*
+  `Access-Control-Allow-Credentials: true` is set — any other website can
+  issue a credentialed cross-origin request here and read the response.
+  `critical`.
+- `cors-reflected-origin` — the same reflection, without credentials
+  involved — still lets any site read non-credentialed responses
+  cross-origin. `medium`.
+- `cors-wildcard-with-credentials` — `Access-Control-Allow-Origin: *`
+  combined with `Access-Control-Allow-Credentials: true`. Browsers reject
+  this exact combination as invalid, but it signals a policy not built
+  around a real allowlist, and some proxies rewrite `*` into a reflected
+  origin, reintroducing the bypass. `medium`.
+- `cors-null-origin-allowed` — `Access-Control-Allow-Origin: null` is set in
+  response to `Origin: null`, allow-listing a value that untrusted sandboxed
+  contexts send by design. `high`.
+
+**Email Security** — the one set of checks here that reads DNS TXT records
+instead of making an HTTP request; skipped entirely for a target that's a
+bare IP address rather than a domain name. Implemented in
+`checkSpf`/`checkDmarc`/`checkDkim` in `lib/misconfig_scan.js`.
+- `email-spf-missing` — no `v=spf1` TXT record on the host's own name, so
+  receivers have no way to verify a mail server claiming to send as this
+  domain is actually authorized to. `medium`.
+- `email-spf-multiple-records` — more than one `v=spf1` record published;
+  RFC 7208 requires exactly one, and a receiver that finds more than one is
+  required to treat SPF as a permanent error (i.e. ignore it). `medium`.
+- `email-spf-permissive-all` — the SPF record ends in `+all`, explicitly
+  authorizing *any* server on the internet to send mail as this domain and
+  pass SPF. `high`.
+- `email-dmarc-missing` — no TXT record at `_dmarc.<host>`. Without DMARC,
+  nothing tells receivers what to do with mail that fails SPF/DKIM, and the
+  domain gets no aggregate-report visibility into who's sending as it.
+  `high`.
+- `email-dmarc-multiple-records` — more than one `v=DMARC1` record at
+  `_dmarc.<host>`; per RFC 7489 a domain must publish exactly one. `medium`.
+- `email-dmarc-policy-none` — the DMARC policy is `p=none` (or the `p=` tag
+  is missing, which defaults to `none`) — reports are generated, but
+  nothing failing alignment is actually blocked or quarantined. `medium`.
+- `email-dmarc-reduced-enforcement-pct` — an enforcing policy (`quarantine`/
+  `reject`) is scoped to less than 100% of mail via `pct=`; the remainder is
+  let through as if the policy were `none`. Normal while ramping up
+  enforcement, a real gap if left there long-term. `low`.
+- `email-dmarc-no-reports` — the DMARC record has no `rua=` aggregate-report
+  address, so no one is notified which sources are sending mail as this
+  domain or whether tightening the policy broke real mail flow. `low`.
+- `email-dkim-not-found-common-selectors` — none of a short, curated list of
+  commonly-used DKIM selectors (`default`, `google`, `selector1`/
+  `selector2`, `k1`/`k2`, `pm`, `sendgrid`, `zoho`, `amazonses`, …) resolved
+  a key under `<selector>._domainkey.<host>`. Deliberately **lower
+  confidence** than the SPF/DMARC findings above: unlike SPF and DMARC,
+  DKIM has no single well-known location — the selector is chosen by
+  whoever configured outbound mail — so a miss here only rules out these
+  specific selector names, not DKIM as a whole. `low`.
+
+  These run per scanned host, the same granularity as every other check in
+  this list — not deduplicated down to one call per organizational domain,
+  since that would need public-suffix-list handling this module doesn't
+  otherwise depend on. A finding on a subdomain that doesn't send mail
+  directly (`www.example.com`, say) is real but lower-stakes: DMARC in
+  particular is designed to be inherited from the organizational domain, so
+  a missing record at a subdomain isn't necessarily actionable on its own —
+  SPF, by contrast, is evaluated per-hostname by receivers regardless.
 
 Findings are grouped by rule id in the report (not one row per host) — see
 [Reports](#reports) — with a deduplicated "seen on" host list per rule, the
 same shape Components/Vulnerabilities already use. A host contributes
 entries to `misconfigurations_errors` (not a false "no findings") when a
 probe fails outright — a timeout, a connection reset, an unparseable
-response — so a clean-looking host and an unprobeable one are never
-conflated.
+response, or a real (non-"no record") DNS lookup failure — so a
+clean-looking host and an unprobeable one are never conflated.
 
 ---
 
@@ -772,11 +900,25 @@ involved — there's nothing extra to clean up in a CI job or container layer.
   those two checks, even though the ungated ones (exposed files, TLS,
   headers) still run against it like any other host.
 - Every misconfiguration check probes exactly one well-known path (or, for
-  TLS, one handshake) per host — the same fixed-list, no-wordlist posture as
-  the rest of this module. A non-default `.env` location, a `.git` directory
-  served from somewhere other than the web root, or any issue outside the
-  fixed rule list in [Misconfiguration checks](#misconfiguration-checks)
-  simply isn't checked for.
+  TLS, one handshake; for email authentication, a short fixed list of DNS
+  names) per host — the same fixed-list, no-wordlist posture as the rest of
+  this module. A non-default `.env` location, a `.git` directory served from
+  somewhere other than the web root, or any issue outside the fixed rule
+  list in [Misconfiguration checks](#misconfiguration-checks) simply isn't
+  checked for.
+- The DKIM check (`email-dkim-not-found-common-selectors`) only queries a
+  short, curated list of commonly-used selector names — it can positively
+  confirm DKIM is configured under one of them, but a miss across the whole
+  list is not proof DKIM is absent, only that it isn't published under any
+  of these specific names. It's reported at lower severity than the SPF/
+  DMARC findings for exactly this reason; see the note in
+  [Misconfiguration checks](#misconfiguration-checks).
+- SPF/DMARC/DKIM are checked per scanned host, not deduplicated to one check
+  per organizational/registrable domain — that would need public-suffix-list
+  handling this module doesn't otherwise carry. `ubel-domain` sweeping a
+  domain with many non-mail-sending subdomains (`www.`, `api.`, `cdn.`, …)
+  will report the same SPF/DMARC gap once per such host rather than once for
+  the domain as a whole.
 
 ---
 

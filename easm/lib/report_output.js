@@ -115,6 +115,7 @@ export async function collectScanMetadata(opts = {}) {
  *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}
  */
 export async function writeEasmReports(reportPayload, opts, { reportType, cliLabel }) {
+  reportType = reportType.replace("-", "_");
   const now      = new Date();
   const pad      = n => String(n).padStart(2, "0");
   const ts       = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}`
@@ -155,6 +156,9 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
 
   console.log(`\n${cliLabel} Timestamped bundle : ${zipPath}`);
   console.log(`${cliLabel} Latest reports     : ${latestDir}`);
+  console.log(`${cliLabel}   - JSON : ${latestJson}`);
+  console.log(`${cliLabel}   - HTML : ${latestHtml}`);
+  console.log("");
 
   return { zipPath, latestJson, latestHtml };
 }

@@ -30,6 +30,13 @@
 //   - CORS misconfiguration: arbitrary-Origin reflection, reflection
 //     combined with Access-Control-Allow-Credentials: true, a wildcard
 //     paired with credentials, and acceptance of the 'null' Origin
+//   - email authentication (SPF/DMARC/DKIM) DNS records: missing or
+//     multiple SPF records, an overly permissive "+all" SPF mechanism,
+//     missing DMARC, a DMARC policy of "p=none" (monitoring only),
+//     reduced DMARC enforcement via pct=, a DMARC record with no
+//     aggregate-report address, and DKIM absence at a short list of
+//     commonly-used selectors — see checkSpf/checkDmarc/checkDkim below,
+//     the one place in this file that queries DNS instead of HTTP
 //   - TLS/certificate weaknesses: expiry, trust, hostname match, weak
 //     protocol/cipher, explicit legacy-protocol (TLS 1.0/1.1) downgrade
 //     acceptance — and outright absence of a working HTTPS listener on a
@@ -69,6 +76,7 @@ import { scanContent } from "../../sca/secrets.js";
 import tls from "node:tls";
 import http from "node:http";
 import https from "node:https";
+import dns from "node:dns";
 import { URL } from "node:url";
 
 const MAX_CHECK_BODY_BYTES = 2 * 1024 * 1024;
@@ -372,6 +380,310 @@ async function checkInfoPhp(origin, asset, baseline, timeout, findings, errors) 
     });
     return; // one finding covers the underlying mistake; no need to flag every alias
   }
+}
+
+// ── Email authentication (SPF / DMARC / DKIM) ────────────────────────────
+//
+// Unlike every other check in this file, these three read DNS TXT records
+// rather than making an HTTP request — a domain's outbound mail posture
+// has nothing to do with what its web server answers on 80/443, so this
+// is the one place here that reaches for node:dns instead of
+// httpClient/rawRequest. Same passive, read-only posture as the rest of
+// the module: three kinds of TXT lookup (the apex record, _dmarc.<host>,
+// and a short list of common DKIM selectors), nothing sent, nothing
+// brute-forced against a wordlist of arbitrary length.
+//
+// DKIM is the odd one out. SPF and DMARC each live at one well-known,
+// fixed location (the apex TXT record, and _dmarc.<domain> respectively),
+// but a DKIM public key is published under
+// "<selector>._domainkey.<domain>", where the selector is picked by
+// whatever's sending the mail (Google Workspace defaults to "google",
+// Microsoft 365 to "selector1"/"selector2", Mailchimp/Mandrill to
+// "k1"/"k2", Postmark to "pm", etc.) and isn't discoverable from outside
+// without already knowing it. Querying a short, curated list of the
+// selector names real-world providers actually default to is the same
+// "well-known path, not a wordlist" posture the HTTP checks take with
+// .env/.git/xmlrpc.php — it can positively confirm DKIM is set up, but a
+// miss on every selector in the list is NOT proof DKIM is absent, only
+// that it isn't using any of these specific names. The finding text below
+// says exactly that and is deliberately lower severity than the
+// SPF/DMARC findings, whose fixed locations mean a miss really does mean
+// absent.
+//
+// These run once per scanned host, same granularity as every other check
+// in this file (see checkTls et al.) — not deduplicated down to one call
+// per registrable/organizational domain, since that would need public-
+// suffix-list handling this module doesn't otherwise depend on. A finding
+// on a subdomain that doesn't send mail directly (www.example.com, say)
+// is a real, if lower-stakes, gap: DMARC in particular is meant to be
+// inherited from the organizational domain, so a missing record at a
+// subdomain is usually not itself actionable — but SPF is evaluated
+// per-hostname by receivers, and no finding here claims otherwise.
+
+// Selectors the checkDkim() comment above explains the reasoning for.
+const COMMON_DKIM_SELECTORS = [
+  "default",                    // widely reused generic default
+  "selector1", "selector2",     // Microsoft 365
+  "google",                     // Google Workspace
+  "k1", "k2",                   // Mailchimp / Mandrill
+  "pm",                         // Postmark
+  "mandrill",
+  "sendgrid", "s1", "s2",
+  "mail", "dkim", "smtp", "email",
+  "zoho",
+  "amazonses",                  // Amazon SES
+];
+
+function resolveTxt(hostname, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(Object.assign(new Error(`DNS TXT lookup for ${hostname} timed out after ${timeoutMs}ms`), { code: "ETIMEOUT" }));
+    }, timeoutMs);
+    dns.resolveTxt(hostname, (err, records) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(records);
+    });
+  });
+}
+
+/** True for "this name simply has no TXT record" — that absence is the
+ *  finding itself, not a scan error. Anything else (timeout, SERVFAIL,
+ *  refused) is a real lookup failure the caller should surface instead of
+ *  silently reading as "no record". */
+function isNoRecordDnsError(err) {
+  return !!err && (err.code === "ENOTFOUND" || err.code === "ENODATA");
+}
+
+// A record's value can be split across multiple chunks by the DNS wire
+// format (any single TXT string over 255 bytes) — join a record's own
+// chunks back into one string, but keep separate records separate, since
+// e.g. two genuinely distinct SPF records on one name is itself a finding
+// (see checkSpf).
+function joinTxtRecords(records) {
+  return (records || []).map((chunks) => chunks.join(""));
+}
+
+const IP_ADDRESS_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+:[0-9a-f:]+$/i;
+
+async function checkSpf(hostname, target, timeout, findings, errors) {
+  let records;
+  try {
+    records = await resolveTxt(hostname, Math.max(1, timeout) * 1000);
+  } catch (e) {
+    if (isNoRecordDnsError(e)) {
+      records = [];
+    } else {
+      errors.push({ target, check: "email-spf", url: hostname, error: e.message });
+      return;
+    }
+  }
+
+  const spfRecords = joinTxtRecords(records).filter((r) => /^v=spf1\b/i.test(r));
+
+  if (!spfRecords.length) {
+    findings.push({
+      id: "email-spf-missing",
+      title: "No SPF record found",
+      category: "Email Security",
+      severity: "medium",
+      url: hostname,
+      target,
+      description:
+        `${hostname} has no SPF (Sender Policy Framework) TXT record. Without one, receiving mail servers have no way to verify that mail claiming to be from this domain actually came from a server authorized to send it — anyone can forge the From/MAIL FROM address and send phishing mail that appears to originate from ${hostname}.`,
+      evidence: [],
+      remediation:
+        `Publish a TXT record on ${hostname} listing every server/service authorized to send mail for this domain, e.g. "v=spf1 include:_spf.<provider>.com -all". End it with "-all" (hard fail) rather than "~all" (soft fail) or "+all" once the list of authorized senders is confirmed complete, so mail from unauthorized sources is rejected outright instead of merely flagged.`,
+    });
+    return;
+  }
+
+  if (spfRecords.length > 1) {
+    findings.push({
+      id: "email-spf-multiple-records",
+      title: "Multiple SPF records published",
+      category: "Email Security",
+      severity: "medium",
+      url: hostname,
+      target,
+      description:
+        `${hostname} publishes ${spfRecords.length} separate "v=spf1" TXT records. RFC 7208 requires exactly one SPF record per domain — a receiver that finds more than one is required to treat SPF as a permanent error (permerror) and effectively ignore it, which silently defeats whatever protection the records were meant to provide.`,
+      evidence: spfRecords,
+      remediation:
+        "Merge every authorized sender into a single \"v=spf1 ...\" TXT record (chain additional providers together with \"include:\" mechanisms inside that one record) and remove the rest, so exactly one SPF record remains.",
+    });
+  }
+
+  const allMatch = spfRecords[0].match(/([+?~-]?)all\b/i);
+  if (allMatch && allMatch[1] === "+") {
+    findings.push({
+      id: "email-spf-permissive-all",
+      title: "SPF record ends in +all (authorizes any server to send mail)",
+      category: "Email Security",
+      severity: "high",
+      url: hostname,
+      target,
+      description:
+        `${hostname}'s SPF record uses "+all", which explicitly authorizes every server on the internet to send mail as this domain and passes SPF for all of it. This looks stricter than having no SPF record only on the surface — in practice it defeats the check entirely and hands forged mail a passing SPF result.`,
+      evidence: [spfRecords[0]],
+      remediation:
+        "Replace \"+all\" with \"-all\" (or \"~all\" while still validating the authorized-sender list is complete) so only the explicitly listed servers pass.",
+    });
+  }
+}
+
+async function checkDmarc(hostname, target, timeout, findings, errors) {
+  const dmarcName = `_dmarc.${hostname}`;
+  let records;
+  try {
+    records = await resolveTxt(dmarcName, Math.max(1, timeout) * 1000);
+  } catch (e) {
+    if (isNoRecordDnsError(e)) {
+      records = [];
+    } else {
+      errors.push({ target, check: "email-dmarc", url: dmarcName, error: e.message });
+      return;
+    }
+  }
+
+  const dmarcRecords = joinTxtRecords(records).filter((r) => /^v=DMARC1\b/i.test(r));
+
+  if (!dmarcRecords.length) {
+    findings.push({
+      id: "email-dmarc-missing",
+      title: "No DMARC record found",
+      category: "Email Security",
+      severity: "high",
+      url: dmarcName,
+      target,
+      description:
+        `No DMARC TXT record was found at ${dmarcName}. DMARC is what ties SPF and DKIM together into an actual enforcement/reporting policy — without it, receivers still validate SPF/DKIM individually, but nothing tells them what to do with mail that fails either, and this domain gets no visibility, via aggregate reports, into who is currently sending mail as it, spoofed or otherwise.`,
+      evidence: [],
+      remediation:
+        `Publish a TXT record at ${dmarcName}, starting in monitoring mode so current mail flow is visible before anything is enforced: "v=DMARC1; p=none; rua=mailto:<address to receive aggregate reports>". Once the reports confirm every legitimate mail source is covered by SPF/DKIM, move p= to "quarantine" and then "reject".`,
+    });
+    return;
+  }
+
+  const record = dmarcRecords[0];
+  if (dmarcRecords.length > 1) {
+    findings.push({
+      id: "email-dmarc-multiple-records",
+      title: "Multiple DMARC records published",
+      category: "Email Security",
+      severity: "medium",
+      url: dmarcName,
+      target,
+      description:
+        `${dmarcName} publishes ${dmarcRecords.length} separate "v=DMARC1" TXT records. Per RFC 7489 a domain must publish exactly one; a receiver that finds more than one is expected to treat DMARC as unset for this domain, discarding whatever policy was intended.`,
+      evidence: dmarcRecords,
+      remediation: `Remove all but one DMARC TXT record at ${dmarcName}.`,
+    });
+  }
+
+  const policyMatch = record.match(/(?:^|;)\s*p=(\w+)/i);
+  const policy = policyMatch ? policyMatch[1].toLowerCase() : null;
+  if (!policy || policy === "none") {
+    findings.push({
+      id: "email-dmarc-policy-none",
+      title: 'DMARC policy is "none" (monitoring only, nothing enforced)',
+      category: "Email Security",
+      severity: "medium",
+      url: dmarcName,
+      target,
+      description:
+        `${dmarcName}'s DMARC policy is${policy ? "" : " missing its required p= tag, which defaults to"} "p=none". Mail that fails SPF/DKIM alignment is delivered anyway — aggregate reports are generated, but nothing is actually blocked or quarantined, so this domain remains fully spoofable in practice despite DMARC being present.`,
+      evidence: [record],
+      remediation:
+        "Once aggregate reports (rua) confirm every legitimate sending source passes SPF/DKIM alignment, move the policy to \"p=quarantine\" and eventually \"p=reject\" to act on failing mail instead of only observing it.",
+    });
+  }
+
+  const pctMatch = record.match(/(?:^|;)\s*pct=(\d+)/i);
+  const pct = pctMatch ? Number(pctMatch[1]) : 100;
+  if (policy && policy !== "none" && pct < 100) {
+    findings.push({
+      id: "email-dmarc-reduced-enforcement-pct",
+      title: `DMARC enforcement reduced to ${pct}% of mail (pct=${pct})`,
+      category: "Email Security",
+      severity: "low",
+      url: dmarcName,
+      target,
+      description:
+        `${dmarcName} enforces its "${policy}" policy on only ${pct}% of mail that fails alignment (pct=${pct}); the remainder is let through as if the policy were "none". This is a normal, deliberate step while ramping up enforcement, but leaves a real gap in coverage if left in place long-term.`,
+      evidence: [record],
+      remediation:
+        "Ratchet pct= up toward 100 as monitoring confirms legitimate mail keeps passing under the stricter policy, so full enforcement eventually applies to all mail rather than a sample of it.",
+    });
+  }
+
+  if (!/(?:^|;)\s*rua=/i.test(record)) {
+    findings.push({
+      id: "email-dmarc-no-reports",
+      title: "DMARC record has no aggregate-report address (rua)",
+      category: "Email Security",
+      severity: "low",
+      url: dmarcName,
+      target,
+      description:
+        `${dmarcName}'s DMARC record has no "rua=" tag, so no aggregate reports are sent anywhere. Reports are what make DMARC actionable — without them, no one is notified which sources are sending mail as this domain, legitimate or spoofed, or whether tightening the policy broke real mail flow.`,
+      evidence: [record],
+      remediation:
+        "Add \"rua=mailto:<address>\" to the record to receive daily aggregate XML reports summarizing which sources pass/fail for this domain.",
+    });
+  }
+}
+
+async function checkDkim(hostname, target, timeout, findings, errors) {
+  let foundSelector = null;
+  const timeoutMs = Math.max(1, timeout) * 1000;
+
+  for (const selector of COMMON_DKIM_SELECTORS) {
+    const name = `${selector}._domainkey.${hostname}`;
+    let records;
+    try {
+      records = await resolveTxt(name, timeoutMs);
+    } catch (e) {
+      if (isNoRecordDnsError(e)) continue;
+      // A real lookup failure (timeout, SERVFAIL) on one selector
+      // shouldn't abort the rest of the list — record it and keep going.
+      errors.push({ target, check: "email-dkim", url: name, error: e.message });
+      continue;
+    }
+    const hit = joinTxtRecords(records).find((r) => /v=DKIM1/i.test(r) || /(?:^|;)\s*p=/i.test(r));
+    if (hit) {
+      foundSelector = selector;
+      break;
+    }
+  }
+
+  if (!foundSelector) {
+    findings.push({
+      id: "email-dkim-not-found-common-selectors",
+      title: "No DKIM record found at common selectors",
+      category: "Email Security",
+      severity: "low",
+      url: `_domainkey.${hostname}`,
+      target,
+      description:
+        `None of ${COMMON_DKIM_SELECTORS.length} commonly-used DKIM selectors (${COMMON_DKIM_SELECTORS.join(", ")}) resolved a DKIM key under _domainkey.${hostname}. DKIM lets receivers verify a message wasn't altered in transit and genuinely came from a server holding this domain's private key — without it, SPF/DMARC are the only authentication this domain has. This is a lower-confidence finding than the SPF/DMARC checks above: DKIM selectors are chosen by whoever configured outbound mail and aren't discoverable from outside without already knowing the name, so this only rules out the selector names checked here, not DKIM as a whole.`,
+      evidence: [],
+      remediation:
+        "Confirm with whoever administers this domain's outbound mail (in-house mail server, or a provider such as Google Workspace/Microsoft 365/SendGrid/etc.) whether DKIM signing is enabled and under what selector, and publish it if it isn't. If DKIM is already configured under a selector not in this common list, this specific finding is a false positive.",
+    });
+  }
+}
+
+async function checkEmailAuth(hostname, target, timeout, findings, errors) {
+  if (IP_ADDRESS_RE.test(hostname)) return; // SPF/DMARC/DKIM apply to domain names, not bare IPs
+  await checkSpf(hostname, target, timeout, findings, errors);
+  await checkDmarc(hostname, target, timeout, findings, errors);
+  await checkDkim(hostname, target, timeout, findings, errors);
 }
 
 // ── TLS/SSL checks ───────────────────────────────────────────────────────
@@ -1218,6 +1530,11 @@ export async function scanMisconfigurations(assets, inventory, opts = {}) {
     await checkInfoPhp(origin, asset, baseline, timeout, findings, errors);
     await checkHttpMethods(origin, asset, timeout, findings, errors);
     await checkCorsMisconfig(origin, asset, timeout, findings, errors);
+
+    // DNS-only, independent of everything above — reuses `parsed.hostname`
+    // (already validated by parseResolvedUrl) rather than raw asset.target,
+    // since target may carry a scheme/port depending on how it was given.
+    await checkEmailAuth(parsed.hostname, asset.target, timeout, findings, errors);
 
     const tlsResult = await checkTls(asset, timeout).catch(() => ({ findings: [], httpsAvailable: false }));
     findings.push(...tlsResult.findings);

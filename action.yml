@@ -6,7 +6,7 @@ inputs:
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
-    default: '0.14.2'
+    default: '0.15.0'
   args:
     description: 'Extra flags, e.g. --fail-on high'
     default: ''

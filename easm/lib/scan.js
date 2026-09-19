@@ -17,10 +17,10 @@
 //      module's own secrets rules — see ./secrets_crawl.js.
 //   4. Probe each scanned host for a fixed, deliberately small set of
 //      well-known web misconfigurations — exposed .env/.git, xmlrpc.php,
-//      WP user enumeration, phpinfo(), TLS certificate problems, and
-//      missing security headers (HSTS / clickjacking / no-HTTPS-at-all).
-//      Independent of the CVE pipeline and the secrets crawl — see
-//      ./misconfig_scan.js.
+//      WP user enumeration, phpinfo(), TLS certificate problems, missing
+//      security headers (HSTS / clickjacking / no-HTTPS-at-all), and
+//      SPF/DMARC/DKIM email-authentication gaps. Independent of the CVE
+//      pipeline and the secrets crawl — see ./misconfig_scan.js.
 //   5. Loop over every id (CPE *and* purl alike) of every inventory item,
 //      look each up against the matching source (CPE ids → NVD, purl ids →
 //      OSV, WordPress-tagged items → wpvulnerability.net instead of NVD —
@@ -493,8 +493,10 @@ export async function scanTargets(targets, opts = {}) {
   // Independent of both the CVE pipeline and the secrets crawl: point
   // probes against each scanned host for a fixed set of well-known
   // misconfigurations — exposed .env / .git, xmlrpc.php, WP user enum,
-  // phpinfo(), TLS certificate issues, and missing security headers
-  // (HSTS / clickjacking / no-HTTPS-at-all). See ./misconfig_scan.js.
+  // phpinfo(), TLS certificate issues, missing security headers
+  // (HSTS / clickjacking / no-HTTPS-at-all), and SPF/DMARC/DKIM email-
+  // authentication gaps (the one DNS-only check in the set). See
+  // ./misconfig_scan.js.
   let misconfigurations = {
     findings: [],
     errors: [],
