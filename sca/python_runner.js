@@ -24,6 +24,7 @@ export class PythonVenvScanner {
       fs.existsSync(path.join(dir, "pyvenv.cfg")) ||
       fs.existsSync(path.join(dir, "bin", "activate")) ||
       fs.existsSync(path.join(dir, "Scripts", "activate")) //||
+      //fs.existsSync(path.join(dir, "Lib", "distutils")) ||
       //fs.existsSync(path.join(dir, "lib")) ||
       //fs.existsSync(path.join(dir, "Lib"))
     );
@@ -46,13 +47,55 @@ export class PythonVenvScanner {
     const winSp = path.join(venvRoot, "Lib", "site-packages");
     if (fs.existsSync(winSp)) results.push(winSp);
 
+    const distPackagesDir = path.join(venvRoot, "lib", "dist-packages");
+    if (fs.existsSync(distPackagesDir)) results.push(distPackagesDir);
+
+    const rootdistpkgs = path.join(venvRoot, "dist-packages");
+    if (fs.existsSync(rootdistpkgs)) {
+      results.push(rootdistpkgs);
+    }
+    const rootsitepkg = path.join(venvRoot, "site-packages");
+    if (fs.existsSync(rootsitepkg)) {
+      results.push(rootsitepkg);
+    }
+
     return results;
   }
 
   // ─────────────────────────────
-  // Read metadata
+  // Package metadata dir naming: wheel-style ".dist-info" vs
+  // legacy setuptools ".egg-info" (used by most system/apt-installed
+  // packages, e.g. /usr/lib/python3/dist-packages/Pillow-8.1.2.egg-info)
   // ─────────────────────────────
-  _readDistInfo(metaDir) {
+  _parsePackageMetaDirName(entryName) {
+    if (entryName.endsWith(".dist-info")) {
+      const base = entryName.slice(0, -".dist-info".length);
+      const idx = base.lastIndexOf("-");
+      if (idx === -1) return null;
+      return { name: base.slice(0, idx), version: base.slice(idx + 1), format: "dist-info" };
+    }
+
+    if (entryName.endsWith(".egg-info")) {
+      // some egg-info dirs carry a trailing interpreter/platform tag,
+      // e.g. "Pillow-8.1.2-py3.9-linux-x86_64.egg-info"
+      let base = entryName
+        .slice(0, -".egg-info".length)
+        .replace(/-py\d+\.\d+(-[\w.]+)?$/, "");
+
+      const idx = base.lastIndexOf("-");
+      if (idx === -1) return { name: base, version: "", format: "egg-info" };
+      return { name: base.slice(0, idx), version: base.slice(idx + 1), format: "egg-info" };
+    }
+
+    return null;
+  }
+
+  // ─────────────────────────────
+  // Read metadata
+  // dist-info: METADATA (fallback PKG-INFO), deps from "Requires-Dist:"
+  // egg-info:  PKG-INFO, deps from sibling "requires.txt"
+  // ─────────────────────────────
+  _readDistInfo(metaDir, format = "dist-info") {
     let raw = "";
     try {
       const metaPath = fs.existsSync(path.join(metaDir, "METADATA"))
@@ -79,7 +122,8 @@ export class PythonVenvScanner {
         license = line.slice("License-Expression:".length).trim() || "unknown";
       }
 
-      if (lower.startsWith("requires-dist:")) {
+      // wheel/dist-info metadata declares deps inline
+      if (format !== "egg-info" && lower.startsWith("requires-dist:")) {
         const dep = line
           .slice("requires-dist:".length)
           .trim()
@@ -91,14 +135,30 @@ export class PythonVenvScanner {
       }
     }
 
+    // egg-info doesn't put Requires-Dist in PKG-INFO — deps live in a
+    // sibling requires.txt (plain reqs, then optional "[extra]" sections)
+    if (format === "egg-info") {
+      const requiresTxt = path.join(metaDir, "requires.txt");
+      if (fs.existsSync(requiresTxt)) {
+        for (const line of fs.readFileSync(requiresTxt, "utf8").split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          if (trimmed.startsWith("[")) break; // stop before extras sections
+          const dep = trimmed.split(/[\s(;[!<>=]/)[0].toLowerCase().replace(/_/g, "-");
+          if (dep) requires.push(dep);
+        }
+      }
+    }
+
     return { license: license.trim(), requires };
   }
 
   // ─────────────────────────────
-  // Scan venv
+  // Scan a set of site-packages/dist-packages dirs into components.
+  // rootLabel groups them for scope assignment: a venv root for venv
+  // scans, or the directory itself for a bare system install.
   // ─────────────────────────────
-  _scanVenv(venvRoot) {
-    const sitePackagesDirs = this._sitePackagesDirs(venvRoot);
+  _scanPackageDirs(sitePackagesDirs, rootLabel) {
     if (!sitePackagesDirs.length) return [];
 
     const nameIndex = new Map();
@@ -114,19 +174,16 @@ export class PythonVenvScanner {
 
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        if (!entry.name.endsWith(".dist-info")) continue;
 
-        const base = entry.name.replace(/\.dist-info$/, "");
-        const idx = base.lastIndexOf("-");
-        if (idx === -1) continue;
+        const parsed = this._parsePackageMetaDirName(entry.name);
+        if (!parsed) continue;
 
-        const name = base.slice(0, idx);
-        const version = base.slice(idx + 1);
-        const norm = name.toLowerCase().replace(/_/g, "-");
+        const norm = parsed.name.toLowerCase().replace(/_/g, "-");
 
         nameIndex.set(norm, {
-          name,
-          version,
+          name: parsed.name,
+          version: parsed.version,
+          format: parsed.format,
           metaDir: path.join(sp, entry.name)
         });
       }
@@ -135,11 +192,11 @@ export class PythonVenvScanner {
     // Pass 2
     const components = [];
 
-    for (const { name, version, metaDir } of nameIndex.values()) {
+    for (const { name, version, metaDir, format } of nameIndex.values()) {
       const norm = name.toLowerCase().replace(/_/g, "-");
       const id = this._pypiPurl(name, version);
 
-      const { license, requires } = this._readDistInfo(metaDir);
+      const { license, requires } = this._readDistInfo(metaDir, format);
 
       const dependencies = requires.map(dep => {
         const resolved = nameIndex.get(dep);
@@ -159,11 +216,26 @@ export class PythonVenvScanner {
         scopes: [],
         dependencies,
         paths: [metaDir],
-        venv_root: venvRoot
+        venv_root: rootLabel
       });
     }
 
     return components;
+  }
+
+  // ─────────────────────────────
+  // Scan venv
+  // ─────────────────────────────
+  _scanVenv(venvRoot) {
+    return this._scanPackageDirs(this._sitePackagesDirs(venvRoot), venvRoot);
+  }
+
+  // ─────────────────────────────
+  // Scan a bare system-wide site-packages/dist-packages dir that
+  // isn't inside a venv at all (e.g. /usr/lib/python3/dist-packages)
+  // ─────────────────────────────
+  _scanSitePackagesDir(dir) {
+    return this._scanPackageDirs([dir], dir);
   }
 
   // ─────────────────────────────
@@ -268,6 +340,10 @@ export class PythonVenvScanner {
       // we should NOT blanket-tag everything "prod" — packages that
       // never appear in any requirement file and were never reached by
       // propagation are genuinely undetermined, not implicitly prod.
+      // For a bare system dist-packages/site-packages scan (rootLabel
+      // is the dir itself, not a project with a venv), this is also
+      // exactly the branch that fires, since there's no requirements
+      // file family to find — everything gets tagged "prod" by default.
       if (prod.size === 0 && dev.size === 0) {
         for (const c of comps) {
           if (c.scopes.length === 0) c.scopes.push("prod");
@@ -331,6 +407,20 @@ export class PythonVenvScanner {
           if (!visited.has(key)) {
             visited.add(key);
             raw.push(...this._scanVenv(full));
+          }
+          continue;
+        }
+
+        // System-wide installs (e.g. /usr/lib/python3/dist-packages,
+        // /usr/lib/python3/site-packages) aren't inside a venv at all —
+        // scan a bare site-packages/dist-packages dir the moment we
+        // walk into one, rather than only looking for these inside a
+        // detected venv root.
+        if (entry.name === "site-packages" || entry.name === "dist-packages") {
+          const key = path.resolve(full);
+          if (!visited.has(key)) {
+            visited.add(key);
+            raw.push(...this._scanSitePackagesDir(full));
           }
           continue;
         }
