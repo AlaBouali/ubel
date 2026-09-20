@@ -976,7 +976,13 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
   // plain HTTP), and the clickjacking headers should be identical on both
   // schemes, so one fetch over HTTPS is enough. If no HTTPS is available,
   // fall back to HTTP so clickjacking protection can still be evaluated.
-  const url = httpsAvailable ? `https://${u.hostname}/` : `http://${u.hostname}/`;
+  // Keep the port: the TLS listener checkTls verified (originHostPort), or the http
+  // origin the fingerprinter actually reached. Dropping it would test 80/443 on the
+  // same IP, which for a host:port target is a different service (or nothing).
+  const tlsPort = originHostPort(asset)?.port ?? 443;
+  const url = httpsAvailable
+    ? `https://${u.hostname}:${tlsPort}/`
+    : (u.protocol === "http:" ? `http://${u.host}/` : `http://${u.hostname}/`);
 
   let res;
   try {

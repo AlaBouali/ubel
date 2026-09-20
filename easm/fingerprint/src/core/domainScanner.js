@@ -34,7 +34,7 @@ export class DomainScanner {
       if (IpInfo.ipIsPrivate(domainIp) || blackListIps.includes(domainIp)) return [];
     }
 
-    const data = { asset: domain, type: "domain", components: [] };
+    const data = { asset: domain, type: "domain", url: null, components: [] };
     let u;
     if (!domain.includes("://")) {
       u = `https://${domain}`;
@@ -46,6 +46,10 @@ export class DomainScanner {
     } else {
       u = domain;
     }
+
+    // The scheme chosen above is the one fact every downstream check (misconfig,
+    // TLS, security headers, secrets crawl) needs; `asset` is just the input string.
+    data.url = u;
 
     const appData = await WebApplicationScanner.scan(u);
 

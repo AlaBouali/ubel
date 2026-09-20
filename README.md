@@ -11,7 +11,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
-- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD (the same vulnerability-lookup engine the SCA module uses), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, or `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
+- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD/wpvulnerability.net (the same vulnerability-lookup engine the SCA module uses, plus a dedicated WordPress plugin/theme/core lookup), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run, `ubel-host` to connect-scan every port on one host and fingerprint whatever answers HTTP(S), or `ubel-easm` to combine both — discover a domain's subdomains, resolve them to distinct IPs, port-scan each, and fingerprint the combined result. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
 Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
 
@@ -42,8 +42,10 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
-| `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
+| `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD/wpvulnerability.net vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
 | `ubel-domain` | EASM | Same as `ubel-url`, but discovers its own target list first — enumerates a domain's subdomains via Certificate Transparency logs (crt.sh), then runs the same fingerprinting/vulnerability/misconfiguration scan against all of them — **authorized use only, against infrastructure you own** |
+| `ubel-host` | EASM | Connect-scans every port in a range (default 1-30000) on one host, probes whatever accepts a connection for HTTP(S), then runs the same fingerprinting/vulnerability/misconfiguration scan `ubel-url` does against whatever answered — **authorized use only, against infrastructure you own** |
+| `ubel-easm` | EASM | Combines `ubel-domain`'s discovery with `ubel-host`'s port sweep — discovers a domain's subdomains, resolves them to distinct IPs, port-scans every IP, and fingerprints the merged IP:port targets plus the subdomains themselves by name — the most invasive EASM entry point; see the "Shared IPs" warning in `easm/README.md` — **authorized use only, against infrastructure you own** |
 
 `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
 
@@ -246,11 +248,19 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 ## EASM — External Attack Surface Fingerprinting
 
 > **⚠ Authorized use only.** `ubel-url` sends live, unauthenticated requests to
-> every target you give it and discloses what it fingerprints to OSV.dev/NVD.
-> `ubel-domain` does the same, but discovers its own target list from
-> Certificate Transparency logs first — so it can end up scanning hosts you
-> didn't explicitly name. Only ever run either against infrastructure you own
-> or have explicit, documented authorization to test — the same
+> every target you give it and discloses what it fingerprints to OSV.dev/NVD/
+> wpvulnerability.net. `ubel-domain` does the same, but discovers its own
+> target list from Certificate Transparency logs first — so it can end up
+> scanning hosts you didn't explicitly name. `ubel-host` goes further: it
+> connect-scans every port in a range (1-30000 by default) on one host and
+> fingerprints whatever answers HTTP(S) — a live port sweep, not just a
+> fingerprint request. `ubel-easm` combines both — it discovers a domain's
+> subdomains, resolves each to an IP, then runs `ubel-host`'s full port
+> sweep against every distinct IP behind the domain, the most invasive of
+> the four and the most likely to reach infrastructure you didn't intend to
+> touch (shared hosting, a CDN edge IP — see the "Shared IPs" note in
+> `easm/README.md`). Only ever run any of these four against infrastructure
+> you own or have explicit, documented authorization to test — the same
 > own-infrastructure-only rule every other UBEL module already holds you to.
 > See [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
 > for the full notice.
@@ -258,9 +268,11 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 Passively fingerprints the software exposed on a domain/URL over plain
 HTTP(S) — server banners, version headers, page markup, a small set of
 well-known paths — turns what it finds into candidate CPE identifiers, and
-feeds those through the exact same OSV.dev/NVD vulnerability-lookup engine
-the SCA module uses. No authentication, no brute forcing, no exploitation —
-just unauthenticated GETs and a lookup against public vulnerability data.
+feeds those through the exact same OSV.dev/NVD/wpvulnerability.net
+vulnerability-lookup engine the SCA module uses (wpvulnerability.net for
+WordPress plugins/themes/core specifically, which NVD's CPE dictionary
+mostly misses). No authentication, no brute forcing, no exploitation — just
+unauthenticated GETs and a lookup against public vulnerability data.
 
 `ubel-domain` runs the identical scan, with the target list discovered for
 you first:
@@ -281,6 +293,24 @@ list without sending a single request to any of those hosts, so you can
 review and trim it (`--exclude`, or add hosts crt.sh missed with
 `--include`) before authorizing the real scan.
 
+`ubel-host` adds a step *before* fingerprinting instead of before discovery
+— give it one host, and it connect-scans every port in `--ports` (default
+`1-30000`), probes whatever accepts a connection for HTTP(S), and hands only
+the HTTP(S)-speaking ports to the same fingerprint/lookup engine `ubel-url`
+uses, so you don't need to already know which port a target's web app or
+admin panel lives on. This is genuinely active reconnaissance, not passive
+fingerprinting — see the warning above.
+
+`ubel-easm` is `ubel-domain`'s discovery and `ubel-host`'s port sweep
+together across a whole domain: crt.sh discovery → resolve every subdomain
+to an IP → collapse to the **distinct** IPs actually behind the domain
+(several subdomains commonly share one) → port-scan and HTTP(S)-probe each
+of those IPs → fingerprint the merged IP:port targets **and** the
+discovered subdomains by name (a bare-IP request has no Host header/SNI, so
+it can't see a name-based virtual host; controlled by `--subdomain-ports`).
+A component seen on five IPs behind the domain is still one inventory item,
+the same name+version dedup `ubel-domain` gets across subdomains.
+
 Every host is also checked, automatically, for a fixed set of common
 misconfigurations, independent of the CVE lookup above: an exposed
 `.env`/`.git`, exposed `phpinfo()` output, TLS/certificate weaknesses
@@ -293,6 +323,7 @@ actual Cross-Site Tracing probe), CORS misconfiguration (arbitrary-Origin
 reflection, a wildcard paired with credentials, the `null` Origin), SPF/
 DMARC/DKIM email-authentication gaps, and — on hosts already identified as
 WordPress — a reachable `xmlrpc.php` and unauthenticated user enumeration.
+This runs the same way across all four entry points.
 
 It's a deliberate subset of an SCA report: no license compliance (no
 manifest to read one off of), no dependency sequences/graph (nothing here
@@ -318,6 +349,18 @@ ubel-domain your-company.example --list-only
 
 # Discover every subdomain of a domain you own, then scan them all
 ubel-domain your-company.example --fail-on high
+
+# See what ports are open on a host you own, without fingerprinting anything
+ubel-host app.your-company.example --list-only
+
+# Port-scan and fingerprint a host you own, well-known ports only
+ubel-host app.your-company.example --ports 1-1024 --fail-on high
+
+# Review the IP grouping a combined sweep would touch, before authorizing it
+ubel-easm your-company.example --list-only
+
+# Combined discovery + per-IP port sweep of a domain you own
+ubel-easm your-company.example --fail-on high
 ```
 
 Outputs JSON and HTML only. **Exit codes:** governed by `--fail-on` (default
@@ -327,8 +370,9 @@ misconfigurations alike) regardless of this flag; note that `--fail-on`
 itself currently gates on vulnerabilities/infections only, not on
 misconfiguration findings.
 
-**Full documentation — the responsible-use notice, safety guard, the full
-misconfiguration-check list, and every flag:**
+**Full documentation — the responsible-use notice, safety guard, every
+`ubel-host`/`ubel-easm` flag, the "Shared IPs" warning, and the full
+misconfiguration-check list:**
 [**easm/README.md**](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
 
 ---
@@ -394,7 +438,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `ubel-domain` isn't in this allow-list yet, so a domain-wide EASM sweep isn't available through the packaged action today — call the binary directly instead (see below).
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `ubel-domain`, `ubel-host`, and `ubel-easm` aren't in this allow-list yet, so a domain-wide sweep, a port scan, or a combined sweep isn't available through the packaged action today — call the binary directly instead (see below).
 
 ### Calling the binaries directly
 
@@ -428,6 +472,12 @@ Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 
 - name: UBEL domain-wide attack surface sweep (discovers subdomains first — only against a domain you own)
   run: ubel-domain your-own-domain.example --fail-on high
+
+- name: UBEL port scan + fingerprint (connect-scans 1-1024, only against a host you own)
+  run: ubel-host staging.your-own-domain.example --ports 1-1024 --fail-on high
+
+- name: UBEL combined discovery + per-IP port sweep (most invasive EASM entry point — only against a domain you own, review with --list-only first)
+  run: ubel-easm your-own-domain.example --fail-on high
 ```
 
 ```dockerfile
@@ -986,16 +1036,17 @@ To keep this document honest rather than aspirational:
 - This entire matrix is about **the SCA/firewall/reachability/license/SBOM
   pipeline for dependency trees you resolve locally** (a manifest, a
   lockfile, an installed package set, a container image). `ubel-url`/
-  `ubel-domain` (EASM) are a genuinely separate thing — passive HTTP
-  fingerprinting of a remote domain/URL (plus a fixed set of
-  misconfiguration checks), not a dependency-tree scan — and deliberately
-  doesn't carry license compliance, dependency sequences, reachability
-  analysis, or SBOM/SARIF output, none of which are meaningful concepts for
-  something fingerprinted over the network rather than resolved from a
-  manifest. See the EASM section above and
+  `ubel-domain`/`ubel-host`/`ubel-easm` (EASM) are a genuinely separate
+  thing — passive HTTP fingerprinting of a remote domain/URL (plus a fixed
+  set of misconfiguration checks; `ubel-host`/`ubel-easm` additionally run a
+  live, active TCP port scan ahead of the fingerprinting), not a
+  dependency-tree scan — and deliberately doesn't carry license compliance,
+  dependency sequences, reachability analysis, or SBOM/SARIF output, none of
+  which are meaningful concepts for something fingerprinted over the network
+  rather than resolved from a manifest. See the EASM section above and
   [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md)
-  for what it does carry over (OSV/NVD lookup, CVSS, fix recommendations,
-  compliance mapping) and why.
+  for what it does carry over (OSV/NVD/wpvulnerability.net lookup, CVSS, fix
+  recommendations, compliance mapping) and why.
 
 ---
 

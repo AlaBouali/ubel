@@ -149,7 +149,9 @@ async function fingerprintTarget(target, allowPrivate, inventoryByKey) {
     return assetResult;
   }
 
-  assetResult.resolved_url = result.asset;
+  // Prefer the URL (with the scheme DomainScanner actually connected on) over the
+  // bare input string; downstream checks read the scheme and port from this.
+  assetResult.resolved_url = result.url || result.asset;
   assetResult.components_found = result.components.length;
 
   for (const component of result.components) {

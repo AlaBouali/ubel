@@ -83,6 +83,9 @@ export function request(targetUrl, opts = {}) {
         reject(e);
         return;
       }
+      // NOTE: the scheme in the URL is authoritative. Do not "correct" it based on the
+      // port: URL#port is "" for a default port, so any port-based rewrite silently
+      // turns every plain https://host into http://host:80.
       const lib = parsed.protocol === "https:" ? https : http;
       const reqOptions = {
         hostname: parsed.hostname,

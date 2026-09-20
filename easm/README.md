@@ -1,30 +1,46 @@
 # UBEL — Unified Bill / Enforced Law
-### EASM — External Attack Surface Fingerprinting (`ubel-url`, `ubel-domain`)
+### EASM — External Attack Surface Fingerprinting (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`)
 
 > ## ⚠ Authorized use only
 > `ubel-url` sends live, unauthenticated HTTP(S) requests to every target you
 > give it, then discloses what it fingerprints (product/version banners) to
-> OSV.dev and/or NVD to look up known vulnerabilities. `ubel-domain` does the
-> same, but **discovers its own target list** from Certificate Transparency
-> logs first — meaning it can end up scanning hosts you didn't explicitly
-> name and may not have expected to exist. **Only ever run either against
-> infrastructure you own, or have explicit, documented authorization
-> to test** — the same rule UBEL's own license already holds every module to
-> (see [`../LICENSE.md`](../LICENSE.md), "Internal Use Only"). Scanning a
-> system you don't own or lack authorization for can violate computer-fraud
-> laws (e.g. the CFAA), the target's terms of service, and/or applicable
+> OSV.dev, NVD, and/or wpvulnerability.net to look up known vulnerabilities.
+> `ubel-domain` does the same, but **discovers its own target list** from
+> Certificate Transparency logs first — meaning it can end up scanning hosts
+> you didn't explicitly name and may not have expected to exist. `ubel-host`
+> goes further: it **connect-scans every port in a range (1-30000 by
+> default) on one host**, probes whatever accepts a connection for HTTP(S),
+> and fingerprints what answers — a live port sweep, not just a passive
+> fingerprint request. `ubel-easm` combines all of it: it discovers a
+> domain's subdomains the way `ubel-domain` does, resolves every one of them
+> to an IP, then runs `ubel-host`'s full port sweep against **every distinct
+> IP behind the domain**, and fingerprints the combined result — the most
+> invasive of the four, and the one most likely to reach infrastructure you
+> didn't intend to touch (see "Shared IPs" under
+> [`ubel-easm`](#ubel-easm--discover-a-domain-resolve-to-ips-port-scan-each-then-fingerprint-everything)
+> below). **Only ever run any of these four against infrastructure you own,
+> or have explicit, documented authorization to test** — the same rule
+> UBEL's own license already holds every module to (see
+> [`../LICENSE.md`](../LICENSE.md), "Internal Use Only"). Scanning a system
+> you don't own or lack authorization for can violate computer-fraud laws
+> (e.g. the CFAA), the target's terms of service, and/or applicable
 > regulations, regardless of intent — this applies whether the target is a
 > third party's infrastructure or a system inside your own organization that
 > you personally aren't authorized to test. UBEL and its authors accept no
-> liability for misuse. This warning is repeated in the CLI's `--help` output,
-> printed before every scan, embedded in every JSON report (`usage_notice`),
-> and shown as a persistent banner on every tab of the HTML report — it isn't
-> something you can accidentally miss or scan past.
+> liability for misuse. This warning is repeated in each CLI's `--help`
+> output, printed before every scan, embedded in every JSON report
+> (`usage_notice`), and shown as a persistent banner on every tab of the HTML
+> report — it isn't something you can accidentally miss or scan past.
 >
-> For `ubel-domain` specifically, `--list-only` discovers and prints the
-> target list **without sending a single request to any of those hosts** —
-> use it to review (and trim with `--exclude`) what a sweep would touch
-> before you authorize it.
+> `ubel-domain`, `ubel-host`, and `ubel-easm` each accept `--list-only`,
+> which stops **before a single request reaches a target you didn't name
+> directly** — printing the discovered host list (`ubel-domain`), the
+> open/HTTP(S) port list (`ubel-host`), or the discovered IP grouping
+> (`ubel-easm`) and exiting, with nothing written to disk. Use it to review
+> (and trim, with `--exclude`/`--exclude-ip`) what a real run would touch
+> before you authorize it — this matters most for `ubel-easm`, whose
+> discovery step can turn one domain into a port sweep of several unrelated
+> IPs.
 
 `ubel-url` passively fingerprints the software exposed on a domain/URL over
 plain HTTP(S) — server banners, `X-Powered-By`/version headers, page markup,
@@ -52,11 +68,50 @@ forty-host list and **one** set of vulnerability findings — not forty
 near-identical rows repeating the same CVEs. See "Known limitations" for how
 that interacts with multi-id components.
 
-This document covers the **EASM module** (`ubel-url` and `ubel-domain`), two
-of the CLIs shipped in the `@arcane-spark/ubel-node` package alongside the
-SCA/firewall CLI ([../sca/README.md](../sca/README.md)), the AI-powered
-SAST/malware scanner ([../sast/README.md](../sast/README.md)), and the cloud
-misconfiguration scanner ([../cloud/README.md](../cloud/README.md)).
+`ubel-host` adds a step *before* fingerprinting instead of before discovery:
+give it one host, and it connect-scans every port in range, probes whatever
+accepts a connection for HTTP(S), and hands only the HTTP(S)-speaking ports
+to the same fingerprint/lookup engine `ubel-url` uses — so you don't have to
+already know which port a target's web app or admin panel lives on.
+
+```
+host  →  connect-scan port range  →  probe open ports for HTTP(S)
+      →  fingerprint every host:port that answered  →  group by name+version
+      →  vulnerability lookup + misconfiguration checks  →  one report
+```
+
+`ubel-easm` is `ubel-domain`'s discovery and `ubel-host`'s port sweep run
+together across a whole domain: it discovers subdomains via crt.sh, resolves
+every one of them to an IP, collapses that down to the **distinct** IPs
+actually behind the domain (several subdomains commonly share one), then
+runs `ubel-host`'s connect-scan-then-HTTP(S)-probe against each of those
+IPs. Every IP's HTTP(S)-speaking ports are merged into one target list
+before fingerprinting — a component seen on five IPs behind the domain is
+still one inventory item, the same name+version dedup `ubel-domain` gets
+across subdomains. It also fingerprints the discovered subdomains **by
+name** (not just by IP:port), because a bare IP request carries no Host
+header or TLS SNI and so can never see a name-based virtual host — see
+[`ubel-easm`](#ubel-easm--discover-a-domain-resolve-to-ips-port-scan-each-then-fingerprint-everything)
+below for `--subdomain-ports`.
+
+```
+domain  →  crt.sh subdomain discovery  →  resolve every hostname to an IP
+        →  collapse to distinct IPs  →  port-scan + HTTP(S)-probe each IP
+        →  fingerprint every ip:port AND every subdomain-by-name
+        →  group by name+version  →  vulnerability lookup + misconfig checks
+        →  one report
+```
+
+This document covers the **EASM module** — `ubel-url`, `ubel-domain`,
+`ubel-host`, and `ubel-easm` — four of the CLIs shipped in the
+`@arcane-spark/ubel-node` package alongside the SCA/firewall CLI
+([../sca/README.md](../sca/README.md)), the AI-powered SAST/malware scanner
+([../sast/README.md](../sast/README.md)), and the cloud misconfiguration
+scanner ([../cloud/README.md](../cloud/README.md)). All four share one
+scanning/lookup/reporting engine — `ubel-domain`, `ubel-host`, and
+`ubel-easm` each only add a discovery step ahead of exactly what `ubel-url`
+already does; see each entry point's own file for the precise delta
+(`domain.js`, `host.js`, `easm.js`).
 
 Written against **Node.js's standard library only** for the OSV/NVD/report
 layer — the fingerprinting engine underneath ([`fingerprint/`](./fingerprint/),
@@ -77,7 +132,23 @@ or paths beyond a small fixed list of well-known ones (see
 whether that CVE is actually reachable, patched out-of-band, or mitigated by
 something in front of it (a WAF, a reverse proxy stripping the banner that
 would've disproved the version, etc.). Treat every finding as a lead to
-verify, not a confirmed compromise.
+verify, not a confirmed compromise. `ubel-domain` inherits this exactly —
+its only addition is discovering the target list; it fingerprints each
+discovered host with the same single-GET-plus-well-known-paths posture.
+
+`ubel-host` and `ubel-easm` are **not** purely passive in the same sense:
+before any fingerprinting happens, both run a live raw-TCP connect scan
+across a port range (1-30000 by default) — a real, if unauthenticated and
+non-exploitative, port scan, not just a fingerprint request. That scan does
+nothing beyond attempting a TCP handshake on each port (no banner-grabbing,
+no protocol negotiation beyond the HTTP(S) liveness probe that follows it),
+and still never authenticates, exploits, or brute-forces anything — but it
+is a materially more active reconnaissance step than `ubel-url`/
+`ubel-domain`'s single GET per target, is likely to be logged/alerted on by
+anything watching the target's network (an IDS, a cloud provider's port-scan
+detection), and against a wide `--ports` range can generate a large number
+of connection attempts in a short time. Treat "authorized use only" as
+applying with extra weight to these two entry points.
 
 Alongside that CVE lookup, every scan also runs a small, fixed set of
 **misconfiguration checks** against each live host — exposed `.env`/`.git`,
@@ -131,18 +202,30 @@ dependency; if it's answering HTTP requests, it's running.
   fallback for anything not explicitly registered
 - Multi-target in one run (`ubel-url a.com b.com c.com` or `--targets-file`),
   with bounded concurrency for the fingerprinting step
-- **Subdomain discovery** (`ubel-domain`) — give it a root domain and it
-  enumerates every subdomain with a logged certificate via crt.sh, then
-  scans all of them in one run; `--list-only` prints the scope without
-  touching a single discovered host
+- **Subdomain discovery** (`ubel-domain`, `ubel-easm`) — give it a root
+  domain and it enumerates every subdomain with a logged certificate via
+  crt.sh, then scans all of them in one run; `--list-only` prints the scope
+  without touching a single discovered host
+- **Port scanning** (`ubel-host`, `ubel-easm`) — a bounded-concurrency raw
+  TCP connect scan across a port range (1-30000 by default) on one host
+  (`ubel-host`) or on every distinct IP a domain's discovered subdomains
+  resolve to (`ubel-easm`), followed by an HTTP(S) liveness probe of
+  whatever accepted a connection, so you don't need to already know which
+  port a target's web app lives on; `--list-only` prints the open/HTTP(S)
+  port list (or, for `ubel-easm`, the IP grouping) without fingerprinting
+  anything
 - De-duplicated vulnerability lookups — the same product+version detected on
-  many hosts is one NVD query, not one per host; every affected host is
-  still listed per finding. Inventory is grouped by name+version, so a
-  domain-wide sweep that finds the same nginx on forty subdomains yields one
-  component row carrying a forty-host list, not forty duplicate rows
+  many hosts is one query, not one per host; every affected host is still
+  listed per finding. Inventory is grouped by name+version, so a domain-wide
+  sweep that finds the same nginx on forty subdomains (or the same service
+  on forty ports across several IPs, for `ubel-easm`) yields one component
+  row carrying a forty-host list, not forty duplicate rows
 - Reuses `../sca/engine.js`'s exact OSV.dev + NVD query, CVSS-parsing, and
   fix-version-recommendation logic — not a reimplementation, the same code
-  path the SCA module's host/platform CPE-based scanning already uses
+  path the SCA module's host/platform CPE-based scanning already uses —
+  plus a dedicated [wpvulnerability.net](https://www.wpvulnerability.net)
+  lookup for WordPress plugins/themes/core, across all four entry points
+  (see [Vulnerability data sources](#vulnerability-data-sources))
 - **Compliance framework mapping**, same shared engine as every other module
 - Automatic report generation: timestamped **JSON** + interactive **HTML**,
   plus `latest.*` convenience copies
@@ -190,9 +273,9 @@ dependency; if it's answering HTTP requests, it's running.
 npm install -g @arcane-spark/ubel-node
 ```
 
-This installs `ubel-url` and `ubel-domain` alongside every other UBEL
-binary. There's no separate package to install — EASM ships as part of
-`@arcane-spark/ubel-node`.
+This installs `ubel-url`, `ubel-domain`, `ubel-host`, and `ubel-easm`
+alongside every other UBEL binary. There's no separate package to install —
+EASM ships as part of `@arcane-spark/ubel-node`.
 
 ---
 
@@ -206,8 +289,14 @@ binary. There's no separate package to install — EASM ships as part of
   `_domainkey.<host>` selector names) for the email-authentication checks
   (see [Misconfiguration checks](#misconfiguration-checks)) — `api.osv.dev`,
   `services.nvd.nist.gov`, and `www.wpvulnerability.net` (plus `crt.sh` for
-  `ubel-domain`) — or your own internal mirrors, see
+  `ubel-domain`/`ubel-easm`) — or your own internal mirrors, see
   [Vulnerability data sources](#vulnerability-data-sources)
+- For `ubel-host`/`ubel-easm` specifically: outbound access to raw TCP
+  connect attempts across the whole scanned port range (1-65535, default
+  scan range 1-30000) on the target host(s)/IP(s) — a restrictive egress
+  firewall on the scanning machine itself will silently look like "nothing
+  is open" rather than error, since a blocked outbound connect and a closed
+  remote port both just time out
 - No credentials of any kind — this doesn't authenticate to anything
 
 ---
@@ -220,6 +309,16 @@ IP. A match is **skipped, not scanned** — reported in the JSON/HTML Scan Info
 tab with a `"skipped"` status and a reason, never silently dropped from the
 target list, so a report never reads as "clean" for a target that was
 actually never probed.
+
+For `ubel-host` and `ubel-easm`, the same check runs **one stage earlier**:
+before the port scan even starts (not just before fingerprinting), since a
+full port sweep of an unintended target is a bigger deal than a single
+fingerprint request. `ubel-host` checks the one host it's given directly;
+`ubel-easm` checks every IP it resolves for itself, one entry in the report
+per IP. Neither guard can detect the separate "shared/CDN IP" risk
+`ubel-easm` carries — see
+[`ubel-easm`](#ubel-easm--discover-a-domain-resolve-to-ips-port-scan-each-then-fingerprint-everything)
+below.
 
 `--allow-private` disables this guard entirely. It exists for lab/localhost
 targets you own (`ubel-url localhost:8080 --allow-private`,
@@ -294,6 +393,128 @@ discovery and prints the host list without sending a single request to any
 discovered host, so you can confirm the scope (and trim it with
 `--exclude`) before authorizing the real scan.
 
+### `ubel-host` — port-scan one host, then scan whatever answers HTTP(S)
+
+```bash
+ubel-host example.com                                   # connect-scan ports 1-30000, fingerprint HTTP(S) ports found
+ubel-host example.com --ports 1-1024                    # narrow the scanned range (well-known ports only)
+ubel-host example.com --ports 1-65535                   # the full port space
+ubel-host example.com --list-only                       # print open + HTTP(S) ports and exit — sends nothing further
+ubel-host 203.0.113.10                                  # a bare IPv4 address works the same as a hostname
+ubel-host staging.internal --allow-private               # a lab/internal host you own
+ubel-host example.com --port-concurrency 200             # slower/gentler connect scan (default: 500)
+ubel-host example.com --port-timeout 3000                 # more patient per-port connect timeout, ms (default: 1500)
+ubel-host example.com --http-concurrency 10               # slower HTTP(S) liveness-probe stage (default: 20)
+ubel-host example.com --concurrency 8                     # fingerprint up to 8 HTTP(S)-speaking ports in parallel
+ubel-host example.com --min-severity high --fail-on high
+ubel-host example.com --verbose                           # per-port/per-host progress
+ubel-host --help
+```
+
+`<host>` is a single bare hostname or IPv4 address — not a URL, not a
+`host:port` pair; exactly one per run. It shares every scanning/reporting
+flag with `ubel-url` (`--allow-private`, `--concurrency`, `--working-dir`,
+`--min-severity`, `--fail-on`, `--no-secrets`, `--verbose`, `--quiet`), plus
+its own discovery-stage flags (`--ports`, `--port-concurrency`,
+`--port-timeout`, `--http-concurrency`, `--http-timeout`).
+
+Discovery is **active**, two stages, both against the one host:
+
+1. Every port in `--ports` (default `1-30000`, inclusive) is connect-scanned
+   in parallel. A port that accepts a TCP connection counts as "open" —
+   nothing about what's actually listening on it is known yet.
+2. Each open port is then probed with an HTTP(S) request (HTTPS first,
+   falling back to plain HTTP) to filter that list down to the ones
+   actually speaking HTTP(S) — most open ports on a typical host (SSH, a
+   database, a message queue, ...) are not web servers, and only the
+   HTTP(S)-speaking subset is handed to the fingerprinter.
+
+Both lists are recorded in the report: the HTTP(S)-speaking subset becomes
+the usual Targets/assets list (identical shape to a `ubel-url` run), and the
+**full open-port list** is additionally shown in the Scan Info tab so the
+report reflects the whole scanned range, not just the ports that went on to
+be fingerprinted.
+
+Start with `--list-only` on any host you haven't swept before — it runs both
+discovery stages and prints the open-port and HTTP(S)-port lists, then exits
+before a single fingerprinting request is sent.
+
+### `ubel-easm` — discover a domain, resolve to IPs, port-scan each, then fingerprint everything
+
+```bash
+ubel-easm example.com                                    # crt.sh discovery -> resolve to IPs -> port-scan each -> fingerprint
+ubel-easm example.com --list-only                        # discover, resolve, group by IP, print, exit — no port touched
+ubel-easm example.com --exclude legacy.example.com       # drop a hostname before it's ever resolved (repeatable)
+ubel-easm example.com --exclude-ip 198.51.100.7          # never port-scan this IP, even if a hostname resolves to it (repeatable)
+ubel-easm example.com --include internal.example.com     # resolve+scan a hostname crt.sh didn't return (repeatable)
+ubel-easm example.com --ports 1-1024                     # narrower port range, applied once per distinct IP
+ubel-easm example.com --subdomain-ports none              # IP:port targets only; don't also fingerprint subdomains by name
+ubel-easm example.com --subdomain-ports all                # + every other HTTP(S) port found on a subdomain's IP, by name
+ubel-easm example.com --ip-concurrency 1                   # port-scan distinct IPs one at a time (default: 2)
+ubel-easm example.com --concurrency 8                       # fingerprint up to 8 HTTP(S) targets in parallel, across all IPs
+ubel-easm example.com --min-severity high --fail-on high
+ubel-easm example.com --verbose                              # per-hostname/per-IP/per-port progress
+ubel-easm --help
+```
+
+`<domain>` is a bare registrable domain, exactly one per run — same format
+rule as `ubel-domain`. It shares every scanning/reporting flag with
+`ubel-url`, `ubel-domain`'s own `--include`/`--exclude`, and `ubel-host`'s
+own port-scan flags (`--ports`, `--port-concurrency`, `--port-timeout`,
+`--http-concurrency`, `--http-timeout`), plus two flags unique to it:
+`--exclude-ip` and `--subdomain-ports`.
+
+This is the most invasive EASM entry point UBEL ships — think of it as "run
+`ubel-domain`'s discovery, then run `ubel-host`'s full port sweep against
+every IP that discovery turns up, and report on all of it together."
+Discovery (crt.sh + DNS resolution) is passive; the port scan that follows
+it is not — it's a live connect scan against every distinct IP found, same
+as `ubel-host`. The flow:
+
+1. Discover subdomains via crt.sh (same as `ubel-domain`), merge in
+   `--include`, drop `--exclude`.
+2. Resolve every remaining hostname to an IP and collapse the result onto
+   the set of **distinct IPs** — several subdomains commonly share one
+   origin IP (or one shared/CDN edge IP), and there's no reason to
+   port-scan the same address twice. `--exclude-ip` drops an IP here even
+   if a hostname resolved to it.
+3. Connect-scan every port in `--ports` on **each** distinct IP, then
+   HTTP(S)-probe whatever accepted a connection — `ubel-host`'s own two
+   discovery stages, run once per IP, up to `--ip-concurrency` IPs at a
+   time (default: 2, kept low because each IP's own scan already opens up
+   to `--port-concurrency` connections at once).
+4. Merge every IP's HTTP(S)-speaking ports into **one** target list and
+   fingerprint it in a single pass — a component seen on five IPs behind
+   the domain is still one inventory item, not five.
+5. **Also** fingerprint the discovered subdomains **by name**, not just by
+   IP:port: a request to a bare IP carries no Host header or TLS SNI, so it
+   only ever reaches the server's default site and misses every name-based
+   virtual host. Controlled by `--subdomain-ports`:
+   - `none` — IP:port targets only; subdomains are used to find IPs and
+     then not scanned by name.
+   - `default` (the default) — each subdomain's own URL on the default web
+     port (443, else 80), whenever the port scan found its IP answering
+     there.
+   - `all` — as `default`, plus `<subdomain>:<port>` for every *other*
+     HTTP(S) port found on that subdomain's IP. Multiplies the target count
+     by (subdomains per IP) × (web ports per IP) — on a shared IP with many
+     subdomains and several web ports, that grows fast.
+
+**Shared IPs — read before running unattended.** Several subdomains of a
+domain frequently resolve to the same IP, sometimes because it's genuinely
+the domain owner's own single origin server, and sometimes because it sits
+behind a CDN, a load balancer, or shared hosting whose IP is **not**
+exclusively the domain owner's infrastructure. `ubel-easm` only
+de-duplicates identical IPs so it doesn't scan the same address twice — it
+has no way to tell "my dedicated server" apart from "a shared edge IP
+thousands of other sites also resolve to." Owning a domain does not by
+itself authorize a full port sweep of every IP that domain's DNS happens to
+point at. **Always review the IP list with `--list-only` first**, and use
+`--exclude`/`--exclude-ip` to drop any host or IP you don't have standalone
+authorization to port-scan. The private/self-IP safety guard (see [Safety
+guard](#safety-guard)) does not and cannot detect this — it only catches
+RFC1918/self addresses, not a third party's shared infrastructure.
+
 ### Shared behavior
 
 `--min-severity` filters which vulnerabilities appear in the report's
@@ -308,19 +529,24 @@ vulnerability at `critical` severity or an infection; pass `--fail-on none`
 to always exit `0`, or `--fail-on <count>:<severity>` — e.g. `5:high` — to
 fail only once MORE than `<count>` matches at or above `<severity>` exist,
 for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1`
-on a fatal/unexpected error (including `ubel-domain` finding no hosts).
-`--fail-on` gates only on **vulnerabilities** (and infections) — a scan that
-finds nothing but critical misconfigurations still exits `0`; misconfiguration
-severity isn't part of the exit-code gate today (see [Known
-limitations](#known-limitations--natural-next-steps)).
+on a fatal/unexpected error (including `ubel-domain` finding no hosts or
+`ubel-easm` finding no scannable IP for the domain). `--fail-on` gates only
+on **vulnerabilities** (and infections) — a scan that finds nothing but
+critical misconfigurations still exits `0`; misconfiguration severity isn't
+part of the exit-code gate today (see [Known
+limitations](#known-limitations--natural-next-steps)). `--list-only` (on
+`ubel-domain`, `ubel-host`, and `ubel-easm`) always exits `0` on success,
+independent of `--fail-on`, since it never reaches the vulnerability-lookup
+stage the gate evaluates.
 
 ---
 
 ## Misconfiguration checks
 
-Both `ubel-url` and `ubel-domain` run the same fixed set of misconfiguration
-probes against every live host, in addition to the CVE lookup the rest of
-this document describes — implemented in
+All four entry points — `ubel-url`, `ubel-domain`, `ubel-host`, and
+`ubel-easm` — run the same fixed set of misconfiguration probes against
+every live host, in addition to the CVE lookup the rest of this document
+describes — implemented in
 [`lib/misconfig_scan.js`](./lib/misconfig_scan.js). This runs automatically
 on every scan; there's currently no CLI flag to disable or retime it (see
 [Known limitations](#known-limitations--natural-next-steps)).
@@ -531,20 +757,20 @@ clean-looking host and an unprobeable one are never conflated.
 
 ## Vulnerability data sources
 
-Both endpoints are the exact same env vars the SCA module already honors —
+These are the exact same env vars the SCA module already honors —
 point them at an internal mirror or authenticated proxy for air-gapped
 deployments or to get past NVD's public rate limit:
 
 | Variable | Default | Used by |
 |---|---|---|
-| `UBEL_OSV_ENDPOINT` | `https://api.osv.dev` | both |
-| `UBEL_NVD_ENDPOINT` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | both |
-| `UBEL_WPVULNERABILITY_ENDPOINT` | `https://www.wpvulnerability.net` | both |
-| `UBEL_CRTSH_ENDPOINT` | `https://crt.sh` | `ubel-domain` only |
+| `UBEL_OSV_ENDPOINT` | `https://api.osv.dev` | all four |
+| `UBEL_NVD_ENDPOINT` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | all four |
+| `UBEL_WPVULNERABILITY_ENDPOINT` | `https://www.wpvulnerability.net` | all four |
+| `UBEL_CRTSH_ENDPOINT` | `https://crt.sh` | `ubel-domain`, `ubel-easm` |
 
 Whichever of these a run actually used is recorded in the report's Scan Info
 tab and in the JSON payload, so a report always states where its findings
-(and, for `ubel-domain`, its target list) came from.
+(and, for `ubel-domain`/`ubel-easm`, its target list) came from.
 
 Most findings still come from NVD, since most fingerprinted components
 (CMSes, admin panels, network services, ...) are identified by CPE
@@ -584,38 +810,76 @@ hosts (see [Features](#features) — de-duplication).
 
 ## Reports
 
-Both CLIs follow the same reporting flow the SAST/malware scanners use: the
-per-run timestamped copies are bundled into a **single `.zip`**, while the
-always-current `latest.*` copies stay plain and unzipped so anything
+All four CLIs follow the same reporting flow the SAST/malware scanners use:
+the per-run timestamped copies are bundled into a **single `.zip`**, while
+the always-current `latest.*` copies stay plain and unzipped so anything
 watching them (a CI step, a dashboard, a browser tab left open on
-`latest.*.html`) needs no unpacking step.
+`latest.*.html`) needs no unpacking step. Each of the four writes to its own
+report family, named after the string each entry point passes to
+`writeEasmReports()` in `lib/report_output.js` — which replaces the first
+`-` in that string with `_` before building any path, so despite the
+hyphenated labels used throughout this document and each CLI's own source
+comments (`easm-url`, `easm-domain`, `easm-host`, `easm-full`), what
+actually lands on disk uses an **underscore**:
 
 `ubel-url` writes:
 
 ```
-.ubel/reports/latest.easm.json     ← always current, unzipped
-.ubel/reports/latest.easm.html     ← always current, unzipped
+.ubel/reports/latest.easm_url.json     ← always current, unzipped
+.ubel/reports/latest.easm_url.html     ← always current, unzipped
 
-.ubel/local/reports/easm/<YYYY>/<MM>/<DD>/
-    easm__<timestamp>.zip          ← contains report.json + report.html
+.ubel/local/reports/easm_url/<YYYY>/<MM>/<DD>/
+    easm_url__<timestamp>.zip          ← contains report.json + report.html
 ```
 
-`ubel-domain` writes the same, under its own `easm-domain` name:
+`ubel-domain` writes the same, under its own `easm_domain` name:
 
 ```
-.ubel/reports/latest.easm-domain.json
-.ubel/reports/latest.easm-domain.html
+.ubel/reports/latest.easm_domain.json
+.ubel/reports/latest.easm_domain.html
 
-.ubel/local/reports/easm-domain/<YYYY>/<MM>/<DD>/
-    easm-domain__<timestamp>.zip
+.ubel/local/reports/easm_domain/<YYYY>/<MM>/<DD>/
+    easm_domain__<timestamp>.zip
 ```
 
-They're kept separate so a domain-wide sweep never overwrites a targeted
-scan's `latest` pointer, or vice versa — the two answer different questions
-and you'll usually want both on hand. The payload format is identical; a
-`ubel-domain` report additionally carries `domain` (the root domain queried)
-and `subdomain_endpoint`, with `targets` holding the discovered host list
-that was actually fingerprinted.
+`ubel-host` writes under `easm_host`:
+
+```
+.ubel/reports/latest.easm_host.json
+.ubel/reports/latest.easm_host.html
+
+.ubel/local/reports/easm_host/<YYYY>/<MM>/<DD>/
+    easm_host__<timestamp>.zip
+```
+
+`ubel-easm` writes under `easm_full` — not `easm_easm`: every sibling entry
+point names its report family `easm_<word>` using a word that isn't the
+module's own binary name, and `ubel-easm` keeps that convention instead of
+doubling "easm", while still starting with `easm_` so all four report
+families sort and namespace together on disk:
+
+```
+.ubel/reports/latest.easm_full.json
+.ubel/reports/latest.easm_full.html
+
+.ubel/local/reports/easm_full/<YYYY>/<MM>/<DD>/
+    easm_full__<timestamp>.zip
+```
+
+They're kept separate so a domain-wide sweep, a port sweep, or a combined
+run never overwrites another entry point's `latest` pointer — the four
+answer different questions and you may want several on hand at once. The
+payload format is identical across all four; a `ubel-domain` report
+additionally carries `domain` (the root domain queried) and
+`subdomain_endpoint`, with `targets` holding the discovered host list that
+was actually fingerprinted. A `ubel-host` report additionally carries
+`host`, `portRange`, and `openPorts` (the full scanned port list, not just
+the HTTP(S)-speaking subset that became `targets`). A `ubel-easm` report
+additionally carries `domain`, `subdomain_endpoint`, `hosts` (one entry per
+distinct IP resolved and port-scanned — the plural counterpart to
+`ubel-host`'s singular `host`/`portRange`/`openPorts`, each carrying its own
+`resolvedFrom` hostname list, status, port range, and open/HTTP(S) port
+lists), and `deadHostnames` (hostnames that never resolved to an IP).
 
 Bundling keeps file count and storage down as runs accumulate — the same
 reasoning (and the same `sca/zip_writer.js`) behind the SCA and SAST
@@ -694,9 +958,10 @@ consumed by CI/CD tooling directly.
 
 ## Programmatic API
 
-`easm/index.js` (`ubel-url`) and `easm/domain.js` (`ubel-domain`) each
-export `main` and `parseArgs` for scripting or CI wrappers that need argv
-control beyond what the binaries expose:
+`easm/index.js` (`ubel-url`), `easm/domain.js` (`ubel-domain`),
+`easm/host.js` (`ubel-host`), and `easm/easm.js` (`ubel-easm`) each export
+`main` and `parseArgs` for scripting or CI wrappers that need argv control
+beyond what the binaries expose:
 
 ```js
 import { main } from "../easm/index.js";   // relative path within the ubel-node package tree
@@ -711,6 +976,26 @@ import { main } from "../easm/domain.js";
 process.argv = ['node', 'ubel-domain', 'example.com', '--fail-on', 'high'];
 await main();
 ```
+
+```js
+import { main } from "../easm/host.js";
+
+process.argv = ['node', 'ubel-host', 'example.com', '--ports', '1-1024', '--fail-on', 'high'];
+await main();
+```
+
+```js
+import { main } from "../easm/easm.js";
+
+process.argv = ['node', 'ubel-easm', 'example.com', '--subdomain-ports', 'default', '--fail-on', 'high'];
+await main();
+```
+
+`easm/easm.js` additionally exports `discoverIps` (domain → `{ip: [hostnames]}`
+grouping, the crt.sh-discovery-plus-DNS-resolution step) and `buildTargets`
+(per-IP port-scan results → the merged `ipTargets`/`hostnameTargets` list
+`scanTargets()` is handed), for callers that want `ubel-easm`'s discovery
+logic without going through its own argv parser.
 
 For finer-grained programmatic use — driving the scan without going through
 argv at all — `easm/lib/scan.js` exports `scanTargets(targets, opts)`
@@ -750,6 +1035,22 @@ import { resolveTargets } from "../easm/lib/resolve.js";
 const { alive, dead } = await resolveTargets(hosts);
 ```
 
+The port-scan/HTTP(S)-discovery pair `ubel-host` and `ubel-easm` both use is
+likewise available standalone via `easm/lib/portscan.js` —
+`scanPorts(host, {from, to}, opts)` runs the raw TCP connect scan
+(`opts.concurrency` default 500, `opts.timeout` ms default 1500) and
+`probeHttpPorts(host, openPorts, opts)` filters an open-port list down to
+the HTTP(S)-speaking subset (`opts.concurrency` default 20, `opts.timeout`
+ms default 5000); neither ever throws for an individual port — a closed,
+filtered, or timed-out port is simply absent from the returned list:
+
+```js
+import { scanPorts, probeHttpPorts } from "../easm/lib/portscan.js";
+
+const openPorts = await scanPorts("example.com", { from: 1, to: 1024 }, { concurrency: 200 });
+const httpPorts = await probeHttpPorts("example.com", openPorts);
+```
+
 [Misconfiguration checks](#misconfiguration-checks) are available on their
 own via `easm/lib/misconfig_scan.js`'s `scanMisconfigurations(assets,
 inventory, opts)` — `assets` and `inventory` are the shapes `scanTargets()`
@@ -767,27 +1068,37 @@ const { findings, errors, stats } = await scanMisconfigurations(assets, inventor
 This is also the only way to skip or retime the misconfiguration checks
 today — `scanTargets()`'s own `scanMisconfigs`/`misconfigTimeout` options
 (see [Misconfiguration checks](#misconfiguration-checks)) aren't wired up to
-either CLI's argv parser yet.
+any of the four CLIs' argv parsers yet.
 
 Like `ubel-cloud`, none of this is yet wired into `package.json`'s `exports`
 map (only `./sca` and `./sast` are) — reachable via a relative import within
 the installed package's own file tree, or by invoking the `ubel-url` /
-`ubel-domain` binaries directly, which is the supported path for CI and
-scripting alike.
+`ubel-domain` / `ubel-host` / `ubel-easm` binaries directly, which is the
+supported path for CI and scripting alike.
 
 ---
 
 ## CI/CD Integration
 
-`ubel-url` exits non-zero on vulnerabilities that clear the configured
-`--fail-on` bar, making it native to any CI runner — **only against
-infrastructure the pipeline itself owns/deploys**, e.g. a post-deploy check
-against your own staging or production environment right after a release:
+All four EASM CLIs exit non-zero on vulnerabilities that clear the
+configured `--fail-on` bar, making them native to any CI runner — **only
+against infrastructure the pipeline itself owns/deploys**, e.g. a
+post-deploy check against your own staging or production environment right
+after a release:
 
 ```yaml
 # GitHub Actions — post-deploy check against infrastructure this pipeline owns
 - name: UBEL external attack surface scan
   run: ubel-url staging.our-own-domain.example --fail-on high
+
+- name: UBEL domain-wide attack surface sweep (discovers subdomains first)
+  run: ubel-domain our-own-domain.example --fail-on high
+
+- name: UBEL port-scan + fingerprint one host
+  run: ubel-host staging.our-own-domain.example --ports 1-1024 --fail-on high
+
+- name: UBEL combined discovery + per-IP port sweep
+  run: ubel-easm our-own-domain.example --subdomain-ports default --fail-on high
 ```
 
 ```dockerfile
@@ -798,15 +1109,29 @@ RUN ubel-url our-own-domain.example --fail-on high
 Nothing is written to disk beyond the report itself, and no credentials are
 involved — there's nothing extra to clean up in a CI job or container layer.
 
+`ubel-host` and `ubel-easm` are heavier CI citizens than `ubel-url`/
+`ubel-domain`: a default `--ports 1-30000` connect scan (per host for
+`ubel-host`, per distinct IP for `ubel-easm`) takes materially longer than
+a single fingerprint request and can trip a runner's own outbound
+connection-rate limits or a target-side IDS/port-scan alert — narrow
+`--ports` to the range you actually care about (e.g. `1-1024` for
+well-known services, or a short explicit web-port list) for a routine CI
+gate, and reserve a full `1-65535` sweep for a scheduled, off-peak job
+rather than every push.
+
 ---
 
 ## Known limitations / natural next steps
 
-- Detection is entirely passive/banner-based (headers, page markup, a small
-  fixed list of well-known paths) — a hardened target that suppresses
-  version banners (custom `Server` header, stripped `X-Powered-By`) will
-  under-report, not over-report; absence of a finding is not proof of
-  absence of a vulnerability (also called out in the report's usage notice).
+- Fingerprinting itself is entirely passive/banner-based (headers, page
+  markup, a small fixed list of well-known paths) — a hardened target that
+  suppresses version banners (custom `Server` header, stripped
+  `X-Powered-By`) will under-report, not over-report; absence of a finding
+  is not proof of absence of a vulnerability (also called out in the
+  report's usage notice). The one exception is `ubel-host`/`ubel-easm`'s
+  port-scan stage ahead of fingerprinting, which is a live TCP connect
+  scan, not passive — see [What this is, and
+  isn't](#what-this-is-and-isnt).
 - The secrets crawl is one level deep: it fetches each live host's root
   document and the scripts that document references, and does not follow
   links, enumerate routes, or execute JavaScript. A credential that only
@@ -817,18 +1142,20 @@ involved — there's nothing extra to clean up in a CI job or container layer.
   `sca/secrets.js` rules `ubel-secrets` uses), so a value that merely looks
   like a credential can be a false positive; verify before rotating
   anything production-critical.
-- `ubel-domain`'s subdomain discovery is likewise passive: Certificate
-  Transparency logs (crt.sh) and nothing else. A host with no logged
-  certificate — internal-only, HTTP-only, or behind a CA that doesn't log
-  to CT — won't be discovered, so an empty or short result is evidence
-  about the CT record, not about what's actually deployed. `--include`
-  covers known-but-undiscovered hosts by hand; DNS brute-forcing and
-  alternate passive sources (Shodan InternetDB, other CT aggregators) are
-  natural next steps but deliberately not here yet. CT logs are also
-  append-only history rather than current state, so a long-decommissioned
-  subdomain still appears in the discovered list — those are caught by the
-  DNS pre-resolution step and reported as `dead` rather than probed, but
-  they do still count toward the discovered total.
+- `ubel-domain`'s and `ubel-easm`'s subdomain discovery is likewise passive:
+  Certificate Transparency logs (crt.sh) and nothing else. A host with no
+  logged certificate — internal-only, HTTP-only, or behind a CA that
+  doesn't log to CT — won't be discovered, so an empty or short result is
+  evidence about the CT record, not about what's actually deployed.
+  `--include` covers known-but-undiscovered hosts by hand; DNS
+  brute-forcing and alternate passive sources (Shodan InternetDB, other CT
+  aggregators) are natural next steps but deliberately not here yet. CT
+  logs are also append-only history rather than current state, so a
+  long-decommissioned subdomain still appears in the discovered list —
+  those are caught by the DNS pre-resolution step and reported as `dead`
+  (`ubel-domain`) or excluded from `discovery.ips` with an entry in
+  `deadHostnames` (`ubel-easm`) rather than probed, but they do still count
+  toward the discovered total.
 - A component whose disclosed version is under-specified (most commonly a
   bare major version, e.g. a target that only advertises `Python 3` rather
   than `Python 3.11.4`) is **not** queried against OSV/NVD — it's still
@@ -876,11 +1203,11 @@ involved — there's nothing extra to clean up in a CI job or container layer.
 - [Misconfiguration checks](#misconfiguration-checks) run unconditionally on
   every scan. `scanTargets()` already accepts `scanMisconfigs`/
   `misconfigTimeout` options to disable or retime them, but — unlike
-  `--no-secrets` for the client-side crawl — neither `ubel-url` nor
-  `ubel-domain`'s CLI exposes a flag for either one yet; skipping or
-  retiming them today means calling `scanTargets()` (or
-  `scanMisconfigurations()` directly) programmatically instead of through
-  the binaries.
+  `--no-secrets` for the client-side crawl — none of the four CLIs
+  (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) expose a flag for
+  either one yet; skipping or retiming them today means calling
+  `scanTargets()` (or `scanMisconfigurations()` directly) programmatically
+  instead of through the binaries.
 - `--fail-on` only gates on vulnerabilities/infections, not on
   misconfiguration findings — a scan that turns up only critical
   misconfigurations (an exposed `.git` directory, say) with no matching
@@ -915,10 +1242,40 @@ involved — there's nothing extra to clean up in a CI job or container layer.
   [Misconfiguration checks](#misconfiguration-checks).
 - SPF/DMARC/DKIM are checked per scanned host, not deduplicated to one check
   per organizational/registrable domain — that would need public-suffix-list
-  handling this module doesn't otherwise carry. `ubel-domain` sweeping a
-  domain with many non-mail-sending subdomains (`www.`, `api.`, `cdn.`, …)
-  will report the same SPF/DMARC gap once per such host rather than once for
-  the domain as a whole.
+  handling this module doesn't otherwise carry. `ubel-domain`/`ubel-easm`
+  sweeping a domain with many non-mail-sending subdomains (`www.`, `api.`,
+  `cdn.`, …) will report the same SPF/DMARC gap once per such host rather
+  than once for the domain as a whole.
+- The port scan `ubel-host`/`ubel-easm` run is TCP-connect-only — no SYN/
+  stealth scanning, no UDP. A UDP-only service (DNS, many game/VoIP
+  protocols) is invisible to it regardless of `--ports`, and connect
+  scanning is both noisier (a full three-way handshake per port, logged by
+  most firewalls/IDS as a completed connection rather than a half-open
+  probe) and slower than a raw SYN scan would be.
+- The default `--ports` range is `1-30000`, not the full `1-65535` — a
+  service listening above 30000 (common for some databases, message
+  queues, and dev servers run on a high port) is silently out of scope
+  unless `--ports` is widened explicitly.
+- No scan-side rate limiting or backoff on the port-scan stage itself
+  (`--port-concurrency`/`--http-concurrency` cap parallelism but don't
+  pace requests over time) — unlike the NVD lookup stage, which already
+  respects NVD's own published rate limit. A target's own IDS/WAF may
+  still throttle or block a wide, fast scan mid-run; a port that stops
+  responding partway through is simply reported as not open, with no
+  distinction from a port that was never open at all.
+- `ubel-easm`'s by-name subdomain targets (`--subdomain-ports`) resolve DNS
+  again, independently, at fingerprinting time — the port scan itself
+  worked from the IP resolved during discovery. On a hostname with several
+  A/AAAA records (round-robin DNS, some CDN/load-balancer setups), the
+  fingerprint request can land on a different IP than the one that was
+  actually port-scanned, so the by-name finding and the by-IP finding for
+  "the same" subdomain aren't guaranteed to describe the identical backend.
+- In `ubel-easm`, a port-scan failure on one distinct IP (a network error,
+  not a guard skip) is recorded as that IP's `status: "error"` and
+  contributes no targets, but does not abort the run — the report's `hosts`
+  array shows exactly which IPs errored and why (`skipReason`), so a
+  partial run is distinguishable from a clean one, not silently merged into
+  it.
 
 ---
 
@@ -950,4 +1307,33 @@ ubel-domain your-company.example \
 
 # Scheduled attack-surface review, failing only on critical findings
 ubel-domain your-company.example --fail-on critical --quiet
+
+# See what ports are open on a host you own, without fingerprinting anything
+ubel-host app.your-company.example --list-only
+
+# Port-scan and fingerprint a host you own, well-known ports only
+ubel-host app.your-company.example --ports 1-1024 --fail-on high
+
+# Full 1-65535 sweep of a host you own, gentler connect-scan pace
+ubel-host app.your-company.example --ports 1-65535 --port-concurrency 100 --verbose
+
+# A local dev/staging box, safety guard disabled since it's yours
+ubel-host localhost --allow-private --ports 1-10000
+
+# Review the IP grouping a combined sweep would touch, before authorizing it
+ubel-easm your-company.example --list-only
+
+# Combined discovery + per-IP port sweep of a domain you own
+ubel-easm your-company.example --fail-on high --quiet
+
+# Same, but drop a shared/CDN IP identified via --list-only, and a host you don't own
+ubel-easm your-company.example \
+  --exclude legacy.your-company.example \
+  --exclude-ip 198.51.100.7
+
+# IP:port targets only — skip the by-name subdomain fingerprint pass
+ubel-easm your-company.example --subdomain-ports none
+
+# Narrower port range, one IP at a time, for a slow/sensitive network
+ubel-easm your-company.example --ports 1-1024 --ip-concurrency 1
 ```

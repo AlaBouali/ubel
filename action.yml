@@ -2,11 +2,11 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
-    default: '0.15.0'
+    default: '0.16.0'
   args:
     description: 'Extra flags, e.g. --fail-on high'
     default: ''
@@ -86,6 +86,33 @@ runs:
     # your organization owns or is explicitly authorized to test; treat
     # `args` here with the same care as any other step that makes outbound
     # network calls to a caller-influenced destination.
+    #
+    # `host` (EASM/`ubel-host`) is the same shape of risk as `url` above, one
+    # step further: the target host is likewise part of caller-influenced
+    # `args`, but this command additionally connect-scans every port in
+    # range on it (30,000 by default) before fingerprinting whatever answers
+    # HTTP(S) — an `args`-sourced target here means a CI runner sweeping an
+    # unintended host's entire port range, not just one request to it. Same
+    # rule applies: only ever pass a host your organization owns or is
+    # explicitly authorized to test.
+    #
+    # `easm` (EASM/`ubel-easm`) combines `domain`'s and `host`'s risks rather
+    # than adding a new one: the `args`-sourced root domain is expanded into
+    # an unbounded, caller-uninfluenced subdomain list (same as `domain`),
+    # each of THOSE is then resolved to an IP and full-range port-scanned
+    # (same as `host`) — so a CI runner ends up connect-scanning every port
+    # on every IP a domain's subdomains happen to resolve to, with no single
+    # `args` value naming any one of those IPs directly. It also carries one
+    # risk neither `domain` nor `host` does on its own: several subdomains
+    # commonly resolve to a SHARED IP (a CDN/edge IP, shared hosting) that
+    # isn't the domain owner's exclusive infrastructure, and this command has
+    # no way to detect that — it only de-duplicates identical IPs, it does
+    # not vet who else's traffic that IP also serves. Authorization to scan a
+    # domain does not by itself authorize a full port sweep of every IP that
+    # domain's DNS happens to point at; a workflow using `easm` unattended in
+    # CI should pin `args` down with `--exclude`/`--exclude-ip` for anything
+    # not exclusively the caller's own, the same care `url`'s own comment
+    # above asks for around caller-influenced targets generally.
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -93,10 +120,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|npm|pnpm|bun|yarn|docker|pip|pipx|uv|composer|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|composer|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, npm, pnpm, bun, yarn, docker, pip, pipx, uv, composer, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, composer, apt, dnf, yum"
             exit 1
             ;;
         esac

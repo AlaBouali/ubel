@@ -1,10 +1,11 @@
 'use strict';
-// html_report.js — HTML report generator for ubel-url / ubel-domain (EASM) findings
+// html_report.js — HTML report generator for ubel-url / ubel-domain / ubel-host / ubel-easm (EASM) findings
 //
 // Input:  scanResult — { assets, inventory, vulnerabilities, misconfigurations } from ../lib/scan.js
 //         meta       — { tool, generated_at, tool_version, targets, allowPrivate,
 //                         osvEndpoint, nvdEndpoint, wpvulnerabilityEndpoint,
-//                         domain, subdomainEndpoint }
+//                         domain, subdomainEndpoint, host, portRange, openPorts,
+//                         hosts, deadHostnames }
 //
 // Output: HTML string (caller writes to disk)
 //
@@ -205,6 +206,268 @@ function buildMisconfigStats(misconfigResult, grouped) {
   };
 }
 
+// ─── scope: one entry per distinct IP / subdomain ────────────────────────────
+//
+// The report's `scope` array — the same list the HTML Scope tab renders, so
+// the JSON and the HTML can't disagree. One entry per distinct IP and one per
+// distinct subdomain, never one per port: targets the scanner fingerprinted as
+// "203.0.113.7:80", "203.0.113.7:443" and "203.0.113.7:8080" are ONE "ip"
+// entry; "app.example.com", "http://app.example.com" and
+// "app.example.com:8080" are ONE "subdomain" entry. The raw per-target list
+// (`assets`, `targets`, and each inventory item's `assets`) is left untouched
+// — Scan Info and the inventory's "seen on" lists are built on it — and every
+// scope entry lists the exact `targets` it collapsed, so the two join.
+//
+// Entry shape (common fields first):
+//   type            "ip" | "subdomain"
+//   name            the IP address, or the subdomain hostname
+//   status          scanned | error | skipped | dead — best outcome across
+//                   everything the entry was scanned as
+//   targets         the exact target strings collapsed into this entry
+//   notes           human-readable reasons (skip reason, errors, why a
+//                   discovered name wasn't fingerprinted)
+//   components      [{id, name, version}]  — ids reference inventory[].id
+//   vulnerabilities [{id, affected_package_id, severity, is_infection}]
+//   ip entries only:
+//     subdomains    every discovered subdomain hosted on this IP
+//     open_ports    every port known open on it (port scan + fingerprinted)
+//     http_ports    the subset that answered HTTP(S)
+//     port_range    range that was connect-scanned; null if not port-scanned
+//   subdomain entries only:
+//     ips           the IP(s) it resolved to
+//     urls          the resolved URL(s) it was fingerprinted at
+//     scanned_ports ports it was fingerprinted on, as reported by the
+//                   fingerprinter or given in the target
+//
+// Sources: fingerprinted targets (assets), the per-IP port-scan records
+// (ubel-easm's hosts[], ubel-host's single host), and hostnames that never
+// resolved (dead_hostnames) — so an IP with no web port, an IP the safety
+// guard skipped, or a subdomain that wasn't fingerprinted still appears in
+// scope instead of silently dropping out.
+
+function scopeIsIp(host) {
+  if (host.includes(":")) return true; // IPv6 literal
+  const parts = host.split(".");
+  return parts.length === 4 && parts.every((p) => p.length > 0 && p.length <= 3 && Number.isInteger(Number(p)));
+}
+
+function scopeParseTarget(target) {
+  let t = String(target || "").trim();
+  const schemeEnd = t.indexOf("://");
+  if (schemeEnd !== -1) t = t.slice(schemeEnd + 3);
+  t = t.split("/")[0].split("?")[0].split("#")[0];
+  let host = t;
+  let port = null;
+  if (t.startsWith("[")) {
+    const close = t.indexOf("]");
+    if (close !== -1) {
+      host = t.slice(1, close);
+      const rest = t.slice(close + 1);
+      if (rest.startsWith(":")) port = Number(rest.slice(1));
+    }
+  } else if (t.split(":").length === 2) {
+    const parts = t.split(":");
+    host = parts[0];
+    port = Number(parts[1]);
+  }
+  host = host.toLowerCase();
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  return { host, isIp: scopeIsIp(host), port: Number.isInteger(port) && port > 0 ? port : null };
+}
+
+function scopeNormPort(p) {
+  const n = Number(p);
+  return Number.isInteger(n) ? n : p;
+}
+
+function scopeSortPorts(iterable) {
+  return [...new Set(iterable)].sort((a, b) =>
+    typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b))
+  );
+}
+
+/**
+ * @param {object} parts
+ * @param {object[]} parts.assets          per-target fingerprint results
+ * @param {object[]} parts.inventory       component inventory (items carry assets[{host,port,target}])
+ * @param {object[]} parts.vulnerabilities
+ * @param {object[]} [parts.hosts]         per-IP port-scan records (payload shape: snake_case)
+ * @param {string|null} [parts.host]       ubel-host's single scanned host
+ * @param {string|null} [parts.portRange]  ubel-host's scanned range
+ * @param {number[]} [parts.openPorts]     ubel-host's open ports
+ * @param {object[]} [parts.deadHostnames] [{hostname, error}] names that never resolved
+ * @returns {object[]}
+ */
+export function buildScope({
+  assets = [], inventory = [], vulnerabilities = [],
+  hosts = [], host = null, portRange = null, openPorts = [], deadHostnames = [],
+} = {}) {
+  const rows = new Map();
+  const rowFor = (type, name) => {
+    const key = `${type}:${name}`;
+    if (!rows.has(key)) {
+      rows.set(key, {
+        type, name,
+        assets: [],
+        targets: new Set(),
+        scan: null,            // per-IP port-scan record, when there is one
+        ips: new Set(),        // subdomain -> IP(s) it resolved to
+        subdomains: new Set(), // ip -> subdomains hosted on it
+        deadName: false,
+        deadReason: null,
+        notScanned: false,
+      });
+    }
+    return rows.get(key);
+  };
+
+  for (const a of assets) {
+    const p = scopeParseTarget(a.target);
+    const row = rowFor(p.isIp ? "ip" : "subdomain", p.host);
+    row.assets.push(a);
+    row.targets.add(a.target);
+    if (!p.isIp && a.resolved_ip) row.ips.add(a.resolved_ip);
+  }
+
+  // Per-IP port scans (ubel-easm).
+  for (const h of hosts) {
+    const name = String(h.host || "").toLowerCase();
+    if (!name) continue;
+    const row = rowFor(scopeIsIp(name) ? "ip" : "subdomain", name);
+    row.scan = h;
+    for (const hn of h.resolved_from || []) {
+      const sub = String(hn).toLowerCase();
+      row.subdomains.add(sub);
+      rowFor("subdomain", sub).ips.add(name);
+    }
+  }
+
+  // Single-host port scan (ubel-host).
+  if (host && !hosts.length) {
+    const name = String(host).toLowerCase();
+    rowFor(scopeIsIp(name) ? "ip" : "subdomain", name).scan = {
+      host: name, status: "scanned", resolved_from: [],
+      port_range: portRange || null, open_ports: openPorts || [], http_ports: [],
+    };
+  }
+
+  // Hostnames that never resolved (ubel-easm; ubel-domain's dead ones already arrive as assets).
+  for (const d of deadHostnames) {
+    const name = String(d.hostname || "").toLowerCase();
+    if (!name) continue;
+    const row = rowFor("subdomain", name);
+    if (!row.assets.length) { row.deadName = true; row.deadReason = d.error || null; }
+  }
+
+  const STATUS_PRECEDENCE = ["scanned", "error", "skipped", "dead"];
+  for (const row of rows.values()) {
+    const statuses = row.assets.map((a) => a.status);
+    let status = STATUS_PRECEDENCE.find((s) => statuses.includes(s));
+    if (!status && row.scan) status = row.scan.status || "scanned";
+    if (!status && row.deadName) status = "dead";
+    if (!status) { status = "skipped"; row.notScanned = true; }
+    row.status = status;
+
+    // Components / vulnerabilities seen under any of this entry's targets.
+    const compById = new Map();
+    const invPorts = new Set();
+    for (const item of inventory) {
+      for (const a of item.assets || []) {
+        if (!row.targets.has(a.target)) continue;
+        compById.set(item.id, item);
+        if (a.port !== null && a.port !== undefined && a.port !== "") invPorts.add(scopeNormPort(a.port));
+      }
+    }
+    row.components = [...compById.values()];
+    const compIds = new Set(row.components.map((c) => c.id));
+    row.vulns = vulnerabilities.filter((v) => compIds.has(v.affected_package_id));
+
+    // Ports: everything known for this entry, and which of them spoke HTTP(S).
+    const targetPorts = new Set();
+    for (const a of row.assets) {
+      const p = scopeParseTarget(a.target).port;
+      if (p) targetPorts.add(p);
+    }
+    const ports = new Set([...invPorts, ...targetPorts]);
+    const web = new Set(targetPorts);
+    if (row.scan) {
+      for (const p of row.scan.open_ports || []) ports.add(scopeNormPort(p));
+      for (const p of row.scan.http_ports || []) { ports.add(scopeNormPort(p)); web.add(scopeNormPort(p)); }
+    }
+    row.ports = scopeSortPorts(ports);
+    row.webPorts = scopeSortPorts(web);
+  }
+
+  // Notes need every entry's final status (a subdomain's note names its IP's outcome).
+  const ipRow = (ip) => rows.get(`ip:${ip}`);
+  for (const row of rows.values()) {
+    const notes = [];
+    if (row.scan && row.scan.skip_reason) notes.push(row.scan.skip_reason);
+    if (row.deadName) {
+      notes.push(`hostname does not resolve${row.deadReason ? ` (${row.deadReason})` : ""} — not probed`);
+    }
+    if (row.notScanned && row.type === "subdomain") {
+      const ipRows = [...row.ips].map(ipRow).filter(Boolean);
+      const guarded = ipRows.filter((x) => x.scan && x.scan.status === "skipped");
+      const failed = ipRows.filter((x) => x.scan && x.scan.status === "error");
+      if (guarded.length) {
+        notes.push(`Not scanned: its IP (${guarded.map((x) => x.name).join(", ")}) was refused by the private/self-IP safety guard.`);
+      } else if (failed.length) {
+        notes.push(`Not scanned: the port scan of its IP (${failed.map((x) => x.name).join(", ")}) failed.`);
+      } else {
+        notes.push(
+          "Resolved, but not fingerprinted by name: its IP answered no HTTP(S) on port 80/443, " +
+          "or subdomain scanning was disabled (--subdomain-ports none)."
+        );
+      }
+    }
+    const seen = new Set();
+    for (const a of row.assets) {
+      if (!a.error || seen.has(`${a.error}|${a.target}`)) continue;
+      seen.add(`${a.error}|${a.target}`);
+      notes.push(row.assets.length > 1 ? `${a.target}: ${a.error}` : a.error);
+    }
+    row.notes = notes;
+  }
+
+  const common = (row) => ({
+    type: row.type,
+    name: row.name,
+    status: row.status,
+    targets: [...row.targets],
+    notes: row.notes,
+    components: row.components.map((c) => ({ id: c.id, name: c.name, version: c.version || "" })),
+    vulnerabilities: row.vulns.map((v) => ({
+      id: v.id,
+      affected_package_id: v.affected_package_id,
+      severity: v.is_infection ? "infection" : (v.severity || "unknown"),
+      is_infection: !!v.is_infection,
+    })),
+  });
+
+  return [...rows.values()]
+    .sort((a, b) =>
+      (a.type === b.type ? 0 : a.type === "ip" ? -1 : 1) ||
+      a.name.localeCompare(b.name, undefined, { numeric: true })
+    )
+    .map((row) =>
+      row.type === "ip"
+        ? {
+            ...common(row),
+            subdomains: [...row.subdomains].sort((a, b) => a.localeCompare(b)),
+            open_ports: row.status === "skipped" ? [] : row.ports,
+            http_ports: row.status === "skipped" ? [] : row.webPorts,
+            port_range: row.scan && row.status !== "skipped" ? row.scan.port_range || null : null,
+          }
+        : {
+            ...common(row),
+            ips: [...row.ips].sort(),
+            urls: [...new Set(row.assets.map((a) => a.resolved_url).filter(Boolean))],
+            scanned_ports: row.ports,
+          }
+    );
+}
+
 // ─── main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -227,6 +490,22 @@ function buildMisconfigStats(misconfigResult, grouped) {
  *   root domain crt.sh was queried for; `targets` is the resulting
  *   discovered-subdomain list that was actually fingerprinted
  * @param {string} [meta.subdomainEndpoint]  crt.sh endpoint used, when meta.domain is set
+ * @param {string} [meta.host]             set only for ubel-host runs — the
+ *   host that was port-scanned; `targets` is the resulting HTTP(S)-speaking
+ *   "host:port" list that was actually fingerprinted
+ * @param {string} [meta.portRange]        "<from>-<to>" port range scanned, when meta.host is set
+ * @param {number[]} [meta.openPorts]      every port that accepted a TCP connection on meta.host,
+ *   independent of whether it went on to answer HTTP(S) — the fuller scanned
+ *   scope, vs. `targets` which is only the fingerprinted subset
+ * @param {object[]} [meta.hosts]          set only for ubel-easm runs — the plural,
+ *   per-IP counterpart to meta.host/portRange/openPorts above: one entry per
+ *   distinct IP resolved from the scanned domain's subdomains, each shaped
+ *   {host, resolvedFrom, status, skipReason, portRange, openPorts, httpPorts}.
+ *   `targets` is still the merged "ip:port" list across every entry here that
+ *   was actually fingerprinted, same relationship meta.host/openPorts has to
+ *   `targets` in a single-host ubel-host run.
+ * @param {object[]} [meta.deadHostnames]  set only for ubel-easm runs — hostnames
+ *   discovered/included that never resolved to an IP, shaped {hostname, error}
  */
 export function buildReportPayload(scanResult, meta = {}) {
   const { assets, inventory, vulnerabilities, resolution, secrets, misconfigurations } = scanResult;
@@ -274,6 +553,19 @@ export function buildReportPayload(scanResult, meta = {}) {
       "is actually implemented.";
   }
 
+  const hosts = Array.isArray(meta.hosts)
+    ? meta.hosts.map((h) => ({
+        host: h.host,
+        resolved_from: h.resolvedFrom || [],
+        status: h.status || 'scanned',
+        skip_reason: h.skipReason || null,
+        port_range: h.portRange || null,
+        open_ports: h.openPorts || [],
+        http_ports: h.httpPorts || [],
+      }))
+    : [];
+  const deadHostnames = Array.isArray(meta.deadHostnames) ? meta.deadHostnames : [];
+
   return {
     generated_at: meta.generated_at || new Date().toISOString(),
     tool: meta.tool || TOOL_NAME,
@@ -286,6 +578,11 @@ export function buildReportPayload(scanResult, meta = {}) {
     wpvulnerability_endpoint: meta.wpvulnerabilityEndpoint || null,
     domain: meta.domain || null,
     subdomain_endpoint: meta.domain ? meta.subdomainEndpoint || null : null,
+    host: meta.host || null,
+    port_range: meta.host ? meta.portRange || null : null,
+    open_ports: meta.host ? meta.openPorts || [] : [],
+    hosts,
+    dead_hostnames: deadHostnames,
     platform: meta.platform || null,
     arch: meta.arch || null,
     runtime_version: meta.runtime_version || null,
@@ -294,6 +591,12 @@ export function buildReportPayload(scanResult, meta = {}) {
     os_metadata: meta.osMetadata || null,
     stats,
     compliance_summary: complianceSummary,
+    // One entry per distinct IP / subdomain (see buildScope()) — what the HTML
+    // Scope tab renders. `assets` below stays the raw per-target list.
+    scope: buildScope({
+      assets, inventory, vulnerabilities, hosts, deadHostnames,
+      host: meta.host || null, portRange: meta.portRange || null, openPorts: meta.openPorts || [],
+    }),
     assets,
     inventory,
     vulnerabilities,
@@ -434,6 +737,11 @@ export async function generateHtmlReport(reportPayload) {
         <input id="sc-search" type="text" placeholder="Search subdomain, IP..."
                class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
                oninput="applyScopeFilters()">
+        <select id="sc-type" onchange="applyScopeFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+          <option value="all">All types</option>
+          <option value="ip">IP</option>
+          <option value="subdomain">Subdomain</option>
+        </select>
         <select id="sc-status" onchange="applyScopeFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm">
           <option value="all">All statuses</option>
           <option value="scanned">Scanned</option>
@@ -448,9 +756,9 @@ export async function generateHtmlReport(reportPayload) {
           <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider">
             <tr>
               <th class="px-4 py-3">Status</th>
-              <th class="px-4 py-3">Subdomain</th>
-              <th class="px-4 py-3">IP</th>
-              <th class="px-4 py-3">Ports</th>
+              <th class="px-4 py-3">Type</th>
+              <th class="px-4 py-3">IP / Subdomain</th>
+              <th class="px-4 py-3">Resolves to / Hosts</th>
               <th class="px-4 py-3">Components</th>
               <th class="px-4 py-3">Vulns</th>
             </tr>
@@ -799,8 +1107,11 @@ export async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OSV endpoint</span><span class="mono text-xs" id="sys-osv-endpoint">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">NVD endpoint</span><span class="mono text-xs" id="sys-nvd-endpoint">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">WPVulnerability endpoint</span><span class="mono text-xs" id="sys-wpvuln-endpoint">—</span></div>
-            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Domain (ubel-domain only)</span><span class="mono text-xs" id="sys-domain">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Domain (ubel-domain / ubel-easm)</span><span class="mono text-xs" id="sys-domain">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Subdomain source</span><span class="mono text-xs" id="sys-crtsh-endpoint">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Host (ubel-host only)</span><span class="mono text-xs" id="sys-host">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Port range scanned</span><span class="mono text-xs" id="sys-port-range">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2 items-start"><span class="text-neutral-500 text-xs pt-0.5">Open ports</span><span class="mono text-xs text-right max-w-[65%] break-words" id="sys-open-ports">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="sys-platform">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Arch</span><span class="mono text-xs" id="sys-arch">—</span></div>
             <div class="flex justify-between"><span class="text-neutral-500 text-xs">Node</span><span class="mono text-xs" id="sys-node">—</span></div>
@@ -811,6 +1122,11 @@ export async function generateHtmlReport(reportPayload) {
           <div id="sys-resolution-summary" class="text-xs bg-neutral-900 rounded-lg p-3 border border-neutral-800 mb-2">—</div>
           <div id="sys-targets" class="text-xs space-y-2 max-h-72 overflow-y-auto pr-1">—</div>
         </div>
+      </div>
+
+      <div class="glass p-6 rounded-xl space-y-3">
+        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Resolved IPs &amp; Port Scans (ubel-easm only)</h3>
+        <div id="sys-host-scans" class="text-xs grid grid-cols-1 md:grid-cols-2 gap-2">—</div>
       </div>
     </section>
 
@@ -1051,46 +1367,39 @@ function renderDashboard() {
 }
 
 // ── SCOPE ─────────────────────────────────────────────────────────────────────
-// Per-target ("subdomain") view: what was found on each host in scope, not
-// what was found overall. Joins back to inventory/vulnerabilities by
-// matching "target" — every inventory item's assets[] entry already
-// carries the exact target string it was seen under (see scan.js), so this
-// needs no separate lookup table, just a filter.
+// Rendered straight from reportData.scope — the exact array that's in the JSON
+// report (see buildScope() in html_report.js), so the table and the JSON can't
+// disagree. One row per distinct IP and one per distinct subdomain, never one
+// per port; ports live in the IP's modal. Component and vulnerability entries
+// in scope only carry ids, so they're resolved against the inventory and the
+// vulnerability list here.
 
-function scopeComponentsFor(target) {
-  return (reportData.inventory || []).filter(item =>
-    (item.assets || []).some(a => a.target === target)
-  );
-}
+const _scopeInv = new Map((reportData.inventory || []).map(i => [i.id, i]));
+const _scopeVulns = new Map((reportData.vulnerabilities || []).map(v => [vulnKey(v), v]));
 
-function scopePortsFor(target) {
-  const ports = new Set();
-  for (const item of reportData.inventory || []) {
-    for (const a of item.assets || []) {
-      if (a.target === target && a.port != null && a.port !== '') ports.add(a.port);
-    }
-  }
-  return [...ports].sort((a, b) => (typeof a === 'number' && typeof b === 'number') ? a - b : String(a).localeCompare(String(b)));
-}
-
-function scopeVulnsFor(target) {
-  const compIds = new Set(scopeComponentsFor(target).map(c => c.id));
-  return (reportData.vulnerabilities || []).filter(v => compIds.has(v.affected_package_id));
-}
-
-let _filteredScope = reportData.assets || [];
+const _scopeRows = (reportData.scope || []).map(s => ({
+  ...s,
+  key: (s.type === 'ip' ? 'ip:' : 'sub:') + s.name,
+  ips: s.ips || [],
+  subdomains: s.subdomains || [],
+  notes: s.notes || [],
+  urls: s.urls || [],
+  ports: (s.type === 'ip' ? s.open_ports : s.scanned_ports) || [],
+  webPorts: new Set(s.http_ports || []),
+  components: (s.components || []).map(c => _scopeInv.get(c.id)).filter(Boolean),
+  vulns: (s.vulnerabilities || []).map(v => _scopeVulns.get(vulnKey(v))).filter(Boolean),
+}));
+let _filteredScope = _scopeRows;
 
 function applyScopeFilters() {
   const q = document.getElementById('sc-search').value.trim().toLowerCase();
   const status = document.getElementById('sc-status').value;
-  const all = reportData.assets || [];
+  const type = document.getElementById('sc-type').value;
 
-  _filteredScope = all.filter(a => {
-    if (status !== 'all' && a.status !== status) return false;
-    if (q && !(
-      (a.target || '').toLowerCase().includes(q) ||
-      (a.resolved_ip || '').toLowerCase().includes(q)
-    )) return false;
+  _filteredScope = _scopeRows.filter(r => {
+    if (status !== 'all' && r.status !== status) return false;
+    if (type !== 'all' && r.type !== type) return false;
+    if (q && ![r.name, ...r.ips, ...r.subdomains].join(' ').toLowerCase().includes(q)) return false;
     return true;
   });
 
@@ -1098,79 +1407,62 @@ function applyScopeFilters() {
 }
 
 const SCOPE_STATUS_CLASS = { scanned: 'text-green-400', skipped: 'text-amber-400', error: 'text-red-400', dead: 'text-red-400' };
+const SCOPE_TYPE_LABEL = { ip: 'IP', subdomain: 'Subdomain' };
+const SCOPE_TYPE_CLASS = { ip: 'text-blue-400', subdomain: 'text-purple-400' };
+
+function scopeTypeBadge(type, sizeClass) {
+  return \`<span class="px-2 py-0.5 rounded border border-neutral-700 \${sizeClass} uppercase font-bold \${SCOPE_TYPE_CLASS[type] || 'text-neutral-400'}">\${escH(SCOPE_TYPE_LABEL[type] || type)}</span>\`;
+}
 
 function renderScopeTable() {
   const tbody = document.getElementById('scope-table-body');
   tbody.innerHTML = '';
 
-  const all = reportData.assets || [];
-  document.getElementById('scope-empty').classList.toggle('hidden', all.length > 0);
+  document.getElementById('scope-empty').classList.toggle('hidden', _scopeRows.length > 0);
 
-  if (all.length && !_filteredScope.length) {
+  if (_scopeRows.length && !_filteredScope.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-12 text-center text-neutral-500 italic">No targets match the current filters.</td></tr>';
     return;
   }
 
-  for (const a of _filteredScope) {
-    const ports = scopePortsFor(a.target);
-    const comps = scopeComponentsFor(a.target);
-    const vulns = scopeVulnsFor(a.target);
+  for (const r of _filteredScope) {
+    const related = r.type === 'ip'
+      ? (r.subdomains.length ? r.subdomains.length + ' subdomain' + (r.subdomains.length === 1 ? '' : 's') : '—')
+      : (r.ips.length ? r.ips.join(', ') : '—');
     const row = document.createElement('tr');
     row.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
-    row.dataset.scopeTarget = a.target;
+    row.dataset.scopeKey = r.key;
     row.innerHTML = \`
-      <td class="px-4 py-3"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${SCOPE_STATUS_CLASS[a.status] || 'text-neutral-400'}">\${escH(a.status)}</span></td>
-      <td class="px-4 py-3 mono text-sm \${a.status === 'dead' ? 'text-neutral-500 line-through' : 'text-neutral-200'}">\${escH(a.target)}</td>
-      <td class="px-4 py-3 mono text-xs text-neutral-400">\${escH(a.resolved_ip || '—')}</td>
-      <td class="px-4 py-3 mono text-xs text-neutral-400">\${ports.length ? escH(ports.join(', ')) : '—'}</td>
-      <td class="px-4 py-3 text-xs text-neutral-300">\${comps.length}</td>
-      <td class="px-4 py-3 text-xs \${vulns.length ? 'text-red-400 font-semibold' : 'text-neutral-500'}">\${vulns.length}</td>
+      <td class="px-4 py-3"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${SCOPE_STATUS_CLASS[r.status] || 'text-neutral-400'}">\${escH(r.status)}</span></td>
+      <td class="px-4 py-3">\${scopeTypeBadge(r.type, 'text-[10px]')}</td>
+      <td class="px-4 py-3 mono text-sm \${r.status === 'dead' ? 'text-neutral-500 line-through' : 'text-neutral-200'}">\${escH(r.name)}</td>
+      <td class="px-4 py-3 mono text-xs text-neutral-400">\${escH(related)}</td>
+      <td class="px-4 py-3 text-xs text-neutral-300">\${r.components.length}</td>
+      <td class="px-4 py-3 text-xs \${r.vulns.length ? 'text-red-400 font-semibold' : 'text-neutral-500'}">\${r.vulns.length}</td>
     \`;
     tbody.appendChild(row);
   }
 }
 
-function openScopeModal(target) {
-  const a = (reportData.assets || []).find(x => x.target === target);
-  if (!a) return;
-  const ports = scopePortsFor(target);
-  const comps = scopeComponentsFor(target);
-  const vulns = scopeVulnsFor(target);
-
-  openModal(\`
-    <div class="space-y-4">
-      <div class="flex items-center gap-3 flex-wrap">
-        <span class="px-2 py-0.5 rounded border text-xs uppercase font-bold \${SCOPE_STATUS_CLASS[a.status] || 'text-neutral-400'}">\${escH(a.status)}</span>
-        <h2 class="text-lg font-semibold text-white mono">\${escH(a.target)}</h2>
-      </div>
-      <div class="grid grid-cols-2 gap-3 text-xs">
-        <div><span class="text-neutral-500">IP</span><div class="mono text-neutral-200">\${escH(a.resolved_ip || '—')}</div></div>
-        <div><span class="text-neutral-500">Resolved URL</span><div class="mono text-neutral-200 break-all">\${escH(a.resolved_url || '—')}</div></div>
-        <div class="col-span-2">
-          <span class="text-neutral-500">Scanned Ports (\${ports.length})</span>
-          <div class="mono text-neutral-200 bg-neutral-900 rounded-lg p-2 mt-1 border border-neutral-800 max-h-24 overflow-y-auto">
-            \${ports.length ? escH(ports.join(', ')) : '<span class="text-neutral-500">—</span>'}
-          </div>
-        </div>
-        \${a.error ? \`<div class="col-span-2"><span class="text-neutral-500">Note</span><div class="text-neutral-300 text-xs italic mt-1">\${escH(a.error)}</div></div>\` : ''}
-      </div>
+function scopeComponentsHtml(r, emptyMsg) {
+  return \`
       <div>
-        <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Components (\${comps.length})</p>
+        <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Components (\${r.components.length})</p>
         <div class="bg-neutral-900 rounded-lg border border-neutral-800 divide-y divide-neutral-800 max-h-56 overflow-y-auto">
-          \${comps.length ? comps.map(c => \`
+          \${r.components.length ? r.components.map(c => \`
             <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-component-id="\${escH(c.id)}">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold \${stateClass(c.state)} shrink-0">\${escH(c.state)}</span>
                 <span class="text-xs text-neutral-200 truncate">\${escH(c.name)}\${c.version ? ' @ ' + escH(c.version) : ''}</span>
               </div>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500 shrink-0"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </div>\`).join('') : '<p class="text-neutral-500 text-xs italic p-3">No components fingerprinted on this host.</p>'}
+            </div>\`).join('') : '<p class="text-neutral-500 text-xs italic p-3">' + escH(emptyMsg.components) + '</p>'}
         </div>
       </div>
       <div>
-        <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerabilities (\${vulns.length})</p>
+        <p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Vulnerabilities (\${r.vulns.length})</p>
         <div class="bg-neutral-900 rounded-lg border border-neutral-800 divide-y divide-neutral-800 max-h-56 overflow-y-auto">
-          \${vulns.length ? vulns.map(v => \`
+          \${r.vulns.length ? r.vulns.map(v => \`
             <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-vuln-key="\${escH(vulnKey(v))}">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold \${sevClass(vulnSeverityKey(v))} shrink-0">\${escH(v.is_infection ? 'infection' : v.severity)}</span>
@@ -1178,9 +1470,88 @@ function openScopeModal(target) {
                 <span class="text-[10px] text-neutral-500 truncate">(\${escH(componentLabel(v.affected_package_id))})</span>
               </div>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500 shrink-0"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </div>\`).join('') : '<p class="text-neutral-500 text-xs italic p-3">No known vulnerabilities on this host.</p>'}
+            </div>\`).join('') : '<p class="text-neutral-500 text-xs italic p-3">' + escH(emptyMsg.vulns) + '</p>'}
         </div>
+      </div>\`;
+}
+
+function openScopeModal(key) {
+  const r = _scopeRows.find(x => x.key === key);
+  if (!r) return;
+  const notesHtml = r.notes.length
+    ? \`<div class="col-span-2"><span class="text-neutral-500">Note</span>\${r.notes.map(n => \`<div class="text-neutral-300 text-xs italic mt-1">\${escH(n)}</div>\`).join('')}</div>\`
+    : '';
+  const header = \`
+      <div class="flex items-center gap-3 flex-wrap">
+        <span class="px-2 py-0.5 rounded border text-xs uppercase font-bold \${SCOPE_STATUS_CLASS[r.status] || 'text-neutral-400'}">\${escH(r.status)}</span>
+        \${scopeTypeBadge(r.type, 'text-xs')}
+        <h2 class="text-lg font-semibold text-white mono">\${escH(r.name)}</h2>
+      </div>\`;
+
+  if (r.type === 'ip') {
+    // An IP: every subdomain hosted on it, and every open port found on it.
+    const subRow = (name) => {
+      const sr = _scopeRows.find(x => x.key === 'sub:' + name);
+      const st = sr ? sr.status : null;
+      return \`
+            <div class="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-neutral-800/40 transition-colors" data-scope-key="\${escH('sub:' + name)}">
+              <span class="mono text-xs text-neutral-200 truncate">\${escH(name)}</span>
+              <span class="flex items-center gap-2 shrink-0">
+                \${st ? \`<span class="text-[9px] uppercase font-bold \${SCOPE_STATUS_CLASS[st] || 'text-neutral-400'}">\${escH(st)}</span>\` : ''}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+              </span>
+            </div>\`;
+    };
+    const portChip = (p) => r.webPorts.has(p)
+      ? \`<span class="mono text-[11px] px-1.5 py-0.5 rounded border border-green-500/40 text-green-400">\${escH(p)}</span>\`
+      : \`<span class="mono text-[11px] px-1.5 py-0.5 rounded border border-neutral-700 text-neutral-400">\${escH(p)}</span>\`;
+    const portsEmpty = r.status === 'skipped' ? 'Not scanned.' : 'No open ports found in the scanned range.';
+
+    openModal(\`
+    <div class="space-y-4">
+      \${header}
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div class="col-span-2">
+          <span class="text-neutral-500">Subdomains hosted (\${r.subdomains.length})</span>
+          <div class="bg-neutral-900 rounded-lg border border-neutral-800 divide-y divide-neutral-800 max-h-40 overflow-y-auto mt-1">
+            \${r.subdomains.length ? r.subdomains.map(subRow).join('') : '<p class="text-neutral-500 text-xs italic p-3">No discovered subdomain resolves to this IP.</p>'}
+          </div>
+        </div>
+        <div class="col-span-2">
+          <span class="text-neutral-500">Open ports (\${r.ports.length})\${r.port_range ? ' — range scanned ' + escH(r.port_range) : ''}</span>
+          <div class="bg-neutral-900 rounded-lg p-2 mt-1 border border-neutral-800 max-h-28 overflow-y-auto flex flex-wrap gap-1.5">
+            \${r.ports.length ? r.ports.map(portChip).join('') : '<span class="text-neutral-500 italic">' + portsEmpty + '</span>'}
+          </div>
+          \${r.webPorts.size ? '<p class="text-[10px] text-neutral-500 mt-1"><span class="text-green-400">Green</span> = answered HTTP(S) and was fingerprinted.</p>' : ''}
+        </div>
+        \${notesHtml}
       </div>
+      \${scopeComponentsHtml(r, { components: 'No components fingerprinted on this IP.', vulns: 'No known vulnerabilities on this IP.' })}
+    </div>
+  \`);
+    return;
+  }
+
+  // A subdomain: same view as before, aggregated over every target it was scanned as.
+  const ipLink = (ip) => _scopeRows.some(x => x.key === 'ip:' + ip)
+    ? \`<span class="cursor-pointer underline decoration-dotted hover:text-white" data-scope-key="\${escH('ip:' + ip)}">\${escH(ip)}</span>\`
+    : escH(ip);
+
+  openModal(\`
+    <div class="space-y-4">
+      \${header}
+      <div class="grid grid-cols-2 gap-3 text-xs">
+        <div><span class="text-neutral-500">IP</span><div class="mono text-neutral-200">\${r.ips.length ? r.ips.map(ipLink).join(', ') : '—'}</div></div>
+        <div><span class="text-neutral-500">Resolved URL</span><div class="mono text-neutral-200 break-all">\${r.urls.length ? r.urls.map(u => escH(u)).join('<br>') : '—'}</div></div>
+        <div class="col-span-2">
+          <span class="text-neutral-500">Scanned Ports (\${r.ports.length})</span>
+          <div class="mono text-neutral-200 bg-neutral-900 rounded-lg p-2 mt-1 border border-neutral-800 max-h-24 overflow-y-auto">
+            \${r.ports.length ? escH(r.ports.join(', ')) : '<span class="text-neutral-500">—</span>'}
+          </div>
+        </div>
+        \${notesHtml}
+      </div>
+      \${scopeComponentsHtml(r, { components: 'No components fingerprinted on this host.', vulns: 'No known vulnerabilities on this host.' })}
     </div>
   \`);
 }
@@ -1962,6 +2333,11 @@ function renderScanInfo() {
   document.getElementById('sys-wpvuln-endpoint').textContent = reportData.wpvulnerability_endpoint || 'https://www.wpvulnerability.net (default)';
   document.getElementById('sys-domain').textContent = reportData.domain || 'n/a (not a domain scan)';
   document.getElementById('sys-crtsh-endpoint').textContent = reportData.domain ? (reportData.subdomain_endpoint || 'https://crt.sh (default)') : '—';
+  document.getElementById('sys-host').textContent = reportData.host || 'n/a (not a host scan)';
+  document.getElementById('sys-port-range').textContent = reportData.host ? (reportData.port_range || '—') : '—';
+  document.getElementById('sys-open-ports').textContent = reportData.host
+    ? ((reportData.open_ports || []).length ? reportData.open_ports.join(', ') : 'none found')
+    : '—';
   document.getElementById('sys-platform').textContent = reportData.platform || '—';
   document.getElementById('sys-arch').textContent = reportData.arch || '—';
   document.getElementById('sys-node').textContent = reportData.runtime_version || '—';
@@ -1978,19 +2354,47 @@ function renderScanInfo() {
   const assets = reportData.assets || [];
   if (!assets.length) {
     targetsEl.textContent = '—';
+  } else {
+    const statusClass = { scanned: 'text-green-400', skipped: 'text-amber-400', error: 'text-red-400', dead: 'text-red-400' };
+    targetsEl.innerHTML = assets.map(a => \`
+      <div class="bg-neutral-900 rounded-lg p-3 border \${a.status === 'dead' ? 'border-red-500/30' : 'border-neutral-800'}">
+        <div class="flex items-center justify-between">
+          <span class="mono text-xs \${a.status === 'dead' ? 'text-neutral-500 line-through' : 'text-neutral-200'}">\${escH(a.target)}</span>
+          <span class="text-[10px] uppercase font-bold \${statusClass[a.status] || 'text-neutral-400'}">\${escH(a.status)}</span>
+        </div>
+        \${a.resolved_ip ? \`<div class="mono text-[10px] text-neutral-500 mt-1">resolved to \${escH(a.resolved_ip)}</div>\` : ''}
+        \${a.resolved_url ? \`<div class="mono text-[10px] text-neutral-500 mt-1">\${escH(a.resolved_url)} — \${a.components_found} component(s)</div>\` : ''}
+        \${a.error ? \`<div class="text-[10px] text-neutral-500 mt-1 italic">\${escH(a.error)}</div>\` : ''}
+      </div>\`).join('');
+  }
+
+  const hostScansEl = document.getElementById('sys-host-scans');
+  const hostScans = reportData.hosts || [];
+  const deadHostnames = reportData.dead_hostnames || [];
+  if (!hostScans.length && !deadHostnames.length) {
+    hostScansEl.textContent = '—';
+    hostScansEl.className = 'text-xs';
     return;
   }
-  const statusClass = { scanned: 'text-green-400', skipped: 'text-amber-400', error: 'text-red-400', dead: 'text-red-400' };
-  targetsEl.innerHTML = assets.map(a => \`
-    <div class="bg-neutral-900 rounded-lg p-3 border \${a.status === 'dead' ? 'border-red-500/30' : 'border-neutral-800'}">
+  hostScansEl.className = 'text-xs grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1';
+  const hostStatusClass = { scanned: 'text-green-400', skipped: 'text-amber-400', error: 'text-red-400' };
+  const hostCards = hostScans.map(h => \`
+    <div class="bg-neutral-900 rounded-lg p-3 border \${h.status === 'skipped' ? 'border-amber-500/30' : 'border-neutral-800'}">
       <div class="flex items-center justify-between">
-        <span class="mono text-xs \${a.status === 'dead' ? 'text-neutral-500 line-through' : 'text-neutral-200'}">\${escH(a.target)}</span>
-        <span class="text-[10px] uppercase font-bold \${statusClass[a.status] || 'text-neutral-400'}">\${escH(a.status)}</span>
+        <span class="mono text-xs text-neutral-200">\${escH(h.host)}</span>
+        <span class="text-[10px] uppercase font-bold \${hostStatusClass[h.status] || 'text-neutral-400'}">\${escH(h.status)}</span>
       </div>
-      \${a.resolved_ip ? \`<div class="mono text-[10px] text-neutral-500 mt-1">resolved to \${escH(a.resolved_ip)}</div>\` : ''}
-      \${a.resolved_url ? \`<div class="mono text-[10px] text-neutral-500 mt-1">\${escH(a.resolved_url)} — \${a.components_found} component(s)</div>\` : ''}
-      \${a.error ? \`<div class="text-[10px] text-neutral-500 mt-1 italic">\${escH(a.error)}</div>\` : ''}
+      \${(h.resolved_from || []).length ? \`<div class="mono text-[10px] text-neutral-500 mt-1 break-all">resolved from: \${h.resolved_from.map(hn => escH(hn)).join(', ')}</div>\` : ''}
+      \${h.skip_reason
+        ? \`<div class="text-[10px] text-neutral-500 mt-1 italic">\${escH(h.skip_reason)}</div>\`
+        : \`<div class="text-[10px] text-neutral-500 mt-1">ports \${escH(h.port_range || '—')}: \${(h.open_ports || []).length} open, \${(h.http_ports || []).length} HTTP(S)</div>\`}
     </div>\`).join('');
+  const deadCard = deadHostnames.length ? \`
+    <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">
+      <div class="mono text-xs text-neutral-500">\${deadHostnames.length} hostname(s) did not resolve</div>
+      <div class="mono text-[10px] text-neutral-600 mt-1 break-all">\${deadHostnames.map(d => escH(d.hostname)).join(', ')}</div>
+    </div>\` : '';
+  hostScansEl.innerHTML = hostCards + deadCard;
 }
 
 // ── DETAILED STATS ────────────────────────────────────────────────────────────
@@ -2224,9 +2628,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('scope-table-body').addEventListener('click', (e) => {
-    const row = e.target.closest('[data-scope-target]');
+    const row = e.target.closest('[data-scope-key]');
     if (!row) return;
-    openScopeModal(row.dataset.scopeTarget);
+    openScopeModal(row.dataset.scopeKey);
   });
 
   document.getElementById('components-table-body').addEventListener('click', (e) => {
@@ -2261,6 +2665,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const modalBody = document.getElementById('modal-body');
   modalBody.addEventListener('click', (e) => {
+    const scopeRow = e.target.closest('[data-scope-key]');
+    if (scopeRow && modalBody.contains(scopeRow)) {
+      e.stopPropagation();
+      openScopeModal(scopeRow.dataset.scopeKey);
+      return;
+    }
     const compRow = e.target.closest('[data-component-id]');
     if (compRow && modalBody.contains(compRow)) {
       e.stopPropagation();
@@ -2310,7 +2720,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
 
 function updateTabCounts() {
-  document.getElementById('tab-scope').textContent = 'Scope(' + ((reportData.assets || []).length) + ')';
+  document.getElementById('tab-scope').textContent = 'Scope(' + _scopeRows.length + ')';
   document.getElementById('tab-components').textContent = 'Components(' + reportData.stats.component_count + ')';
   document.getElementById('tab-vulns').textContent = 'Vulnerabilities(' + reportData.stats.total_vulnerabilities + ')';
   document.getElementById('tab-misconfigs').textContent = 'Misconfigurations(' + ((reportData.misconfigurations || []).length) + ')';
