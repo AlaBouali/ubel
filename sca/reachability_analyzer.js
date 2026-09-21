@@ -12,6 +12,14 @@
  *   - vulnerabilities    → severity_vector (AV extraction)
  *   - project source     → import/require scan (optional, 8 ecosystems)
  *
+ * Import scanning is batched: every source file under projectRoot is read
+ * exactly once. Files are bucketed by ecosystem (via extension), and each
+ * file is tested against the import patterns of every vulnerable component
+ * (and every candidate transitive parent) that shares its ecosystem — not
+ * re-walked/re-read once per vulnerability. The resulting component→
+ * reachability-signal map is then used to classify each vulnerability
+ * through the same priority ladder as before.
+ *
  * Zero external dependencies. Zero new data collection.
  *
  * Usage (programmatic):
@@ -131,6 +139,16 @@ const SKIP_DIRS = new Set([
 
 /** Max file size to scan (bytes). */
 const MAX_FILE_SIZE = 512 * 1024;
+
+/** Shared shape for "no scan performed / nothing found" results. */
+function nullImportScan(overrides = {}) {
+  return {
+    searched: false, found: false, matchedFiles: [],
+    patternsUsed: [], filesScanned: 0, skippedNoSource: false,
+    parentScans: {},
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // PURL helpers
@@ -330,100 +348,171 @@ function collectSourceFiles(dir, extensions) {
 }
 
 // ---------------------------------------------------------------------------
-// Import scan
+// Component scan registry — decide WHAT needs scanning, ecosystem-agnostic
 // ---------------------------------------------------------------------------
 
 /**
- * Scans source files under projectRoot for imports of the given package.
+ * Resolves a purl to its scannable form: canonical ecosystem, resolved
+ * import name (post-override), and pre-built regex patterns. Returns null
+ * if the purl's ecosystem has no known source extensions (unsupported).
  *
- * @param {string}  importName  - The resolved import name (may differ from dist name)
- * @param {{ ecosystem: string, name: string, namespace: string }} purlInfo
- * @param {string|null} projectRoot
- * @returns {{ searched: boolean, found: boolean, matchedFiles: string[],
- *             patternsUsed: string[], filesScanned: number,
- *             skippedNoSource: boolean, parentScans: Object }}
+ * @param {string} purl
+ * @returns {{ ecosystem: string, patterns: RegExp[] }|null}
  */
-function scanImports(importName, purlInfo, projectRoot) {
-  const NULL = {
-    searched: false, found: false, matchedFiles: [],
-    patternsUsed: [], filesScanned: 0, skippedNoSource: false, parentScans: {},
+function resolveScanTarget(purl) {
+  const info = parsePurl(purl);
+  const eco  = ECOSYSTEM_ALIASES[info.ecosystem] ?? info.ecosystem;
+  if (!ECOSYSTEM_EXTENSIONS[eco]) return null;
+
+  const importName   = IMPORT_NAME_OVERRIDES[info.name.toLowerCase()] ?? info.name;
+  const resolvedInfo = { ...info, ecosystem: eco, name: importName };
+  const patterns      = buildImportPatterns(resolvedInfo);
+  if (!patterns.length) return null;
+
+  return { ecosystem: eco, patterns };
+}
+
+/**
+ * Determines whether a vulnerability's package is even eligible for an
+ * import scan (mirrors the ladder's early short-circuits: non-library,
+ * malware, env-scoped, and dev/test packages are decided without one).
+ */
+function isEligibleForImportScan(vuln, inventoryIndex) {
+  const pkgPurl       = vuln.affected_package_id || "";
+  const inventoryItem = inventoryIndex.get(pkgPurl);
+  const scope         = getScope(inventoryItem);
+  const pkgType       = getPkgType(inventoryItem);
+  const isNonLibrary  = NON_LIBRARY_TYPES.has(pkgType);
+  const isMalware     = (vuln.id || "").startsWith("MAL-");
+  const envScope      = hasEnvScope(inventoryItem);
+
+  return !isNonLibrary && !isMalware && !envScope
+      && scope !== "dev" && scope !== "test";
+}
+
+/**
+ * Walks every vulnerability once and builds the set of component purls
+ * that need an import scan — the vulnerable package itself, plus every
+ * introduced_by parent (candidate transitive carriers) — so the file walk
+ * below can check every file against every needed component in one pass.
+ *
+ * @param {Object} report
+ * @param {Map}    inventoryIndex
+ * @returns {Map<string, {ecosystem: string, patterns: RegExp[]}|null>}
+ */
+function buildScanRegistry(report, inventoryIndex) {
+  const vulnerabilities = report.vulnerabilities || [];
+  const registry = new Map(); // purl -> resolveScanTarget() result
+
+  const register = (purl) => {
+    if (!purl || registry.has(purl)) return;
+    registry.set(purl, resolveScanTarget(purl));
   };
-  if (!projectRoot) return NULL;
 
-  const rawEco = purlInfo.ecosystem;
-  const eco    = ECOSYSTEM_ALIASES[rawEco] ?? rawEco;
-  const resolvedInfo = { ...purlInfo, ecosystem: eco };
+  for (const vuln of vulnerabilities) {
+    if (!isEligibleForImportScan(vuln, inventoryIndex)) continue;
 
-  const extensions = ECOSYSTEM_EXTENSIONS[eco];
-  if (!extensions) return NULL;
-
-  const patterns = buildImportPatterns(resolvedInfo);
-  if (!patterns.length) return NULL;
-
-  const sourceFiles = collectSourceFiles(projectRoot, extensions);
-  if (!sourceFiles.length) {
-    return {
-      searched: true, found: false, matchedFiles: [],
-      patternsUsed: patterns.map(p => p.source),
-      filesScanned: 0, skippedNoSource: true, parentScans: {},
-    };
+    const pkgPurl = vuln.affected_package_id || "";
+    register(pkgPurl);
+    for (const parentPurl of getIntroducedBy(pkgPurl, inventoryIndex)) {
+      register(parentPurl);
+    }
   }
 
-  const matchedFiles = [];
-  for (const fpath of sourceFiles) {
-    let content;
-    try { content = fs.readFileSync(fpath, "utf8"); }
-    catch { continue; }
+  return registry;
+}
 
-    for (const pat of patterns) {
-      if (pat.test(content)) {
-        const rel = path.relative(projectRoot, fpath);
-        if (!matchedFiles.includes(rel)) matchedFiles.push(rel);
-        break;
+// ---------------------------------------------------------------------------
+// Single-pass batched scan — every file read once, checked against every
+// registered component sharing its ecosystem
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the registry against the project source tree in one pass per
+ * ecosystem: each file belonging to that ecosystem is read exactly once
+ * and tested against every registered component's patterns.
+ *
+ * @param {Map}    registry     - from buildScanRegistry()
+ * @param {string|null} projectRoot
+ * @returns {Map<string, Object>}  purl → import-scan result
+ */
+function runBatchedScan(registry, projectRoot) {
+  const results = new Map();
+
+  if (!projectRoot) {
+    for (const purl of registry.keys()) results.set(purl, nullImportScan());
+    return results;
+  }
+
+  // Bucket registered components by ecosystem so each ecosystem's file set
+  // is walked exactly once, regardless of how many components share it.
+  const byEcosystem = new Map(); // ecosystem -> [purl, ...]
+  for (const [purl, target] of registry.entries()) {
+    if (!target) {
+      results.set(purl, nullImportScan()); // unsupported ecosystem
+      continue;
+    }
+    if (!byEcosystem.has(target.ecosystem)) byEcosystem.set(target.ecosystem, []);
+    byEcosystem.get(target.ecosystem).push(purl);
+  }
+
+  for (const [eco, purls] of byEcosystem.entries()) {
+    const extensions = ECOSYSTEM_EXTENSIONS[eco];
+    const files       = collectSourceFiles(projectRoot, extensions);
+
+    for (const purl of purls) {
+      results.set(purl, nullImportScan({
+        searched:        true,
+        patternsUsed:    registry.get(purl).patterns.map(p => p.source),
+        filesScanned:    files.length,
+        skippedNoSource: files.length === 0,
+      }));
+    }
+    if (!files.length) continue;
+
+    // Each file is read once and checked against every component
+    // registered for this ecosystem.
+    for (const fpath of files) {
+      let content;
+      try { content = fs.readFileSync(fpath, "utf8"); }
+      catch { continue; }
+      const rel = path.relative(projectRoot, fpath);
+
+      for (const purl of purls) {
+        const target = registry.get(purl);
+        const result = results.get(purl);
+        for (const pat of target.patterns) {
+          if (pat.test(content)) {
+            if (!result.matchedFiles.includes(rel)) result.matchedFiles.push(rel);
+            result.found = true;
+            break;
+          }
+        }
       }
     }
   }
 
-  return {
-    searched: true,
-    found: matchedFiles.length > 0,
-    matchedFiles,
-    patternsUsed: patterns.map(p => p.source),
-    filesScanned: sourceFiles.length,
-    skippedNoSource: false,
-    parentScans: {},
-  };
+  return results;
 }
 
-// ---------------------------------------------------------------------------
-// Transitive parent import scan
-// ---------------------------------------------------------------------------
-
 /**
- * For transitive vulns where the direct import wasn't found, scans each
- * package in introducedBy for imports. If a parent is imported, the
- * vulnerable package is reachable through it.
+ * Builds the parentScans map for a single vulnerable component, from the
+ * already-batched scan results — no re-scanning. Mirrors the original
+ * same-ecosystem-only filter.
  *
- * @param {string[]} introducedBy     - Array of parent PURLs
- * @param {{ ecosystem: string }} purlInfo
- * @param {string} projectRoot
- * @returns {Object}  parentPurl → importScanResult
+ * @param {string[]} introducedBy
+ * @param {string}   pkgEcosystem  - canonical ecosystem of the vulnerable pkg
+ * @param {Map}      scanResults
+ * @returns {Object}
  */
-function scanParentImports(introducedBy, purlInfo, projectRoot) {
+function buildParentScans(introducedBy, pkgEcosystem, scanResults) {
   const results = {};
-  const eco = ECOSYSTEM_ALIASES[purlInfo.ecosystem] ?? purlInfo.ecosystem;
-
   for (const parentPurl of introducedBy) {
-    const parentInfo    = parsePurl(parentPurl);
-    const parentEco     = ECOSYSTEM_ALIASES[parentInfo.ecosystem] ?? parentInfo.ecosystem;
-    if (parentEco !== eco) continue;
-
-    const distName      = parentInfo.name;
-    const importName    = IMPORT_NAME_OVERRIDES[distName.toLowerCase()] ?? distName;
-    const parentScanInfo = { ...parentInfo, ecosystem: parentEco, name: importName };
-    results[parentPurl]  = scanImports(importName, parentScanInfo, projectRoot);
+    const parentInfo = parsePurl(parentPurl);
+    const parentEco  = ECOSYSTEM_ALIASES[parentInfo.ecosystem] ?? parentInfo.ecosystem;
+    if (parentEco !== pkgEcosystem) continue;
+    results[parentPurl] = scanResults.get(parentPurl) || nullImportScan();
   }
-
   return results;
 }
 
@@ -505,7 +594,7 @@ function getNumPaths(pkgPurl, findingsSummary) {
 }
 
 // ---------------------------------------------------------------------------
-// Core decision logic
+// Core decision logic — priority ladder (unchanged)
 // ---------------------------------------------------------------------------
 
 /**
@@ -682,6 +771,14 @@ function computeReachability(signals) {
 /**
  * Main entry point. Analyzes a UBEL JSON report.
  *
+ * Import scanning happens once for the whole report: every vulnerable
+ * component (and every candidate transitive parent) is registered up
+ * front, the project source tree is walked once per ecosystem involved,
+ * and each file is checked against every registered component in that
+ * ecosystem. The cached per-component results are then combined with
+ * each vulnerability's own signals (AV, malware-ID) and run through the
+ * unchanged priority ladder.
+ *
  * @param {Object}      report       - Parsed UBEL JSON report.
  * @param {string|null} projectRoot  - Optional path to project source root.
  * @returns {Array<{
@@ -699,6 +796,10 @@ export function analyzeReachability(report, projectRoot = null) {
   const inventoryIndex   = buildInventoryIndex(inventory);
   const allDependents    = collectAllDependents(dependencyGraph);
   const graphRoots       = new Set(Object.keys(dependencyGraph));
+
+  // ── Batched, single-pass import scan across every component up front ──
+  const scanRegistry = buildScanRegistry(report, inventoryIndex);
+  const scanResults   = runBatchedScan(scanRegistry, projectRoot);
 
   return vulnerabilities.map(vuln => {
     const vulnId         = vuln.id || "unknown";
@@ -718,37 +819,26 @@ export function analyzeReachability(report, projectRoot = null) {
     const numPaths       = getNumPaths(pkgPurl, findingsSummary);
     const isOrphanTool   = graphRoots.has(pkgPurl) && !allDependents.has(pkgPurl);
 
-    // Import scan — skip if non-library (already total), malware (already total),
-    // env-scoped (already total), or dev/test (already low)
     const runImportScan  = projectRoot !== null && !isNonLibrary
                            && !isMalware && !envScope
                            && scope !== "dev" && scope !== "test";
 
     let importScan;
     if (runImportScan) {
-      const rawEco     = purlInfo.ecosystem;
-      const eco        = ECOSYSTEM_ALIASES[rawEco] ?? rawEco;
-      const distName   = purlInfo.name;
-      const importName = IMPORT_NAME_OVERRIDES[distName.toLowerCase()] ?? distName;
-      const resolvedInfo = { ...purlInfo, ecosystem: eco, name: importName };
+      const cached = scanResults.get(pkgPurl) || nullImportScan();
+      const target = scanRegistry.get(pkgPurl); // { ecosystem, patterns } or null
 
-      importScan = scanImports(importName, resolvedInfo, projectRoot);
-
-      // Transitive: direct not found → check parents
+      // Transitive: direct not found → attach cached parent scans (no re-scan)
+      let parentScans = {};
       if (
-        importScan.searched && !importScan.found &&
-        !importScan.skippedNoSource && depth >= 1 && introducedBy.length
+        cached.searched && !cached.found && !cached.skippedNoSource &&
+        depth >= 1 && introducedBy.length && target
       ) {
-        const resolvedInfoForParent = { ...purlInfo, ecosystem: eco };
-        importScan.parentScans = scanParentImports(
-          introducedBy, resolvedInfoForParent, projectRoot
-        );
+        parentScans = buildParentScans(introducedBy, target.ecosystem, scanResults);
       }
+      importScan = { ...cached, parentScans };
     } else {
-      importScan = {
-        searched: false, found: false, matchedFiles: [],
-        patternsUsed: [], filesScanned: 0, skippedNoSource: false, parentScans: {},
-      };
+      importScan = nullImportScan();
     }
 
     const signals = {
