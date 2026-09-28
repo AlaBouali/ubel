@@ -21,18 +21,28 @@ import https from "https";
 // UBEL_WPVULNERABILITY_ENDPOINT in ./wpvulnerability.js).
 const CRTSH_BASE = (process.env.UBEL_CRTSH_ENDPOINT || "https://crt.sh").replace(/\/+$/, "");
 
+// Backoff ceiling so a large `retries` count never produces an
+// unreasonably long single wait between attempts.
+const MAX_DELAY_MS = 30_000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * GET /json?q=<domain> against crt.sh. Never throws — resolves to [] on any
- * network failure, non-200 response, or unparseable body. crt.sh itself
- * returns a genuinely empty response body (not "[]") when a domain has no
- * matching certificates at all, which JSON.parse would choke on — that's
- * treated the same as "zero results" here rather than surfaced as an error.
+ * A single GET /json?q=<domain> attempt against crt.sh. Never throws.
  *
- * @param {string} domain
- * @returns {Promise<object[]>} raw crt.sh entries — see extractSubdomains()
- *   for the fields actually used
+ * Resolves to:
+ *   { ok: true,  entries: object[] } — 200 with a parseable body, or
+ *                                       crt.sh's genuinely-empty "no
+ *                                       results" body (not "[]", just an
+ *                                       empty response, which JSON.parse
+ *                                       would choke on)
+ *   { ok: false }                    — anything worth retrying: a network
+ *                                       error, a timeout, or a non-200
+ *                                       status
  */
-export function queryCrtSh(domain, timeoutMs = 60_000) {
+function attemptCrtSh(domain, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (result) => {
@@ -53,21 +63,53 @@ export function queryCrtSh(domain, timeoutMs = 60_000) {
           if (data.length > MAX_SIZE) req.destroy(new Error("Response too large"));
         });
         res.on("end", () => {
-          if (res.statusCode !== 200) return done([]);
+          if (res.statusCode !== 200) return done({ ok: false });
           const trimmed = data.trim();
-          if (!trimmed) return done([]); // crt.sh's own "no results" shape
+          if (!trimmed) return done({ ok: true, entries: [] }); // crt.sh's own "no results" shape
           try {
             const parsed = JSON.parse(trimmed);
-            done(Array.isArray(parsed) ? parsed : []);
+            done({ ok: true, entries: Array.isArray(parsed) ? parsed : [] });
           } catch {
-            done([]);
+            // Unparseable body from a 200 response — treat as zero results
+            // rather than a transient failure, same as before; retrying
+            // won't fix a malformed body.
+            done({ ok: true, entries: [] });
           }
         });
       }
     );
     req.on("timeout", () => req.destroy(new Error("crt.sh request timed out")));
-    req.on("error", () => done([]));
+    req.on("error", () => done({ ok: false }));
   });
+}
+
+/**
+ * GET /json?q=<domain> against crt.sh, retrying on network-level failure
+ * (connection errors, per-attempt timeouts, non-200 responses) with
+ * exponential backoff between attempts. Never throws — resolves to []
+ * once every attempt is exhausted. A genuinely empty result set (crt.sh's
+ * "no certificates found" response) is not a failure and is returned
+ * as-is on the first attempt, no retry involved.
+ *
+ * @param {string} domain
+ * @param {number} [timeoutMs=60_000] per-attempt network timeout
+ * @param {number} [retries=5] retries after the first attempt — so up to
+ *   `retries + 1` requests total before giving up
+ * @param {number} [baseDelayMs=1_000] backoff base; the wait before retry
+ *   N is `min(baseDelayMs * 2^(N-1), MAX_DELAY_MS)` ms
+ * @returns {Promise<object[]>} raw crt.sh entries — see extractSubdomains()
+ *   for the fields actually used
+ */
+export async function queryCrtSh(domain, timeoutMs = 60_000, retries = 5, baseDelayMs = 1_000) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const result = await attemptCrtSh(domain, timeoutMs);
+    if (result.ok) return result.entries;
+    if (attempt < retries) {
+      const delay = Math.min(baseDelayMs * 2 ** attempt, MAX_DELAY_MS);
+      await sleep(delay);
+    }
+  }
+  return [];
 }
 
 // A reasonably strict but not pedantic hostname shape — just enough to

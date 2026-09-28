@@ -222,6 +222,23 @@ Options:
                               than N matches exist, e.g. "5:high".
   --no-secrets                Skip the client-side JavaScript secrets crawl
                               (see ubel-url --help for what this covers).
+  --cookie <value>           Send this Cookie header on every
+                              fingerprinting request, e.g. --cookie
+                              "session=abc123". Useful for fingerprinting
+                              behind a login. Sent only on the
+                              fingerprinting requests (initial probe +
+                              directory-list checks) for each IP:port and
+                              subdomain target - the port scan, the secrets
+                              crawl and the misconfiguration probes stay
+                              unauthenticated, since some of those checks
+                              (CORS, TRACE) rely on a credential-free
+                              baseline response.
+  --header <"Name: Value">   Send an additional custom header on every
+                              fingerprinting request. Repeatable, e.g.
+                              --header "X-Api-Key: xyz" --header
+                              "Accept-Language: en". Same scope as --cookie
+                              above; a header here can override the default
+                              User-Agent or a Cookie set via --cookie.
   --verbose                   Print per-hostname/per-IP/per-port progress.
   --quiet                     Suppress the console summary (reports still write).
   --help, -h                  Show this help.
@@ -290,6 +307,8 @@ function parseArgs(argv) {
     minSeverity: 'unknown',
     failOn: 'critical',
     scanSecrets: true,
+    cookie: null,
+    headers: {},
     verbose: false,
     quiet: false,
   };
@@ -330,6 +349,23 @@ function parseArgs(argv) {
     else if (a === '--min-severity') args.minSeverity = argv[++i];
     else if (a === '--fail-on') args.failOn = argv[++i];
     else if (a === '--no-secrets') args.scanSecrets = false;
+    else if (a === '--cookie') {
+      const val = argv[++i];
+      if (!val) { console.error('--cookie requires a value\n'); console.log(HELP); process.exit(2); }
+      args.cookie = val;
+    } else if (a === '--header') {
+      const val = argv[++i];
+      if (!val) { console.error('--header requires "Name: Value"\n'); console.log(HELP); process.exit(2); }
+      const idx = val.indexOf(':');
+      if (idx === -1) {
+        console.error(`--header must be "Name: Value" (got ${JSON.stringify(val)})\n`);
+        process.exit(2);
+      }
+      const name = val.slice(0, idx).trim();
+      const value = val.slice(idx + 1).trim();
+      if (!name) { console.error(`--header must be "Name: Value" (got ${JSON.stringify(val)})\n`); process.exit(2); }
+      args.headers[name] = value;
+    }
     else if (a === '--verbose') args.verbose = true;
     else if (a === '--quiet') args.quiet = true;
     else if (a.startsWith('--')) {
@@ -679,6 +715,8 @@ async function main() {
     allowPrivate: args.allowPrivate,
     concurrency: args.concurrency,
     scanSecrets: args.scanSecrets,
+    cookie: args.cookie,
+    headers: args.headers,
     log,
   });
 
@@ -709,6 +747,10 @@ async function main() {
     })),
     deadHostnames: discovery.deadHostnames.map((r) => ({ hostname: r.target, error: r.error })),
     allowPrivate: args.allowPrivate,
+    // Deliberately not the cookie value or header values themselves - those can be
+    // session tokens/API keys and have no business landing in a written report.
+    usedCookie: Boolean(args.cookie),
+    customHeaderNames: Object.keys(args.headers),
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,

@@ -39,13 +39,31 @@
 //     the one place in this file that queries DNS instead of HTTP
 //   - TLS/certificate weaknesses: expiry, trust, hostname match, weak
 //     protocol/cipher, explicit legacy-protocol (TLS 1.0/1.1) downgrade
-//     acceptance — and outright absence of a working HTTPS listener on a
-//     host that isn't serving TLS at all — all via Node's own stdlib
-//     `tls` module. No external tool (nmap, testssl.sh, openssl CLI) and
-//     no third-party TLS library is used or required; Node's TLS support
-//     is backed by the OpenSSL build already bundled with the runtime,
-//     the same way every other HTTPS request in this codebase already
-//     works.
+//     acceptance, explicit weak-cipher-suite (RC4/3DES/NULL/EXPORT)
+//     acceptance, weak classic-DH key-exchange parameters (Logjam-sized
+//     groups), absent TLS 1.3 support, and missing OCSP stapling — and
+//     outright absence of a working HTTPS listener on a host that isn't
+//     serving TLS at all — all via Node's own stdlib `tls` module. No
+//     external tool (nmap, testssl.sh, openssl CLI) and no third-party
+//     TLS library is used or required; Node's TLS support is backed by
+//     the OpenSSL build already bundled with the runtime, the same way
+//     every other HTTPS request in this codebase already works.
+//
+//     Deliberately NOT implemented here, even though a full sslyze-style
+//     scan reports on them: Heartbleed, ROBOT, and CCS-injection detection
+//     all require hand-crafting malformed/out-of-order records at the raw
+//     TLS record layer — at that point the "check" and a working proof-of-
+//     concept exploit for the CVE are the same code, which this project
+//     doesn't write regardless of intent. TLS compression (CRIME) can't be
+//     tested from here either, for an unrelated reason: the OpenSSL build
+//     Node ships with has compression compiled out, so this client can
+//     never offer it to negotiate against a peer in the first place.
+//     Likewise SSLv2/SSLv3 acceptance isn't probed: those protocols are
+//     compiled out of the same OpenSSL build, so `tls.connect` cannot ask
+//     for them at all (unlike TLS 1.0/1.1, which remain requestable via
+//     minVersion/maxVersion even though disabled by default). Any of these
+//     is better handled by pointing a dedicated tool (sslyze itself,
+//     testssl.sh) at the same host rather than reimplementing it here.
 //
 // Each HTTP-based check fetches one specific, well-known path with
 // maxRedirects: 0 — a redirect away from e.g. /.env means the path isn't
@@ -696,6 +714,19 @@ async function checkEmailAuth(hostname, target, timeout, findings, errors) {
 
 const WEAK_CIPHER_PATTERNS = [/\bRC4\b/i, /\bDES\b/i, /\b3DES\b/i, /\bMD5\b/i, /\bNULL\b/i, /EXPORT/i, /aNULL/i, /eNULL/i, /\banon\b/i];
 
+// Cipher families probed by explicit request in addition to the passive
+// WEAK_CIPHER_PATTERNS check on whatever the server negotiates by default
+// (see the "Explicit weak-cipher-suite probing" section of checkTls below
+// for why both are needed). `@SECLEVEL=0` only lowers *this client's* local
+// OpenSSL policy so it's willing to offer the suite at all — it has no
+// bearing on what the server does with it.
+const WEAK_CIPHER_SUITE_PROBES = [
+  { label: "RC4", ciphers: "RC4:@SECLEVEL=0" },
+  { label: "DES/3DES", ciphers: "DES-CBC-SHA:DES-CBC3-SHA:EDH-RSA-DES-CBC3-SHA:@SECLEVEL=0" },
+  { label: "NULL/anonymous", ciphers: "eNULL:aNULL:@SECLEVEL=0" },
+  { label: "EXPORT-grade", ciphers: "EXPORT:@SECLEVEL=0" },
+];
+
 const TLS_TITLES = {
   "tls-cert-expired": "TLS certificate expired",
   "tls-cert-expiring-soon": "TLS certificate expiring soon",
@@ -705,6 +736,10 @@ const TLS_TITLES = {
   "tls-weak-protocol-negotiated": "Weak TLS/SSL protocol negotiated by default",
   "tls-weak-cipher": "Weak TLS cipher suite negotiated",
   "tls-legacy-protocol-supported": "Legacy TLS protocol still accepted",
+  "tls-weak-cipher-suite-accepted": "Weak cipher suite accepted on explicit request",
+  "tls-weak-dh-params": "Weak Diffie-Hellman key-exchange parameters",
+  "tls-1.3-not-supported": "TLS 1.3 not supported",
+  "tls-ocsp-stapling-missing": "OCSP stapling not enabled",
   "tls-no-https": "No working HTTPS listener",
   "tls-broken": "TLS handshake fails on an HTTPS URL",
 };
@@ -762,7 +797,50 @@ function tlsConnectOnce(hostname, ip, port, tlsOpts, timeoutMs) {
         protocol: socket.getProtocol(),
         cipher: socket.getCipher(),
         cert: socket.getPeerCertificate(false),
+        // { type: 'DH', size } or { type: 'ECDH', name, size } for the
+        // (EC)DHE key exchange this handshake actually used — undefined on
+        // older Node, hence the typeof guard.
+        ephemeralKeyInfo: (typeof socket.getEphemeralKeyInfo === "function" && socket.getEphemeralKeyInfo()) || null,
       });
+    });
+    socket.once("error", (err) => done(reject, err));
+    socket.once("timeout", () => done(reject, new Error("TLS connection timed out")));
+  });
+}
+
+/**
+ * Returns true if the server stapled an OCSP response during the
+ * handshake, false if the handshake completed without one. Node emits
+ * 'OCSPResponse' with a Buffer if the server sent a status response, or
+ * with `null` if it didn't — as documented, that event fires as part of
+ * the same handshake that leads to 'secureConnect', so in practice it has
+ * already arrived by the time 'secureConnect' does. The short timer
+ * started there is a safety net for that ordering, not the primary
+ * signal: it assumes "not stapled" if 'OCSPResponse' never arrives at all,
+ * which (same caveat as everywhere else in this file) can't be told apart
+ * from a boundary case in this specific probe rather than the server
+ * genuinely not stapling.
+ */
+function checkOcspStapling(hostname, ip, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const socket = tls.connect({
+      host: ip || hostname,
+      port,
+      servername: hostname,
+      timeout: timeoutMs,
+      rejectUnauthorized: false,
+      requestOCSP: true,
+    });
+    const done = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      fn(val);
+    };
+    socket.once("OCSPResponse", (response) => done(resolve, response != null));
+    socket.once("secureConnect", () => {
+      setTimeout(() => done(resolve, false), 300);
     });
     socket.once("error", (err) => done(reject, err));
     socket.once("timeout", () => done(reject, new Error("TLS connection timed out")));
@@ -919,6 +997,24 @@ async function checkTls(asset, timeout) {
     );
   }
 
+  // ── Ephemeral key-exchange strength (Logjam-sized classic DH) ──────────
+  // For classic (non-elliptic) DHE the group size is entirely server-
+  // controlled (a custom dhparam file), so a small modulus here reflects
+  // a server misconfiguration regardless of what this client offered.
+  // ECDHE curve choice, by contrast, is effectively fixed by what this
+  // runtime's OpenSSL build offers (X25519/P-256/P-384/P-521, all strong),
+  // so there's nothing weak to flag there.
+  const eph = primary.ephemeralKeyInfo;
+  if (eph && eph.type === "DH" && Number.isFinite(eph.size) && eph.size < 2048) {
+    findings.push(
+      mkTlsFinding(
+        "tls-weak-dh-params", "high", target, hostname, port,
+        `The server negotiated a classic Diffie-Hellman key exchange using a ${eph.size}-bit group, below the 2048-bit minimum current guidance requires. Groups this small are within reach of precomputation attacks against common small groups (the Logjam attack).`,
+        "Configure the server with a 2048-bit or larger DH group, or simpler: drop classic DHE cipher suites from the configured list entirely and rely on ECDHE, which this connection already shows the server supports."
+      )
+    );
+  }
+
   // ── Explicit legacy-protocol downgrade probing ─────────────────────────
   // Even when the server prefers something modern by default, it may
   // still accept a connection that explicitly requests TLS 1.0/1.1 — worth
@@ -942,6 +1038,67 @@ async function checkTls(asset, timeout) {
     } catch {
       /* refused (good) or untestable here — nothing to report either way */
     }
+  }
+
+  // ── Explicit weak-cipher-suite probing ─────────────────────────────────
+  // Same rationale as the protocol-downgrade probe just above, but for
+  // cipher suites: a server that negotiates something modern by default
+  // (so tls-weak-cipher above found nothing) can still be misconfigured to
+  // *accept* RC4/3DES/NULL/EXPORT-grade suites when a client asks for one
+  // explicitly — exactly the fallback a downgrade attacker would try. And
+  // as with that probe, a failed connection here is inconclusive (a
+  // correct server refusal and this client failing to complete the
+  // handshake for its own reasons look identical from here) and is
+  // silently ignored; only a successful handshake is reported.
+  for (const probe of WEAK_CIPHER_SUITE_PROBES) {
+    try {
+      const r = await tlsConnectOnce(
+        hostname, ip, port,
+        { ciphers: probe.ciphers, minVersion: "TLSv1", maxVersion: "TLSv1.2" },
+        timeoutMs
+      );
+      const negotiated = (r.cipher && (r.cipher.standardName || r.cipher.name)) || probe.label;
+      findings.push(
+        mkTlsFinding(
+          "tls-weak-cipher-suite-accepted", "medium", target, hostname, port,
+          `The server completed a handshake when this scan explicitly requested only ${probe.label} cipher suites (negotiated: ${negotiated}). A server that doesn't offer these by default but still accepts them on request gives a downgrade attacker a working fallback path.`,
+          `Remove ${probe.label} cipher suites from the server's configured cipher list entirely — don't rely on the server's own preference order to avoid them, since a downgrading client can request them explicitly regardless of preference order.`
+        )
+      );
+    } catch {
+      /* refused (good) or untestable here — nothing to report either way */
+    }
+  }
+
+  // ── TLS 1.3 availability ────────────────────────────────────────────────
+  // Informational rather than a vulnerability: not supporting TLS 1.3
+  // isn't itself a flaw, but every TLS 1.3 cipher suite is forward-secret
+  // by design and the handshake needs one fewer round trip than TLS 1.2 —
+  // worth surfacing as a modernization item. A failed probe here is far
+  // more likely to mean "not supported" than a network blip, since
+  // `primary` above already proved this exact host:port answers TLS.
+  try {
+    await tlsConnectOnce(hostname, ip, port, { minVersion: "TLSv1.3", maxVersion: "TLSv1.3" }, timeoutMs);
+  } catch {
+    findings.push(
+      mkTlsFinding(
+        "tls-1.3-not-supported", "low", target, hostname, port,
+        "The server does not appear to support TLS 1.3. Every TLS 1.3 cipher suite provides forward secrecy, and its handshake completes in one fewer round trip than TLS 1.2.",
+        "Enable TLS 1.3 in the server/load balancer TLS configuration alongside TLS 1.2 — current web server and load balancer software supports it as a configuration flag with no certificate or application changes required."
+      )
+    );
+  }
+
+  // ── OCSP stapling ────────────────────────────────────────────────────────
+  const stapled = await checkOcspStapling(hostname, ip, port, timeoutMs).catch(() => null);
+  if (stapled === false) {
+    findings.push(
+      mkTlsFinding(
+        "tls-ocsp-stapling-missing", "low", target, hostname, port,
+        "The server did not provide a stapled OCSP response during the TLS handshake. Without stapling, clients that check certificate revocation status make a separate live request to the CA's OCSP responder on every visit — slower for the user, and an availability dependency on that responder being reachable.",
+        "Enable OCSP stapling in the web server/load balancer TLS configuration (e.g. `ssl_stapling on;` in nginx, `SSLUseStapling On` in Apache) so the server includes a signed, cached revocation status alongside its certificate."
+      )
+    );
   }
 
   return { findings, httpsAvailable: true };

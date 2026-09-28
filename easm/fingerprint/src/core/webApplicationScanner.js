@@ -40,6 +40,8 @@ export class WebApplicationScanner {
     const { userAgent = null, startFromRoot = true, cookie = null, headers = {}, timeout = 20, enableDast = false } = opts;
     const us = userAgent || randomUserAgent();
     const hed = { "User-Agent": us };
+    if (cookie) hed.Cookie = cookie;
+    Object.assign(hed, headers);
 
     let u;
     if (!domain.includes("://")) {
@@ -68,9 +70,6 @@ export class WebApplicationScanner {
     } else {
       port = parseInt(u.split("://")[1].split("/")[0].split(":")[1], 10) || 443;
     }
-
-    if (cookie) hed.Cookie = cookie;
-    Object.assign(hed, headers);
 
     let responseText = "";
     let responseHeaders = new Headers();

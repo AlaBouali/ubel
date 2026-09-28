@@ -4,6 +4,8 @@ easm/fingerprint — vendored detection engine
 Vendoring note
 ================================================================================
 
+This was ported from a private python scanner I made by hand called "bane".
+
 Everything under `src/` in this directory is vendored as-is from a
 stdlib-only, zero-dependency Node.js port of a Python service/CMS/framework
 fingerprinting toolkit (see `README.md` in this directory for the original

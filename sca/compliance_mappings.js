@@ -553,6 +553,10 @@ const WEB_MISCONFIG_CATEGORY = {
   'tls-cert-not-yet-valid': ['cryptography'],
   'tls-cert-untrusted': ['cryptography'],
   'tls-hostname-mismatch': ['cryptography'],
+  'tls-weak-cipher-suite-accepted': ['cryptography'],
+  'tls-weak-dh-params': ['cryptography'],
+  'tls-1.3-not-supported': ['cryptography'],
+  'tls-ocsp-stapling-missing': ['cryptography'],
 
   // Security headers — HSTS is a transport-encryption control; the rest are
   // general security-misconfiguration, same as SAST's

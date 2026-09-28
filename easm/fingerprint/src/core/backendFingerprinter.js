@@ -103,6 +103,8 @@ export class BackendFingerprinter {
       } else if (key === "payara") {
         serverInfo.push({ product: "payara", vendor: "payara", version: serverTokens[2] });
         break;
+      } else if (key === "jetty") {
+        serverInfo.push({ product: "jetty", vendor: "eclipse", version });  
       } else if (NEXT_TOKEN_VERSION.has(key)) {
         const v = (serverTokens[i + 1] || "").replace(/v/gi, "");
         const meta = SERVER_TOKEN_MAP[key];

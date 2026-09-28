@@ -119,8 +119,10 @@ function detectWpKind(component, cpeId) {
  *   DomainScanner's `skipVerification` — see the safety note in
  *   ../fingerprint/NOTICE.md before ever setting this true.
  * @param {Map<string, object>} inventoryByKey  keyed by buildInventoryKey()
+ * @param {{cookie?: string, headers?: object}} [reqOpts]  forwarded verbatim to
+ *   DomainScanner.scan() as its own opts — see the CLI's --cookie/--header.
  */
-async function fingerprintTarget(target, allowPrivate, inventoryByKey) {
+async function fingerprintTarget(target, allowPrivate, inventoryByKey, reqOpts = {}) {
   const assetResult = {
     target,
     status: "scanned", // "scanned" | "skipped" | "error"
@@ -131,7 +133,7 @@ async function fingerprintTarget(target, allowPrivate, inventoryByKey) {
 
   let result;
   try {
-    [result] = await DomainScanner.scan(target, allowPrivate);
+    [result] = await DomainScanner.scan(target, allowPrivate, reqOpts);
   } catch (err) {
     assetResult.status = "error";
     assetResult.error = err.message;
@@ -265,6 +267,13 @@ async function lookupWpItem(item, log) {
  * @param {boolean}  [opts.scanSecrets]  run the JS secrets crawl (default true)
  * @param {boolean}  [opts.scanMisconfigs]  run the fixed-set misconfiguration probes (default true)
  * @param {number}   [opts.misconfigTimeout]  seconds per misconfiguration probe (default 8)
+ * @param {string}   [opts.cookie]  sent as the Cookie header on every fingerprinting
+ *   request (the initial scheme probe and every directory-list request) - lets a scan
+ *   reach content that only renders for an authenticated session. NOT sent on the
+ *   separate secrets-crawl or misconfiguration-probe requests, which stay unauthenticated
+ *   by design (e.g. the CORS/TRACE checks specifically need a credential-free baseline).
+ * @param {object}   [opts.headers]  additional custom headers, same scope as opts.cookie
+ *   above and able to override the default User-Agent or a Cookie set via opts.cookie.
  *
  * @returns {Promise<{assets: object[], inventory: object[], vulnerabilities: object[], misconfigurations: object}>}
  */
@@ -276,6 +285,8 @@ export async function scanTargets(targets, opts = {}) {
     scanSecrets = true,
     scanMisconfigs = true,
     misconfigTimeout = 8,
+    cookie = null,
+    headers = {},
   } = opts;
 
   const cleanTargets = [...new Set(targets.map((t) => t.trim()).filter(Boolean))];
@@ -319,7 +330,7 @@ export async function scanTargets(targets, opts = {}) {
 
   log(`[*] Fingerprinting ${liveTargets.length} resolvable target(s)...`);
   const assetResults = await mapLimit(liveTargets, concurrency, (target) =>
-    fingerprintTarget(target, allowPrivate, inventoryByKey)
+    fingerprintTarget(target, allowPrivate, inventoryByKey, { cookie, headers })
   );
   const scannedAssets = assetResults.map((r, i) => {
     const asset = r.ok
