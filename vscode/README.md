@@ -83,6 +83,8 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 | C#/.NET | `packages.lock.json`, `obj/project.assets.json` |
 | Java | `pom.xml` resolved dependencies |
 | Ruby | `Gemfile.lock` |
+| Swift | `Package.resolved` (SwiftPM v1/v2/v3, incl. Xcode workspaces), `.build/workspace-state.json` fallback, `Cartfile.resolved` (Carthage) |
+| Flutter / Dart | `pubspec.lock`, or `.dart_tool/package_config.json` when no lockfile is committed |
 
 **Report location**
 
@@ -273,6 +275,8 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 | Go | `.go` | `"<module-path>"` |
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
 | Ruby | `.rb` | `require '<gem>'` |
+| Flutter / Dart | `.dart` | `import 'package:<pkg>/…'`, `export 'package:<pkg>/…'` |
+| Swift | `.swift` `.m` `.mm` `.h` | `import <Module>`, `@import <Module>`, `#import <Module/…>` |
 
 Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field.
 
@@ -405,6 +409,8 @@ Detected by reading the system package database directly.
 | **C#/.NET** | NuGet | `packages.lock.json` / `obj/project.assets.json` |
 | **Java/Kotlin** | Maven | `pom.xml` resolved dependencies |
 | **Ruby** | Bundler | `Gemfile.lock` |
+| **Swift** | SwiftPM, Carthage | `Package.resolved` / `.build/workspace-state.json` / `Cartfile.resolved` |
+| **Flutter/Dart** | pub | `pubspec.lock` / `.dart_tool/package_config.json` |
 
 ---
 

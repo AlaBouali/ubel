@@ -590,6 +590,8 @@ Source files are scanned for ecosystem-appropriate import patterns:
 | Go | `.go` | `"<module-path>"` |
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
 | Ruby | `.rb` | `require '<gem>'` |
+| Flutter / Dart | `.dart` | `import 'package:<pkg>/…'`, `export 'package:<pkg>/…'` |
+| Swift | `.swift` `.m` `.mm` `.h` | `import <Module>`, `@import <Module>`, `#import <Module/…>` |
 
 
 ### Output fields

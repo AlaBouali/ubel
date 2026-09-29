@@ -584,7 +584,7 @@ vulnerability pipeline and two-pass malware pipeline, JS/TS-aware chunking.
 **Reachability analysis:** Full import-graph reachability — a vulnerable
 package is downgraded in priority if nothing in your code path actually
 imports the vulnerable module, and orphaned/unused dependencies get
-flagged separately. This is one of eight ecosystems with this capability
+flagged separately. This is one of ten ecosystems with this capability
 (see the Reachability Analysis note under Cross-Cutting Capabilities).
 
 **Editor integration:** The VS Code/Cursor/VSCodium extension runs
@@ -665,7 +665,7 @@ gaps in UBEL's own implementation:
 **SAST / Malware SAST:** Full coverage, same three-pass/two-pass pipelines.
 
 **Reachability analysis:** Fully covered, tracking `.py` files against the
-resolved dependency graph — one of eight ecosystems with this capability.
+resolved dependency graph — one of ten ecosystems with this capability.
 
 ---
 
@@ -809,7 +809,9 @@ Swift package is reported as `prod`.
 families in the SAST or malware catalogs. `.swift` files are still included
 in Secrets detection.
 
-**Reachability analysis:** Covered.
+**Reachability analysis:** Covered — `.swift` files (plus `.m`/`.mm`/`.h`) are
+scanned for `import <Module>` / `@import` / `#import <Module/…>` references,
+with repository-to-module mapping (e.g. `swift-log` → `Logging`).
 
 **License compliance:** `Package.resolved` and `Cartfile.resolved` don't
 record licenses, so every Swift package is inventoried with license
@@ -855,7 +857,10 @@ stop the OSV lookup.
 **SAST / Malware SAST:** Not covered — Dart isn't one of the language
 families in the SAST or malware catalogs.
 
-**Reachability analysis:** Covered.
+**Reachability analysis:** Covered — `.dart` files are scanned for
+`import`/`export 'package:<name>/…'` references, including conditional-import
+continuation lines. A federated platform implementation (e.g.
+`url_launcher_android`) is also matched via its app-facing package.
 
 **License compliance:** `pubspec.lock` doesn't record licenses, so every
 Flutter/Dart package is inventoried with license `unknown`.
@@ -988,7 +993,7 @@ feeding the same classification pipeline as every other ecosystem.
 
 ## Cross-Cutting Capabilities
 
-### Reachability Analysis — 8 ecosystems via import-graph confirmation
+### Reachability Analysis — 10 ecosystems via import-graph confirmation
 
 Every vulnerability is annotated with a reachability verdict derived from
 dependency depth, scope (prod/dev/env), attack vector, orphan-tool
@@ -997,8 +1002,11 @@ scanning that confirms whether the vulnerable module is ever referenced.
 The import-scan half of this is implemented for **Python (`.py`), Node.js
 (`.js`/`.ts`/`.mjs`/`.cjs`/`.jsx`/`.tsx`), Maven/Java+Kotlin (`.java`,
 `.kt`, `.groovy`, `.scala`), NuGet/C# (`.cs`, `.vb`, `.fs`, `.fsx`), PHP
-(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — 10
-of the ten SCA ecosystems. A known distribution-name-to-
+(`.php`), Go (`.go`), Cargo/Rust (`.rs`), RubyGems/Ruby (`.rb`), Flutter/Dart
+(`.dart`), and Swift (`.swift`, plus `.m`/`.mm`/`.h` for Objective-C interop)** —
+every SCA ecosystem except C. Dart matches `import`/`export 'package:<name>/…'`;
+Swift maps each package's repository to its module names (e.g. `swift-log` →
+`Logging`) and matches `import <Module>`, `@import`, and `#import <Module/…>`. A known distribution-name-to-
 import-name override table (e.g. `beautifulsoup4` → `bs4`,
 `pyyaml` → `yaml`, `opencv-python` → `cv2`) keeps the import match accurate
 even where the published package name and the name you actually import
@@ -1080,7 +1088,7 @@ not treated as an afterthought bolted onto the dependency scanner.
   and SBOM output.
 - **HTML reports** — force-directed dependency graphs, inventory modals,
   and reachability badges/filters wherever reachability data exists in the
-  report (the eight ecosystems above).
+  report (the ten ecosystems above).
 - **JSON** — the canonical, complete report every other format is derived
   from, including effective-configuration tracing (what policy/thresholds
   were actually in effect for that specific scan run).
