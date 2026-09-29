@@ -10,7 +10,9 @@
  *   - inventory          → depth, scope, introduced_by, pkg type
  *   - findings_summary   → affected_dependency_sequences (shortest path)
  *   - vulnerabilities    → severity_vector (AV extraction)
- *   - project source     → import/require scan (optional, 8 ecosystems)
+ *   - project source     → import/require scan (optional, 10 ecosystems:
+ *                          python, npm, maven, nuget, php, go, cargo, rubygems,
+ *                          dart/flutter (pub), swift (SwiftPM + Carthage))
  *
  * Import scanning is batched: every source file under projectRoot is read
  * exactly once. Files are bucketed by ecosystem (via extension), and each
@@ -63,6 +65,10 @@ const ECOSYSTEM_EXTENSIONS = {
   go:       new Set([".go"]),
   cargo:    new Set([".rs"]),
   rubygems: new Set([".rb"]),
+  dart:     new Set([".dart"]),
+  // Objective-C sources are included because Carthage/SwiftPM frameworks are
+  // routinely consumed from ObjC via `@import Module;` / `#import <Module/…>`.
+  swift:    new Set([".swift", ".m", ".mm", ".h"]),
 };
 
 /** PURL ecosystem type → canonical key used in ECOSYSTEM_EXTENSIONS. */
@@ -85,7 +91,80 @@ const ECOSYSTEM_ALIASES = {
   gem:         "rubygems",
   rubygems:    "rubygems",
   ruby:        "rubygems",
+  pub:         "dart",      // flutter_runner.js emits pkg:pub/… (ecosystem label "dart")
+  dart:        "dart",
+  flutter:     "dart",
+  swift:       "swift",     // swift_runner.js emits pkg:swift/<host>/<owner>/<repo>
 };
+
+/**
+ * Ecosystems whose import name is NOT derived from IMPORT_NAME_OVERRIDES.
+ * That table is keyed by bare package name and holds PyPI/npm/Ruby/.NET
+ * distribution→module mappings; applying it here would corrupt lookups
+ * (e.g. the pub.dev package `protobuf` would be rewritten to the Python
+ * import name `google.protobuf`). Dart imports use the package name verbatim,
+ * and Swift resolves module names through SWIFT_MODULE_OVERRIDES instead.
+ */
+const NO_NAME_OVERRIDE_ECOSYSTEMS = new Set(["dart", "swift"]);
+
+/**
+ * Swift: repository name (lowercase, no ".git") → module names it exports.
+ *
+ * A SwiftPM package is identified by its repository, but source files import
+ * *modules* (library products), and the two rarely match (swift-log → Logging).
+ * When an entry exists it is used INSTEAD of the name heuristics in
+ * swiftModuleCandidates(). A trailing "*" means "any module with this prefix"
+ * (e.g. "Firebase*" → FirebaseCore, FirebaseAuth, …). Matching is
+ * case-insensitive. This is a seed list of packages whose module names can't
+ * be derived from the repo name — anything not listed falls back to the
+ * heuristics.
+ */
+const SWIFT_MODULE_OVERRIDES = {
+  "swift-nio":              ["NIO*"],
+  "swift-log":              ["Logging"],
+  "swift-metrics":          ["Metrics", "CoreMetrics"],
+  "swift-crypto":           ["Crypto", "_CryptoExtras"],
+  "swift-certificates":     ["X509"],
+  "swift-collections":      ["Collections", "DequeModule", "OrderedCollections",
+                             "HeapModule", "BitCollections", "HashTreeCollections"],
+  "swift-numerics":         ["Numerics", "RealModule", "ComplexModule"],
+  "swift-system":           ["SystemPackage"],
+  "swift-http-types":       ["HTTPTypes", "HTTPTypesFoundation"],
+  "swift-foundation":       ["FoundationEssentials", "FoundationInternationalization"],
+  "swift-syntax":           ["SwiftSyntax*", "SwiftParser*", "SwiftDiagnostics",
+                             "SwiftOperators", "SwiftBasicFormat", "SwiftCompilerPlugin"],
+  "grpc-swift":             ["GRPC*"],
+  "firebase-ios-sdk":       ["Firebase*"],
+  "rxswift":                ["RxSwift", "RxCocoa", "RxRelay", "RxBlocking", "RxTest"],
+  "moya":                   ["Moya", "RxMoya", "ReactiveMoya", "CombineMoya"],
+  "sentry-cocoa":           ["Sentry*"],
+  "stripe-ios":             ["Stripe*"],
+  "facebook-ios-sdk":       ["FBSDK*", "Facebook*"],
+  "googlesignin-ios":       ["GoogleSignIn*"],
+  "charts":                 ["Charts", "DGCharts"],
+  "ohhttpstubs":            ["OHHTTPStubs", "OHHTTPStubsSwift"],
+};
+
+/**
+ * Swift: heuristic module names that would collide with modules shipped in the
+ * toolchain / SDK. `import Foundation` must never count as evidence for a
+ * package that merely has "foundation" in its repo name.
+ */
+const SWIFT_SYSTEM_MODULES = new Set([
+  "swift", "foundation", "dispatch", "darwin", "glibc", "os", "uikit", "appkit",
+  "swiftui", "combine", "xctest", "coredata", "cryptokit", "coregraphics",
+]);
+
+/**
+ * Dart/Flutter: federated-plugin platform packages (url_launcher_android,
+ * path_provider_foundation, …). Apps never import these directly — the
+ * endorsed implementation is linked in automatically by the app-facing
+ * package — so without this an installed, actively-running platform
+ * implementation would always be reported "imported nowhere". The capture
+ * group is the app-facing package whose import is treated as evidence.
+ */
+const DART_PLATFORM_IMPL_RE =
+  /^(.+?)_(?:android(?:_camerax)?|ios|linux|macos|windows|web|for_web|darwin|foundation|avfoundation|storekit|platform_interface)$/;
 
 /**
  * Distribution package name → actual import name.
@@ -135,6 +214,11 @@ const SKIP_DIRS = new Set([
   "node_modules", ".git", "__pycache__", ".tox", "venv", ".venv",
   "env", ".env", "dist", "build", "target", "vendor",
   ".idea", ".vscode", "coverage", ".mypy_cache", ".pytest_cache",
+  // Dart / Flutter: generated tool state and the pub cache
+  ".dart_tool", ".pub-cache", ".symlinks",
+  // Swift / Apple: SwiftPM checkouts (.build/checkouts holds every dependency's
+  // own source, which would make each package "import itself"), Xcode & Carthage
+  ".build", ".swiftpm", "Pods", "Carthage", "DerivedData", ".gradle",
 ]);
 
 /** Max file size to scan (bytes). */
@@ -307,7 +391,86 @@ function buildImportPatterns(purlInfo) {
     );
   }
 
+  else if (eco === "dart") {
+    // Dart imports are always `package:<pubspec name>/…` — no name mapping.
+    // A federated platform implementation is also evidenced by its
+    // app-facing package (see DART_PLATFORM_IMPL_RE).
+    const names = [name];
+    const impl  = name.match(DART_PLATFORM_IMPL_RE);
+    if (impl) names.push(impl[1]);
+
+    for (const n of names) {
+      const nEsc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      patterns.push(
+        // import 'package:x/x.dart' [as y | show … | hide …];  export 'package:x/…';
+        new RegExp(`^\\s*(?:import|export)\\s+['"]package:${nEsc}/`, "m"),
+        // conditional-import continuation lines:  if (dart.library.io) 'package:x/io.dart'
+        new RegExp(`^\\s*if\\s*\\([^)]*\\)\\s*['"]package:${nEsc}/`, "m"),
+      );
+    }
+  }
+
+  else if (eco === "swift") {
+    const mods = swiftModuleCandidates(name);
+    if (mods.length) {
+      const alt = mods.map(swiftModuleRegexSource).join("|");
+      patterns.push(
+        // import Mod · @testable import Mod · @_exported import Mod
+        // public/package/internal import Mod (Swift 6) · import struct Mod.Type · import Mod.Sub
+        new RegExp(
+          `^\\s*(?:@\\w+(?:\\([^)]*\\))?\\s+)*`
+          + `(?:(?:public|package|internal|fileprivate|private|open)\\s+)?`
+          + `import\\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\\s+)?`
+          + `(?:${alt})(?![A-Za-z0-9_])`,
+          "mi",
+        ),
+        // Objective-C:  @import Mod;   #import <Mod/Header.h>   #include "Mod/Header.h"
+        new RegExp(`^\\s*@import\\s+(?:${alt})(?![A-Za-z0-9_])`, "mi"),
+        new RegExp(`^\\s*#\\s*(?:import|include)\\s+[<"](?:${alt})/`, "mi"),
+      );
+    }
+  }
+
   return patterns;
+}
+
+/**
+ * Swift: the module names a package's source files would import.
+ *
+ * SWIFT_MODULE_OVERRIDES wins outright when it has the repo. Otherwise the
+ * candidates are derived from the repository name — the separators dropped
+ * (swift-argument-parser → "swiftargumentparser"), the same with the
+ * conventional "swift-" / "-swift" / "-ios" / "-cocoa" affixes removed
+ * (→ "argumentparser"), and the underscore form SwiftPM uses when a target
+ * name contains "-" or "." (→ "swift_argument_parser"). Matching is
+ * case-insensitive, so "argumentparser" matches `import ArgumentParser`.
+ *
+ * @param {string} repoName  Last path segment of the PURL (repo name).
+ * @returns {string[]}       Module names; a trailing "*" marks a prefix match.
+ */
+function swiftModuleCandidates(repoName) {
+  const key = String(repoName || "").toLowerCase().replace(/\.git$/, "");
+  if (!key) return [];
+  if (SWIFT_MODULE_OVERRIDES[key]) return SWIFT_MODULE_OVERRIDES[key];
+
+  const flat     = (s) => s.replace(/[^a-z0-9]/g, "");
+  const under    = (s) => s.replace(/[-.]/g, "_");
+  const stripped = key
+    .replace(/^swift[-_.]/, "")
+    .replace(/[-_.](?:swift|ios|ios[-_]sdk|macos|cocoa|apple)$/, "");
+
+  const out = new Set();
+  for (const c of [flat(key), flat(stripped), under(key), under(stripped)]) {
+    if (c.length >= 2 && !SWIFT_SYSTEM_MODULES.has(c)) out.add(c);
+  }
+  return [...out];
+}
+
+/** Regex source for one Swift module candidate ("*" suffix → identifier-char run). */
+function swiftModuleRegexSource(mod) {
+  const prefix = mod.endsWith("*");
+  const esc    = (prefix ? mod.slice(0, -1) : mod).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return prefix ? `${esc}[A-Za-z0-9_]*` : esc;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +527,9 @@ function resolveScanTarget(purl) {
   const eco  = ECOSYSTEM_ALIASES[info.ecosystem] ?? info.ecosystem;
   if (!ECOSYSTEM_EXTENSIONS[eco]) return null;
 
-  const importName   = IMPORT_NAME_OVERRIDES[info.name.toLowerCase()] ?? info.name;
+  const importName   = NO_NAME_OVERRIDE_ECOSYSTEMS.has(eco)
+    ? info.name
+    : (IMPORT_NAME_OVERRIDES[info.name.toLowerCase()] ?? info.name);
   const resolvedInfo = { ...info, ecosystem: eco, name: importName };
   const patterns      = buildImportPatterns(resolvedInfo);
   if (!patterns.length) return null;

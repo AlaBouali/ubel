@@ -320,7 +320,7 @@ When invoked programmatically with `full_stack: true`, `health` walks the entire
 
 Each discovered package is deduplicated by PURL before submission, so packages shared across sub-projects are scanned exactly once.
 
-**Swift and Flutter/Dart notes.** PURLs are `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV ecosystem `SwiftURL`) and `pkg:pub/<name>@<version>`, with `?repository_url=` / `?vcs_url=` qualifiers on pub packages from a non-pub.dev registry or a git repository. Local packages (SwiftPM `fileSystem` / `localSourceControl`, pub `path`) and pub `sdk` packages are skipped, and CocoaPods (`Podfile.lock`) is intentionally not scanned because OSV has no CocoaPods ecosystem. A SwiftPM pin on a branch or bare commit is inventoried with an empty version and dropped from OSV queries. Scopes: Swift lockfiles carry no dev/prod signal, so every Swift package is `prod`; for pub, `direct dev` → `dev` and everything else → `prod` (a transitive dependency's origin isn't recorded), and the `package_config.json` fallback reports `prod`. Neither lockfile records a dependency graph or license data, so these packages have no introduced-by/parent edges and their license is `unknown`. Neither ecosystem has firewall (`check` / `install`) or import-scan reachability coverage.
+**Swift and Flutter/Dart notes.** PURLs are `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV ecosystem `SwiftURL`) and `pkg:pub/<name>@<version>`, with `?repository_url=` / `?vcs_url=` qualifiers on pub packages from a non-pub.dev registry or a git repository. Local packages (SwiftPM `fileSystem` / `localSourceControl`, pub `path`) and pub `sdk` packages are skipped, and CocoaPods (`Podfile.lock`) is intentionally not scanned because OSV has no CocoaPods ecosystem. A SwiftPM pin on a branch or bare commit is inventoried with an empty version and dropped from OSV queries. Scopes: Swift lockfiles carry no dev/prod signal, so every Swift package is `prod`; for pub, `direct dev` → `dev` and everything else → `prod` (a transitive dependency's origin isn't recorded), and the `package_config.json` fallback reports `prod`. Neither lockfile records a dependency graph or license data, so these packages have no introduced-by/parent edges and their license is `unknown`. Neither ecosystem has firewall (`check` / `install`).
 
 #### Platform scanning (Linux)
 
@@ -591,7 +591,6 @@ Source files are scanned for ecosystem-appropriate import patterns:
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
 | Ruby | `.rb` | `require '<gem>'` |
 
-Swift and Flutter/Dart aren't covered by the import scan; their findings rely on scope and the other signals above.
 
 ### Output fields
 

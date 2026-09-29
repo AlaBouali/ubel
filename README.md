@@ -532,8 +532,8 @@ below.
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
 | C | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
@@ -809,8 +809,7 @@ Swift package is reported as `prod`.
 families in the SAST or malware catalogs. `.swift` files are still included
 in Secrets detection.
 
-**Reachability analysis:** Not covered — the import-scan half doesn't
-include `.swift` files.
+**Reachability analysis:** Covered.
 
 **License compliance:** `Package.resolved` and `Cartfile.resolved` don't
 record licenses, so every Swift package is inventoried with license
@@ -856,8 +855,7 @@ stop the OSV lookup.
 **SAST / Malware SAST:** Not covered — Dart isn't one of the language
 families in the SAST or malware catalogs.
 
-**Reachability analysis:** Not covered — the import-scan half doesn't
-include `.dart` files.
+**Reachability analysis:** Covered.
 
 **License compliance:** `pubspec.lock` doesn't record licenses, so every
 Flutter/Dart package is inventoried with license `unknown`.
@@ -999,9 +997,8 @@ scanning that confirms whether the vulnerable module is ever referenced.
 The import-scan half of this is implemented for **Python (`.py`), Node.js
 (`.js`/`.ts`/`.mjs`/`.cjs`/`.jsx`/`.tsx`), Maven/Java+Kotlin (`.java`,
 `.kt`, `.groovy`, `.scala`), NuGet/C# (`.cs`, `.vb`, `.fs`, `.fsx`), PHP
-(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — eight
-of the ten SCA ecosystems (Swift and Flutter/Dart don't get the import-scan
-half yet). A known distribution-name-to-
+(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — 10
+of the ten SCA ecosystems. A known distribution-name-to-
 import-name override table (e.g. `beautifulsoup4` → `bs4`,
 `pyyaml` → `yaml`, `opencv-python` → `cv2`) keeps the import match accurate
 even where the published package name and the name you actually import
@@ -1117,8 +1114,8 @@ To keep this document honest rather than aspirational:
   nor `uv pip install --dry-run` can avoid that — it's how sdist-based
   resolution works generally, independent of which tool triggers it.
   Wheel-only installs don't have this gap; see the Python section above.
-- Reachability analysis's import-confirmation half covers **8 of the 10
-  SCA ecosystems** (every one except Swift and Flutter/Dart) — C, OS packages, Docker, Kubernetes, and IaC don't get
+- Reachability analysis's import-confirmation half covers **10 of the 10
+  SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question
   for those.
 - Kubernetes *manifest* and IaC coverage is **static file analysis**, not
