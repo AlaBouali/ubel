@@ -13,6 +13,8 @@ import { GoModScanner } from "./go_runner.js";
 import { CSharpNuGetScanner } from "./csharp_runner.js";
 import { JavaMavenScanner } from "./java_runner.js";
 import { RubyBundlerScanner } from "./ruby_runner.js";
+import { SwiftScanner } from "./swift_runner.js";
+import { FlutterPubScanner } from "./flutter_runner.js";
 import { LinuxHostScanner } from "./linux_runner.js";
 import { WindowsHostScanner } from "./windows_runner.js";
 
@@ -1009,6 +1011,8 @@ export class NodeManagerInstance {
   const csharpScanner  = new CSharpNuGetScanner();
   const javaScanner    = new JavaMavenScanner();
   const rubyScanner    = new RubyBundlerScanner();
+  const swiftScanner   = new SwiftScanner();
+  const flutterScanner = new FlutterPubScanner();
 
   // Node.js scan as a promise
   const nodePromise = (async () => {
@@ -1052,6 +1056,16 @@ export class NodeManagerInstance {
       console.log(`Scanning for Ruby projects in ${startDir}...`);
       await rubyScanner.getInstalled(startDir);
       return { inventory: rubyScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Swift projects in ${startDir}...`);
+      await swiftScanner.getInstalled(startDir);
+      return { inventory: swiftScanner.inventoryData, projectRoots: [] };
+    })(),
+    (async () => {
+      console.log(`Scanning for Flutter/Dart projects in ${startDir}...`);
+      await flutterScanner.getInstalled(startDir);
+      return { inventory: flutterScanner.inventoryData, projectRoots: [] };
     })(),
   ];
 
@@ -1166,6 +1180,11 @@ export class NodeManagerInstance {
    * prod dependency in *any* workspace, and "dev" if it is a dev dependency in
    * *any* workspace (with "prod" taking precedence).
    *
+   * package.json only ever names npm packages, so only npm components
+   * (`pkg:npm/…` ids) are matched and scoped here. Components from other
+   * ecosystems in a mixed inventory (PyPI, Go, Maven, pub, …) are left
+   * untouched — each ecosystem's own scanner assigns their scopes.
+   *
    * @param {object[]}       inventory    - Component array (mutated in place)
    * @param {string|string[]} pkgJsonPath - Path(s) to package.json files
    */
@@ -1198,8 +1217,13 @@ export class NodeManagerInstance {
       for (const name of Object.keys(pkgJson.devDependencies || {})) devDirect.add(name);
     }
 
+    // Name → component index, npm components only. Matching on name alone
+    // across every ecosystem let an npm dependency's scope leak onto any
+    // same-named component from another one (pub `path`, PyPI `requests`, …),
+    // and a leaked "dev" scope downgrades that finding in reachability analysis.
     const nameIndex = new Map();
     for (const comp of inventory) {
+      if (typeof comp.id !== "string" || !comp.id.startsWith("pkg:npm/")) continue;
       if (!nameIndex.has(comp.name)) nameIndex.set(comp.name, []);
       nameIndex.get(comp.name).push(comp);
     }

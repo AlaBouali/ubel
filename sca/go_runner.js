@@ -6,9 +6,11 @@ import path from "path";
  * Scans Go modules projects for installed dependencies.
  *
  * Detection strategy:
- *   1.  A directory is a Go module root when it contains go.mod AND go.sum.
- *   2.  Installed packages are read from go.sum (the resolved/verified set)
- *       cross-referenced with go.mod for direct vs indirect classification.
+ *   1.  A directory is a Go module root when it contains go.mod; go.sum is
+ *       optional (Go permits it to be absent or empty).
+ *   2.  Versions are read from standard go.sum entries and cross-referenced
+ *       with go.mod. Where go.mod specifies the selected version, that version
+ *       takes precedence over stale checksum entries for other versions.
  *   3.  PURL: pkg:golang/<module-path>@<version>
  *
  * go.mod format:
@@ -37,14 +39,18 @@ export class GoModScanner {
     return `pkg:golang/${modulePath.toLowerCase()}@${v}`;
   }
 
+  _unescapeGoModulePath(modulePath) {
+    // go.sum escapes uppercase ASCII letters as ! followed by lowercase
+    // (for example, github.com/!azure/...). Restore the canonical module path
+    // so it can be matched against go.mod and represented correctly in PURLs.
+    return modulePath.replace(/!([a-z])/g, (_, letter) => letter.toUpperCase());
+  }
+
   // ─────────────────────────────
   // Detect Go module root
   // ─────────────────────────────
   _isGoRoot(dir) {
-    return (
-      fs.existsSync(path.join(dir, "go.mod")) &&
-      fs.existsSync(path.join(dir, "go.sum"))
-    );
+    return fs.existsSync(path.join(dir, "go.mod"));
   }
 
   // ─────────────────────────────
@@ -127,13 +133,16 @@ export class GoModScanner {
   }
 
   // ─────────────────────────────
-  // Parse go.sum → Set of "<module>@<version>"
-  // Only /go.mod lines give version presence; h1: lines confirm download.
-  // We want the source-code hash lines (not /go.mod lines) to get the
-  // actually-used modules.
+  // Parse standard go.sum lines:
+  //   <module-path> <version> <hash>
+  //   <module-path> <version>/go.mod <hash>
+  // The second form authenticates only go.mod metadata, so it is excluded
+  // from the source-package inventory. A path may have multiple versions in
+  // go.sum (including stale entries); retain those versions until go.mod can
+  // select the version recorded for this build list.
   // ─────────────────────────────
   _parseGoSum(sumPath) {
-    const installed = new Map();   // lowercase path → { path, version }
+    const installed = new Map();   // lowercase path → { path, versions[] }
 
     let content;
     try {
@@ -146,23 +155,23 @@ export class GoModScanner {
       const line = rawLine.trim();
       if (!line) continue;
 
-      const parts = line.split(" ");
-      if (parts.length < 2) continue;
+      const parts = line.split(/\s+/);
+      if (parts.length < 3) continue;
 
-      const [modVer] = parts;
-      // Skip go.mod-only entries
-      if (modVer.endsWith("/go.mod")) continue;
-
-      const atIdx  = modVer.lastIndexOf("@");
-      if (atIdx < 0) continue;
-
-      const modPath = modVer.slice(0, atIdx);
-      const version = modVer.slice(atIdx + 1);
+      const modPath = this._unescapeGoModulePath(parts[0]);
+      const rawVersion = parts[1];
+      // go.sum's version is a separate field; it is not joined to the path
+      // with '@'. Skip hashes for go.mod files, not package source archives.
+      if (rawVersion.endsWith("/go.mod")) continue;
+      const version = rawVersion;
+      if (!modPath || !version || !parts[2]) continue;
       const key     = modPath.toLowerCase();
 
       if (!installed.has(key)) {
-        installed.set(key, { path: modPath, version });
+        installed.set(key, { path: modPath, versions: [] });
       }
+      const entry = installed.get(key);
+      if (!entry.versions.includes(version)) entry.versions.push(version);
     }
 
     return installed;
@@ -184,28 +193,38 @@ export class GoModScanner {
     // to go.mod requires (for local replace directives that don't appear in go.sum)
     const index = new Map();   // lowercase path → { path, version, indirect }
 
-    for (const [key, { path: mp, version }] of sumEntries.entries()) {
+    for (const [key, { path: mp, versions }] of sumEntries.entries()) {
       const req = requires.get(key);
-      index.set(key, {
-        path:     mp,
-        version,
-        indirect: req ? req.indirect : true
-      });
+      // go.mod's require list is the best local indication of the selected
+      // build-list version. go.sum is a checksum ledger and may retain hashes
+      // for old versions, so don't let those override a version in go.mod.
+      const selectedVersions = req?.version
+        ? [req.version]
+        : versions;
+      for (const version of selectedVersions) {
+        const entryKey = `${key}@${version}`;
+        index.set(entryKey, {
+          path: mp,
+          version,
+          indirect: req ? req.indirect : true
+        });
+      }
     }
 
     // Include require-only entries (local modules / replace targets not in go.sum)
     for (const [key, { path: mp, version, indirect }] of requires.entries()) {
-      if (!index.has(key)) {
-        index.set(key, { path: mp, version, indirect });
+      const entryKey = `${key}@${version}`;
+      if (!index.has(entryKey)) {
+        index.set(entryKey, { path: mp, version, indirect });
       }
     }
 
     // Apply replace directives – update resolved path/version
     for (const [origKey, { replacement, version }] of replaces.entries()) {
-      const entry = index.get(origKey);
-      if (entry) {
+      for (const [entryKey, entry] of index.entries()) {
+        if (!entryKey.startsWith(`${origKey}@`)) continue;
         entry.path    = replacement;
-        entry.version = version;
+        if (version) entry.version = version;
       }
     }
 

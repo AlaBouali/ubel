@@ -1,9 +1,10 @@
 // version_recommender.js
 // Zero-dependency version upgrade recommender.
-// Supports semver, PEP 440, Maven, and Go version schemes.
+// Supports semver, pub (Dart), PEP 440, Maven, and Go version schemes.
 
 const ECOSYSTEMS_VR = {
   semver: { parse: _vr_parseSemver,  gt: _vr_semverGt,  distance: _vr_semverDistance  },
+  pub:    { parse: _vr_parsePub,     gt: _vr_pubGt,     distance: _vr_pubDistance     },
   pep440: { parse: _vr_parsePep440,  gt: _vr_pep440Gt,  distance: _vr_pep440Distance  },
   maven:  { parse: _vr_parseMaven,   gt: _vr_mavenGt,   distance: _vr_mavenDistance   },
   go:     { parse: _vr_parseGo,      gt: _vr_goGt,      distance: _vr_goDistance      },
@@ -14,7 +15,10 @@ export function _vr_purlToEcosystem(purl) {
   if (purl.startsWith("pkg:pypi/"))    return "pep440";
   if (purl.startsWith("pkg:maven/"))   return "maven";
   if (purl.startsWith("pkg:golang/"))  return "go";
-  return "semver"; // npm, cargo, nuget, gem, composer, unknown → semver
+  if (purl.startsWith("pkg:pub/"))     return "pub";     // Dart / Flutter
+  // pkg:swift/ (SwiftPM, Carthage) is plain SemVer — tags are "v"-stripped by the
+  // scanner and SwiftPM ignores build metadata, so the generic scheme is correct.
+  return "semver"; // npm, swift, cargo, nuget, gem, composer, unknown → semver
 }
 
 function _vr_compareDistances(a, b) {
@@ -27,6 +31,10 @@ function _vr_compareDistances(a, b) {
   // which never populate it.
   if ((a.securityDiff ?? 0) !== (b.securityDiff ?? 0)) return (a.securityDiff ?? 0) - (b.securityDiff ?? 0);
   if ((a.postRank ?? 0) !== (b.postRank ?? 0)) return (a.postRank ?? 0) - (b.postRank ?? 0);
+  // buildRank is only set by the pub path: Dart orders "+build" segments
+  // (0.8.5+2 > 0.8.5+1), so of two candidates on the same x.y.z the lower
+  // build is the closer one.
+  if ((a.buildRank ?? 0) !== (b.buildRank ?? 0)) return (a.buildRank ?? 0) - (b.buildRank ?? 0);
   if (a.isPreRelease !== b.isPreRelease) return a.isPreRelease ? 1 : -1;
   if ((a.qualifierRank ?? 0) !== (b.qualifierRank ?? 0)) return (a.qualifierRank ?? 0) - (b.qualifierRank ?? 0);
   return 0;
@@ -100,6 +108,45 @@ function _vr_semverDistance(cur, can) {
     // are valid fix candidates for a version pinned at 2.2.6.3.
     securityDiff: sp ? can.security - cur.security : can.security,
     isPreRelease: Boolean(can.pre) && !Boolean(cur.pre) };
+}
+
+// ── pub (Dart / Flutter) ──
+// Same grammar as semver, but two rules differ (both verified against
+// dart-lang/pub_semver, lib/src/version.dart):
+//   1. "+build" is part of the ordering: 1.0.0 < 1.0.0+1 < 1.0.0+2. Flutter's
+//      federated plugins publish fixes as build bumps (e.g. 0.8.5+2), so
+//      treating build as ignorable — as plain semver does — drops the fix.
+//   2. Caret ranges break on the leftmost non-zero part: ^1.2.3 → <2.0.0 but
+//      ^0.13.0 → <0.14.0 (Version.nextBreaking), so a 0.x minor bump is a
+//      breaking upgrade.
+function _vr_parsePub(v) {
+  const m = _VR_SEMVER_RE.exec(v.trim());
+  if (!m || !m.groups) return null;
+  const base = _vr_parseSemver(v);
+  return { ...base, build: m.groups.build ?? "" };
+}
+function _vr_pubGt(a, b) {
+  if (a.major !== b.major) return a.major > b.major;
+  if (a.minor !== b.minor) return a.minor > b.minor;
+  if (a.patch !== b.patch) return a.patch > b.patch;
+  if (a.pre && !b.pre) return false;
+  if (!a.pre && b.pre) return true;
+  const c = _vr_cmpPre(a.pre, b.pre);
+  if (c !== 0) return c > 0;
+  // Builds always sort after "no build".
+  if (!a.build && !b.build) return false;
+  if (!a.build) return false;
+  if (!b.build) return true;
+  return _vr_cmpPre(a.build, b.build) > 0;
+}
+function _vr_pubDistance(cur, can) {
+  const d = _vr_semverDistance(cur, can);
+  const isBreaking = cur.major === 0
+    ? (can.major !== 0 || can.minor !== cur.minor)
+    : can.major !== cur.major;
+  const first = can.build.split(".")[0];
+  const buildRank = !can.build ? 0 : /^\d+$/.test(first) ? parseInt(first, 10) + 1 : 1;
+  return { ...d, isBreaking, buildRank };
 }
 
 // ── pep440 ──
@@ -224,7 +271,7 @@ function _vr_goDistance(cur, can) {
  * return an array of result objects sorted closest-first.
  * @param {string}   currentVersion
  * @param {string[]} candidateVersions
- * @param {string}   ecosystem  - "semver" | "pep440" | "maven" | "go"
+ * @param {string}   ecosystem  - "semver" | "pub" | "pep440" | "maven" | "go"
  * @returns {{ version: string, recommended: boolean, compatibility_level: "low"|"medium"|"high" }[]}
  */
 export function findClosestFixVersions(currentVersion, candidateVersions, ecosystem = "semver") {
@@ -267,6 +314,13 @@ function _runTests() {
     const ok = JSON.stringify(vs) === JSON.stringify(expected);
     console.log(`  ${ok ? PASS : FAIL} ${label}`);
     if (!ok) { console.log(`      expected=${JSON.stringify(expected)}\n      got    =${JSON.stringify(vs)}`); failures++; }
+  }
+
+  function checkCompat(label, got, version, expected) {
+    const hit = got.find(x => x.version === version);
+    const ok = hit !== undefined && hit.compatibility_level === expected;
+    console.log(`  ${ok ? PASS : FAIL} ${label}`);
+    if (!ok) { console.log(`      expected ${version} → ${expected}, got=${JSON.stringify(hit)}`); failures++; }
   }
 
   // ── semver ────────────────────────────────────────────────────────────────
@@ -315,6 +369,83 @@ function _runTests() {
     "ruby 4th segment: 2.2.6.4 closer than 2.2.7.0",
     findClosestFixVersions("2.2.6.3", ["2.2.7.0", "2.2.6.4"]),
     "2.2.6.4",
+  );
+
+  // ── pub (Dart / Flutter) ─────────────────────────────────────────────────
+  console.log("\n[pub]");
+  check(
+    "+build bump on same x.y.z is a valid fix (0.8.5+1 → 0.8.5+2)",
+    findClosestFixVersions("0.8.5+1", ["0.8.6", "0.8.5+2"], "pub"),
+    "0.8.5+2",
+  );
+  checkOrder(
+    "build numbers compare numerically (+9 < +10)",
+    findClosestFixVersions("1.0.0+1", ["1.0.0+10", "1.0.0+9"], "pub"),
+    ["1.0.0+9", "1.0.0+10"],
+  );
+  checkOrder(
+    "candidate without build is not newer than the same version with a build",
+    findClosestFixVersions("1.0.0+1", ["1.0.0"], "pub"),
+    [],
+  );
+  check(
+    "no-build candidate preferred over +build on the same x.y.z",
+    findClosestFixVersions("1.2.3", ["1.2.4+1", "1.2.4"], "pub"),
+    "1.2.4",
+  );
+  checkOrder(
+    "0.x: minor bump is breaking, sorted after patch",
+    findClosestFixVersions("0.13.0", ["1.0.0", "0.14.0", "0.13.5"], "pub"),
+    ["0.13.5", "0.14.0", "1.0.0"],
+  );
+  checkCompat(
+    "0.x minor bump → low compatibility",
+    findClosestFixVersions("0.13.0", ["0.14.0", "0.13.5"], "pub"),
+    "0.14.0", "low",
+  );
+  checkCompat(
+    "0.x patch bump → high compatibility",
+    findClosestFixVersions("0.13.0", ["0.14.0", "0.13.5"], "pub"),
+    "0.13.5", "high",
+  );
+  checkCompat(
+    "0.0.x → 0.0.y is not breaking (nextBreaking of 0.0.3 is 0.1.0)",
+    findClosestFixVersions("0.0.3", ["0.0.4", "0.1.0"], "pub"),
+    "0.0.4", "high",
+  );
+  check(
+    "1.x: minor bump preferred over major bump",
+    findClosestFixVersions("1.2.3", ["2.0.0", "1.3.0"], "pub"),
+    "1.3.0",
+  );
+  check(
+    "pre-release pushed after stable",
+    findClosestFixVersions("1.2.3", ["1.2.4-dev.1", "1.2.4"], "pub"),
+    "1.2.4",
+  );
+
+  // ── swift (plain SemVer via pkg:swift/) ───────────────────────────────────
+  console.log("\n[swift]");
+  const swiftEco = _vr_purlToEcosystem("pkg:swift/github.com/apple/swift-nio@2.0.0");
+  check(
+    "closest patch pick",
+    findClosestFixVersions("2.40.0", ["2.42.0", "2.40.1", "3.0.0"], swiftEco),
+    "2.40.1",
+  );
+  check(
+    "v-prefixed tags parse",
+    findClosestFixVersions("5.4.3", ["v5.4.4", "v5.5.0"], swiftEco),
+    "v5.4.4",
+  );
+  check(
+    "pre-release tag pushed after stable",
+    findClosestFixVersions("5.0.0", ["5.0.1-beta.1", "5.0.1"], swiftEco),
+    "5.0.1",
+  );
+  checkOrder(
+    "empty version (branch / revision pin) yields no recommendation",
+    findClosestFixVersions("", ["1.0.0"], swiftEco),
+    [],
   );
 
   // ── pep440 ───────────────────────────────────────────────────────────────
@@ -409,6 +540,9 @@ function _runTests() {
     ["pkg:golang/github.com/foo/bar@v1.0.0", "go"],
     ["pkg:npm/lodash@4.0.0",     "semver"],
     ["pkg:cargo/serde@1.0.0",    "semver"],
+    ["pkg:pub/http@1.2.0",       "pub"],
+    ["pkg:pub/foo@1.0.0?repository_url=https%3A%2F%2Fpub.example.com", "pub"],
+    ["pkg:swift/github.com/apple/swift-nio@2.0.0", "semver"],
     [null,                        "semver"],
   ];
   for (const [purl, expected] of ecoTests) {

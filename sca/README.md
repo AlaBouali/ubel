@@ -19,12 +19,12 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `health` mode — scan the current project's installed dependencies
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/apt/dnf/yum have no lockfile to revert; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
-- Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv))
+- Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
-- **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems (see [Reachability Analysis](#reachability-analysis))
+- **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation for the ecosystems listed under [Import scan coverage](#import-scan-coverage) (see [Reachability Analysis](#reachability-analysis))
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary; included by default in every scan, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
@@ -303,7 +303,7 @@ ubel-apt health   # ubel-dnf / ubel-yum health work the same way
 
 #### Full-stack monorepo scanning
 
-When invoked programmatically with `full_stack: true`, `health` walks the entire directory tree from the project root and collects packages across all supported ecosystems in a single pass — no per-language configuration required. Mixed-stack monorepos (e.g. a Node.js frontend, Python backend, Rust service, and Go tooling in the same repo) are fully covered in one invocation.
+When invoked programmatically with `full_stack: true`, `health` walks the entire directory tree from the project root and collects packages across all supported ecosystems in a single pass — no per-language configuration required. Mixed-stack monorepos (e.g. a Node.js frontend, Python backend, Rust service, Go tooling, and a Flutter or Swift mobile app in the same repo) are fully covered in one invocation.
 
 | Ecosystem | Package Manager | Resolved From |
 |---|---|---|
@@ -315,8 +315,12 @@ When invoked programmatically with `full_stack: true`, `health` walks the entire
 | C# / .NET | NuGet | `packages.lock.json` / `obj/project.assets.json` |
 | Java | Maven | `pom.xml` resolved dependencies |
 | Ruby | Bundler | `Gemfile.lock` |
+| Swift | SwiftPM, Carthage | `Package.resolved` (also inside `.xcworkspace` / `.xcodeproj`), `.build/workspace-state.json` fallback, `Cartfile.resolved` |
+| Flutter / Dart | pub | `pubspec.lock`, falling back to `.dart_tool/package_config.json` |
 
 Each discovered package is deduplicated by PURL before submission, so packages shared across sub-projects are scanned exactly once.
+
+**Swift and Flutter/Dart notes.** PURLs are `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV ecosystem `SwiftURL`) and `pkg:pub/<name>@<version>`, with `?repository_url=` / `?vcs_url=` qualifiers on pub packages from a non-pub.dev registry or a git repository. Local packages (SwiftPM `fileSystem` / `localSourceControl`, pub `path`) and pub `sdk` packages are skipped, and CocoaPods (`Podfile.lock`) is intentionally not scanned because OSV has no CocoaPods ecosystem. A SwiftPM pin on a branch or bare commit is inventoried with an empty version and dropped from OSV queries. Scopes: Swift lockfiles carry no dev/prod signal, so every Swift package is `prod`; for pub, `direct dev` → `dev` and everything else → `prod` (a transitive dependency's origin isn't recorded), and the `package_config.json` fallback reports `prod`. Neither lockfile records a dependency graph or license data, so these packages have no introduced-by/parent edges and their license is `unknown`. Neither ecosystem has firewall (`check` / `install`) or import-scan reachability coverage.
 
 #### Platform scanning (Linux)
 
@@ -586,6 +590,8 @@ Source files are scanned for ecosystem-appropriate import patterns:
 | Go | `.go` | `"<module-path>"` |
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
 | Ruby | `.rb` | `require '<gem>'` |
+
+Swift and Flutter/Dart aren't covered by the import scan; their findings rely on scope and the other signals above.
 
 ### Output fields
 

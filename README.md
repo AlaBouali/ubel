@@ -65,7 +65,7 @@ ubel-bun health
 ubel-composer health
 ```
 
-`health` mode also supports full-stack monorepo scanning (Python, PHP, Rust, Go, .NET, Java, Ruby alongside Node) and host/platform scanning (Linux package managers, Windows registry) when invoked programmatically.
+`health` mode also supports full-stack monorepo scanning (Python, PHP, Rust, Go, .NET, Java, Ruby, Swift, Flutter/Dart alongside Node) and host/platform scanning (Linux package managers, Windows registry) when invoked programmatically.
 
 **yarn** is supported in `health` mode only — it can't do a lockfile-only dry-run, so it has no firewall coverage below.
 
@@ -513,7 +513,9 @@ packages** (`apt`/`dnf`/`yum`'s own native dry-run). Ruby, Rust, Go,
 Java/Kotlin, C#, and Windows remain SCA-covered but not firewall-covered
 below — their package managers genuinely have no dry-run-without-side-effects
 equivalent to gate against, which is a mechanical constraint of each
-ecosystem's tooling, not an oversight.
+ecosystem's tooling, not an oversight. **Swift (SwiftPM/Carthage)** and
+**Flutter/Dart (pub)** are SCA-only today as well — see their sections
+below.
 
 ---
 
@@ -530,6 +532,8 @@ ecosystem's tooling, not an oversight.
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ✅ |
 | C | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
@@ -538,7 +542,7 @@ ecosystem's tooling, not an oversight.
 | Windows host | ✅ | ❌ | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
 
-✅ = built and shipped · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
+✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
@@ -771,6 +775,95 @@ files are all scanned under the same `nuget` reachability key.
 
 ---
 
+## Swift — SwiftPM / Carthage
+
+**SCA:** Resolves from the lockfiles Swift tooling already writes, so
+nothing needs to be built or installed first:
+
+- `Package.resolved` (SwiftPM formats v1, v2, and v3) — next to a
+  `Package.swift`, inside an Xcode workspace at
+  `<X>.xcworkspace/xcshareddata/swiftpm/`, or inside an Xcode project at
+  `<X>.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/`.
+- `.build/workspace-state.json` — fallback for a package whose
+  `Package.resolved` wasn't committed (common for libraries that gitignore
+  it).
+- `Cartfile.resolved` (Carthage) — `binary` entries are skipped, since they
+  carry no repository identity.
+
+Packages are reported as `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV
+ecosystem `SwiftURL`), with a leading `v` stripped from release tags. Local
+packages (`fileSystem` / `localSourceControl` pins) are first-party code and
+aren't reported. A pin that resolves to a branch or a bare commit instead of
+a release tag is inventoried with an empty version and dropped from OSV
+queries, because a commit hash isn't a version OSV can range-match.
+
+CocoaPods (`Podfile.lock`) is intentionally not scanned: OSV has no
+CocoaPods ecosystem, so those packages could never match an advisory.
+
+**Scopes:** None of these lockfiles distinguish dev from prod, so every
+Swift package is reported as `prod`.
+
+**Firewall:** Not available — Swift is SCA-only today.
+
+**SAST / Malware SAST:** Not covered — Swift isn't one of the language
+families in the SAST or malware catalogs. `.swift` files are still included
+in Secrets detection.
+
+**Reachability analysis:** Not covered — the import-scan half doesn't
+include `.swift` files.
+
+**License compliance:** `Package.resolved` and `Cartfile.resolved` don't
+record licenses, so every Swift package is inventoried with license
+`unknown`.
+
+---
+
+## Flutter / Dart — pub
+
+**SCA:** A directory is scanned when it contains `pubspec.lock` or — for
+packages and libraries that don't commit their lockfile —
+`.dart_tool/package_config.json`, which `dart pub get` / `flutter pub get`
+writes. `pubspec.lock` is preferred when both exist: it carries each
+package's version, source (hosted, git, path, or sdk), and dependency kind.
+From the `package_config.json` fallback only hosted packages can be
+recovered (their version comes from the pub-cache directory name); git, SDK,
+and relative-path packages are skipped there.
+
+Packages are reported as `pkg:pub/<name>@<version>`, with
+`?repository_url=<url>` for a package hosted on a non-pub.dev registry and
+`?vcs_url=<url>` for a git dependency. `sdk` sources (`flutter`,
+`flutter_test`, …) and `path` sources are skipped — first-party or toolchain
+code, not installed third-party packages.
+
+**Scopes:** From `pubspec.lock`: `direct main` and `direct overridden` →
+`prod`, `direct dev` → `dev`, and `transitive` → `prod` (the lockfile
+doesn't record whether a transitive dependency is reached from dev or main,
+so the conservative default is used). Packages recovered from the
+`package_config.json` fallback carry no dev/main signal and are reported as
+`prod`.
+
+**Dependency graph:** `pubspec.lock` has no dependency graph, so Flutter/Dart
+packages are reported without introduced-by/parent edges.
+
+**Known limitation:** OSV matches on package name. A package from a private
+registry or a git repository that shares its name with a pub.dev package can
+be matched against that package's advisories; the `repository_url` /
+`vcs_url` qualifier keeps the identity distinct in the inventory but doesn't
+stop the OSV lookup.
+
+**Firewall:** Not available — Flutter/Dart is SCA-only today.
+
+**SAST / Malware SAST:** Not covered — Dart isn't one of the language
+families in the SAST or malware catalogs.
+
+**Reachability analysis:** Not covered — the import-scan half doesn't
+include `.dart` files.
+
+**License compliance:** `pubspec.lock` doesn't record licenses, so every
+Flutter/Dart package is inventoried with license `unknown`.
+
+---
+
 ## C (bare, no package manager)
 
 **SCA:** Not applicable — C has no standard ecosystem-level package
@@ -906,8 +999,9 @@ scanning that confirms whether the vulnerable module is ever referenced.
 The import-scan half of this is implemented for **Python (`.py`), Node.js
 (`.js`/`.ts`/`.mjs`/`.cjs`/`.jsx`/`.tsx`), Maven/Java+Kotlin (`.java`,
 `.kt`, `.groovy`, `.scala`), NuGet/C# (`.cs`, `.vb`, `.fs`, `.fsx`), PHP
-(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — the
-same eight ecosystems that get full SCA. A known distribution-name-to-
+(`.php`), Go (`.go`), Cargo/Rust (`.rs`), and RubyGems/Ruby (`.rb`)** — eight
+of the ten SCA ecosystems (Swift and Flutter/Dart don't get the import-scan
+half yet). A known distribution-name-to-
 import-name override table (e.g. `beautifulsoup4` → `bs4`,
 `pyyaml` → `yaml`, `opencv-python` → `cv2`) keeps the import match accurate
 even where the published package name and the name you actually import
@@ -944,7 +1038,9 @@ SPDX identifier, checks it against a curated OSI-approved license table,
 and assigns a risk tier (permissive → weak copyleft → strong copyleft /
 proprietary / unrecognized). It's applied once, uniformly, to the entire
 unified scan inventory — Node, Python, PHP, Ruby, Rust, Go, Java/Kotlin,
-C#, and Linux/Windows OS packages alike. The only true exception is C (no
+C#, Swift, Flutter/Dart, and Linux/Windows OS packages alike (Swift and pub
+lockfiles record no license data, so those packages come through as
+`unknown`). The only true exception is C (no
 package manager/manifest exists to read a license from in the first
 place). Policy supports both a `license-risk` threshold
 and a separate `license-block-unknown` flag for licenses that couldn't be
@@ -1004,7 +1100,9 @@ To keep this document honest rather than aspirational:
   dry-run resolution UBEL can safely gate against. Ruby (Bundler), Rust
   (Cargo), Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
   Windows host all remain without it for that reason — a hard mechanical
-  constraint, not a roadmap gap.
+  constraint, not a roadmap gap. Swift (SwiftPM/Carthage) and Flutter/Dart
+  (pub) are SCA-only as well, simply because no install gate has been built
+  for them yet.
 - **Yarn** is the one Node.js package manager left out of that list, for
   the same kind of reason, not a different one: `yarn add` always writes
   to `node_modules` immediately, with no lockfile-only/dry-run mode the
@@ -1019,8 +1117,8 @@ To keep this document honest rather than aspirational:
   nor `uv pip install --dry-run` can avoid that — it's how sdist-based
   resolution works generally, independent of which tool triggers it.
   Wheel-only installs don't have this gap; see the Python section above.
-- Reachability analysis's import-confirmation half covers **8 of the 8
-  SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
+- Reachability analysis's import-confirmation half covers **8 of the 10
+  SCA ecosystems** (every one except Swift and Flutter/Dart) — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question
   for those.
 - Kubernetes *manifest* and IaC coverage is **static file analysis**, not
@@ -1031,7 +1129,8 @@ To keep this document honest rather than aspirational:
   each provider's own API; see the Cloud section above.)
 - Every ecosystem here — including the OS-level ones (apt/dnf/yum and
   Windows) — gets full SCA **and** license compliance regardless of
-  firewall status; firewalling and inventory/license coverage are tracked
+  firewall status (Swift and Flutter/Dart licenses report as `unknown`,
+  since their lockfiles carry no license data); firewalling and inventory/license coverage are tracked
   and reported independently.
 - This entire matrix is about **the SCA/firewall/reachability/license/SBOM
   pipeline for dependency trees you resolve locally** (a manifest, a

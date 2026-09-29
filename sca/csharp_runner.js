@@ -13,7 +13,8 @@ import path from "path";
  *         • obj/project.assets.json  (MSBuild restore fallback)
  *   3.  Central Package Management: Directory.Packages.props is walked up
  *       from the project root to resolve versions missing from the .csproj.
- *   4.  Multi-target projects: the highest resolved version across TFMs is used.
+ *   4.  Multi-target projects: each TFM is parsed independently so versions
+ *       and dependency edges are not incorrectly collapsed across frameworks.
  *   5.  PURL: pkg:nuget/<name>@<version>
  *            (no @ when version is unknown)
  */
@@ -74,9 +75,8 @@ export class CSharpNuGetScanner {
 
   // ─────────────────────────────
   // Parse packages.lock.json (preferred).
-  // Merges all TFMs, keeping the highest version when the same package appears
-  // under multiple target frameworks.
-  // Returns Map<lowercaseName, { name, version, type, dependencies[] }> or null.
+  // Keeps each target framework's resolved package graph separate until
+  // components are merged by PURL. Dependencies retain their resolved version.
   // ─────────────────────────────
   _readPackagesLock(projectRoot) {
     const lockPath = path.join(projectRoot, "packages.lock.json");
@@ -91,26 +91,22 @@ export class CSharpNuGetScanner {
 
     const index = new Map();
 
-    for (const tfmDeps of Object.values(raw.dependencies ?? {})) {
+    for (const [tfm, tfmDeps] of Object.entries(raw.dependencies ?? {})) {
       for (const [pkgId, meta] of Object.entries(tfmDeps)) {
-        const key     = pkgId.toLowerCase();
+        const key     = `${tfm.toLowerCase()}\0${pkgId.toLowerCase()}`;
         const version = meta.resolved ?? meta.requested ?? "";
         if (!version) continue;                   // skip malformed entries
 
-        if (!index.has(key)) {
-          index.set(key, {
-            name:         pkgId,
-            version,
-            type:         (meta.type ?? "direct").toLowerCase(),
-            dependencies: Object.keys(meta.dependencies ?? {}).map(d => d.toLowerCase())
-          });
-        } else {
-          // Keep the highest version seen across TFMs
-          const existing = index.get(key);
-          if (this._versionGt(version, existing.version)) {
-            existing.version = version;
-          }
-        }
+        index.set(key, {
+          name: pkgId,
+          version,
+          type: String(meta.type ?? "direct").toLowerCase(),
+          targetFramework: tfm,
+          dependencies: Object.entries(meta.dependencies ?? {}).map(([depName, depVersion]) => ({
+            name: depName,
+            version: String(depVersion ?? ""),
+          }))
+        });
       }
     }
 
@@ -132,8 +128,8 @@ export class CSharpNuGetScanner {
   }
 
   // ─────────────────────────────
-  // Parse obj/project.assets.json (fallback).
-  // Returns Map<lowercaseName, { name, version, type, dependencies[] }> or null.
+  // Parse obj/project.assets.json (fallback), retaining each target's graph.
+  // Returns Map<target framework + package name, package record> or null.
   // ─────────────────────────────
   _readProjectAssets(projectRoot) {
     const assetPath = path.join(projectRoot, "obj", "project.assets.json");
@@ -147,20 +143,49 @@ export class CSharpNuGetScanner {
     }
 
     const index = new Map();
+    const libraries = raw.libraries ?? {};
+    const targets = raw.targets ?? {};
 
-    for (const [libKey, meta] of Object.entries(raw.libraries ?? {})) {
-      const slash   = libKey.lastIndexOf("/");
-      const name    = slash >= 0 ? libKey.slice(0, slash)  : libKey;
-      const version = slash >= 0 ? libKey.slice(slash + 1) : "";
-      if (!version) continue;                     // skip malformed entries
-      const key = name.toLowerCase();
-
-      if (!index.has(key)) {
+    // `targets` contains the resolved graph per TFM. Prefer it whenever
+    // available; `libraries` alone does not preserve target-specific edges.
+    for (const [tfm, targetLibraries] of Object.entries(targets)) {
+      for (const [libKey, targetMeta] of Object.entries(targetLibraries ?? {})) {
+        const slash = libKey.lastIndexOf("/");
+        if (slash < 0) continue;
+        const name = libKey.slice(0, slash);
+        const version = libKey.slice(slash + 1);
+        if (!version) continue;
+        const key = `${tfm.toLowerCase()}\0${name.toLowerCase()}`;
+        const libraryMeta = libraries[libKey] ?? {};
         index.set(key, {
           name,
           version,
-          type:         (meta.type ?? "package").toLowerCase(),
-          dependencies: Object.keys(meta.dependencies ?? {}).map(d => d.toLowerCase())
+          type: String(targetMeta.type ?? libraryMeta.type ?? "package").toLowerCase(),
+          targetFramework: tfm,
+          dependencies: Object.entries(targetMeta.dependencies ?? {}).map(([depName, depVersion]) => ({
+            name: depName,
+            version: String(depVersion ?? ""),
+          }))
+        });
+      }
+    }
+
+    // Preserve compatibility with assets files that omit `targets`.
+    if (index.size === 0) {
+      for (const [libKey, meta] of Object.entries(libraries)) {
+        const slash = libKey.lastIndexOf("/");
+        const name = slash >= 0 ? libKey.slice(0, slash) : libKey;
+        const version = slash >= 0 ? libKey.slice(slash + 1) : "";
+        if (!version) continue;
+        index.set(`\0${name.toLowerCase()}`, {
+          name,
+          version,
+          type: String(meta.type ?? "package").toLowerCase(),
+          targetFramework: "",
+          dependencies: Object.entries(meta.dependencies ?? {}).map(([depName, depVersion]) => ({
+            name: depName,
+            version: String(depVersion ?? ""),
+          }))
         });
       }
     }
@@ -227,19 +252,21 @@ export class CSharpNuGetScanner {
 
     const components = [];
 
-    for (const [key, { name, version, type, dependencies }] of index.entries()) {
+    for (const [, { name, version, type, dependencies, targetFramework }] of index.entries()) {
       const id = this._nugetPurl(name, version);
 
       const resolvedDeps = dependencies.map(dep => {
-        const resolved = index.get(dep);
+        const depKey = `${String(targetFramework).toLowerCase()}\0${dep.name.toLowerCase()}`;
+        let resolved = index.get(depKey);
+        if (resolved && dep.version && resolved.version !== dep.version) resolved = null;
         return resolved
           ? this._nugetPurl(resolved.name, resolved.version)
-          : this._nugetPurl(dep, "");
+          : this._nugetPurl(dep.name, dep.version);
       });
 
       components.push({
         id,
-        name:         key,
+        name:         name.toLowerCase(),
         version,
         type:         "library",
         license:      "unknown",
@@ -351,6 +378,9 @@ export class CSharpNuGetScanner {
       const existing = map.get(comp.id);
       for (const p of comp.paths)   { if (!existing.paths.includes(p))   existing.paths.push(p); }
       for (const s of comp.scopes)  { if (!existing.scopes.includes(s))  existing.scopes.push(s); }
+      for (const dep of comp.dependencies) {
+        if (!existing.dependencies.includes(dep)) existing.dependencies.push(dep);
+      }
     }
 
     return [...map.values()];

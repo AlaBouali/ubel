@@ -90,10 +90,18 @@ export class BackendFingerprinter {
 
     const serverTokens = server.split(/\s+/).filter(Boolean);
     for (let i = 0; i < serverTokens.length; i++) {
+      console.log(`serverTokens[${i}]: ${serverTokens[i]}`);
       const rawToken = serverTokens[i];
       const token = rawToken.replace(")", "");
-      const key = token.split("/")[0].toLowerCase();
-      const version = versionFromToken(token);
+      let key = token.split("/")[0].toLowerCase();
+      let version = versionFromToken(token);
+      if (rawToken.toLowerCase().startsWith("jetty")) {
+        console.log(`rawToken: ${rawToken}`);
+        key = "jetty";
+        version = rawToken.toLowerCase().split("jetty")[1] || "";
+        version = version.replace("(", "").replace(")", "").replace("/", "");
+        console.log(`key: ${key}, version: ${version}`);
+      }
 
       if (key === "glassfish") {
         serverInfo.push({ product: "glassfish_server", vendor: "oracle", version: serverTokens[serverTokens.length - 1] });
@@ -103,8 +111,8 @@ export class BackendFingerprinter {
       } else if (key === "payara") {
         serverInfo.push({ product: "payara", vendor: "payara", version: serverTokens[2] });
         break;
-      } else if (key === "jetty") {
-        serverInfo.push({ product: "jetty", vendor: "eclipse", version });  
+      } else if (key.toLowerCase() === "jetty") {
+        serverInfo.push({ product: "jetty", vendor: "eclipse", version: version });
       } else if (NEXT_TOKEN_VERSION.has(key)) {
         const v = (serverTokens[i + 1] || "").replace(/v/gi, "");
         const meta = SERVER_TOKEN_MAP[key];
