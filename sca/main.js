@@ -609,7 +609,7 @@ async function main(programmaticOptions) {
   }
 
   // ── check/install require lockfile-only dry-run support ─────────────────────
-  if (!CHECK_INSTALL_ENGINES.has(engine)) {
+  if (!CHECK_INSTALL_ENGINES.has(engine) && (effectiveMode === "check" || effectiveMode === "install")) {
     console.error(`[!] '${engine}' is not supported.`);
     console.error("[!] Supported engines: npm, pnpm, bun, composer");
     process.exit(1);
