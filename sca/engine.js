@@ -1768,6 +1768,8 @@ export function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:cargo/"))        return "rust";
   if (purl.startsWith("pkg:composer/"))       return "php";
   if (purl.startsWith("pkg:pypi/"))         return "python";
+  if (purl.startsWith("pkg:swift/"))        return "swift";
+  if (purl.startsWith("pkg:pub/"))          return "dart";
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
   if (purl.startsWith("pkg:deb/debian/"))   return "debian";
   if (purl.startsWith("pkg:rpm/redhat/"))   return "redhat";

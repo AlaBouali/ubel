@@ -24,6 +24,17 @@
  *       couldn't be classified at all, rather than a specific risk level.
  *       Same health-mode-only scope. Defaults to false.
  *
+ *   Per-run policy flags (health | check | install, any engine except docker):
+ *     --threshold <level>          — override severity_threshold for this run
+ *     --block-unknown [true|false] — override block_unknown_vulnerabilities (bare = true)
+ *     --license-risk <level>       — override license_risk_threshold   (npm-family only)
+ *     --license-block-unknown [true|false] — override block_unknown_license_risk (npm-family only)
+ *       `--flag value` and `--flag=value` both work, anywhere among the
+ *       package args. Unlike the modes above, these are NOT saved: the policy
+ *       file is snapshotted and restored on exit, so the persisted policy is
+ *       identical before and after. e.g.
+ *         node src/main.js npm check --threshold critical lodash
+ *
  *   Docker mode (`docker` engine supports `health`, `check`, and `install`):
  *     node src/main.js docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
  *
@@ -125,6 +136,8 @@
  *   bun    — yes  (--lockfile-only dry-run, node_modules untouched)
  *   yarn   — no   (no lockfile-only equivalent; yarn add always writes node_modules)
  *   composer — yes (`composer require/update --no-install --no-scripts` dry-run; vendor/ untouched)
+ *   flutter/dart — no  (pub's dry-run prints a plan, not an installable candidate lockfile, so the scanned set can't be installed exactly)
+ *   swift  — no   (SwiftPM has no dry-run: resolving clones the repo and evaluates its Package.swift, i.e. runs code)
  *   docker — yes  (health/check/install all supported; see Docker mode above)
  *   pip    — yes  (`pip install --dry-run --report`; real install syncs requirements.txt/pyproject.toml after)
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
@@ -144,6 +157,7 @@ import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
 
 import fs from 'node:fs/promises';
+import { readFileSync, writeFileSync } from "node:fs";
 
 async function createTargetPath(dirPath) {
   try {
@@ -173,6 +187,107 @@ const PYPI_ENGINES  = new Set(["pip", "pipx", "uv"]);
 // guesses whether you meant pnpm.
 const LINUX_ENGINES = new Set(["apt", "dnf", "yum"]);
 
+// ── Per-run policy flags ──────────────────────────────────────────────────────
+// `--threshold high`, `--block-unknown`, etc. override a policy field for the
+// current invocation ONLY. Unlike the `threshold`/`block-unknown`/... modes,
+// nothing is left behind in the policy file afterwards.
+// `license` fields are npm-family only, mirroring the license-risk /
+// license-block-unknown modes.
+const POLICY_FLAGS = {
+  "--threshold":             { field: "severity_threshold",            type: "severity" },
+  "--block-unknown":         { field: "block_unknown_vulnerabilities", type: "boolean"  },
+  "--license-risk":          { field: "license_risk_threshold",        type: "license",  license: true },
+  "--license-block-unknown": { field: "block_unknown_license_risk",    type: "boolean",  license: true },
+};
+
+/**
+ * Pull policy flags out of the CLI args, leaving package specifiers (and any
+ * flag we don't recognise) untouched. Accepts `--flag value` and `--flag=value`;
+ * boolean flags may also be bare (`--block-unknown` === `--block-unknown true`).
+ * Exits 1 on an invalid or unsupported flag/value.
+ *
+ * @returns {{ rest: string[], overrides: Object<string, string|boolean> }}
+ */
+function parsePolicyFlags(args, { license }) {
+  const rest = [];
+  const overrides = {};
+  const die = (msg) => { console.error(`[!] ${msg}`); process.exit(1); };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const eq   = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const def  = POLICY_FLAGS[name];
+    if (!def) { rest.push(arg); continue; }
+
+    if (def.license && !license) {
+      die(`${name} is only available on npm/pnpm/bun/yarn/composer.`);
+    }
+
+    let raw = eq === -1 ? undefined : arg.slice(eq + 1);
+    if (raw === undefined) {
+      const next = args[i + 1];
+      if (def.type === "boolean") {
+        if (next !== undefined && /^(true|false)$/i.test(next)) { raw = next; i++; }
+        else raw = "true";
+      } else {
+        raw = next;
+        i++;
+      }
+    }
+    raw = (raw ?? "").toLowerCase();
+
+    if (def.type === "severity") {
+      if (!VALID_SEVERITIES.has(raw)) die(`${name} requires: low | medium | high | critical | none`);
+      overrides[def.field] = raw;
+    } else if (def.type === "license") {
+      if (!VALID_LICENSE_RISKS.has(raw)) die(`${name} requires: none | low | medium | high`);
+      overrides[def.field] = raw;
+    } else {
+      if (raw !== "true" && raw !== "false") die(`${name} requires: true | false`);
+      overrides[def.field] = raw === "true";
+    }
+  }
+  return { rest, overrides };
+}
+
+/**
+ * Apply per-run policy overrides without leaving them behind. The policy file
+ * is snapshotted, the overrides applied through the normal setPolicyField()
+ * path (so the engine sees them exactly as it would a saved policy), and the
+ * original bytes are written back on process exit — which covers a clean
+ * finish, a policy-violation exit(1), a scan failure, and Ctrl-C alike.
+ */
+function applyPolicyOverrides(eng, overrides) {
+  const entries = Object.entries(overrides);
+  if (!entries.length) return;
+
+  const policyFile = path.join(eng.policyDir, "config.json");
+  let original;
+  try {
+    original = readFileSync(policyFile);
+  } catch (err) {
+    // Refuse rather than risk silently persisting an override we can't undo.
+    console.error(`[!] Can't apply policy flags: unable to read ${policyFile} (${err.message}).`);
+    process.exit(1);
+  }
+
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    try { writeFileSync(policyFile, original); }
+    catch (err) { console.error(`[!] Failed to restore policy file ${policyFile}: ${err.message}`); }
+  };
+  process.on("exit", restore);
+  process.on("SIGINT",  () => process.exit(130));
+  process.on("SIGTERM", () => process.exit(143));
+
+  for (const [field, value] of entries) eng.setPolicyField(field, value);
+  console.log(`[i] Policy overrides for this run only (saved policy unchanged): ${entries.map(([k, v]) => `${k} = ${v}`).join(", ")}`);
+  console.log();
+}
+
 /**
  * Resolve the right manager instance + systemType grouping for an engine
  * name. Keeps "systemType" meaning one of exactly three ecosystem buckets
@@ -198,7 +313,7 @@ function resolveManager(engine) {
     // contract as NodeManagerInstance, so it shares the "npm" systemType
     // bucket (engine.js's lockfile-based dry-run/verify/revert/install
     // path) rather than getting a fourth bucket of its own.
-    return { manager: new PhpComposerScanner(), systemType: "php" };
+    return { manager: new PhpComposerScanner(), systemType: "npm" };
   }
   return { manager: new NodeManagerInstance(), systemType: "npm" };
 }
@@ -482,7 +597,11 @@ async function main(programmaticOptions) {
     }
 
     // ── collect package args ────────────────────────────────────────────────
-    let pkgArgs = extraArgs;
+    // Per-run policy flags (--threshold, --block-unknown) are peeled off first
+    // so they're never mistaken for package specifiers.
+    const { rest: pkgArgsRaw, overrides: policyOverrides } = parsePolicyFlags(extraArgs, { license: false });
+    applyPolicyOverrides(eng, policyOverrides);
+    let pkgArgs = pkgArgsRaw;
 
     // pip/uv check/install with no args → fall back to ./requirements.txt,
     // then ./pyproject.toml's [project] dependencies (manager owns both —
@@ -616,7 +735,11 @@ async function main(programmaticOptions) {
   }
 
   // ── validate package specifiers early ───────────────────────────────────────
-  let pkgArgs = extraArgs;
+  // Per-run policy flags are peeled off first so they're never mistaken for
+  // package specifiers, and applied without touching the saved policy.
+  const { rest: pkgArgsRaw, overrides: policyOverrides } = parsePolicyFlags(extraArgs, { license: true });
+  applyPolicyOverrides(eng, policyOverrides);
+  let pkgArgs = pkgArgsRaw;
   if (!pkgArgs.length && (effectiveMode === "check" || effectiveMode === "install")) {
     pkgArgs = [];
   }

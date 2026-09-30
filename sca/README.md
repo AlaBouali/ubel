@@ -117,7 +117,13 @@ ubel-pipx  <mode> [package]
 ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
 ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
+
+# Any of the above, on health | check | install — one-off policy overrides, nothing saved:
+ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
+                               [--license-risk <level>] [--license-block-unknown [true|false]]
 ```
+
+The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
 Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
 
@@ -435,7 +441,7 @@ ubel-apt threshold high       # ubel-dnf / ubel-yum work the same way
 
 Infections (`MAL-*` advisories) are always blocked regardless of this setting.
 
-The threshold is persisted to the local policy file and applies to all subsequent scans until changed.
+The threshold is persisted to the local policy file and applies to all subsequent scans until changed. To apply a level to a single run without saving it, use [`--threshold`](#per-run-policy-flags) instead.
 
 ---
 
@@ -452,6 +458,8 @@ ubel-composer block-unknown true
 ubel-pip block-unknown true
 ubel-uv block-unknown true
 ```
+
+Like `threshold`, this is persisted. For a one-off run use [`--block-unknown`](#per-run-policy-flags).
 
 ---
 
@@ -479,6 +487,40 @@ ubel-npm license-block-unknown false   # default
 ```
 
 Same `health`-mode-only scope as `license-risk`. Off by default: an `unknown` classification is usually a detection gap (unparseable free-text license, missing metadata) rather than an actual compliance finding, so this is opt-in even on a strict `license-risk` policy — a fresh scan of an unfamiliar codebase can otherwise block on packages nobody has actually looked at yet, purely because their metadata didn't parse.
+
+---
+
+## Per-run policy flags
+
+Every policy field that has a mode can also be passed as a flag on `health`, `check`, and `install`. A flag overrides the saved policy **for that one invocation only** — the policy file is restored when the process exits (clean run, policy block, scan failure, or Ctrl-C), so it's byte-for-byte what it was before. Use the modes above (`threshold`, `block-unknown`, ...) when you want the change to stick.
+
+| Flag | Overrides | Values | Engines |
+|---|---|---|---|
+| `--threshold <level>` | `severity_threshold` | `low` \| `medium` \| `high` \| `critical` \| `none` | all |
+| `--block-unknown [true\|false]` | `block_unknown_vulnerabilities` | `true` \| `false` (bare flag = `true`) | all |
+| `--license-risk <level>` | `license_risk_threshold` | `none` \| `low` \| `medium` \| `high` | npm/pnpm/bun/yarn/composer |
+| `--license-block-unknown [true\|false]` | `block_unknown_license_risk` | `true` \| `false` (bare flag = `true`) | npm/pnpm/bun/yarn/composer |
+
+Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/apt/dnf/yum, exits `1` with an error before any scan starts. `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
+
+```bash
+# Block only critical vulnerabilities for this run; saved policy untouched
+ubel-npm check --threshold critical
+
+# Stricter gate for one install
+ubel-pnpm install --threshold=medium --block-unknown react
+
+# CI: fail a health scan on high-risk licenses without editing the shared policy file
+ubel-npm health --license-risk high --license-block-unknown
+
+# Linux / Python engines take the two vulnerability flags
+ubel-apt check --threshold critical curl
+ubel-pip install --threshold high requests==2.31.0
+```
+
+`license-risk` / `license-block-unknown` keep their usual scope: they're only evaluated on `health` scans, so passing them to `check`/`install` has no effect on the result.
+
+**Precedence:** flag > saved policy > default policy.
 
 ---
 
@@ -1061,6 +1103,11 @@ ubel-apt install curl
 # Tighten policy for the Linux firewall too, then re-scan
 ubel-apt threshold critical
 ubel-apt check curl
+
+# One-off overrides — same fields, nothing written to the policy file
+ubel-npm check --threshold critical
+ubel-npm health --license-risk high
+ubel-apt check --threshold=low curl
 ```
 
 ---
