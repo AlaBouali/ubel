@@ -27,7 +27,7 @@ Written against **Node.js's standard library only** — no AWS SDK, no
 - Bounded concurrency for per-bucket/per-user/per-region work (see `lib/concurrency.js`) instead of serial, one-item-at-a-time scanning
 - Auto-discovers enabled AWS regions via `DescribeRegions` by default — no need to list them out by hand
 - Credentials are only ever used for that run — nothing stored or reused, same model as the SAST module's LLM credentials
-- **Compliance framework mapping** — every finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary (see [Compliance Framework Mapping](#compliance-framework-mapping))
+- **Compliance framework mapping** — every finding is mapped onto the frameworks that apply to its risk category — OWASP Top 10, PCI DSS, HIPAA Security Rule, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, plus the provider-specific CIS Foundations Benchmarks (AWS, Azure, GCP) where a check has one — with a report-level per-framework/per-control finding-count summary (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Automatic report generation: timestamped **JSON** + interactive **HTML**, plus `latest.*` convenience links; a zipped snapshot of both is also saved for historic tracking
 - `--fail-on` severity/count gate — same syntax as the rest of UBEL — for CI use
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -170,7 +170,7 @@ of one item at a time.
 
 Every finding, from all three providers, is mapped onto industry compliance/security frameworks by default — no separate flag needed, and included in both the JSON and HTML report.
 
-Each finding's `check` id (e.g. `s3-acl-public`, `iam-no-password-policy`) resolves to one or more internal risk categories — `public_exposure`, `iam_misconfiguration`, `cryptography`, `logging_monitoring`, `data_protection_resilience`, or `security_misconfiguration` — and each category carries a fixed list of framework control references: **OWASP Top 10 (2021)**, **PCI DSS v4.0**, **NIST SP 800-53 Rev. 5**, **SOC 2**, **ISO/IEC 27001:2022**, **GDPR**, and **CIS Controls v8**. As with the SCA module's [Compliance Framework Mapping](../sca/README.md#compliance-framework-mapping) (shared engine, same category system), this is best-effort guidance derived from public framework documentation, not a certified compliance assessment — every report's `compliance_summary.disclaimer` field says so verbatim.
+Each finding's `check` id (e.g. `s3-acl-public`, `iam-no-password-policy`) resolves to one or more internal risk categories — `public_exposure`, `iam_misconfiguration`, `cryptography`, `logging_monitoring`, `data_protection_resilience`, or `security_misconfiguration` — and each category carries a fixed list of framework control references: **OWASP Top 10 (2021)**, **PCI DSS v4.0**, **NIST SP 800-53 Rev. 5**, **SOC 2**, **ISO/IEC 27001:2022**, **GDPR**, **CIS Controls v8**, and, for the checks that map to them, the **HIPAA Security Rule** and the provider **CIS Foundations Benchmarks** (AWS, Azure, GCP). Not every framework applies to every check. As with the SCA module's [Compliance Framework Mapping](../sca/README.md#compliance-framework-mapping) (shared engine, same category system), this is best-effort guidance derived from public framework documentation, not a certified compliance assessment — every report's `compliance_summary.disclaimer` field says so verbatim.
 
 Each finding gets a `compliance` object:
 
@@ -494,3 +494,7 @@ ubel-cloud --provider aws --profile prod-readonly
 ---
 
 *Ubel — Find the misconfiguration before an attacker does.*
+
+## License
+
+UBEL is source-available under an **internal-use-only** license. You may install, run, and modify it for your own organization's internal needs, including your own CI/CD pipelines and products. You may not redistribute, wrap, or embed it, expose it to third parties over a network or API, or use it to provide scanning or similar services to others. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms, including the consultant-use exception.

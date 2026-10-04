@@ -304,8 +304,7 @@ function parseArgs(argv) {
  */
 async function isBlockedHost(host) {
   const ip = await DomainInfo.getIpFromDomain(host);
-  const myIp = await IpInfo.myIp();
-  return { blocked: IpInfo.ipIsPrivate(ip) || (myIp != null && ip === myIp), ip };
+  return { blocked: IpInfo.ipIsPrivate(ip) || IpInfo.isLocalAddress(ip), ip };
 }
 
 async function main() {

@@ -9,9 +9,9 @@ This document covers the **SAST / malware-scan** component (source-level code an
 
 ## Features
 
-- Semantic code chunker across 11 language families — class/function-aware boundaries, not naive line-splitting
+- Semantic code chunker across 13 language families (10 source-code languages plus Docker, IaC, and Kubernetes) — class/function-aware boundaries, not naive line-splitting
 - Three-pass analysis pipeline for vulnerability findings: **scan** (Pass 1) → **verify** (Pass 2) → **taint trace** (Pass 3)
-- Structured, CWE-mapped vulnerability catalog — 59 classes across 11 language families, each with concrete "detect when you see" signals fed to the model
+- Structured, CWE-mapped vulnerability catalog — 59 classes across the 13 language families, each with concrete "detect when you see" signals fed to the model
 - Per-language catalog filtering — classes irrelevant to a chunk's language are dropped before the prompt is built, cutting token usage and false positives
 - Cross-chunk call-graph resolution — `buildFullCallChain` walks callers/callees across chunk boundaries so the taint-trace pass reasons about real source→sink flow, not a single isolated snippet
 - Separate **malicious code / backdoor** scan — its own catalog (15 classes: reverse shells, C2 beacons, supply-chain implants, persistence, exfiltration, anti-analysis evasion, logic bombs, and more), own prompts, own report set, never mixed with accidental-vulnerability findings
@@ -23,6 +23,8 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - Zero external runtime dependencies (Node.js stdlib only)
 
 ---
+
+> **Data handling:** SAST sends the code chunks it analyzes to the LLM provider you select (`--provider`, `openrouter` by default). Choose a local or self-hosted endpoint (e.g. Ollama-compatible) if source code must not leave your network. UBEL itself has no telemetry and no UBEL-operated backend.
 
 ## Installation
 
@@ -104,7 +106,7 @@ The malware scan omits Pass 3 — intent-based findings (a planted backdoor, a h
 
 ### Diff mode
 
-`--only-diff [--diff-base <ref>]` restricts **Pass 1** to chunks belonging to files changed in the given git diff (default base: `HEAD^`; `staged` diffs the index against `HEAD`). The full, untouched chunk set is still built in the background — for free, since chunking is pure static parsing, not an LLM call — so Pass 3's call-graph resolution can trace a diff-introduced sink back through unchanged code. If the diff base ref can't be resolved (shallow clone, first commit), it falls back to `git diff --name-only HEAD` and, failing that, scans everything. `--diff-base` is validated against `/^[\w\/\.\-]+$/` before being shelled out to `git`, as a shell-injection guard.
+`--only-diff [--diff-base <ref>]` restricts **Pass 1** to chunks belonging to files changed in the given git diff (default base: `HEAD^`; `staged` diffs the index against `HEAD`). The full, untouched chunk set is still built in the background — for free, since chunking is pure static parsing, not an LLM call — so Pass 3's call-graph resolution can trace a diff-introduced sink back through unchanged code. The diff is the union of the commits since the base and any uncommitted (staged or unstaged) working-tree changes; paths are matched relative to the scanned directory. **If the diff can't be resolved** — not a git repo, `git` missing, an unknown ref, or a shallow clone that doesn't contain the base commit (the default for `actions/checkout`) — `--only-diff` never skips anything: it logs the reason and scans everything, because an unresolvable diff must not be mistaken for an empty one. In CI, use `fetch-depth: 0` (or a `--diff-base` that exists in the clone) to get the real diff-scoped run. A diff that resolves and is genuinely empty scans nothing. `--diff-base` must look like a git ref (no leading `-`, no whitespace); `git` is invoked without a shell.
 
 ---
 
@@ -122,7 +124,7 @@ Builds the semantic chunk set for a directory and writes it to `sast_chunks.json
 | `--max-chunks <n>` | int | `1000` | Hard cap on chunks returned |
 | `--skip-folders <a,b,c>` | CSV | `[]` | Extra folder names to exclude, on top of the built-in ignore set |
 | `--skip-files <a,b,c>` | CSV | `[]` | File names to exclude |
-| `--languages <a,b,c>` | CSV | all 10 families | Restrict to specific language families |
+| `--languages <a,b,c>` | CSV | all 13 families | Restrict to specific language families |
 
 Built-in ignore directories (always excluded, on top of `--skip-folders`): `node_modules`, `.nyc_output`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.tox`, `venv`, `.venv`, `env`, `.env`, `eggs`, `.eggs`, `htmlcov`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `vendor`, `.gradle`, `.idea`, `.vs`, `packages`, `.git`, `.svn`, `.hg`, `coverage`.
 
@@ -470,7 +472,7 @@ If a Pass-1 response fails JSON parsing and `retryOnParseError` is true (default
 
 ### `--only-diff` — the highest-leverage lever for repeat runs
 
-Because Pass 1 is normally the majority of total calls, restricting it to files touched since `--diff-base` is the single biggest lever for repeat/CI runs — a PR touching 5 files out of 500 pays roughly `(5/500)` of the normal Pass-1 bill, plus whatever Pass 2/3 calls the new findings generate. The full chunk set for all 500 files is still built (for Pass 3's cross-file resolution), but that costs nothing — chunking has no LLM calls.
+Because Pass 1 is normally the majority of total calls, restricting it to files touched since `--diff-base` is the single biggest lever for repeat/CI runs — a PR touching 5 files out of 500 pays roughly `(5/500)` of the normal Pass-1 bill, plus whatever Pass 2/3 calls the new findings generate. The full chunk set for all 500 files is still built (for Pass 3's cross-file resolution), but that costs nothing — chunking has no LLM calls. In a shallow CI checkout the base commit is usually missing, so UBEL scans everything (and says so); use `fetch-depth: 0` to get the saving.
 
 ### Optimization playbook, ordered by typical impact
 
@@ -520,3 +522,7 @@ ubel-sast --provider anthropic --model claude-opus-4-8 --max-tokens 2048 --inclu
 ---
 
 *Ubel — Find the bug before it finds production.*
+
+## License
+
+UBEL is source-available under an **internal-use-only** license. You may install, run, and modify it for your own organization's internal needs, including your own CI/CD pipelines and products. You may not redistribute, wrap, or embed it, expose it to third parties over a network or API, or use it to provide scanning or similar services to others. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms, including the consultant-use exception.

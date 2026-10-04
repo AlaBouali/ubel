@@ -54,6 +54,7 @@ import {
   submitToOsv,
   submitToNvd,
   getVulnById,
+  VulnLookupError,
   getFix,
   scoreToSeverity,
   deduplicateVulnerabilitiesByAlias,
@@ -409,8 +410,19 @@ export async function scanTargets(targets, opts = {}) {
     for (let i = 0; i < osvIds.length; i += CONCURRENCY) {
       const batch = osvIds.slice(i, i + CONCURRENCY);
       const results = await Promise.allSettled(batch.map(getVulnById));
+      // An advisory id here is a finding OSV already reported for one of the
+      // queried components; if its details cannot be fetched, dropping it would
+      // turn a known finding into a clean result. Fail closed, same as ubel-npm.
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length) {
+        throw new VulnLookupError(
+          `${failed.length} OSV advisor${failed.length === 1 ? "y" : "ies"} could not be fetched ` +
+          `(${failed[0].reason?.message || "unknown error"}) — vulnerability lookup is incomplete.`,
+          { source: "osv-vuln", cause: failed[0].reason }
+        );
+      }
       for (const r of results) {
-        if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
+        if (r.value) vulnerabilities.push(r.value);
       }
     }
   }

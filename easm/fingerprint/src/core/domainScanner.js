@@ -9,17 +9,6 @@ import { normalizeComponents } from "./normalize.js";
 
 export class DomainScanner {
   static blackListDomains = [];
-  static #blackListIpsPromise = null;
-
-  /** Lazily resolves and caches this host's own public IP, mirroring the
-   *  Python original's `black_list_ips=[IP_Info.my_ip()]` class attribute -
-   *  done lazily here instead of at import time. */
-  static #getBlackListIps() {
-    if (!DomainScanner.#blackListIpsPromise) {
-      DomainScanner.#blackListIpsPromise = IpInfo.myIp().then((ip) => (ip ? [ip] : []));
-    }
-    return DomainScanner.#blackListIpsPromise;
-  }
 
   /**
    * @param {string} domain
@@ -37,8 +26,9 @@ export class DomainScanner {
     if (!skipVerification) {
       if (DomainScanner.blackListDomains.includes(domain)) return [];
       const domainIp = await DomainInfo.getIpFromDomain(domain);
-      const blackListIps = await DomainScanner.#getBlackListIps();
-      if (IpInfo.ipIsPrivate(domainIp) || blackListIps.includes(domainIp)) return [];
+      // Private ranges, plus any address bound to one of this machine's own
+      // interfaces (checked locally - no third-party "what is my IP" lookup).
+      if (IpInfo.ipIsPrivate(domainIp) || IpInfo.isLocalAddress(domainIp)) return [];
     }
 
     const data = { asset: domain, type: "domain", url: null, components: [] };

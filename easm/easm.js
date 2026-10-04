@@ -510,8 +510,7 @@ async function discoverIps(args, log) {
  * discoverIps() above), so there's no need for DomainInfo.getIpFromDomain.
  */
 async function isBlockedIp(ip) {
-  const myIp = await IpInfo.myIp();
-  return IpInfo.ipIsPrivate(ip) || (myIp != null && ip === myIp);
+  return IpInfo.ipIsPrivate(ip) || IpInfo.isLocalAddress(ip);
 }
 
 /**

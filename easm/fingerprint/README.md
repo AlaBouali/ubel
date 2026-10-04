@@ -109,3 +109,7 @@ registration order, and returns `[application, scanFn]` for the first
 ## Requirements
 
 Node.js >= 18. No `npm install` needed - everything is stdlib.
+
+## License
+
+UBEL is source-available under an **internal-use-only** license. You may install, run, and modify it for your own organization's internal needs, including your own CI/CD pipelines and products. You may not redistribute, wrap, or embed it, expose it to third parties over a network or API, or use it to provide scanning or similar services to others. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms, including the consultant-use exception.

@@ -1,9 +1,14 @@
 // Minimal stand-ins for bane's Domain_Info / IP_Info, covering only what
 // domain_scanner.py actually calls: resolving a domain, and checking whether
 // an address is private/self so the scanner can skip it.
+//
+// Nothing in this file makes a network request other than the DNS lookup of the
+// target itself. In particular the "is this my own address?" check is answered
+// from the machine's own network interfaces — it used to ask a third-party
+// service (api.ipify.org) for this machine's public IP on every scan.
 
 import dns from "node:dns/promises";
-import { httpClient } from "./httpClient.js";
+import os from "node:os";
 
 export class DomainInfo {
   /** @returns {Promise<string|null>} first resolved IPv4 address, or null */
@@ -48,13 +53,25 @@ export class IpInfo {
     return PRIVATE_RANGES.some((cidr) => inRange(ip, cidr));
   }
 
-  /** @returns {Promise<string|null>} this machine's public IP, via a plain GET (no proxy/socket layer) */
-  static async myIp() {
-    try {
-      const res = await httpClient.get("https://api.ipify.org", { timeout: 10 });
-      return res.text.trim();
-    } catch {
-      return null;
+  /**
+   * True when `ip` is assigned to one of THIS machine's own network interfaces
+   * (e.g. a VPS / bare-metal host whose public address is bound directly to the
+   * NIC). Purely local: no network request is made.
+   *
+   * Limitation: a public address that lives only on a router/NAT in front of
+   * this machine (a typical home or office egress IP, or a cloud VM with a NAT'd
+   * elastic IP) is not on any local interface and is not detected here.
+   *
+   * @param {string|null|undefined} ip
+   * @returns {boolean}
+   */
+  static isLocalAddress(ip) {
+    if (!ip) return false;
+    for (const addrs of Object.values(os.networkInterfaces())) {
+      for (const a of addrs || []) {
+        if (a.address === ip) return true;
+      }
     }
+    return false;
   }
 }

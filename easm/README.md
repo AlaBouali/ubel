@@ -260,7 +260,7 @@ dependency; if it's answering HTTP requests, it's running.
   rather than probed to a timeout, so "this host is gone" is never confused
   with "this host failed to scan"
 - Built-in safety default: targets resolving to a private/RFC1918 address or
-  to the scanning host's own public IP are skipped, not scanned, unless
+  to an address bound to one of the scanning machine's own network interfaces are skipped, not scanned, unless
   `--allow-private` is explicitly passed (see [Safety guard](#safety-guard))
 - Zero external runtime dependencies (Node.js stdlib only, both here and in
   the vendored fingerprinting engine)
@@ -304,8 +304,7 @@ EASM ships as part of `@arcane-spark/ubel-node`.
 ## Safety guard
 
 By default, before probing anything, each target's IP is resolved and
-checked against private/RFC1918 ranges and the scanning host's own public
-IP. A match is **skipped, not scanned** — reported in the JSON/HTML Scan Info
+checked against private/RFC1918 ranges and the scanning machine's own network-interface addresses. The own-address check is purely local — no external "what is my IP" service is contacted — so a public address that exists only on an upstream NAT or router (a typical office or home egress IP) is not detected. A match is **skipped, not scanned** — reported in the JSON/HTML Scan Info
 tab with a `"skipped"` status and a reason, never silently dropped from the
 target list, so a report never reads as "clean" for a target that was
 actually never probed.
@@ -528,9 +527,7 @@ Exit code is `2` if the `--fail-on` condition is met (default: any
 vulnerability at `critical` severity or an infection; pass `--fail-on none`
 to always exit `0`, or `--fail-on <count>:<severity>` — e.g. `5:high` — to
 fail only once MORE than `<count>` matches at or above `<severity>` exist,
-for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1`
-on a fatal/unexpected error (including `ubel-domain` finding no hosts or
-`ubel-easm` finding no scannable IP for the domain). `--fail-on` gates only
+for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1` on a fatal/unexpected error (including `ubel-domain` finding no hosts, `ubel-easm` finding no scannable IP for the domain, or a vulnerability lookup against OSV/NVD that can't be completed — a run never reports a clean result for a lookup it couldn't make). `--fail-on` gates only
 on **vulnerabilities** (and infections) — a scan that finds nothing but
 critical misconfigurations still exits `0`; misconfiguration severity isn't
 part of the exit-code gate today (see [Known
@@ -1007,7 +1004,7 @@ import { scanTargets } from "../easm/lib/scan.js";
 import { buildReportPayload, generateHtmlReport } from "../easm/lib/html_report.js";
 
 const result = await scanTargets(["example.com"], { allowPrivate: false });
-const payload = buildReportPayload(result, { tool_version: "0.13.1", targets: ["example.com"] });
+const payload = buildReportPayload(result, { tool_version: "0.18.2", targets: ["example.com"] });
 const html = await generateHtmlReport(payload);
 ```
 
@@ -1337,3 +1334,7 @@ ubel-easm your-company.example --subdomain-ports none
 # Narrower port range, one IP at a time, for a slow/sensitive network
 ubel-easm your-company.example --ports 1-1024 --ip-concurrency 1
 ```
+
+## License
+
+UBEL is source-available under an **internal-use-only** license. You may install, run, and modify it for your own organization's internal needs, including your own CI/CD pipelines and products. You may not redistribute, wrap, or embed it, expose it to third parties over a network or API, or use it to provide scanning or similar services to others. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms, including the consultant-use exception.

@@ -89,7 +89,9 @@ After installation, the following entry-point binaries are available:
 
 Both are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
-Aside from these (and the OS/NVD-name CPE lookups they front), UBEL makes no other outbound network calls during a scan. Earlier versions queried a third-party IP-lookup API (ipify) to record the host's public IP in reports; this was removed — it was a network call to an external service on every scan for a display-only field with no other consumer, which cut against the zero-third-party-dependency, fully-local-execution positioning above. The scan's *local* network interfaces are still recorded (used internally to tag which host a given inventory item's filesystem path came from, useful once reports from multiple hosts/containers get combined) — that information never leaves the machine.
+If a configured endpoint (or the public API) is unreachable, rate-limited, or returns an error or a malformed response, the scan **fails** (non-zero exit) instead of reporting a clean result — an air-gapped or mirrored deployment therefore needs a mirror that is actually reachable and complete.
+
+Aside from these (and the OS/NVD-name CPE lookups they front), UBEL makes no other outbound network calls during a scan. Earlier versions queried a third-party IP-lookup API (ipify) to record the host's public IP in reports; this was removed — it was a network call to an external service on every scan for a display-only field with no other consumer, which cut against the zero-third-party-dependency, fully-local-execution positioning above. (The EASM modules' private/own-address safety guard used the same service and now compares against the machine's own network interfaces instead — also with no network request.) The scan's *local* network interfaces are still recorded (used internally to tag which host a given inventory item's filesystem path came from, useful once reports from multiple hosts/containers get combined) — that information never leaves the machine.
 
 ```bash
 # Point live queries at internal mirrors instead of the public APIs
@@ -889,7 +891,7 @@ vendor/package:constraint
 
 Specifiers containing shell metacharacters or other unsafe characters are rejected immediately, same as npm/pnpm/bun.
 
-**pip/pipx/apt/dnf/yum** — validated more permissively, to allow the specifier shapes those ecosystems actually use (`black[d]>=24`, `requests==2.31.0`, a bare Linux package name): every character in `=._+-@/~[]<>!` is stripped from the specifier, and what remains must be alphanumeric. This still rejects shell metacharacters and anything else that isn't a legitimate part of a version/extras specifier — it's a different allow-list, not a weaker one.
+**pip/pipx/apt/dnf/yum** — validated more permissively, to allow the specifier shapes those ecosystems actually use (`black[d]>=24`, `requests==2.31.0`, a bare Linux package name): every character in `=._+-@/~[]<>!` is stripped from the specifier, and what remains must be alphanumeric. This rejects shell metacharacters, whitespace, quotes, and other characters that aren't part of a legitimate version/extras specifier. It checks *characters*, not structure, though: a leading `-` is allowed, so an option-shaped argument such as `--no-deps` passes validation as if it were a package specifier. Don't forward untrusted input to these CLIs.
 
 Either way, a rejected specifier exits non-zero before any filesystem or network operation occurs.
 
@@ -968,7 +970,7 @@ The JSON report contains the full machine-readable equivalent and can be consume
 
 ## CI/CD Integration
 
-All CLI commands exit non-zero on policy violations, making them native to any CI runner.
+All CLI commands exit non-zero on policy violations — and when a vulnerability lookup against OSV or NVD can't be completed — making them native to any CI runner. An incomplete lookup is a failed scan, never a clean one.
 
 **Via the packaged GitHub Action** ([`action.yml`](https://github.com/AlaBouali/ubel/blob/main/action.yml), a composite action wrapping `npx @arcane-spark/ubel-node@<version>` behind a `command` allow-list checked against UBEL's own `package.json` bin names):
 
@@ -976,13 +978,13 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 - uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
   with:
     command: npm
-    version: 0.8.0
+    version: 0.18.2
     args: check
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: npm
-    version: 0.8.0
+    version: 0.18.2
     args: install
 
 - uses: AlaBouali/ubel@<commit-sha>
@@ -992,25 +994,25 @@ All CLI commands exit non-zero on policy violations, making them native to any C
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: pip
-    version: 0.10.0
+    version: 0.18.2
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: composer
-    version: 0.10.0
+    version: 0.18.2
     args: install                     # scan-gated `composer install --no-scripts`, resolved from the existing composer.lock
 
 - uses: AlaBouali/ubel@<commit-sha>    # needs a preceding astral-sh/setup-uv step for `uv` itself
   with:
     command: uv
-    version: 0.10.0
+    version: 0.18.2
     args: install                     # same fallback + generated-file install as the pip example above
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: apt                      # dnf/yum work the same way, as their own `command` values
-    version: 0.10.0
+    version: 0.18.2
     args: check curl
 ```
 

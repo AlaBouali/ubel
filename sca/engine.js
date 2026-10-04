@@ -1989,6 +1989,21 @@ function nvdItemToOsvShape(nvdItem, cpe, name, version, ecosystem) {
  * @param {object[]} inventory  Full merged inventory array
  * @returns {Promise<object[]>} Array of OSV-shaped vulnerability objects
  */
+// ── Lookup failure sentinel ───────────────────────────────────────────────────
+// Thrown when a vulnerability lookup (OSV batch query, OSV advisory detail, or
+// NVD) could not be completed.  A scan that could not look vulnerabilities up
+// has NOT established that the dependencies are clean, so callers must treat
+// this as a failed scan — non-zero exit, lockfile reverted, nothing installed —
+// and never as "0 findings / ALLOW".  `source` is "osv", "osv-vuln" or "nvd".
+export class VulnLookupError extends Error {
+  constructor(message, { source = "unknown", cause } = {}) {
+    super(message);
+    this.name   = "VulnLookupError";
+    this.source = source;
+    if (cause) this.cause = cause;
+  }
+}
+
 /**
  * Query NVD for one CPE string.  Returns { status, vulns } so the caller
  * can distinguish 429 (rate-limited) from real errors.
@@ -2004,8 +2019,14 @@ async function queryNvdForCpe(cpe, name, version, ecosystem) {
     return { status: res.status, vulns: [] };
   }
 
+  // NVD answers 400/404 for a cpeName it cannot resolve (e.g. one that is not
+  // in the CPE dictionary).  That is "NVD has nothing for this CPE", which is a
+  // complete answer — not a failed lookup.
+  if (res.status === 400 || res.status === 404) {
+    return { status: 200, vulns: [] };
+  }
+
   if (res.status !== 200) {
-    console.error(`[!] NVD query failed for ${cpe}: HTTP ${res.status}`);
     return { status: res.status, vulns: [] };
   }
 
@@ -2044,20 +2065,35 @@ export async function submitToNvd(inventory) {
         if (status === 429 || status === 503) {
           attempt++;
           if (attempt >= NVD_MAX_RETRIES) {
-            console.warn(`[~] NVD returned ${status} for ${item.id} after ${NVD_MAX_RETRIES} attempts — skipping.`);
-            break;
+            // Fail closed: skipping this CPE would silently drop its CVEs.
+            throw new VulnLookupError(
+              `NVD returned HTTP ${status} for ${item.id} after ${NVD_MAX_RETRIES} attempts — vulnerability lookup is incomplete.`,
+              { source: "nvd" }
+            );
           }
           console.warn(`[~] NVD ${status} on ${item.id} (attempt ${attempt}/${NVD_MAX_RETRIES}), retrying in ${NVD_RATELIMIT_RETRY_MS / 1000}s...`);
           await new Promise(r => setTimeout(r, NVD_RATELIMIT_RETRY_MS));
           continue; // retry same item
         }
 
+        if (status !== 200) {
+          throw new VulnLookupError(
+            `NVD query failed for ${item.id}: HTTP ${status} — vulnerability lookup is incomplete.`,
+            { source: "nvd" }
+          );
+        }
+
         results.push(...vulns);
-        break; // success or non-retryable error — move to next item
+        break; // success — move to next item
 
       } catch (err) {
-        console.error(`[!] NVD query error for ${item.id}: ${err.message}`);
-        break; // network-level failure — skip this item, don't retry forever
+        if (err instanceof VulnLookupError) throw err;
+        // Network-level failure (DNS, TLS, timeout, reset): same rule — a CPE
+        // we could not query is a CPE we could not clear.
+        throw new VulnLookupError(
+          `NVD query error for ${item.id}: ${err.message} — vulnerability lookup is incomplete.`,
+          { source: "nvd", cause: err }
+        );
       }
     }
 
@@ -2081,14 +2117,34 @@ export async function submitToOsv(purlsList) {
   for (let offset = 0; offset < purlsList.length; offset += PAGE) {
     const chunk   = purlsList.slice(offset, offset + PAGE);
     const queries = chunk.map((purl) => ({ package: { purl } }));
-    const res     = await fetchJSON(OSV_QUERYBATCH, "POST", { queries });
-
-    if (res.status !== 200) {
-      console.error("[!] OSV batch query failed:", res.body);
-      continue;
+    let res;
+    try {
+      res = await fetchJSON(OSV_QUERYBATCH, "POST", { queries });
+    } catch (err) {
+      throw new VulnLookupError(
+        `OSV batch query could not be completed: ${err.message} — vulnerability lookup is incomplete.`,
+        { source: "osv", cause: err }
+      );
     }
 
-    const vulnResults = res.body.results || [];
+    if (res.status !== 200) {
+      const detail = typeof res.body === "string" ? res.body.slice(0, 200) : JSON.stringify(res.body)?.slice(0, 200);
+      throw new VulnLookupError(
+        `OSV batch query failed: HTTP ${res.status}${detail ? ` (${detail})` : ""} — vulnerability lookup is incomplete.`,
+        { source: "osv" }
+      );
+    }
+
+    // OSV returns exactly one result per query, in order.  Anything else means
+    // the answer was truncated or malformed, and indexing it by position would
+    // attribute (or miss) findings against the wrong packages.
+    const vulnResults = res.body?.results;
+    if (!Array.isArray(vulnResults) || vulnResults.length !== chunk.length) {
+      throw new VulnLookupError(
+        `OSV batch query returned ${Array.isArray(vulnResults) ? vulnResults.length : "no"} result(s) for ${chunk.length} package(s) — vulnerability lookup is incomplete.`,
+        { source: "osv" }
+      );
+    }
     vulnResults.forEach((item, i) => {
       const purl     = chunk[i];
       const [dep, ver] = getDependencyFromPurl(purl);
@@ -2186,8 +2242,25 @@ export function getFix(vuln) {
 }
 
 export async function getVulnById({ vulnerability_id, purl, dependency, affected_version }) {
-  const res = await fetchJSON(`${OSV_VULN_BASE}/${vulnerability_id}`);
-  if (res.status !== 200) return null;
+  let res;
+  try {
+    res = await fetchJSON(`${OSV_VULN_BASE}/${vulnerability_id}`);
+  } catch (err) {
+    throw new VulnLookupError(
+      `OSV advisory ${vulnerability_id} could not be fetched: ${err.message}`,
+      { source: "osv-vuln", cause: err }
+    );
+  }
+  // OSV already told us this advisory affects the package (that is how we got
+  // its id).  Returning null here used to drop it silently — including MAL-*
+  // malicious-package advisories — so a failed detail fetch turned a known
+  // finding into a clean result.
+  if (res.status !== 200 || !res.body || typeof res.body !== "object") {
+    throw new VulnLookupError(
+      `OSV advisory ${vulnerability_id} could not be fetched: HTTP ${res.status}`,
+      { source: "osv-vuln" }
+    );
+  }
 
   const data = res.body;
   processVulnerability(data);
@@ -2861,10 +2934,18 @@ export class UbelEngineInstance {
         for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
           const batch   = vuln_ids.slice(i, i + CONCURRENCY);
           const results = await Promise.allSettled(batch.map(getVulnById));
+          const failed  = results.filter(r => r.status === "rejected");
+          if (failed.length) {
+            for (const r of failed) console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
+            // Fail closed: every id in vuln_ids is a finding OSV already
+            // reported for one of the scanned packages.
+            throw new VulnLookupError(
+              `${failed.length} OSV advisor${failed.length === 1 ? "y" : "ies"} could not be fetched — vulnerability lookup is incomplete.`,
+              { source: "osv-vuln", cause: failed[0].reason }
+            );
+          }
           for (const r of results) {
-            if (r.status === "fulfilled" && r.value) vulnerabilities.push(r.value);
-            else if (r.status === "rejected")
-              console.error("[!] Failed to fetch vulnerability:", r.reason?.message);
+            if (r.value) vulnerabilities.push(r.value);
           }
         }
 

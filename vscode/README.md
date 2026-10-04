@@ -445,7 +445,7 @@ Previous scans are retained under:
 
 ## Privacy
 
-UBEL is fully local. The only external calls are to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receive package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk.
+UBEL is fully local. The only external calls are to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receive package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If either lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
 
 Both endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where even those two calls need to stay on an internal network. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 
@@ -453,5 +453,5 @@ Both endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDP
 
 ## License
 
-Free for scanning your own projects and systems.  
-See [LICENSE.md](LICENSE.md) for details or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) for commercial licensing.
+Source-available, **internal use only**: you may use UBEL on your own projects and systems and within your own organization. Redistribution, wrapping, and offering it as a service to others are not permitted.  
+See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms, or contact [ala.bouali.1997@gmail.com](mailto:ala.bouali.1997@gmail.com) to discuss licensing beyond internal use.

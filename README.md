@@ -2,7 +2,7 @@
 
 **Software supply-chain and source-code security: dependency scanning, an install-time firewall, and AI-powered source-level scanning ( SAST ) .**
 
-UBEL is a zero-dependency, source-available application security toolkit. This package (`@arcane-spark/ubel-node`) ships multiple CLIs for dependency-security and source-level scanner:
+UBEL is a zero-dependency, source-available (internal-use-only; see [License](#license)) application security toolkit. This package (`@arcane-spark/ubel-node`) ships multiple CLIs for dependency-security and source-level scanner:
 
 - **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
@@ -13,7 +13,7 @@ UBEL is a zero-dependency, source-available application security toolkit. This p
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
 - **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD/wpvulnerability.net (the same vulnerability-lookup engine the SCA module uses, plus a dedicated WordPress plugin/theme/core lookup), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run, `ubel-host` to connect-scan every port on one host and fingerprint whatever answers HTTP(S), or `ubel-easm` to combine both — discover a domain's subdomains, resolve them to distinct IPs, port-scan each, and fingerprint the combined result. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
-Everything runs on your own infrastructure: no source code egress, no credentials required beyond your chosen LLM provider's API key (SAST only), no telemetry.
+UBEL has no telemetry and no UBEL-operated backend. The dependency-scanning CLIs send only package identifiers (PURLs / CPE names) to OSV.dev and NVD, both mirror-configurable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`; everything else runs on your own infrastructure. **SAST is the exception to "fully local":** the code chunks `ubel-sast` / `ubel-mal` analyze are sent to the LLM provider you configure (OpenRouter by default, and its API key is the only credential UBEL needs) — point it at a local or self-hosted model endpoint if source code must not leave your network. The EASM and cloud scanners contact only the targets and cloud APIs you point them at, plus the public data sources documented in their READMEs (for example crt.sh and wpvulnerability.net).
 
 ---
 
@@ -40,7 +40,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-platform` | SCA | Host platform scan (OS, runtimes, tools) |
 | `ubel-sast` | SAST | Static analysis for accidental vulnerabilities (injection, XSS, insecure deserialization, hardcoded secrets, …) |
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
-| `ubel-chunk` | SAST | Free, LLM-cost-free utility to preview how a codebase will be chunked |
+| `ubel-chunk` | SAST | Utility with no LLM cost to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
 | `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD/wpvulnerability.net vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
 | `ubel-domain` | EASM | Same as `ubel-url`, but discovers its own target list first — enumerates a domain's subdomains via Certificate Transparency logs (crt.sh), then runs the same fingerprinting/vulnerability/misconfiguration scan against all of them — **authorized use only, against infrastructure you own** |
@@ -124,7 +124,7 @@ ubel-apt install curl
 
 Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-composer`/`ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only (npm/pnpm/bun/composer) — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
 
-**Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — a failed scan is never treated as a pass.
+**Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — including when a vulnerability lookup against OSV or NVD can't be completed (network error, rate limit, outage, or a malformed response). A failed or incomplete scan is never treated as a pass: for `install`, nothing is installed and the lockfile is restored from backup.
 
 **Full documentation — every mode, policy config, reachability decision ladder, and programmatic API:**
 [**sca/README.md**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md)
@@ -199,7 +199,7 @@ Every finding gets a `compliance` object (categories + per-framework control lis
 
 ## SAST — AI-Powered Static Analysis & Malicious Code Scanner
 
-Chunks your codebase into semantically-bounded units (11 language families, including Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 59-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
+Chunks your codebase into semantically-bounded units (13 language families — 10 source-code languages plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 59-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
 
 ```bash
 # Vulnerability scan
@@ -389,13 +389,13 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 - uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
   with:
     command: npm
-    version: 0.8.0
+    version: 0.18.2
     args: check
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: npm                      # `command` selects the bin; the mode (check/install/health) goes in `args`
-    version: 0.8.0
+    version: 0.18.2
     args: install
 
 - uses: AlaBouali/ubel@<commit-sha>
@@ -438,7 +438,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `ubel-domain`, `ubel-host`, and `ubel-easm` aren't in this allow-list yet, so a domain-wide sweep, a port scan, or a combined sweep isn't available through the packaged action today — call the binary directly instead (see below).
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
 
 ### Calling the binaries directly
 
@@ -1156,7 +1156,7 @@ To keep this document honest rather than aspirational:
 
 ## License
 
-Source-available, internal-use license. Modification for internal needs is permitted; redistribution, wrapping, and hosting as a third-party service are not. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for full terms, including the consultant-use exception.
+Source-available, **internal-use-only** license. Using and modifying UBEL for your organization's own internal needs (including its own CI/CD pipelines and products) is permitted. Redistribution, wrapping or embedding, exposing it to third parties over a network or API, and hosting or automating it as a service for others are not. Security consultants may use it manually during direct client engagements, provided it isn't left behind, automated, or made available to the client as a platform. See [LICENSE.md](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md) for the full terms.
 ---
 
 ## Links
