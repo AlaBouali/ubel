@@ -29,6 +29,7 @@ Written against **Node.js's standard library only** — no AWS SDK, no
 - Credentials are only ever used for that run — nothing stored or reused, same model as the SAST module's LLM credentials
 - **Compliance framework mapping** — every finding is mapped onto the frameworks that apply to its risk category — OWASP Top 10, PCI DSS, HIPAA Security Rule, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, plus the provider-specific CIS Foundations Benchmarks (AWS, Azure, GCP) where a check has one — with a report-level per-framework/per-control finding-count summary (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Automatic report generation: timestamped **JSON** + interactive **HTML**, plus `latest.*` convenience links; a zipped snapshot of both is also saved for historic tracking
+- **Executive Summary** in both reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Reports](#reports))
 - `--fail-on` severity/count gate — same syntax as the rest of UBEL — for CI use
 - Zero external runtime dependencies (Node.js stdlib only)
 
@@ -323,7 +324,13 @@ ubel-cloud --help
 ```
 
 Any provider whose credentials aren't set is skipped with a warning rather
-than aborting the whole scan, so you can run this incrementally.
+than aborting the whole scan, so you can run this incrementally. Each
+requested provider is recorded in the report's `provider_status` as `scanned`,
+`partial` (the scan threw part-way — findings gathered so far are kept, but
+the results are incomplete) or `skipped`, and the Executive Summary says so.
+Provider names other than `aws`, `gcp` and `azure` are rejected with exit
+code `2`, and a flag that needs a value but has none is a usage error — both
+previously fell through silently.
 
 Every run always writes both JSON and HTML — there's no `--format` flag,
 and no CSV or SARIF output. There's also no `--output` path flag: report
@@ -358,12 +365,32 @@ No SARIF and no SBOM — this isn't a dependency scan, so neither format applies
 The HTML report is fully self-contained (no server required) and includes:
 
 - Dashboard with severity, provider, and per-service breakdown charts
+- Executive Summary tab (right after the Dashboard) — see [Executive summary](#executive-summary) below
 - Searchable, filterable findings table (free-text search plus severity and provider filters)
 - Per-finding detail modal (resource, region, description, remediation command, compliance framework mapping)
 - Dedicated Compliance tab — one card per framework, showing which controls this run's findings touch and how often (see [Compliance Framework Mapping](#compliance-framework-mapping))
-- Scan Info tab (tool version, generated-at timestamp, providers and regions scanned)
+- Scan Info tab (tool version, generated-at timestamp, providers and regions scanned, per-provider status, GCP project / Azure subscription, and the `--min-severity` filter that was applied)
 
-The JSON report is the full machine-readable equivalent — `stats`, `compliance_summary`, and the complete `findings` array — and can be consumed by CI/CD tooling directly.
+The JSON report is the full machine-readable equivalent — `stats`, `compliance_summary`, the complete `findings` array, the scan-coverage fields (`providers`, `regions`, `provider_status`, `accounts`, `region_source`, `scan_options`), and the `executive_summary` object — and can be consumed by CI/CD tooling directly. The HTML report renders from that exact object, so the two never differ.
+
+### Executive summary
+
+`executive_summary` is a plain-language overview for readers who are not security engineers (management, risk, compliance, product owners). It is the cloud counterpart of the SCA and EASM executive summaries and follows the same rules: it is derived only from data already in the report (no extra API calls), it avoids rule ids and CLI commands in its headline text, and a figure that could not be checked is `null` ("n/a" in the HTML), never `0`.
+
+It contains the overall risk rating with its reason and business impact, a one-page `cover` / `bottom_line` (top three risks, three things to do first, four key numbers), key findings, at-a-glance figures, per-cloud coverage, issues grouped by area (public exposure, access permissions, encryption, logging, backup/recovery), the issue types and resources to fix first, suggested actions with default timeframes and owners, a compliance overview, scope, a **methodology** (steps actually performed, how the rating is decided, how things are prioritized, limitations), notes and a glossary. In the HTML report the Executive Summary tab has a *Print / save as PDF* button that prints the summary alone.
+
+Overall risk is the highest level that applies, using the severities the scanner already assigned:
+
+| Rating | Rule |
+|---|---|
+| Critical | at least one Critical-severity finding |
+| High | at least one High finding, none Critical |
+| Medium | Medium findings, nothing more serious |
+| Low | only Low findings, or findings hidden by `--min-severity` (a Minimal rating is never given when findings were hidden) |
+| Minimal | nothing above informational notes in the checks that ran |
+| Not assessed | no cloud could be scanned — no rating is given instead of "Minimal" |
+
+`info` findings are housekeeping notes: they are counted separately and never raise the rating, so the summary's "Issues found" can be lower than the Findings tab total. A cloud that was requested but skipped (no credentials) or whose scan stopped part-way is stated in the summary — a missing or incomplete cloud is never presented as a clean one. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
 
 ---
 

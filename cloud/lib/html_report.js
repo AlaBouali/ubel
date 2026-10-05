@@ -1,8 +1,8 @@
 'use strict';
 // html_report.js — HTML report generator for cloud-scanner findings
 //
-// Input:  reporter (src/lib/report.js Reporter instance), meta
-//   meta — { generated_at, providers, regions, tool_version }
+// Input:  reporter (lib/report.js Reporter instance), meta (see
+//   buildReportPayload below for its fields)
 //
 // Output: HTML string (caller writes to disk)
 //
@@ -10,12 +10,12 @@
 // shared `sca` module the same way ubel-sast's HTML report does, so the
 // report stays a single self-contained file with no CDN/network calls at
 // view time — consistent with UBEL's no-telemetry, offline-friendly
-// posture. cloud-scanner itself is CommonJS, so these are loaded with a
-// dynamic import() (works against either a CJS or ESM sca build) rather
-// than a top-level `require`.
+// posture. cloud-scanner is an ES module ("type": "module" in the node
+// package), so they are imported statically.
 //
-// NOTE: the shared path itself lives in ./sca_path.js (single source of
-// truth — history.js's zip helper points at the same place).
+// The Executive Summary (plain-language overview for non-technical readers)
+// is built once, server-side, in ./executive_summary.js and attached to the
+// report payload, so the JSON report and the HTML tab show the same content.
 
 const TOOL_NAME = 'cloud-scanner';
 
@@ -23,17 +23,14 @@ import { getTailwindScript } from "../../sca/tailwindcss.js";
 import { getChartJSScript } from "../../sca/chartjs.js";
 import { getGoogleFontsScript } from "../../sca/googlefonts.js";
 import { summarizeCompliance } from "../../sca/compliance_mappings.js";
+import { buildExecutiveSummary } from "./executive_summary.js";
 
 async function loadScaStatics() {
-  try {
-    return {
-      tailwind: await getTailwindScript(),
-      chartjs: await getChartJSScript(),
-      googleFonts: await getGoogleFontsScript(),
-    };
-  } catch (err) {
-    throw new err;
-  }
+  return {
+    tailwind: await getTailwindScript(),
+    chartjs: await getChartJSScript(),
+    googleFonts: await getGoogleFontsScript(),
+  };
 }
 
 
@@ -43,6 +40,10 @@ function escapeForScript(obj) {
   return JSON.stringify(obj)
     .replace(/</g, '\\u003c')
     .replace(/`/g, '\\u0060');
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
 // ─── stats builder ───────────────────────────────────────────────────────────
@@ -76,25 +77,51 @@ function buildStats(findings) {
  * @param {import('./report.js').Reporter} reporter
  * @param {object} [meta]
  * @param {string} [meta.generated_at]  ISO timestamp; defaults to now
- * @param {string[]} [meta.providers]   providers that were actually scanned, e.g. ['aws','gcp']
+ * @param {string[]} [meta.providers]   providers that were scanned (fully or partly), e.g. ['aws','gcp']
  * @param {object} [meta.regions]       { aws: string[] } — regions scanned per provider
  * @param {string} [meta.tool_version]
+ * @param {Array<{provider:string,status:'scanned'|'partial'|'skipped',reason?:string}>} [meta.provider_status]
+ *   one row per requested provider — lets the report say which clouds were NOT (fully) scanned
+ * @param {object} [meta.accounts]      { gcp?: project id, azure?: subscription id }
+ * @param {'cli'|'configured'|'discovered'|'fallback'} [meta.region_source]  how the AWS region list was decided
+ * @param {string} [meta.min_severity]  the --min-severity filter that was applied
+ * @param {number} [meta.hidden_by_filter]  findings that filter removed before the report was built
  */
 function buildReportPayload(reporter, meta = {}) {
   const findings = reporter.sorted();
   const stats = buildStats(findings);
   const complianceSummary = summarizeCompliance(findings.map(f => f.compliance));
 
-  return {
+  const payload = {
     generated_at: meta.generated_at || new Date().toISOString(),
     tool: TOOL_NAME,
     tool_version: meta.tool_version || null,
     providers: meta.providers || [],
     regions: meta.regions || {},
+    provider_status: meta.provider_status || [],
+    accounts: meta.accounts || {},
+    region_source: meta.region_source || null,
+    scan_options: {
+      min_severity: meta.min_severity || null,
+      hidden_by_filter: meta.hidden_by_filter || 0,
+    },
     stats,
     compliance_summary: complianceSummary,
     findings,
   };
+
+  // Executive summary (plain-language overview for non-technical readers).
+  // Derived purely from the finished payload above, so it must be built last.
+  // Never allowed to fail the scan: a missing summary only hides one tab, and
+  // the HTML tab shows a "not available" notice in that case (same contract as
+  // the SCA and EASM reports).
+  try {
+    payload.executive_summary = buildExecutiveSummary(payload);
+  } catch (e) {
+    console.warn(`[~] Executive summary failed: ${e.message}`);
+  }
+
+  return payload;
 }
 
 /**
@@ -133,6 +160,51 @@ async function generateHtmlReport(reportPayload) {
     .modal-overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%;
                      background: rgba(0,0,0,0.85); z-index:50; backdrop-filter: blur(4px); }
     .modal-content { max-height: 90vh; overflow-y: auto; }
+    /* Executive summary: print / save-as-PDF. Prints the summary only, on white;
+       page 1 is the one-page summary, details and appendix start on new pages. */
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before { content: "+"; display: inline-block; width: 1.2em; color: #737373; }
+    details[open] > summary::before { content: "-"; }
+    @media print {
+      @page { size: A4; margin: 12mm; }
+      html, body { background: #fff !important; color: #111 !important; font-size: 11px; }
+      header, nav, footer, .no-print, .modal-overlay { display: none !important; }
+      main { padding: 0 !important; max-width: none !important; }
+      main > section { display: none !important; }
+      main > #section-executive { display: block !important; }
+      #section-executive, #section-executive * { -webkit-print-color-adjust: exact; print-color-adjust: exact; box-shadow: none !important; backdrop-filter: none !important; }
+      #section-executive > div, #section-executive #executive-content > * { margin-top: 0; }
+      #executive-content { display: block !important; }
+      #executive-content > * + * { margin-top: 12px !important; }
+      #section-executive .glass { background: #fff !important; border-color: #d1d5db; break-inside: avoid; padding: 8px 12px !important; border-radius: 6px !important; }
+      #section-executive .glass[style*="border-left"] { border-top-color: #d1d5db; border-right-color: #d1d5db; border-bottom-color: #d1d5db; }
+      #section-executive [class*="text-neutral"], #section-executive [class*="text-white"] { color: #374151 !important; }
+      #section-executive .exec-headline, #section-executive h2, #section-executive h4 { color: #111 !important; }
+      #section-executive [class*="bg-neutral"] { background: #f3f4f6 !important; }
+      #section-executive [class*="border-neutral"] { border-color: #d1d5db !important; }
+      #section-executive [class*="divide-neutral"] > * { border-color: #e5e7eb !important; }
+      #section-executive .exec-page-break { break-before: page; }
+      #section-executive .exec-cols-2 { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+      #section-executive .exec-figs > *, #section-executive .exec-glance > *, #section-executive .exec-cols-2 > * { min-width: 0; overflow-wrap: anywhere; }
+      #section-executive .exec-figs { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 8px !important; }
+      #section-executive .exec-glance { display: grid !important; grid-template-columns: repeat(3, 1fr) !important; gap: 8px !important; }
+      #section-executive h2 { font-size: 18px !important; margin-bottom: 4px !important; }
+      #section-executive h3 { font-size: 10px !important; margin-bottom: 6px !important; break-after: avoid; }
+      #section-executive h4 { font-size: 11px !important; }
+      #section-executive .text-4xl { font-size: 28px !important; line-height: 1.1 !important; }
+      #section-executive .text-3xl { font-size: 20px !important; line-height: 1.1 !important; }
+      #section-executive .text-lg { font-size: 12.5px !important; line-height: 1.4 !important; }
+      #section-executive .text-sm { font-size: 10.5px !important; line-height: 1.4 !important; }
+      #section-executive .text-xs, #section-executive [class*="text-[11px]"] { font-size: 9px !important; line-height: 1.35 !important; }
+      #section-executive .space-y-3 > * + * { margin-top: 6px !important; }
+      #section-executive .space-y-8 > * + * { margin-top: 12px !important; }
+      #section-executive table { font-size: 9.5px; }
+      #section-executive td, #section-executive th { padding-top: 5px !important; padding-bottom: 5px !important; }
+      #section-executive tr { break-inside: avoid; }
+      #section-executive .exec-appendix { break-inside: auto; }
+      #section-executive .exec-appendix > summary::before { content: ""; }
+    }
   </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -148,7 +220,7 @@ async function generateHtmlReport(reportPayload) {
         </div>
       </div>
       <span class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/50">
-        ${TOOL_NAME}${reportPayload.tool_version ? ' v' + reportPayload.tool_version : ''}
+        ${TOOL_NAME}${reportPayload.tool_version ? ' v' + escapeHtml(reportPayload.tool_version) : ''}
       </span>
     </div>
   </header>
@@ -157,6 +229,7 @@ async function generateHtmlReport(reportPayload) {
   <nav class="border-b border-neutral-800 bg-neutral-900/30">
     <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
       <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
+      <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('findings')"  id="tab-findings"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
       <button onclick="switchTab('stats')"      id="tab-stats"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
@@ -206,6 +279,11 @@ async function generateHtmlReport(reportPayload) {
           <div class="h-56"><canvas id="serviceChart"></canvas></div>
         </div>
       </div>
+    </section>
+
+    <!-- Executive Summary (plain-language, for non-technical readers) -->
+    <section id="section-executive" class="hidden space-y-8">
+      <div id="executive-content" class="space-y-8"></div>
     </section>
 
     <!-- Findings -->
@@ -293,7 +371,7 @@ async function generateHtmlReport(reportPayload) {
 
         <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3">
           <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Common Checks</h3>
-          <p class="text-[11px] text-neutral-500">Distinct check IDs ranked by how many resources they fired on.</p>
+          <p class="text-[11px] text-neutral-500">Distinct check IDs ranked by how many findings each produced (one per affected resource).</p>
           <div id="stats-top-checks" class="space-y-0"></div>
         </div>
 
@@ -315,12 +393,17 @@ async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool</span><span class="mono text-xs" id="sys-tool">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="sys-version">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Generated at</span><span class="mono text-xs" id="sys-generated">—</span></div>
-            <div class="flex justify-between"><span class="text-neutral-500 text-xs">Providers scanned</span><span class="mono text-xs" id="sys-providers">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Providers scanned</span><span class="mono text-xs" id="sys-providers">—</span></div>
+            <div class="flex justify-between"><span class="text-neutral-500 text-xs">Minimum severity filter</span><span class="mono text-xs" id="sys-filter">—</span></div>
           </div>
         </div>
         <div class="glass p-6 rounded-xl space-y-3">
-          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Regions</h3>
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Regions &amp; accounts</h3>
           <div id="sys-regions" class="text-xs mono text-neutral-300 space-y-1">—</div>
+        </div>
+        <div class="glass p-6 rounded-xl space-y-3 md:col-span-2">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Provider status</h3>
+          <div id="sys-provider-status" class="text-xs mono text-neutral-300 space-y-1">—</div>
         </div>
       </div>
     </section>
@@ -575,6 +658,304 @@ function openComplianceModal(fwIdx, cIdx) {
   \`);
 }
 
+// ── EXECUTIVE SUMMARY ────────────────────────────────────────────────────────
+// Plain-language overview for non-technical readers. Everything shown comes
+// from reportData.executive_summary (built server-side and written to the JSON
+// report as-is), so this tab and the JSON can never disagree. Figures that were
+// not checked arrive as null and are shown as "n/a", never 0.
+//
+// Layout: page 1 (cover, verdict, top risks, what to do first, four numbers) is
+// meant to be readable on its own and to fit one printed page. Detail follows,
+// then an appendix (methodology, scope, glossary) that is collapsed on screen
+// and expanded when printing.
+
+function execEsc(x) {
+  return String(x == null ? '' : x)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderExecutiveSummary() {
+  const root = document.getElementById('executive-content');
+  if (!root) return;
+  const es = reportData.executive_summary;
+  if (!es) {
+    root.innerHTML = '<div class="glass p-6 rounded-xl text-sm text-neutral-500 italic">No executive summary is available for this report.</div>';
+    return;
+  }
+
+  const esc = execEsc;
+  const colors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3', none: '#4ade80', unknown: '#a3a3a3', not_assessed: '#a3a3a3' };
+  const col = function (k) { return colors[k] || '#a3a3a3'; };
+  const sectionTitle = function (t) { return '<h3 class="text-sm font-semibold mb-4 uppercase tracking-widest text-neutral-400">' + esc(t) + '</h3>'; };
+  const badge = function (key, label) {
+    return '<span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold whitespace-nowrap" style="color:' + col(key) + ';border-color:' + col(key) + '">' + esc(label) + '</span>';
+  };
+  const figure = function (f) {
+    const color = f.tone ? col(f.tone) : '';
+    const v = f.value == null ? 'n/a' : f.value;
+    return '<div class="glass p-5 rounded-xl"' + (color ? ' style="border-left:4px solid ' + color + '"' : '') + '>' +
+      '<p class="text-xs text-neutral-500 uppercase font-semibold mb-1">' + esc(f.label) + '</p>' +
+      '<p class="text-3xl font-bold"' + (color ? ' style="color:' + color + '"' : '') + '>' + esc(v) + '</p>' +
+      (f.sub ? '<p class="text-xs text-neutral-500 mt-1">' + esc(f.sub) + '</p>' : '') + '</div>';
+  };
+
+  const risk = es.overall_risk || {};
+  const bl = es.bottom_line || {};
+  const cover = es.cover || {};
+  const sc = es.scope || {};
+  const riskColor = col(risk.level);
+  let html = '';
+
+  // Toolbar (screen only)
+  html += '<div class="no-print flex justify-end"><button type="button" onclick="window.print()" ' +
+    'class="px-4 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-700 transition-colors">' +
+    'Print / save as PDF</button></div>';
+
+  // ── PAGE 1 ────────────────────────────────────────────────────────────────
+  // Cover block
+  const metaItems = [
+    ['Report ID', cover.report_id],
+    ['Date', cover.generated_at ? String(cover.generated_at).replace('T', ' ').slice(0, 16) + ' UTC' : null],
+    ['Tool', cover.tool]
+  ].filter(function (m) { return m[1]; });
+  html += '<div class="glass p-5 rounded-xl">' +
+    '<p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest mb-1">' + esc(cover.title || 'Executive summary') + '</p>' +
+    '<h2 class="text-2xl font-bold mb-3 break-words">' + esc(cover.subject || 'Cloud environment') + '</h2>' +
+    (metaItems.length ? '<div class="flex flex-wrap gap-x-8 gap-y-1 text-xs mb-3">' +
+      metaItems.map(function (m) {
+        return '<div class="min-w-0"><span class="text-neutral-500">' + esc(m[0]) + ': </span><span class="mono break-all text-neutral-300">' + esc(m[1]) + '</span></div>';
+      }).join('') + '</div>' : '') +
+    (cover.classification ? '<p class="text-[11px] text-neutral-500 uppercase tracking-wider">' + esc(cover.classification) + '</p>' : '') +
+  '</div>';
+
+  // Rating banner
+  html += '<div class="glass p-6 md:p-8 rounded-xl" style="border-left:6px solid ' + riskColor + '">' +
+    '<div class="flex flex-wrap items-center justify-between gap-3 mb-3">' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Overall security risk</p>' +
+      '<p class="text-4xl font-bold" style="color:' + riskColor + '">' + esc(bl.risk_label || risk.label || 'Unknown') + '</p></div>' +
+    '</div>' +
+    '<p class="text-lg leading-relaxed text-neutral-100 exec-headline">' + esc(bl.summary || es.headline) + '</p>' +
+  '</div>';
+
+  // Top risks + do first
+  const topRisks = bl.top_risks || [];
+  const doFirst = bl.do_first || [];
+  if (topRisks.length || doFirst.length) {
+    html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 exec-cols-2">';
+    html += '<div>' + sectionTitle('Top risks') + '<div class="space-y-3">' +
+      (topRisks.length ? topRisks.map(function (f, i) {
+        return '<div class="glass p-4 rounded-xl" style="border-left:4px solid ' + col(f.severity) + '">' +
+          '<h4 class="font-semibold text-sm mb-1">' + (i + 1) + '. ' + esc(f.title) + '</h4>' +
+          '<p class="text-xs text-neutral-400 leading-relaxed">' + esc(f.detail) + '</p></div>';
+      }).join('') : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No significant risks were found.</div>') +
+    '</div></div>';
+    html += '<div>' + sectionTitle('Do this first') + '<div class="space-y-3">' +
+      (doFirst.length ? doFirst.map(function (a, i) {
+        return '<div class="glass p-4 rounded-xl flex gap-3">' +
+          '<div class="w-7 h-7 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-xs font-bold">' + (i + 1) + '</div>' +
+          '<div class="min-w-0"><p class="text-sm font-semibold leading-snug mb-1">' + esc(a.action) + '</p>' +
+          '<div class="flex flex-wrap gap-2 items-center text-[10px] uppercase font-bold">' +
+            '<span class="px-2 py-0.5 rounded border border-neutral-600 text-neutral-400 whitespace-nowrap">' + esc(a.timeframe) + '</span>' +
+            (a.owner ? '<span class="text-neutral-500 normal-case font-medium text-xs">Suggested owner: ' + esc(a.owner) + '</span>' : '') +
+          '</div></div></div>';
+      }).join('') : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No urgent actions.</div>') +
+    '</div></div></div>';
+  }
+
+  // Four key numbers
+  if ((bl.figures || []).length) {
+    html += '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 exec-figs">' + bl.figures.map(figure).join('') + '</div>';
+  }
+  if (cover.statement) {
+    html += '<p class="text-[11px] text-neutral-500 italic">' + esc(cover.statement) + '</p>';
+  }
+
+  // ── DETAILS ───────────────────────────────────────────────────────────────
+  html += '<div class="exec-page-break pt-2"><p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest border-b border-neutral-800 pb-2">Details</p></div>';
+
+  // Why this rating
+  if (risk.rationale || risk.business_impact) {
+    html += '<div>' + sectionTitle('Why this rating') + '<div class="glass p-5 rounded-xl space-y-3">' +
+      (risk.rationale ? '<p class="text-sm text-neutral-300"><span class="font-semibold">Reason: </span>' + esc(risk.rationale) + '</p>' : '') +
+      (risk.business_impact ? '<p class="text-sm text-neutral-400"><span class="font-semibold text-neutral-300">What it means: </span>' + esc(risk.business_impact) + '</p>' : '') +
+      (risk.basis ? '<p class="text-xs text-neutral-500 italic">' + esc(risk.basis) + '</p>' : '') +
+    '</div></div>';
+  }
+
+  // Key findings
+  html += '<div>' + sectionTitle('All key findings') + '<div class="space-y-3">' +
+    (es.key_findings || []).map(function (f) {
+      return '<div class="glass p-5 rounded-xl" style="border-left:4px solid ' + col(f.severity) + '">' +
+        '<h4 class="font-semibold text-sm mb-1">' + esc(f.title) + '</h4>' +
+        '<p class="text-sm text-neutral-300 leading-relaxed">' + esc(f.detail) + '</p></div>';
+    }).join('') + '</div></div>';
+
+  // At a glance
+  if ((es.glance_cards || []).length) {
+    html += '<div>' + sectionTitle('At a glance') + '<div class="grid grid-cols-2 lg:grid-cols-3 gap-4 exec-glance">' +
+      es.glance_cards.map(figure).join('') + '</div></div>';
+  }
+
+  // Coverage by cloud
+  const clouds = es.cloud_coverage || [];
+  if (clouds.length) {
+    html += '<div>' + sectionTitle('What was scanned') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Cloud</th><th>Status</th><th>Scope</th><th>Issues</th><th>Worst severity</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      clouds.map(function (c) {
+        const stKey = c.status === 'scanned' ? 'none' : (c.status === 'partial' ? 'medium' : 'high');
+        return '<tr>' +
+          '<td class="px-6 py-4 font-medium align-top">' + esc(c.cloud) + '</td>' +
+          '<td class="py-4 align-top">' + badge(stKey, c.status_label) +
+            (c.reason ? '<div class="text-xs text-neutral-500 mt-1 max-w-xs">' + esc(c.reason) + '</div>' : '') + '</td>' +
+          '<td class="py-4 align-top mono text-xs text-neutral-400 break-all">' + esc(c.scope || '—') + '</td>' +
+          '<td class="py-4 align-top">' + (c.issues == null ? 'n/a' : esc(c.issues)) + '</td>' +
+          '<td class="py-4 pr-6 align-top">' + (c.worst_severity ? badge(c.worst_severity, c.worst_severity_label) : '<span class="text-xs text-neutral-500">n/a</span>') + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  }
+
+  // Issues by area
+  const areas = es.risk_areas || [];
+  if (areas.length) {
+    html += '<div>' + sectionTitle('Issues by area') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Area</th><th>Issues</th><th>Resources</th><th>Most serious</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      areas.map(function (t) {
+        return '<tr>' +
+          '<td class="px-6 py-4"><div class="font-medium">' + esc(t.title) + '</div><div class="text-xs text-neutral-500 mt-1 max-w-xl">' + esc(t.plain) + '</div></td>' +
+          '<td class="py-4 align-top">' + esc(t.issues) + '</td>' +
+          '<td class="py-4 align-top">' + esc(t.resources_affected) + '</td>' +
+          '<td class="py-4 pr-6 align-top">' + badge(t.worst_severity, t.worst_severity_label) + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+  }
+
+  // Issue types to fix first
+  const types = es.issues_to_fix_first || [];
+  if (types.length) {
+    html += '<div>' + sectionTitle('Issue types to fix first') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Issue</th><th>Cloud</th><th>Resources</th><th>Severity</th><th>What to do</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      types.map(function (c) {
+        return '<tr>' +
+          '<td class="px-6 py-4 font-medium align-top">' + esc(c.title) +
+            (c.reference ? '<div class="mono text-[10px] text-neutral-500 font-normal mt-1 break-all max-w-[16rem]">' + esc(c.reference) + '</div>' : '') + '</td>' +
+          '<td class="py-4 align-top text-xs text-neutral-400">' + esc(c.cloud) + (c.service ? ' / ' + esc(c.service) : '') + '</td>' +
+          '<td class="py-4 align-top">' + esc(c.resources_affected) + '</td>' +
+          '<td class="py-4 align-top">' + badge(c.worst_severity, c.worst_severity_label) + '</td>' +
+          '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-[11px] text-neutral-500 italic mt-2">The identifier under each issue is the rule id, for tickets and audit trails. Exact remediation steps for each resource are in the Findings tab.</p></div>';
+  }
+
+  // Resources to review first
+  const resources = es.resources_to_review_first || [];
+  if (resources.length) {
+    html += '<div>' + sectionTitle('Resources to review first') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Resource</th><th>Cloud / service</th><th>Region</th><th>Issues</th><th>Worst severity</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      resources.map(function (r) {
+        return '<tr>' +
+          '<td class="px-6 py-4 mono text-xs break-all">' + esc(r.name) + '</td>' +
+          '<td class="py-4 text-xs text-neutral-400">' + esc(r.cloud) + (r.service ? ' / ' + esc(r.service) : '') + '</td>' +
+          '<td class="py-4 mono text-xs text-neutral-500">' + esc(r.region || '—') + '</td>' +
+          '<td class="py-4">' + esc(r.issues) + '</td>' +
+          '<td class="py-4 pr-6">' + badge(r.worst_severity, r.worst_severity_label) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-[11px] text-neutral-500 italic mt-2">Ranks individual cloud resources carrying the most serious and most numerous issues. Informational notes are not counted.</p></div>';
+  }
+
+  // All suggested actions
+  html += '<div>' + sectionTitle('All suggested actions') +
+    (es.recommended_actions_basis ? '<p class="text-xs text-neutral-500 italic mb-3">' + esc(es.recommended_actions_basis) + '</p>' : '') +
+    '<div class="space-y-3">' +
+    (es.recommended_actions || []).map(function (a) {
+      return '<div class="glass p-5 rounded-xl flex gap-4">' +
+        '<div class="w-8 h-8 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-sm font-bold">' + esc(a.priority) + '</div>' +
+        '<div class="min-w-0"><div class="flex flex-wrap items-center gap-2 mb-1"><h4 class="font-semibold text-sm">' + esc(a.action) + '</h4>' +
+        '<span class="px-2 py-0.5 rounded border border-neutral-600 text-[10px] uppercase font-bold text-neutral-400 whitespace-nowrap">' + esc(a.timeframe) + '</span></div>' +
+        '<p class="text-sm text-neutral-400 leading-relaxed">' + esc(a.why) + '</p>' +
+        (a.owner ? '<p class="text-xs text-neutral-500 mt-1">Suggested owner: ' + esc(a.owner) + '</p>' : '') + '</div></div>';
+    }).join('') + '</div></div>';
+
+  // Compliance
+  const co = es.compliance_overview;
+  if (co) {
+    html += '<div>' + sectionTitle('Compliance exposure') + '<div class="glass p-5 rounded-xl space-y-3">' +
+      '<p class="text-sm text-neutral-300 leading-relaxed">' + esc(co.statement) + '</p>' +
+      '<div class="flex flex-wrap gap-2">' +
+      (co.most_affected || []).map(function (f) {
+        return '<span class="px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs">' + esc(f.framework) + ' <span class="mono text-neutral-500">' + esc(f.findings) + (f.findings === 1 ? ' finding' : ' findings') + '</span></span>';
+      }).join('') + '</div>' +
+      '<p class="text-xs text-neutral-500 italic">' + esc(co.disclaimer) + ' Details are in the Compliance tab.</p></div></div>';
+  }
+
+  // ── APPENDIX ──────────────────────────────────────────────────────────────
+  const summaryCls = 'cursor-pointer px-5 py-4 text-sm font-semibold text-neutral-200';
+  html += '<div class="exec-page-break pt-2"><p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest border-b border-neutral-800 pb-2">Appendix</p></div>';
+
+  const mt = es.methodology;
+  if (mt) {
+    html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">Methodology: how this report was produced</summary>' +
+      '<div class="px-5 pb-5 space-y-5">' +
+      '<ol class="space-y-3">' +
+      (mt.steps || []).map(function (st, i) {
+        return '<li class="flex gap-3"><span class="w-6 h-6 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-xs font-bold">' + (i + 1) + '</span>' +
+          '<div class="text-sm"><span class="font-semibold">' + esc(st.step) + '. </span><span class="text-neutral-400 leading-relaxed">' + esc(st.detail) + '</span></div></li>';
+      }).join('') + '</ol>' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-2">How the overall risk rating is decided</p>' +
+      '<table class="w-full text-left text-sm"><tbody class="divide-y divide-neutral-800">' +
+      (mt.rating_rules || []).map(function (r) {
+        return '<tr><td class="py-2 pr-4 font-semibold whitespace-nowrap align-top">' + esc(r.level) + '</td><td class="py-2 text-neutral-400">' + esc(r.rule) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-sm text-neutral-400 leading-relaxed"><span class="font-semibold text-neutral-300">Prioritization. </span>' + esc(mt.prioritization) + '</p>' +
+      '<p class="text-sm text-neutral-400 leading-relaxed"><span class="font-semibold text-neutral-300">Timeframes and owners. </span>' + esc(mt.timeframes) + '</p>' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-2">Limitations</p>' +
+      '<ul class="list-disc pl-5 space-y-1 text-sm text-neutral-400">' +
+      (mt.limitations || []).map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></div>' +
+    '</div></details>';
+  }
+
+  html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">About this report</summary>' +
+    '<div class="px-5 pb-5 space-y-4">' +
+    '<p class="text-sm text-neutral-300">' + esc(sc.description || '') + '</p>' +
+    (sc.discovery ? '<p class="text-sm text-neutral-400">' + esc(sc.discovery) + '</p>' : '') +
+    '<ul class="list-disc pl-5 space-y-1 text-xs text-neutral-400">' +
+      (es.notes || []).map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>' +
+    '<p class="text-xs text-neutral-500">For technical detail, use the other tabs of this report.</p>' +
+  '</div></details>';
+
+  html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">Plain-language glossary</summary>' +
+    '<dl class="px-5 pb-5 space-y-2 text-xs text-neutral-400">' +
+    (es.glossary || []).map(function (t) { return '<div><dt class="font-semibold text-neutral-300 inline">' + esc(t.term) + ': </dt><dd class="inline">' + esc(t.meaning) + '</dd></div>'; }).join('') +
+    '</dl></details>';
+
+  root.innerHTML = html;
+}
+
+// Printing: the appendix is collapsed on screen but must be open on paper.
+(function () {
+  let closedBeforePrint = [];
+  window.addEventListener('beforeprint', function () {
+    closedBeforePrint = [];
+    document.querySelectorAll('#executive-content details').forEach(function (d) {
+      if (!d.open) { closedBeforePrint.push(d); d.open = true; }
+    });
+  });
+  window.addEventListener('afterprint', function () {
+    closedBeforePrint.forEach(function (d) { d.open = false; });
+    closedBeforePrint = [];
+  });
+})();
+
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 
 function switchTab(id) {
@@ -629,6 +1010,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   updateTabCounts();
   renderDashboard();
+  try { renderExecutiveSummary(); } catch (e) { console.error('Executive summary render failed:', e); }
   populateProviderFilter();
   applyFilters();
   renderScanInfo();
@@ -801,15 +1183,27 @@ function renderScanInfo() {
   document.getElementById('sys-generated').textContent   = reportData.generated_at;
   document.getElementById('sys-providers').textContent   = (reportData.providers || []).join(', ') || '—';
 
+  const so = reportData.scan_options || {};
+  document.getElementById('sys-filter').textContent = so.min_severity
+    ? so.min_severity + (so.hidden_by_filter ? ' (' + so.hidden_by_filter + ' hidden)' : '')
+    : '—';
+
   const regionsEl = document.getElementById('sys-regions');
-  const entries = Object.entries(reportData.regions || {});
-  if (!entries.length) {
-    regionsEl.textContent = '—';
-    return;
-  }
-  regionsEl.innerHTML = entries.map(([provider, regions]) =>
-    '<div><span class="text-neutral-500">' + escH(provider.toUpperCase()) + ':</span> ' + escH((regions||[]).join(', ')) + '</div>'
-  ).join('');
+  const lines = Object.entries(reportData.regions || {}).map(([provider, regions]) =>
+    '<div><span class="text-neutral-500">' + escH(provider.toUpperCase()) + ':</span> ' + escH((regions||[]).join(', ')) +
+    (provider === 'aws' && reportData.region_source ? ' <span class="text-neutral-600">(' + escH(reportData.region_source) + ')</span>' : '') + '</div>'
+  );
+  const acc = reportData.accounts || {};
+  if (acc.gcp) lines.push('<div><span class="text-neutral-500">GCP project:</span> ' + escH(acc.gcp) + '</div>');
+  if (acc.azure) lines.push('<div><span class="text-neutral-500">AZURE subscription:</span> ' + escH(acc.azure) + '</div>');
+  regionsEl.innerHTML = lines.length ? lines.join('') : '—';
+
+  const statusEl = document.getElementById('sys-provider-status');
+  const ps = reportData.provider_status || [];
+  statusEl.innerHTML = ps.length ? ps.map(p =>
+    '<div><span class="text-neutral-500">' + escH(String(p.provider).toUpperCase()) + ':</span> ' + escH(p.status) +
+    (p.reason ? ' <span class="text-neutral-600">— ' + escH(p.reason) + '</span>' : '') + '</div>'
+  ).join('') : '—';
 }
 
 // ── DETAILED STATS ────────────────────────────────────────────────────────────
@@ -856,8 +1250,7 @@ function renderStats() {
   set('stats-service-count', services.size);
   set('stats-region-count', regions.size);
 
-  // Most common checks — mirrors the "Misconfigurations by Category" ranked
-  // list, ranked here by how many resources each check id fired on.
+  // Most common checks — ranked by how many findings each check id produced.
   const topEl = document.getElementById('stats-top-checks');
   if (topEl) {
     const byCheckEntries = Object.entries(byCheck).sort((a, b) => b[1] - a[1]).slice(0, 15);

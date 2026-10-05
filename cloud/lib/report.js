@@ -20,6 +20,7 @@ class Reporter {
    * @param {string} [f.region]
    * @param {string} f.description
    * @param {string} f.remediation
+   * @param {string} [f.action]   machine-readable remediation code (shown in the finding detail view)
    */
   add(f) {
     this.findings.push({

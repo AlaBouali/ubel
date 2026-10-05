@@ -900,6 +900,9 @@ other UBEL report vendors them) and includes:
 - A persistent authorized-use-only banner on every tab
 - Dashboard with severity, component-state (safe/vulnerable/infected/
   undetermined), and per-host breakdown charts
+- **Executive Summary tab** (right after Dashboard) — a plain-language
+  overview for non-technical readers; see
+  [Executive summary](#executive-summary) below
 - Searchable, filterable Components table (state + free-text search) with a
   per-component detail modal (every host/port it was seen on, its full CPE
   id, and every vulnerability that affects it)
@@ -942,7 +945,8 @@ other UBEL report vendors them) and includes:
   / error / **dead**, with the resolved IP, resolved URL and component
   count for each)
 
-The JSON report is the full machine-readable equivalent — `stats` (including
+The JSON report is the full machine-readable equivalent — `executive_summary`,
+`scan_options`, `discovery` (ubel-domain / ubel-easm), `stats` (including
 `stats.resolution` with the dead-host list and `stats.misconfigurations`),
 `compliance_summary`, `usage_notice`, `assets` (per-target status, resolved
 IP), the complete `inventory` (fingerprinted components), the complete
@@ -950,6 +954,63 @@ IP), the complete `inventory` (fingerprinted components), the complete
 with URL and position), and `misconfigurations` / `misconfigurations_errors`
 (one entry per rule id, each carrying its own occurrence list) — and can be
 consumed by CI/CD tooling directly.
+
+### Executive summary
+
+Both reports carry an `executive_summary` section (JSON) / **Executive
+Summary** tab (HTML, directly after Dashboard) written for readers who are not
+security specialists. It is built by `lib/executive_summary.js`, the EASM
+counterpart of `sca/executive_summary.js`, from the finished report payload
+only — no extra scanning or network calls — so the JSON and the tab always
+agree. If it ever fails to build, the scan still completes and the tab says no
+summary is available.
+
+**Structure.** Page 1 stands on its own and fits one printed A4 page: a cover
+block (subject, report ID, date, classification), the overall risk, a
+one-sentence headline (risk level first, then at most three drivers), the top
+three risks, the three things to do first (each with a suggested owner), and
+four key figures. Below it, *Details*: why the rating, all key findings,
+at-a-glance figures, configuration issues by area, components and systems to
+fix or review first (with advisory IDs for tickets and audits), all suggested
+actions, and a compliance overview. Last, an *Appendix*: methodology (only the
+steps that actually ran, how the rating is decided, prioritization,
+limitations), scope notes and a glossary. The appendix is collapsed on screen
+and expanded in print.
+
+**Printing.** The tab has a *Print / save as PDF* button. Print styles switch to
+a light layout and print the Executive Summary only (browser print on any other
+tab prints the summary too); page 1 is the summary, details and appendix start
+on new pages.
+
+**Owners and timeframes.** The "Suggested owner" and timeframe on each action
+are generic defaults (for example "Security team", "Web / infrastructure team"),
+not assignments and not your SLAs. Adjust both to your own organization.
+
+Design rules, so the summary can't mislead:
+
+- **"Not checked" is never zero.** A figure that depends on a stage that did
+  not run (`--no-secrets`, no component with a usable version, no reachable
+  host) is `null` in the JSON and "n/a" in the HTML.
+- **No false "Minimal".** If nothing could be examined, or no check could
+  run, the rating is *Not assessed*. If `--min-severity` hid weaknesses, the
+  rating is floored at *Low*. If the crt.sh lookup failed, or components could
+  not be version-checked, a clean result is explicitly qualified.
+- **No policy verdict.** Unlike SCA there is no pass/fail: EASM reports carry
+  no policy, and `--fail-on` only sets the exit code.
+- **No reachability discount.** Everything an EASM scan sees is already
+  internet-facing, so nothing is down-ranked as "probably unused".
+- Credential values and cookie/header values are never written into the
+  summary; the scan subject has any `user:pass@` URL userinfo stripped.
+
+The rating levels, the prioritization order and the default timeframes are
+defined in `overallRisk()`, `buildPriorityComponents()` and the action builder
+in `lib/executive_summary.js`; the methodology text restates them, so change
+both together.
+
+New report fields supporting this: `scan_options` (`scan_secrets`,
+`min_severity`, `used_cookie`, `custom_header_names`) and, for ubel-domain /
+ubel-easm, `discovery` (`source`, `ok`, `attempts`, `certificate_records`,
+`hosts_discovered`, `hosts_included`, `hosts_excluded`).
 
 ---
 

@@ -111,11 +111,17 @@ export async function collectScanMetadata(opts = {}) {
  * @param {object} reportPayload
  * @param {{workingDir?: string}} opts
  * @param {{reportType: string, cliLabel: string}} labels  e.g.
- *   {reportType: "easm", cliLabel: "[ubel-url]"} or
- *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}
+ *   {reportType: "easm-url", cliLabel: "[ubel-url]"} or
+ *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}. Hyphens in
+ *   reportType become underscores on disk, so these write to
+ *   .ubel/local/reports/easm_url/... and .ubel/reports/latest.easm_url.*
+ *   (and easm_domain, easm_host, easm_full for the other entry points).
  */
 export async function writeEasmReports(reportPayload, opts, { reportType, cliLabel }) {
-  reportType = reportType.replace("-", "_");
+  // Every hyphen, not just the first: "easm-url" -> "easm_url" is what lands on
+  // disk (see the README's Reports section), and a future label with two
+  // hyphens must not leave one behind in a folder/file name.
+  reportType = reportType.replace(/-/g, "_");
   const now      = new Date();
   const pad      = n => String(n).padStart(2, "0");
   const ts       = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}`

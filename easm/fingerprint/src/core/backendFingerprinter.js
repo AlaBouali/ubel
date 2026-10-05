@@ -90,17 +90,14 @@ export class BackendFingerprinter {
 
     const serverTokens = server.split(/\s+/).filter(Boolean);
     for (let i = 0; i < serverTokens.length; i++) {
-      console.log(`serverTokens[${i}]: ${serverTokens[i]}`);
       const rawToken = serverTokens[i];
       const token = rawToken.replace(")", "");
       let key = token.split("/")[0].toLowerCase();
       let version = versionFromToken(token);
       if (rawToken.toLowerCase().startsWith("jetty")) {
-        console.log(`rawToken: ${rawToken}`);
         key = "jetty";
         version = rawToken.toLowerCase().split("jetty")[1] || "";
         version = version.replace("(", "").replace(")", "").replace("/", "");
-        console.log(`key: ${key}, version: ${version}`);
       }
 
       if (key === "glassfish") {

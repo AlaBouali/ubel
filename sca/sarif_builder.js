@@ -651,6 +651,14 @@ export class SarifBuilder {
           iocs: v.iocs || null,
 
           compliance: v.compliance || null,
+
+          // Package-level upgrade plan and the version that fixes this
+          // vulnerability (null when none does). See suggested_fixes.js.
+          suggested_fix_version:
+            this._suggestedFixFor(v)?.version ?? null,
+
+          suggested_fixes:
+            this._invById.get(v.affected_package_id)?.suggested_fixes ?? null,
         },
       });
     }
@@ -1082,6 +1090,33 @@ export class SarifBuilder {
     return locations;
   }
 
+  /** Suggested fix entry ({version, count}) covering vulnerability `v`, if any. */
+  _suggestedFixFor(v) {
+    if (!this._invById) {
+      this._invById = new Map((this.data.inventory || []).map(i => [i.id, i]));
+    }
+    const sf = this._invById.get(v.affected_package_id)?.suggested_fixes;
+    if (!sf || !Array.isArray(sf.fixes)) return null;
+    const hit = sf.fixes.find(f => (f.vulnerabilities || []).some(x => x.id === v.id));
+    return hit ? { version: hit.version, count: hit.count } : null;
+  }
+
+  /**
+   * Per-package suggested fixes for the run's `properties` bag (SARIF has no
+   * inventory section). Only packages with something to report are included.
+   */
+  buildInventorySuggestedFixes() {
+    return (this.data.inventory || [])
+      .filter(i => i.suggested_fixes &&
+        ((i.suggested_fixes.fixes || []).length || (i.suggested_fixes.unfixed || []).length))
+      .map(i => ({
+        id: i.id,
+        name: i.name || null,
+        version: i.version || null,
+        suggested_fixes: i.suggested_fixes,
+      }));
+  }
+
   /**
    * Build the SARIF rules[] for license-compliance findings, one rule per
    * distinct flagged license classification (e.g. "license-GPL-3.0-only",
@@ -1263,6 +1298,9 @@ export class SarifBuilder {
         ecosystems:
           this.data.scan_info
             ?.ecosystems || [],
+
+        inventory_suggested_fixes:
+          this.buildInventorySuggestedFixes(),
       },
     };
 

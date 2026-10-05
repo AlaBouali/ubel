@@ -30,6 +30,17 @@ export class CycloneDXBuilder {
     return "other";
   }
 
+  /** Suggested fix entry ({version, count}) covering vulnerability `v`, if any. */
+  _suggestedFixFor(v) {
+    if (!this._invById) {
+      this._invById = new Map((this.data.inventory || []).map(i => [i.id, i]));
+    }
+    const sf = this._invById.get(v.affected_package_id)?.suggested_fixes;
+    if (!sf || !Array.isArray(sf.fixes)) return null;
+    const hit = sf.fixes.find(f => (f.vulnerabilities || []).some(x => x.id === v.id));
+    return hit ? { version: hit.version, count: hit.count } : null;
+  }
+
   /** Build properties array from selected keys. */
   _props(record, keys) {
     const out = [];
@@ -136,6 +147,12 @@ export class CycloneDXBuilder {
           { name: "license.category",     value: item.license_info.category || "unrecognized" },
           { name: "license.reason",       value: item.license_info.reason || "" },
         );
+      }
+      // Suggested upgrade versions that fix vulns in bulk, plus the vulns with
+      // no fix (see suggested_fixes.js). Component properties are flat string
+      // pairs, so the object travels JSON-encoded like other structured values.
+      if (item.suggested_fixes) {
+        props.push({ name: "suggested_fixes", value: JSON.stringify(item.suggested_fixes) });
       }
       if (props.length) comp.properties = props;
       components.push(comp);
@@ -260,6 +277,18 @@ export class CycloneDXBuilder {
             { name: "reachability.signals.introduced_by_count",value: String(reach.signals.introduced_by_count ?? "") },
           ] : []),
         ];
+      }
+
+      // Suggested fix version for this vulnerability (omitted when none covers it).
+      {
+        const sf = this._suggestedFixFor(v);
+        if (sf) {
+          entry.properties = entry.properties || [];
+          entry.properties.push(
+            { name: "suggested_fix_version", value: sf.version },
+            { name: "suggested_fix_bulk_count", value: String(sf.count) },
+          );
+        }
       }
 
       // Indicators of Compromise — populated on OSV malicious-package

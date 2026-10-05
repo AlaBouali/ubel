@@ -23,8 +23,10 @@
 //      pipeline and the secrets crawl — see ./misconfig_scan.js.
 //   5. Loop over every id (CPE *and* purl alike) of every inventory item,
 //      look each up against the matching source (CPE ids → NVD, purl ids →
-//      OSV, WordPress-tagged items → wpvulnerability.net instead of NVD —
-//      see ./wpvulnerability.js), then attribute every result back to the
+//      OSV, WordPress *plugin/theme* items → wpvulnerability.net instead of
+//      NVD — see ./wpvulnerability.js; WordPress *core* is not routed there,
+//      it goes through the normal CPE → NVD path like any other product),
+//      then attribute every result back to the
 //      owning item and deduplicate per item — so a CVE surfaced twice for
 //      the same component (e.g. via two CPE aliases, or via both its CPE
 //      and its purl) shows up once, not twice. Reuses the exact same
@@ -62,7 +64,8 @@ import {
 } from "../../sca/engine.js";
 import { processVulnerability } from "../../sca/cvss_parser.js";
 import { getComplianceForVulnerability } from "../../sca/compliance_mappings.js";
-import { queryWpPlugin, queryWpTheme, queryWpCore, filterWpVulnerabilities } from "./wpvulnerability.js";
+import { attachSuggestedFixes } from "../../sca/suggested_fixes.js";
+import { queryWpPlugin, queryWpTheme, filterWpVulnerabilities } from "./wpvulnerability.js";
 
 const SEVERITY_BUCKETS = () => ({ critical: 0, high: 0, medium: 0, low: 0, unknown: 0 });
 
@@ -175,8 +178,10 @@ async function fingerprintTarget(target, allowPrivate, inventoryByKey, reqOpts =
         scopes: ["prod"], // everything fingerprinted over the network is in prod, by definition
         state: "undetermined",
         low_confidence_version: !isVersionSpecificEnough(component.Version),
-        // "plugin" | "theme" | "core" | null — routes this component to
-        // wpvulnerability.net instead of NVD in scanTargets() below.
+        // "plugin" | "theme" | "core" | null. plugin/theme route this component
+        // to wpvulnerability.net instead of NVD in scanTargets() below; "core"
+        // is still tagged (the misconfiguration checks gate their WordPress
+        // probes on it) but is looked up via NVD by its CPE like any other product.
         wp_kind: null,
         assets: [],
       });
@@ -224,8 +229,16 @@ function finishNvdVulnerability(v) {
   }
 }
 
+// WordPress plugins/themes are the only inventory items looked up on
+// wpvulnerability.net. Core (wp_kind === "core") is deliberately excluded:
+// NVD's CPE dictionary covers cpe:2.3:a:wordpress:wordpress:<version> well,
+// so it goes through the generic CPE → NVD path with everything else.
+function usesWpVulnerabilityApi(item) {
+  return item.wp_kind === "plugin" || item.wp_kind === "theme";
+}
+
 /**
- * Dispatches one WordPress-tagged inventory item to the right
+ * Dispatches one WordPress plugin/theme inventory item to the right
  * wpvulnerability.net endpoint and maps the response to this pipeline's
  * vuln shape. Never throws — a failed/unreachable query just yields no
  * findings for that component rather than aborting the whole scan, same
@@ -241,9 +254,6 @@ async function lookupWpItem(item, log) {
     } else if (item.wp_kind === "theme") {
       apiResponse = await queryWpTheme(item.name);
       ecosystem = "wordpress-theme";
-    } else if (item.wp_kind === "core") {
-      apiResponse = await queryWpCore(item.version);
-      ecosystem = "wordpress-core";
     } else {
       return [];
     }
@@ -373,15 +383,18 @@ export async function scanTargets(targets, opts = {}) {
     );
   }
 
-  // WordPress plugins/themes/core are routed to wpvulnerability.net instead
-  // of NVD — CPE dictionary coverage for WP plugins/themes is sparse and
+  // WordPress plugins/themes are routed to wpvulnerability.net instead of
+  // NVD — CPE dictionary coverage for WP plugins/themes is sparse and
   // rarely matches the wordpress.org slug this fingerprinter reads off the
   // page, so the generic CPE→NVD path misses most real findings for them.
   // See wpvulnerability.js for why this is a replacement, not an addition.
-  const wpItems = queryable.filter((i) => i.wp_kind);
-  const nonWpQueryable = queryable.filter((i) => !i.wp_kind);
+  // WordPress *core* is NOT in this group: it stays in nonWpQueryable below
+  // and is matched against NVD by its cpe:2.3:a:wordpress:wordpress:<version> id.
+  const wpItems = queryable.filter(usesWpVulnerabilityApi);
+  const nonWpQueryable = queryable.filter((i) => !usesWpVulnerabilityApi(i));
 
-  // Loop over every id of every non-WP queryable item and split by scheme —
+  // Loop over every id of every non-wpvulnerability queryable item (including
+  // WordPress core) and split by scheme —
   // a single item can carry both, e.g. a JS library with a CPE built from
   // vendor/product *and* a purl from a known npm package name (see
   // ../fingerprint/src/core/componentId.js) — so both get queried and both
@@ -434,7 +447,11 @@ export async function scanTargets(targets, opts = {}) {
   // take a while; see UBEL_NVD_ENDPOINT in ../README.md for pointing this
   // at an internal mirror or an authenticated proxy.
   log(`[*] Querying NVD for ${cpeQueryable.length} CPE id(s) (rate-limited — this can take a while)...`);
-  const nvdVulns = await submitToNvd(cpeQueryable);
+  // dropUnboundedMatches: discard CVEs NVD only ties to this product via a bare
+  // "*" wildcard with no version bound ("every version, ever") — a fingerprinted
+  // banner version can't be placed against those, so they surface as old,
+  // unfixable-looking noise. Set to false to see them.
+  const nvdVulns = await submitToNvd(cpeQueryable, { dropUnboundedMatches: true });
   for (const v of nvdVulns) {
     finishNvdVulnerability(v);
   }
@@ -442,7 +459,7 @@ export async function scanTargets(targets, opts = {}) {
 
   // ── wpvulnerability.net ────────────────────────────────────────────────
   if (wpItems.length) {
-    log(`[*] Querying wpvulnerability.net for ${wpItems.length} WordPress component(s)...`);
+    log(`[*] Querying wpvulnerability.net for ${wpItems.length} WordPress plugin/theme component(s)...`);
     const WP_CONCURRENCY = 5;
     const wpResults = await mapLimit(wpItems, WP_CONCURRENCY, (item) => lookupWpItem(item, log));
     for (const r of wpResults) {
@@ -501,6 +518,15 @@ export async function scanTargets(targets, opts = {}) {
     else if (item.version) item.state = "safe";
     else item.state = "undetermined";
   }
+
+  // ── Suggested fixes ──────────────────────────────────────────────────────
+  // Same per-package upgrade suggestions the SCA report has (see
+  // sca/suggested_fixes.js): for each fingerprinted component, the fewest /
+  // highest versions that clear its vulnerabilities, grouped per minor range
+  // (1.2.x, 1.3.x) and then per higher major (2.x). Runs after dedup and the
+  // affected_package_id rewrite above so every vuln is already keyed to its
+  // owning item's canonical id. Never throws (errors are recorded per item).
+  attachSuggestedFixes(inventory, vulnerabilities);
 
   // ── Client-side secret exposure ────────────────────────────────────────
   // Runs after fingerprinting, against the hosts that actually answered, so

@@ -58,7 +58,7 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
-import { queryCrtSh, extractSubdomains } from './lib/crtsh.js';
+import { queryCrtShDetailed, extractSubdomains } from './lib/crtsh.js';
 import { resolveTargets } from './lib/resolve.js';
 import { scanPorts, probeHttpPorts } from './lib/portscan.js';
 import { IpInfo } from './fingerprint/src/index.js';
@@ -243,11 +243,13 @@ Options:
   --quiet                     Suppress the console summary (reports still write).
   --help, -h                  Show this help.
 
-Every run writes a timestamped easm-full__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm-full/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm-full.json and
+Every run writes a timestamped easm_full__<ts>.zip bundle (report.json +
+report.html inside) under .ubel/local/reports/easm_full/<y>/<m>/<d>/, plus
+fixed, unzipped "latest" copies at .ubel/reports/latest.easm_full.json and
 .html — kept separate from ubel-url's, ubel-domain's, and ubel-host's own
-reports so none of the four ever overwrites another's latest pointer.
+reports so none of the four ever overwrites another's latest pointer. Both
+include a plain-language Executive Summary for non-technical readers (the
+tab after Dashboard in the HTML).
 
 Discovered hosts are DNS-resolved before any port is touched. Certificate
 Transparency is append-only history, so a crt.sh result routinely includes
@@ -463,16 +465,38 @@ function parseArgs(argv) {
  */
 async function discoverIps(args, log) {
   log(`[*] Querying crt.sh for certificates issued under ${args.domain}...`);
-  const entries = await queryCrtSh(args.domain);
+  const lookup = await queryCrtShDetailed(args.domain);
+  const entries = lookup.entries;
+  if (!lookup.ok) {
+    console.error(
+      `[ubel-easm] WARNING: the crt.sh lookup for ${args.domain} failed after ${lookup.attempts} attempt(s). ` +
+      `Subdomain discovery is incomplete${args.include.length ? ' — only --include hosts will be scanned' : ''}, ` +
+      `and the report will say so.`
+    );
+  }
   log(`[*] crt.sh returned ${entries.length} certificate record(s).`);
 
   const discovered = extractSubdomains(entries, args.domain);
   log(`[*] ${discovered.length} unique host(s) extracted from those records.`);
 
   const excludedHosts = new Set(args.exclude);
-  const hostnames = [...new Set([...discovered, ...args.include])]
+  const everything = [...new Set([...discovered, ...args.include])];
+  const hostnames = everything
     .filter((h) => !excludedHosts.has(h))
     .sort();
+  const discoveredSet = new Set(discovered);
+  const crtsh = {
+    source: 'crt.sh',
+    ok: lookup.ok,
+    attempts: lookup.attempts,
+    certificate_records: entries.length,
+    hosts_discovered: discovered.length,
+    // Names added by hand that discovery did not already return, and names
+    // actually removed by --exclude (an --exclude that matched nothing
+    // removed nothing).
+    hosts_included: args.include.filter((h) => !discoveredSet.has(h)).length,
+    hosts_excluded: everything.filter((h) => excludedHosts.has(h)).length,
+  };
 
   log(`[*] Resolving ${hostnames.length} hostname(s) to IP addresses...`);
   const { alive, dead, byTarget } = await resolveTargets(hostnames);
@@ -501,7 +525,7 @@ async function discoverIps(args, log) {
     .map(([ip, hostnameSet]) => ({ ip, hostnames: [...hostnameSet].sort() }))
     .sort((a, b) => a.ip.localeCompare(b.ip));
 
-  return { discovered, hostnames, deadHostnames: dead, excludedResolutions, ips };
+  return { discovered, hostnames, deadHostnames: dead, excludedResolutions, ips, crtsh };
 }
 
 /**
@@ -750,6 +774,11 @@ async function main() {
     // session tokens/API keys and have no business landing in a written report.
     usedCookie: Boolean(args.cookie),
     customHeaderNames: Object.keys(args.headers),
+    scanSecrets: args.scanSecrets,
+    minSeverity: args.minSeverity,
+    // How the crt.sh lookup went — see discoverIps(). Lets the report say so
+    // when it FAILED rather than read as a complete, merely small, footprint.
+    discovery: discovery.crtsh,
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,

@@ -86,12 +86,14 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm/<year>/<month>/<day>/,
-plus fixed, unzipped "latest" copies at .ubel/reports/latest.easm.json and
-.ubel/reports/latest.easm.html — same bundling flow the SAST/malware
+Every run writes a timestamped easm_url__<ts>.zip bundle (report.json +
+report.html inside) under .ubel/local/reports/easm_url/<year>/<month>/<day>/,
+plus fixed, unzipped "latest" copies at .ubel/reports/latest.easm_url.json and
+.ubel/reports/latest.easm_url.html — same bundling flow the SAST/malware
 scanners use. JSON and HTML are the only output formats — no SBOM, no SARIF
-(see README).
+(see README). Both carry a plain-language Executive Summary (overall risk,
+key findings, suggested actions and the methodology used) written for
+non-technical readers; in the HTML it is the tab right after Dashboard.
 
 Targets are DNS-resolved before probing: a hostname with no DNS record is
 marked "dead" in the report and skipped rather than probed to a timeout.
@@ -245,6 +247,11 @@ async function main() {
     // session tokens/API keys and have no business landing in a written report.
     usedCookie: Boolean(args.cookie),
     customHeaderNames: Object.keys(args.headers),
+    // Recorded so the report (and its executive summary) can tell "no secrets
+    // found" from "secrets were not searched for", and can say when
+    // --min-severity hid findings from the vulnerability list.
+    scanSecrets: args.scanSecrets,
+    minSeverity: args.minSeverity,
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,

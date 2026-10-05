@@ -117,11 +117,13 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm-host__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm-host/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm-host.json and
+Every run writes a timestamped easm_host__<ts>.zip bundle (report.json +
+report.html inside) under .ubel/local/reports/easm_host/<y>/<m>/<d>/, plus
+fixed, unzipped "latest" copies at .ubel/reports/latest.easm_host.json and
 .html — kept separate from ubel-url's and ubel-domain's own reports so one
-never overwrites another's latest pointer.
+never overwrites another's latest pointer. Both include a plain-language
+Executive Summary for non-technical readers (the tab after Dashboard in the
+HTML).
 
 The two discovery stages, in order:
   1. Every port in --ports is connect-scanned in parallel. A port that
@@ -393,6 +395,8 @@ async function main() {
     // session tokens/API keys and have no business landing in a written report.
     usedCookie: Boolean(args.cookie),
     customHeaderNames: Object.keys(args.headers),
+    scanSecrets: args.scanSecrets,
+    minSeverity: args.minSeverity,
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,

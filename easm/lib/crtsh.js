@@ -86,10 +86,16 @@ function attemptCrtSh(domain, timeoutMs) {
 /**
  * GET /json?q=<domain> against crt.sh, retrying on network-level failure
  * (connection errors, per-attempt timeouts, non-200 responses) with
- * exponential backoff between attempts. Never throws — resolves to []
- * once every attempt is exhausted. A genuinely empty result set (crt.sh's
- * "no certificates found" response) is not a failure and is returned
- * as-is on the first attempt, no retry involved.
+ * exponential backoff between attempts. Never throws. A genuinely empty
+ * result set (crt.sh's "no certificates found" response) is not a failure
+ * and is returned as-is on the first attempt, no retry involved.
+ *
+ * This is the variant to use when the caller needs to know whether the
+ * lookup actually worked: once every attempt is exhausted it resolves to
+ * `{ ok: false, entries: [] }`, which queryCrtSh() below flattens to a bare
+ * `[]` — indistinguishable from a domain that simply has no certificates.
+ * A scan report built on a failed lookup must say so rather than read as a
+ * complete (just small) attack surface.
  *
  * @param {string} domain
  * @param {number} [timeoutMs=60_000] per-attempt network timeout
@@ -97,19 +103,32 @@ function attemptCrtSh(domain, timeoutMs) {
  *   `retries + 1` requests total before giving up
  * @param {number} [baseDelayMs=1_000] backoff base; the wait before retry
  *   N is `min(baseDelayMs * 2^(N-1), MAX_DELAY_MS)` ms
- * @returns {Promise<object[]>} raw crt.sh entries — see extractSubdomains()
- *   for the fields actually used
+ * @returns {Promise<{ok: boolean, entries: object[], attempts: number}>}
+ *   `entries` are the raw crt.sh records — see extractSubdomains() for the
+ *   fields actually used; `attempts` is how many requests were made
  */
-export async function queryCrtSh(domain, timeoutMs = 60_000, retries = 5, baseDelayMs = 1_000) {
+export async function queryCrtShDetailed(domain, timeoutMs = 60_000, retries = 5, baseDelayMs = 1_000) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const result = await attemptCrtSh(domain, timeoutMs);
-    if (result.ok) return result.entries;
+    if (result.ok) return { ok: true, entries: result.entries, attempts: attempt + 1 };
     if (attempt < retries) {
       const delay = Math.min(baseDelayMs * 2 ** attempt, MAX_DELAY_MS);
       await sleep(delay);
     }
   }
-  return [];
+  return { ok: false, entries: [], attempts: retries + 1 };
+}
+
+/**
+ * Same lookup as queryCrtShDetailed(), returning only the entries — `[]`
+ * both for "no certificates found" and for "every attempt failed". Kept for
+ * callers that don't need to tell the two apart; the ubel-domain / ubel-easm
+ * entry points use queryCrtShDetailed() so their reports can.
+ *
+ * @returns {Promise<object[]>} raw crt.sh entries
+ */
+export async function queryCrtSh(domain, timeoutMs = 60_000, retries = 5, baseDelayMs = 1_000) {
+  return (await queryCrtShDetailed(domain, timeoutMs, retries, baseDelayMs)).entries;
 }
 
 // A reasonably strict but not pedantic hostname shape — just enough to

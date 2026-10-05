@@ -23,7 +23,7 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
-import { queryCrtSh, extractSubdomains } from './lib/crtsh.js';
+import { queryCrtShDetailed, extractSubdomains } from './lib/crtsh.js';
 import {
   VALID_SEVERITIES,
   parseFailOn,
@@ -110,12 +110,14 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm-domain__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm-domain/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm-domain.json and
+Every run writes a timestamped easm_domain__<ts>.zip bundle (report.json +
+report.html inside) under .ubel/local/reports/easm_domain/<y>/<m>/<d>/, plus
+fixed, unzipped "latest" copies at .ubel/reports/latest.easm_domain.json and
 .html — same bundling flow the SAST/malware scanners use. These are kept
-separate from ubel-url's own easm/ reports so a domain-wide sweep never
-overwrites a targeted scan's latest pointer, or vice versa.
+separate from ubel-url's own easm_url reports so a domain-wide sweep never
+overwrites a targeted scan's latest pointer, or vice versa. Both include a
+plain-language Executive Summary for non-technical readers (the tab after
+Dashboard in the HTML).
 
 Discovered hosts are DNS-resolved before probing. Certificate Transparency
 is append-only history, so a crt.sh result routinely includes hosts that
@@ -270,18 +272,45 @@ function parseArgs(argv) {
  */
 async function discoverTargets(args, log) {
   log(`[*] Querying crt.sh for certificates issued under ${args.domain}...`);
-  const entries = await queryCrtSh(args.domain);
+  const lookup = await queryCrtShDetailed(args.domain);
+  const entries = lookup.entries;
+  if (!lookup.ok) {
+    console.error(
+      `[ubel-domain] WARNING: the crt.sh lookup for ${args.domain} failed after ${lookup.attempts} attempt(s). ` +
+      `Subdomain discovery is incomplete${args.include.length ? ' — only --include hosts will be scanned' : ''}, ` +
+      `and the report will say so.`
+    );
+  }
   log(`[*] crt.sh returned ${entries.length} certificate record(s).`);
 
   const discovered = extractSubdomains(entries, args.domain);
   log(`[*] ${discovered.length} unique host(s) extracted from those records.`);
 
   const excluded = new Set(args.exclude);
-  const merged = [...new Set([...discovered, ...args.include])]
+  const everything = [...new Set([...discovered, ...args.include])];
+  const merged = everything
     .filter((h) => !excluded.has(h))
     .sort();
 
-  return { discovered, targets: merged };
+  // How the lookup went, carried into the report so a FAILED lookup (which
+  // otherwise looks exactly like "this domain has no certificates") is stated
+  // in the report and its executive summary instead of passing as a small,
+  // complete attack surface.
+  const discoveredSet = new Set(discovered);
+  const discovery = {
+    source: 'crt.sh',
+    ok: lookup.ok,
+    attempts: lookup.attempts,
+    certificate_records: entries.length,
+    hosts_discovered: discovered.length,
+    // Names added by hand that discovery did not already return, and names
+    // actually removed by --exclude (an --exclude that matched nothing
+    // removed nothing).
+    hosts_included: args.include.filter((h) => !discoveredSet.has(h)).length,
+    hosts_excluded: everything.filter((h) => excluded.has(h)).length,
+  };
+
+  return { discovered, targets: merged, discovery };
 }
 
 async function main() {
@@ -293,15 +322,19 @@ async function main() {
 
   const log = args.verbose ? (msg) => console.log(msg) : () => {};
 
-  const { discovered, targets } = await discoverTargets(args, log);
+  const { discovered, targets, discovery } = await discoverTargets(args, log);
 
   if (!targets.length) {
     console.error(
       `\nNo scannable hosts found for "${args.domain}".\n` +
-      `crt.sh returned no usable certificate records for it. That can mean the\n` +
-      `domain genuinely has no logged certificates, that crt.sh was unreachable\n` +
-      `or rate-limiting, or that everything found was excluded. Pass --verbose to\n` +
-      `see the raw counts, or --include <host> to scan specific hosts anyway.\n`
+      (discovery.ok
+        ? `crt.sh returned no usable certificate records for it. That can mean the\n` +
+          `domain genuinely has no logged certificates, or that everything found was\n` +
+          `excluded. Pass --verbose to see the raw counts, or --include <host> to scan\n` +
+          `specific hosts anyway.\n`
+        : `The crt.sh lookup itself failed (unreachable or rate-limiting, ${discovery.attempts} attempts),\n` +
+          `so this is NOT evidence that the domain has no certificates. Try again later,\n` +
+          `or pass --include <host> to scan specific hosts anyway.\n`)
     );
     process.exitCode = 1;
     return;
@@ -355,6 +388,9 @@ async function main() {
     // session tokens/API keys and have no business landing in a written report.
     usedCookie: Boolean(args.cookie),
     customHeaderNames: Object.keys(args.headers),
+    scanSecrets: args.scanSecrets,
+    minSeverity: args.minSeverity,
+    discovery,
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,
