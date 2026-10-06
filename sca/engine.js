@@ -988,6 +988,9 @@ async function generateHTMLReport(data) {
             document.getElementById('stats-vuln-med').textContent = s.vulnerabilities_stats.severity.medium;
             document.getElementById('stats-vuln-low').textContent = s.vulnerabilities_stats.severity.low;
             document.getElementById('stats-vuln-unk').textContent = s.vulnerabilities_stats.severity.unknown;
+            document.getElementById('stats-vuln-kev').textContent = s.vulnerabilities_stats.kev || 0;
+            document.getElementById('stats-vuln-nonkev').textContent = s.vulnerabilities_stats.non_kev || 0;
+            document.getElementById('stats-vuln-kevunk').textContent = s.vulnerabilities_stats.kev_unknown || 0;
 
             new Chart(document.getElementById('statsInventoryChart'), {
                 type: 'doughnut',
@@ -1020,6 +1023,23 @@ async function generateHTMLReport(data) {
                 },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
             });
+
+            // KEV vs non-KEV — its own chart. "Unknown" (feed down / not
+            // checked) is a separate slice so it can't pass as "not KEV".
+            const kevVs = s.vulnerabilities_stats || {};
+            new Chart(document.getElementById('statsKevChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: ['KEV', 'Not in KEV', 'Unknown'],
+                    datasets: [{
+                        data: [kevVs.kev || 0, kevVs.non_kev || 0, kevVs.kev_unknown || 0],
+                        backgroundColor: ['#ef4444', '#3b82f6', '#6b7280'],
+                        borderWidth: 0
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+            });
+
 
             const ecoData = {};
             reportData.inventory.forEach(item => { ecoData[item.ecosystem] = (ecoData[item.ecosystem] || 0) + 1; });
@@ -1842,6 +1862,7 @@ async function generateHTMLReport(data) {
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Inventory Stats</h3><div class="h-48"><canvas id="statsInventoryChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Size</span><span class="mono" id="stats-inv-size">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Safe</span><span class="mono text-green-400" id="stats-inv-safe">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Vulnerable</span><span class="mono text-yellow-400" id="stats-inv-vuln">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Infected</span><span class="mono text-red-400" id="stats-inv-inf">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Undetermined</span><span class="mono text-gray-400" id="stats-inv-und">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Vulnerability Stats</h3><div class="h-48"><canvas id="statsVulnChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Found</span><span class="mono" id="stats-vuln-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Critical</span><span class="mono text-red-600" id="stats-vuln-crit">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-vuln-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-vuln-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-blue-400" id="stats-vuln-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-unk">0</span></div></div></div>
+                <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Known Exploited (CISA KEV)</h3><div class="h-48"><canvas id="statsKevChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-red-400">KEV</span><span class="mono text-red-400" id="stats-vuln-kev">0</span></div><div class="flex justify-between text-sm"><span class="text-blue-400">Not in KEV</span><span class="mono text-blue-400" id="stats-vuln-nonkev">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-vuln-kevunk">0</span></div></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Ecosystem Distribution</h3><div class="h-48"><canvas id="statsEcoChart"></canvas></div><div id="eco-legend" class="grid grid-cols-2 gap-2 text-[10px] mono text-neutral-500"></div></div>
                 <div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">License Risk</h3><div class="h-48"><canvas id="statsLicenseChart"></canvas></div><div class="space-y-2"><div class="flex justify-between text-sm"><span class="text-neutral-500">Total Classified</span><span class="mono" id="stats-license-total">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Low</span><span class="mono text-green-400" id="stats-license-low">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Medium</span><span class="mono text-orange-400" id="stats-license-med">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">High</span><span class="mono text-red-400" id="stats-license-high">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">Unknown</span><span class="mono text-gray-400" id="stats-license-unk">0</span></div><div class="flex justify-between text-sm"><span class="text-neutral-500">OSI Approved</span><span class="mono text-blue-400" id="stats-license-osi">0</span></div></div></div>
             </div>
@@ -3817,9 +3838,18 @@ export class UbelEngineInstance {
       const infectedPurls   = new Set();
       const vulnerablePurls = new Set();
       let infectionCount    = 0;
+      // KEV split: is_kev is true (in CISA KEV), false (checked, not listed) or
+      // null/undefined (feed down or not checked). Unknown is its own bucket so
+      // a failed lookup is never silently counted as "not KEV".
+      let kevCount        = 0;
+      let nonKevCount     = 0;
+      let kevUnknownCount = 0;
 
       for (const v of vulnerabilities) {
         this.vulns_ids_found.add(v.id);
+        if (v.is_kev === true)       kevCount++;
+        else if (v.is_kev === false) nonKevCount++;
+        else                         kevUnknownCount++;
         v.compliance = getComplianceForVulnerability(v.cwes, v.is_infection);
         if (v.is_infection) {
           infectionCount++;
@@ -3937,7 +3967,12 @@ export class UbelEngineInstance {
           undetermined:  undeterminedCount,
         },
         total_vulnerabilities: vulnerabilities.length,
-        vulnerabilities_stats: { severity: severityBuckets },
+        vulnerabilities_stats: {
+          severity:    severityBuckets,
+          kev:         kevCount,
+          non_kev:     nonKevCount,
+          kev_unknown: kevUnknownCount,
+        },
         total_infections: infectionCount,
         license_stats: licenseSummary,
       };

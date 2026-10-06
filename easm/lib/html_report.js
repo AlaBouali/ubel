@@ -111,9 +111,18 @@ function buildStats(inventory, vulnerabilities, resolution) {
   // something different from one that's mostly wpvulnerability.net.
   const bySource = {};
   let withFix = 0;
+  // KEV split. is_kev is true (in CISA KEV), false (checked, not listed) or
+  // null (feed down / not checked) — null is its own bucket so kev + non_kev
+  // is never silently inflated by "unknown" being counted as "not KEV".
+  let kev = 0;
+  let nonKev = 0;
+  let kevUnknown = 0;
   for (const v of vulnerabilities) {
     bySource[v.source || "unknown"] = (bySource[v.source || "unknown"] || 0) + 1;
     if (v.has_fix) withFix++;
+    if (v.is_kev === true) kev++;
+    else if (v.is_kev === false) nonKev++;
+    else kevUnknown++;
   }
 
   return {
@@ -127,6 +136,9 @@ function buildStats(inventory, vulnerabilities, resolution) {
     by_source: bySource,
     with_fix: withFix,
     without_fix: vulnerabilities.length - withFix,
+    kev,
+    non_kev: nonKev,
+    kev_unknown: kevUnknown,
     low_confidence_components: lowConfidence,
     wordpress_components: wpComponents,
     components_with_purl: withPurl,
@@ -1109,6 +1121,16 @@ export async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="severity-unknown">Unknown</span><span class="mono severity-unknown" id="stats-vuln-unknown">0</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-green-400">With a fix available</span><span class="mono text-green-400" id="stats-vuln-fix">0</span></div>
             <div class="flex justify-between"><span class="text-neutral-500">No fix published</span><span class="mono" id="stats-vuln-nofix">0</span></div>
+          </div>
+        </div>
+
+        <div class="glass p-6 rounded-xl space-y-4">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Known Exploited (CISA KEV)</h3>
+          <div class="h-48"><canvas id="kevChart"></canvas></div>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-red-400">KEV</span><span class="mono text-red-400" id="stats-vuln-kev">0</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-blue-400">Not in KEV</span><span class="mono text-blue-400" id="stats-vuln-nonkev">0</span></div>
+            <div class="flex justify-between"><span class="text-neutral-500">Unknown</span><span class="mono" id="stats-vuln-kevunknown">0</span></div>
           </div>
         </div>
 
@@ -2620,6 +2642,9 @@ function renderStats() {
   set('stats-vuln-medium', sev.medium || 0);
   set('stats-vuln-low', sev.low || 0);
   set('stats-vuln-unknown', sev.unknown || 0);
+  set('stats-vuln-kev', s.kev || 0);
+  set('stats-vuln-nonkev', s.non_kev || 0);
+  set('stats-vuln-kevunknown', s.kev_unknown || 0);
   set('stats-vuln-fix', s.with_fix || 0);
   set('stats-vuln-nofix', s.without_fix || 0);
 
@@ -2703,6 +2728,24 @@ function renderStats() {
 
 function renderStatsCharts(s) {
   if (typeof Chart === 'undefined') return;
+
+  // KEV vs non-KEV — its own chart. "Unknown" (feed down / not checked) is a
+  // separate slice so it can't pass as "not KEV".
+  const kevCanvas = document.getElementById('kevChart');
+  if (kevCanvas) {
+    new Chart(kevCanvas, {
+      type: 'doughnut',
+      data: {
+        labels: ['KEV', 'Not in KEV', 'Unknown'],
+        datasets: [{
+          data: [s.kev || 0, s.non_kev || 0, s.kev_unknown || 0],
+          backgroundColor: ['#ef4444', '#3b82f6', '#6b7280'],
+          borderWidth: 0,
+        }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+    });
+  }
 
   const sourceEntries = Object.entries(s.by_source || {});
   const sourceCanvas = document.getElementById('sourceChart');

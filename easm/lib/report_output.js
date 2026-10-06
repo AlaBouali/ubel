@@ -216,11 +216,15 @@ export function printScanSummary(reportPayload, headerLabel) {
   const opts = reportPayload.scan_options || {};
   const vulns = reportPayload.vulnerabilities;
   const epssT = typeof opts.epss_threshold === "number" ? opts.epss_threshold : null;
-  const kevText  = ti.kev?.status === "unavailable" ? "unknown" : String(vulns.filter(v => v.is_kev === true).length);
+  const kevCount    = vulns.filter(v => v.is_kev === true).length;
+  const nonKevCount = vulns.filter(v => v.is_kev === false).length;
+  const kevUnknown  = vulns.filter(v => v.is_kev !== true && v.is_kev !== false).length;
+  const kevText  = ti.kev?.status === "unavailable" ? "unknown" : String(kevCount);
+  const nonKevText = ti.kev?.status === "unavailable" ? "unknown" : String(nonKevCount);
   const epssText = epssT === null ? "off"
     : (ti.epss?.status === "unavailable" ? "unknown"
        : String(vulns.filter(v => typeof v.epss_score === "number" && v.epss_score >= epssT).length));
-  console.log(`  known-exploited (KEV): ${kevText}  EPSS >= ${epssT === null ? "n/a" : parseFloat((epssT * 100).toFixed(2)) + "%"}: ${epssText}`);
+  console.log(`  known-exploited (KEV): ${kevText}  non-KEV: ${nonKevText}` + (kevUnknown && ti.kev?.status !== "unavailable" ? `  KEV-unknown: ${kevUnknown}` : "") + `  EPSS >= ${epssT === null ? "n/a" : parseFloat((epssT * 100).toFixed(2)) + "%"}: ${epssText}`);
   for (const w of (ti.warnings || [])) console.log(`  [!] ${w}`);
   console.log("");
   for (const v of reportPayload.vulnerabilities) {
