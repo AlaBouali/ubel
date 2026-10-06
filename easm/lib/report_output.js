@@ -13,6 +13,7 @@ import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
+import { extractCveIds } from "../../sca/engine.js";
 
 export const SEVERITY_RANK = { infection: -1, critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
 export const VALID_SEVERITIES = new Set(["critical", "high", "medium", "low", "unknown"]);
@@ -47,9 +48,35 @@ export function filterByMinSeverity(vulnerabilities, minSeverity) {
   return vulnerabilities.filter((v) => (SEVERITY_RANK[vulnSeverityKey(v)] ?? 4) <= minRank);
 }
 
-/** @returns {number} process exit code (0 or 2) for a resolved --fail-on gate */
-export function failOnExitCode(vulnerabilities, failOn) {
+// ── KEV / EPSS gate ─────────────────────────────────────────────────────────
+// Exploit-intelligence rules, mirroring the SCA policy defaults: fail on any
+// CISA KEV entry and on any EPSS score at or above the threshold, whatever the
+// severity. A null is_kev / epss_score means "unknown" (feed down, or no score
+// exists) and can never trip the gate. `--fail-on none` disables these too.
+export const DEFAULT_EPSS_THRESHOLD = 0.1;
+
+/** Parses --epss-threshold: a fraction in (0, 1] ("0.1"), a percentage ("10%"), or "none". Returns undefined if invalid. */
+export function parseEpssThresholdArg(raw) {
+  if (raw === "none") return "none";
+  const m = /^(\d*\.?\d+)(%?)$/.exec(raw);
+  if (!m) return undefined;
+  const n = m[2] ? parseFloat(m[1]) / 100 : parseFloat(m[1]);
+  return (n > 0 && n <= 1) ? n : undefined;
+}
+
+/** @returns {object[]} the vulnerabilities that trip the KEV/EPSS gate */
+export function intelGateHits(vulnerabilities, { blockKev = true, epssThreshold = DEFAULT_EPSS_THRESHOLD } = {}) {
+  const t = typeof epssThreshold === "number" ? epssThreshold : null;
+  return vulnerabilities.filter(v =>
+    (blockKev !== false && v.is_kev === true) ||
+    (t !== null && typeof v.epss_score === "number" && v.epss_score >= t)
+  );
+}
+
+/** @returns {number} process exit code (0 or 2) for a resolved --fail-on gate plus the KEV/EPSS gate */
+export function failOnExitCode(vulnerabilities, failOn, intel = {}) {
   if (failOn.mode === "none") return 0;
+  if (intelGateHits(vulnerabilities, intel).length > 0) return 2;
   if (failOn.mode === "threshold") {
     const failRank = SEVERITY_RANK[failOn.severity];
     const matchCount = vulnerabilities.filter((v) => (SEVERITY_RANK[vulnSeverityKey(v)] ?? 4) <= failRank).length;
@@ -183,11 +210,27 @@ export function printScanSummary(reportPayload, headerLabel) {
     `  infections: ${s.infections}  critical: ${s.severity.critical}  high: ${s.severity.high}  ` +
     `medium: ${s.severity.medium}  low: ${s.severity.low}  unknown: ${s.severity.unknown}`
   );
+  // KEV / EPSS — "unknown" (never 0) when a feed was down, so a clean-looking
+  // count can't be mistaken for "checked and none found".
+  const ti   = reportPayload.threat_intel || {};
+  const opts = reportPayload.scan_options || {};
+  const vulns = reportPayload.vulnerabilities;
+  const epssT = typeof opts.epss_threshold === "number" ? opts.epss_threshold : null;
+  const kevText  = ti.kev?.status === "unavailable" ? "unknown" : String(vulns.filter(v => v.is_kev === true).length);
+  const epssText = epssT === null ? "off"
+    : (ti.epss?.status === "unavailable" ? "unknown"
+       : String(vulns.filter(v => typeof v.epss_score === "number" && v.epss_score >= epssT).length));
+  console.log(`  known-exploited (KEV): ${kevText}  EPSS >= ${epssT === null ? "n/a" : parseFloat((epssT * 100).toFixed(2)) + "%"}: ${epssText}`);
+  for (const w of (ti.warnings || [])) console.log(`  [!] ${w}`);
   console.log("");
   for (const v of reportPayload.vulnerabilities) {
     const item = reportPayload.inventory.find(i => i.id === v.affected_package_id);
     const label = item ? `${item.name}@${item.version || "unknown"}` : v.affected_package_id;
-    console.log(`[${v.is_infection ? "INFECTION" : v.severity.toUpperCase()}] ${v.id}  (${label})`);
+    // GHSA-/OSV-style ids hide the CVE; surface it (from aliases) next to the id.
+    const cves = extractCveIds(v).filter(c => c !== String(v.id).toUpperCase());
+    const cveTag = cves.length ? `  [${cves.join(", ")}]` : "";
+    const kevTag = v.is_kev === true ? "  KEV" : "";
+    console.log(`[${v.is_infection ? "INFECTION" : v.severity.toUpperCase()}] ${v.id}${cveTag}${kevTag}  (${label})`);
     for (const fix of (v.fixes || [])) console.log(`  fix: ${fix}`);
   }
   console.log("");

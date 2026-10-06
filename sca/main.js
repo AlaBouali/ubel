@@ -29,6 +29,10 @@
  *     --block-unknown [true|false] — override block_unknown_vulnerabilities (bare = true)
  *     --license-risk <level>       — override license_risk_threshold   (npm-family only)
  *     --license-block-unknown [true|false] — override block_unknown_license_risk (npm-family only)
+ *     --block-kev [true|false]     — override block_kev: block CISA KEV vulnerabilities (bare = true)
+ *     --epss-threshold <value>     — override epss_threshold: block EPSS >= value. Accepts a
+ *                                    fraction (0.1), a percentage (10%), or "none" to disable.
+ *                                    A bare number above 1 is rejected (ambiguous: 10 vs 10%).
  *       `--flag value` and `--flag=value` both work, anywhere among the
  *       package args. Unlike the modes above, these are NOT saved: the policy
  *       file is snapshotted and restored on exit, so the persisted policy is
@@ -198,7 +202,21 @@ const POLICY_FLAGS = {
   "--block-unknown":         { field: "block_unknown_vulnerabilities", type: "boolean"  },
   "--license-risk":          { field: "license_risk_threshold",        type: "license",  license: true },
   "--license-block-unknown": { field: "block_unknown_license_risk",    type: "boolean",  license: true },
+  "--block-kev":             { field: "block_kev",                       type: "boolean"  },
+  "--epss-threshold":        { field: "epss_threshold",                  type: "epss"     },
 };
+
+/**
+ * Parse an EPSS threshold into the stored form: a fraction in (0, 1], or "none".
+ * `0.1` and `10%` both mean 10%. Returns undefined when invalid.
+ */
+function parseEpssThresholdArg(raw) {
+  if (raw === "none") return "none";
+  const m = /^(\d*\.?\d+)(%?)$/.exec(raw);
+  if (!m) return undefined;
+  const n = m[2] ? parseFloat(m[1]) / 100 : parseFloat(m[1]);
+  return (n > 0 && n <= 1) ? n : undefined;
+}
 
 /**
  * Pull policy flags out of the CLI args, leaving package specifiers (and any
@@ -243,6 +261,10 @@ function parsePolicyFlags(args, { license }) {
     } else if (def.type === "license") {
       if (!VALID_LICENSE_RISKS.has(raw)) die(`${name} requires: none | low | medium | high`);
       overrides[def.field] = raw;
+    } else if (def.type === "epss") {
+      const v = parseEpssThresholdArg(raw);
+      if (v === undefined) die(`${name} requires: a fraction in (0, 1] (e.g. 0.1), a percentage (e.g. 10%), or none`);
+      overrides[def.field] = v;
     } else {
       if (raw !== "true" && raw !== "false") die(`${name} requires: true | false`);
       overrides[def.field] = raw === "true";

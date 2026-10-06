@@ -4,7 +4,9 @@
 
 UBEL is a zero-dependency, source-available (internal-use-only; see [License](#license)) application security toolkit. This package (`@arcane-spark/ubel-node`) ships multiple CLIs for dependency-security and source-level scanner:
 
-- **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables)). This is the audit/reporting side — `health` mode reads what's already installed.
+- **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables)); the KEV/EPSS exploit-intelligence feeds have no mirror setting and are simply reported as unavailable when unreachable. This is the audit/reporting side — `health` mode reads what's already installed.
+- **Exploit intelligence** — every vulnerability is checked against CISA's [Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/) (probability of exploitation in the next 30 days). By default the policy blocks on any KEV entry or an EPSS score of 10% or more, whatever the severity (tunable with `--block-kev` / `--epss-threshold`). The fields travel into the JSON, HTML, SBOM and SARIF outputs, and a feed outage degrades gracefully — the values become `null` (unknown, never "not exploited") and the matching rule isn't enforced — rather than aborting the scan. Applies to SCA, the firewall and EASM. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#exploit-intelligence-kev--epss).
+- **Executive summary & suggested fixes** — every SCA and EASM report opens with a plain-language executive summary for non-technical readers (risk rating, key findings, recommended actions, methodology; SCA adds the policy verdict), where known-exploited and likely-exploited issues raise the rating and the priority order. Each package also gets per-release-line upgrade suggestions (the fewest, highest versions that clear the most vulnerabilities, branch-aware), listed per component in the summary and carried in the JSON, SBOM and SARIF. See the SCA and EASM READMEs.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe restricted keys, Twilio Account/App SIDs, and URL-embedded git credentials, among others). Runs standalone via `ubel-secrets`, or as part of any SCA/firewall scan.
 - **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
@@ -13,7 +15,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
 - **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD/wpvulnerability.net (the same vulnerability-lookup engine the SCA module uses, plus a dedicated WordPress plugin/theme/core lookup), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run, `ubel-host` to connect-scan every port on one host and fingerprint whatever answers HTTP(S), or `ubel-easm` to combine both — discover a domain's subdomains, resolve them to distinct IPs, port-scan each, and fingerprint the combined result. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
-UBEL has no telemetry and no UBEL-operated backend. The dependency-scanning CLIs send only package identifiers (PURLs / CPE names) to OSV.dev and NVD, both mirror-configurable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`; everything else runs on your own infrastructure. **SAST is the exception to "fully local":** the code chunks `ubel-sast` / `ubel-mal` analyze are sent to the LLM provider you configure (OpenRouter by default, and its API key is the only credential UBEL needs) — point it at a local or self-hosted model endpoint if source code must not leave your network. The EASM and cloud scanners contact only the targets and cloud APIs you point them at, plus the public data sources documented in their READMEs (for example crt.sh and wpvulnerability.net).
+UBEL has no telemetry and no UBEL-operated backend. The dependency-scanning CLIs send only package identifiers (PURLs / CPE names) to OSV.dev and NVD, both mirror-configurable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`. For exploit intelligence they also send the CVE ids of whatever vulnerabilities they find to FIRST.org's EPSS API and download CISA's public KEV catalog (nothing is sent for that one); neither of those two has an endpoint override, and if they can't be reached the scan still completes with those fields marked unknown. Everything else runs on your own infrastructure. **SAST is the exception to "fully local":** the code chunks `ubel-sast` / `ubel-mal` analyze are sent to the LLM provider you configure (OpenRouter by default, and its API key is the only credential UBEL needs) — point it at a local or self-hosted model endpoint if source code must not leave your network. The EASM and cloud scanners contact only the targets and cloud APIs you point them at, plus the public data sources documented in their READMEs (for example crt.sh and wpvulnerability.net).
 
 ---
 
@@ -329,8 +331,10 @@ It's a deliberate subset of an SCA report: no license compliance (no
 manifest to read one off of), no dependency sequences/graph (nothing here
 is resolved from a lockfile), no reachability analysis (no source code to
 trace), and no SBOM/SARIF — JSON and HTML only. CVSS scoring, fix-version
-recommendations, and the same compliance framework mapping every other
-module uses are all still included. Every detected component is reported
+recommendations (including per-component suggested fixes), CISA KEV / FIRST
+EPSS exploit intelligence (which also gates the exit code), an executive
+summary, and the same compliance framework mapping every other module uses
+are all still included. Every detected component is reported
 with `scopes: ["prod"]` — anything fingerprinted over the network is, by
 definition, already running.
 
@@ -527,11 +531,11 @@ below.
 | Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Python (pip/uv/pipx/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
 | Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
 | Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
 | C | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
@@ -1078,9 +1082,12 @@ not treated as an afterthought bolted onto the dependency scanner.
 - **SARIF 2.1.0** — full-fidelity output (deterministic SHA-256
   fingerprints, not random UUIDs, so the same finding produces the same ID
   run over run) that plugs directly into GitHub code scanning and any
-  other SARIF-consuming pipeline.
+  other SARIF-consuming pipeline. Results carry KEV / EPSS data and a
+  `rank` (100 for a KEV entry, otherwise the EPSS probability), and a KEV
+  finding is reported at `error` level regardless of its severity.
 - **CycloneDX 1.6 SBOM** — with VEX-style vulnerability annotations,
   usable as a release artifact independent of any specific CI vendor.
+  Includes KEV / EPSS exploit data and per-package suggested fixes.
 - **CVSS scoring** — v2, v3, v3.1, and **v4.0** (a full port of the
   Red Hat CVSS v4 calculator, BSD-2-Clause, separately attributed) plus
   SSVC as a normalized "other" scoring method where relevant, all folded

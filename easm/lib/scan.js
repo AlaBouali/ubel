@@ -61,6 +61,7 @@ import {
   scoreToSeverity,
   deduplicateVulnerabilitiesByAlias,
   sortVulnerabilities,
+  enrichWithThreatIntel,
 } from "../../sca/engine.js";
 import { processVulnerability } from "../../sca/cvss_parser.js";
 import { getComplianceForVulnerability } from "../../sca/compliance_mappings.js";
@@ -482,6 +483,27 @@ export async function scanTargets(targets, opts = {}) {
   for (const v of vulnerabilities) {
     v.compliance = getComplianceForVulnerability(v.cwes, v.is_infection);
   }
+
+  // ── CISA KEV + FIRST EPSS enrichment ─────────────────────────────────────
+  // Same enrichment the SCA engine runs (sca/engine.js). Never aborts the
+  // scan: if a feed is unreachable the affected fields are null (unknown),
+  // the outage is recorded in `threat_intel` and warned about, and the
+  // matching exit-code gate (see ./report_output.js) simply can't fire.
+  let threatIntel = { kev: { status: "skipped" }, epss: { status: "skipped" }, warnings: [] };
+  if (vulnerabilities.length > 0) {
+    try {
+      threatIntel = await enrichWithThreatIntel(vulnerabilities);
+    } catch (err) {
+      const msg = `Threat-intel enrichment failed (${err.message}): KEV/EPSS data unavailable and KEV/EPSS gating was NOT enforced for this scan.`;
+      threatIntel = { kev: { status: "unavailable", error: err.message }, epss: { status: "unavailable", error: err.message }, warnings: [msg] };
+      for (const v of vulnerabilities) {
+        v.is_kev = null; v.kev_added = null; v.kev_deadline = null;
+        v.epss_score = null; v.epss_percentile = null;
+      }
+    }
+    for (const w of threatIntel.warnings) console.warn(`[!] ${w}`);
+  }
+
   vulnerabilities = sortVulnerabilities(vulnerabilities);
 
   // ── Component state + stats ──────────────────────────────────────────────
@@ -576,6 +598,7 @@ export async function scanTargets(targets, opts = {}) {
     assets,
     inventory,
     vulnerabilities,
+    threat_intel: threatIntel,
     resolution,
     secrets,
     misconfigurations,

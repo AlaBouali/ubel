@@ -29,6 +29,13 @@
 //     safety guard, components whose version could not be pinned down, a
 //     failed subdomain-discovery lookup), so it has its own section.
 //
+// Exploit intelligence and fixes (same inputs as the SCA summary): CISA KEV
+// membership and FIRST EPSS scores (stamped on each vulnerability by the scan,
+// see ./scan.js) feed the rating, the priority ranking and the figures, and
+// each component's `suggested_fixes` (sca/suggested_fixes.js) supplies the
+// upgrade paths listed under "Components to fix first". A feed that was down
+// is "unknown" (null), never zero.
+//
 // The rating and prioritization rules in buildMethodology() are a prose copy of
 // overallRisk() / buildPriorityComponents() / the action builder below — if
 // those change, update that text too.
@@ -67,6 +74,16 @@ function joinList(items) {
 
 function hasFix(v) {
   return !!(v?.has_fix || (v?.fixed_versions || []).length > 0);
+}
+
+// Which exploit feeds actually answered. Falls back to the data itself when the
+// report carries no threat_intel block (older reports).
+function intelState(report, vulns) {
+  const ti = report?.threat_intel || null;
+  const kevKnown = ti?.kev ? ti.kev.status === "ok" : vulns.some(v => typeof v.is_kev === "boolean");
+  const epssStatus = ti?.epss?.status;
+  const epssKnown = ti?.epss ? (epssStatus === "ok" || epssStatus === "partial") : vulns.some(v => typeof v.epss_score === "number");
+  return { kevKnown, epssKnown, epssPartial: epssStatus === "partial" };
 }
 
 // Targets can be given as full URLs, and a URL can embed credentials
@@ -314,11 +331,83 @@ function suggestUpgrade(currentVersion, vulns, id) {
   return unique[unique.length - 1];
 }
 
+// Upgrade target from the per-package `suggested_fixes` analysis. Its `fixes`
+// are ordered closest-first (minor ranges, then major) and are branch-aware, so
+// the best single upgrade is the closest one that resolves the most of the
+// component's issues (ties keep the closer one). Returns null when the analysis
+// is missing or failed, so the caller falls back to suggestUpgrade().
+function planUpgrade(item, totalIssues) {
+  const sf = item?.suggested_fixes;
+  if (!sf || sf.error || !Array.isArray(sf.fixes)) return null;
+  const real = list => (list || []).filter(x => !x?.is_infection).length;
+  let best = null;
+  for (const f of sf.fixes) {
+    if (!f?.version) continue;
+    const cleared = Array.isArray(f.vulnerabilities) ? real(f.vulnerabilities) : (f.count || 0);
+    if (cleared > 0 && (!best || cleared > best.cleared)) best = { version: f.version, cleared, scope: f.range?.scope || null };
+  }
+  const unfixed = real(sf.unfixed);
+  return best
+    ? { ...best, total: totalIssues, unfixed }
+    : { version: null, cleared: 0, scope: null, total: totalIssues, unfixed };
+}
+
+// Every upgrade path from `suggested_fixes`, closest first, for the "Possible
+// fixes" list under a component: how many of its issues each version resolves
+// and how many of the known-exploited ones. At most `limit` are listed; the
+// recommended one is always kept.
+const FIX_OPTIONS_LIMIT = 5;
+
+function buildFixOptions(item, nonInf, bestVersion, limit = FIX_OPTIONS_LIMIT) {
+  const sf = item?.suggested_fixes;
+  if (!sf || sf.error || !Array.isArray(sf.fixes)) return { options: [], more: 0, noFixYet: 0 };
+  const kevIds = new Set(nonInf.filter(v => v.is_kev === true).map(v => v.id));
+  const all = [];
+  for (const f of sf.fixes) {
+    if (!f?.version) continue;
+    const list = Array.isArray(f.vulnerabilities) ? f.vulnerabilities.filter(x => !x?.is_infection) : null;
+    const resolves = list ? list.length : (f.count || 0);
+    if (!resolves) continue;
+    all.push({
+      version: f.version,
+      range: f.range?.label || null,
+      scope: f.range?.scope || null,          // "minor" | "major" (may break things)
+      resolves,
+      of: nonInf.length,
+      resolves_known_exploited: list ? list.filter(x => kevIds.has(x.id)).length : 0,
+      known_exploited_total: kevIds.size,
+      recommended: !!bestVersion && f.version === bestVersion,
+    });
+  }
+  let options = all;
+  if (all.length > limit) {
+    options = all.slice(0, limit);
+    const rec = all.find(o => o.recommended);
+    if (rec && !options.includes(rec)) options = [...all.slice(0, limit - 1), rec];
+  }
+  const noFixYet = (sf.unfixed || []).filter(x => !x?.is_infection).length;
+  return { options, more: all.length - options.length, noFixYet };
+}
+
+function describeUpgrade(plan) {
+  let text = `Upgrade to version ${plan.version}`;
+  if (plan.scope === "major") text += " (a major version change, so test for breaking changes)";
+  text += ".";
+  if (plan.cleared < plan.total) {
+    const left = plan.total - plan.cleared;
+    text += ` This resolves ${plan.cleared} of ${plan.total} issues; ` +
+      (plan.unfixed >= left
+        ? `${left === 1 ? "the other has" : `the other ${left} have`} no published fix yet.`
+        : "the rest need a different upgrade path (see the possible fixes listed here or in the component's details).");
+  }
+  return text;
+}
+
 function hostsOfItem(item) {
   return [...new Set((item?.assets || []).map(a => a.host).filter(Boolean))];
 }
 
-function buildPriorityComponents(vulns, inventory, limit = 5) {
+function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
   const itemById = new Map(inventory.map(i => [i.id, i]));
   const byPkg = new Map();
   for (const v of vulns) {
@@ -342,7 +431,17 @@ function buildPriorityComponents(vulns, inventory, limit = 5) {
     const worst = nonInf.reduce((w, v) => Math.max(w, SEV_RANK[sevKey(v.severity)]), -1);
     const worstKey = Object.keys(SEV_RANK).find(k => SEV_RANK[k] === worst) || "unknown";
     const fixable = nonInf.filter(hasFix);
-    const upgradeTo = malicious ? null : suggestUpgrade(p.version, fixable, p.id);
+    const item = itemById.get(p.id);
+    const plan = malicious ? null : planUpgrade(item, nonInf.length);
+    const upgradeTo = malicious ? null : plan ? plan.version : suggestUpgrade(p.version, fixable, p.id);
+    const fixOpts = malicious ? { options: [], more: 0, noFixYet: 0 } : buildFixOptions(item, nonInf, plan ? plan.version : null);
+    // Exploit intelligence. Everything an EASM scan sees is exposed, so there is
+    // no reachability discount: any KEV entry counts for ranking.
+    const kevAll = p.vulns.filter(v => v.is_kev === true);
+    const exploited = kevAll.length > 0;
+    const epssVals = p.vulns.map(v => v.epss_score).filter(x => typeof x === "number");
+    const maxEpss = epssVals.length ? Math.max(...epssVals) : null;
+    const likelySoon = typeof epssMin === "number" && p.vulns.some(v => v.is_kev !== true && typeof v.epss_score === "number" && v.epss_score >= epssMin);
     return {
       name: p.name,
       version: p.version,
@@ -351,6 +450,14 @@ function buildPriorityComponents(vulns, inventory, limit = 5) {
       worst_severity_label: malicious ? "Malicious" : SEV_LABEL[worstKey],
       systems_affected: p.hosts.length,
       example_systems: p.hosts.slice(0, 3),
+      known_exploited: kevAll.length,
+      max_epss: maxEpss,
+      upgrade_to: upgradeTo || null,
+      // All possible upgrade paths (closest first), from sca/suggested_fixes.js.
+      // Empty when that analysis is unavailable; `upgrade_to` / `action` still apply.
+      fix_options: fixOpts.options,
+      fix_options_more: fixOpts.more,
+      no_fix_yet: fixOpts.noFixYet,
       // Advisory identifiers, most serious first, for tickets and auditors. Kept
       // out of the plain-language text on purpose.
       references: [...p.vulns]
@@ -359,10 +466,12 @@ function buildPriorityComponents(vulns, inventory, limit = 5) {
       more_references: Math.max(0, p.vulns.length - 5),
       action: malicious
         ? "Treat every system running this as potentially compromised: isolate it, investigate, and rebuild from a trusted source."
-        : upgradeTo
+        : plan && plan.version
+          ? describeUpgrade(plan)
+          : upgradeTo
           ? `Upgrade to version ${upgradeTo}${fixable.length < nonInf.length ? " (some issues have no fix yet; see technical details)" : ""}`
           : "No fixed version is published yet. Consider restricting access to the system, adding protection in front of it, or replacing the software.",
-      _rank: [malicious ? 1 : 0, worst, p.hosts.length, p.vulns.length],
+      _rank: [malicious ? 1 : 0, exploited ? 1 : 0, worst, likelySoon ? 1 : 0, p.hosts.length, p.vulns.length],
     };
   });
 
@@ -382,6 +491,16 @@ function buildPriorityComponents(vulns, inventory, limit = 5) {
 // the summary, so the rating is floored at Low rather than allowed to read as
 // Minimal.
 function overallRisk(m) {
+  const r = overallRiskCore(m);
+  // A low/medium rating can hide a known-exploited weakness when the exploit
+  // feeds were down, so say so instead of letting the rating read as final.
+  if (m.vulns_assessed && m.intel_incomplete && (r.level === "low" || r.level === "medium")) {
+    r.rationale += " Exploit data was not fully available, so this rating could be understated.";
+  }
+  return r;
+}
+
+function overallRiskCore(m) {
   if (!m.reached) {
     return {
       level: "not_assessed",
@@ -396,11 +515,13 @@ function overallRisk(m) {
   }
   const seriousVuln = m.vuln.critical + m.vuln.high;
   const seriousCfg = m.cfg.critical + m.cfg.high;
-  if (seriousVuln > 0 || seriousCfg > 0 || m.secrets.serious > 0) {
+  if (seriousVuln > 0 || seriousCfg > 0 || m.secrets.serious > 0 || m.kev > 0) {
     const parts = [];
     if (seriousVuln) parts.push(count(seriousVuln, "Critical/High-severity software weakness", "Critical/High-severity software weaknesses"));
     if (seriousCfg) parts.push(count(seriousCfg, "Critical/High-severity configuration gap"));
     if (m.secrets.serious) parts.push(count(m.secrets.serious, "exposed High/Critical credential"));
+    // A known-exploited weakness is High however it is scored: attackers are already using it.
+    if (m.kev) parts.push(count(m.kev, "weakness already exploited in real attacks", "weaknesses already exploited in real attacks"));
     return { level: "high", rationale: `Includes ${joinList(parts)}. These are reachable from the internet and could be used against the organization.` };
   }
   if (m.vuln.medium > 0 || m.vuln.unknown > 0 || m.cfg.medium > 0 || m.cfg.unknown > 0 || m.secrets.total > 0) {
@@ -431,7 +552,7 @@ function overallRisk(m) {
 // corresponding stage actually ran, so the text never claims work that wasn't
 // done.
 function buildMethodology(report, ctx) {
-  const { scan, secretsInfo, vulnsAssessed, cfgChecked, reached, notChecked, hidden, minSeverity, discovery } = ctx;
+  const { scan, secretsInfo, vulnsAssessed, cfgChecked, reached, notChecked, hidden, minSeverity, discovery, intel } = ctx;
   const opts = report?.scan_options || {};
   const hasCompliance = Array.isArray(report?.compliance_summary?.frameworks);
   const steps = [];
@@ -481,6 +602,20 @@ function buildMethodology(report, ctx) {
         "Only weaknesses published by then can be found. " +
         (notChecked > 0 ? `${count(notChecked, "component")} had a missing or too-vague version (for example just “3”) and ${plural(notChecked, "was", "were")} listed but not checked, because matching on a vague version produces misleading results.` : ""),
     });
+    {
+      const bits = [];
+      bits.push(intel.kevKnown
+        ? "each weakness was checked against the U.S. CISA Known Exploited Vulnerabilities catalog (weaknesses attackers are already using)"
+        : "the CISA Known Exploited Vulnerabilities catalog could NOT be reached, so which weaknesses are already being exploited is unknown");
+      bits.push(intel.epssKnown
+        ? "and given a FIRST EPSS score, a statistical estimate of how likely it is to be exploited in the next 30 days" + (intel.epssPartial ? " (scores were missing for some)" : "")
+        : "and the FIRST EPSS exploit-likelihood estimates could NOT be reached");
+      steps.push({
+        step: "Exploit intelligence",
+        detail: "Weaknesses with a CVE identifier were enriched at the time of the scan: " + bits.join(", ") + ". " +
+          "A known-exploited weakness raises the rating to at least High regardless of its severity score. EPSS is an estimate, not a finding, and only influences the order in which components are listed.",
+      });
+    }
     steps.push({
       step: "Malicious-software check",
       detail: "Components that match public malware advisories (identifiers starting with “MAL-”) are reported separately from ordinary weaknesses and always raise the rating to Critical.",
@@ -537,7 +672,7 @@ function buildMethodology(report, ctx) {
 
   const ratingRules = [
     { level: "Critical", rule: "At least one component matches a public malware advisory." },
-    { level: "High", rule: "At least one Critical- or High-severity software weakness, Critical- or High-severity configuration gap, or exposed High/Critical credential." },
+    { level: "High", rule: "At least one Critical- or High-severity software weakness, a weakness listed by CISA as already exploited in real attacks (whatever its severity), Critical- or High-severity configuration gap, or exposed High/Critical credential." },
     { level: "Medium", rule: "Medium or unrated weaknesses or configuration gaps, or lower-severity exposed credentials." },
     { level: "Low", rule: "Only Low-severity weaknesses or configuration gaps." },
     { level: "Minimal", rule: "Nothing found in the checks that ran." },
@@ -545,9 +680,9 @@ function buildMethodology(report, ctx) {
   ];
 
   const prioritization =
-    "“Components to fix first” ranks software components by: (1) matches a malware advisory, (2) worst severity, (3) number of systems running it, (4) number of issues, and lists the top five. " +
+    "“Components to fix first” ranks software components by: (1) matches a malware advisory, (2) has a weakness already exploited in real attacks, (3) worst severity, (4) has a weakness with a high exploit-likelihood estimate, (5) number of systems running it, (6) number of issues, and lists the top five. " +
     "“Systems to review first” ranks public names and network addresses by the same first two factors, then by number of weaknesses plus configuration issues. " +
-    "The suggested version is the highest of the closest published fixes for a component's issues; it is a starting point and has not been tested against your systems. " +
+    "For each component the “possible fixes” list shows every upgrade path, closest release line first, with how many of its issues (and how many exploited ones) each version resolves; the one marked Best is the closest that resolves the most. Where that analysis is unavailable the suggestion is the highest of the closest published fixes. Either way it is a starting point and has not been tested against your systems. " +
     "Every finding is treated as exposed, because everything this scan can see is reachable from the internet; there is no “probably not in use” discount.";
 
   const timeframes =
@@ -558,6 +693,7 @@ function buildMethodology(report, ctx) {
     "This is an outside-in, point-in-time view of what each system chose to disclose. Anything an attacker could only learn from inside the network, or after logging in, is out of scope.",
     "Software is matched to weaknesses by the name and version it announces. A system that hides its version is not matched, and a system that applies fixes without changing its version number (common with Linux distributions) can be flagged for a weakness it no longer has. Verify each finding before acting on it.",
     "Severity ratings come from the public advisories (for software) or from this tool's own rules (for configuration and credentials). They describe the issue in general, not its effect on your business.",
+    "Exploit data comes from two public feeds at the time of the scan. A CVE missing from the CISA catalog is not proof it is safe, EPSS is a probability rather than a fact, and weaknesses without a CVE identifier cannot be matched to either feed.",
     "The tool does not exploit weaknesses or test how the systems behave under attack. It identifies known issues and common mistakes.",
     "Weaknesses with no public advisory, flaws in your own code, and anything on systems that were not found or not reachable are outside this scan. A clean result is not proof of safety.",
     "The recommended actions are generated from the counts in this report; they do not account for what each system does or how important it is.",
@@ -615,6 +751,14 @@ export function buildExecutiveSummary(report) {
   for (const v of regular) bySeverity[sevKey(v.severity)]++;
 
   const withFix = regular.filter(hasFix).length;
+
+  // ── Exploit intelligence (CISA KEV + FIRST EPSS) ──────────────────────────
+  const intel = intelState(report, vulns);
+  const epssT = typeof opts.epss_threshold === "number" ? opts.epss_threshold : null;
+  const kevVulns = regular.filter(v => v.is_kev === true);
+  const kevCount = kevVulns.length;
+  const epssHigh = epssT === null ? [] : regular.filter(v => v.is_kev !== true && typeof v.epss_score === "number" && v.epss_score >= epssT);
+  const intelIncomplete = regular.length > 0 && (!intel.kevKnown || !intel.epssKnown || intel.epssPartial);
   const maliciousComponents = new Set(infections.map(v => v.affected_package_id || v.affected_dependency)).size;
   const componentsReviewed = stats.component_count ?? inventory.length;
   const notChecked = inventory.filter(i => i.low_confidence_version).length;
@@ -637,6 +781,15 @@ export function buildExecutiveSummary(report) {
   const seriousIds = new Set(regular.filter(v => ["critical", "high"].includes(sevKey(v.severity))).map(v => v.affected_package_id));
   const seriousSystems = new Set();
   for (const item of inventory) if (seriousIds.has(item.id)) for (const h of hostsOfItem(item)) seriousSystems.add(h);
+
+  const hostsOfVulns = list => {
+    const ids = new Set(list.map(v => v.affected_package_id));
+    const hosts = new Set();
+    for (const item of inventory) if (ids.has(item.id)) for (const h of hostsOfItem(item)) hosts.add(h);
+    return hosts;
+  };
+  const kevSystems = hostsOfVulns(kevVulns);
+  const epssSystems = hostsOfVulns(epssHigh);
 
   // ── Configuration gaps ───────────────────────────────────────────────────
   const mstats = stats.misconfigurations || {};
@@ -703,6 +856,8 @@ export function buildExecutiveSummary(report) {
     hidden,
     vulns_assessed: vulnsAssessed,
     cfg_checked: cfgChecked,
+    kev: kevCount,
+    intel_incomplete: intelIncomplete,
     gaps,
   };
   const risk = overallRisk(m);
@@ -719,6 +874,7 @@ export function buildExecutiveSummary(report) {
   const lowerCfgCount = misconfigs.length - seriousCfgCount;
   const drivers = [];
   if (maliciousComponents > 0) drivers.push(count(maliciousComponents, "malicious component"));
+  if (kevCount > 0) drivers.push(count(kevCount, "weakness already exploited in real attacks", "weaknesses already exploited in real attacks"));
   if (seriousVulnCount > 0) drivers.push(`${count(seriousVulnCount, "serious software weakness", "serious software weaknesses")}`);
   if (seriousCfgCount > 0) drivers.push(count(seriousCfgCount, "serious configuration issue"));
   if (secretsInfo.total > 0) drivers.push(count(secretsInfo.total, "exposed credential"));
@@ -779,6 +935,36 @@ export function buildExecutiveSummary(report) {
       title: "Malicious software detected",
       detail: `${count(maliciousComponents, "component was", "components were")} flagged as deliberately harmful (for example, packages created to steal data or take control of systems). ` +
         "Unlike ordinary bugs, these are built to cause damage. Advisories occasionally name the wrong package or version, so confirm the match before acting.",
+    });
+  }
+
+  if (kevCount > 0) {
+    keyFindings.push({
+      severity: "high",
+      title: "Weaknesses already being exploited by attackers",
+      detail: `${count(kevCount, "weakness is", "weaknesses are")} on the U.S. government's list of vulnerabilities known to be exploited in real attacks, affecting ${count(kevSystems.size, "system")}. ` +
+        "Whatever the severity score, these are the most urgent software fixes: attackers are not just able to use them, they already do.",
+    });
+  }
+  if (epssHigh.length > 0) {
+    keyFindings.push({
+      severity: "medium",
+      title: "Weaknesses with a high chance of being exploited soon",
+      detail: `${count(epssHigh.length, "further weakness", "further weaknesses")}, on ${count(epssSystems.size, "system")}, ${plural(epssHigh.length, "has", "have")} a high statistical likelihood (at least ${parseFloat((epssT * 100).toFixed(2))}%) of being exploited in the next 30 days. ` +
+        "This is an estimate, not a confirmed attack, but it is a good guide for what to patch first.",
+    });
+  }
+  if (regular.length > 0 && intelIncomplete) {
+    keyFindings.push({
+      severity: "medium",
+      title: "Exploit data was not fully available",
+      detail: (!intel.kevKnown
+        ? "The list of weaknesses known to be exploited could not be reached, so it is unknown whether any of the weaknesses found are already being attacked. "
+        : "") +
+        (!intel.epssKnown
+          ? "The exploit-likelihood estimates could not be reached. "
+          : intel.epssPartial ? "Exploit-likelihood estimates were missing for some weaknesses. " : "") +
+        "The rating and priority order may understate the urgency; re-run the scan when the feeds are reachable.",
     });
   }
 
@@ -921,6 +1107,14 @@ export function buildExecutiveSummary(report) {
       "Replace every exposed password and access key, then keep secrets out of website code.",
       "These values are visible to anyone who loads the site. Removing them from the page does not undo the exposure; issue new credentials and revoke the old ones.",
       "Development team");
+  }
+  if (kevCount > 0) {
+    const kevFixable = kevVulns.filter(hasFix).length;
+    push("Immediately",
+      `Patch or isolate the ${count(kevCount, "weakness", "weaknesses")} already exploited in real attacks` +
+        (kevFixable < kevCount ? ` (${kevFixable} ${plural(kevFixable, "has", "have")} a published fix; for the rest, restrict access or put protection in front of the system).` : "."),
+      "Attackers are actively using these. They come ahead of everything else on the software side; the “Components to fix first” list marks the affected components.",
+      "Web / infrastructure team");
   }
   const exposedFiles = misconfigs.filter(g => g.category === "Exposed File" && SEV_RANK[sevKey(g.severity)] >= SEV_RANK.high);
   if (exposedFiles.length) {
@@ -1072,6 +1266,8 @@ export function buildExecutiveSummary(report) {
     { term: "Internet-facing system", meaning: "A server, website or service that anyone on the internet can reach. This scan only sees those." },
     { term: "Component", meaning: "A piece of software a system is running, such as a web server, a CMS or a JavaScript library." },
     { term: "Weakness (vulnerability)", meaning: "A known flaw in a component that an attacker could use to cause harm." },
+    { term: "Known exploited (CISA KEV)", meaning: "A weakness the U.S. cybersecurity agency (CISA) has confirmed attackers are using in real attacks. These are the most urgent to fix." },
+    { term: "Exploit likelihood (EPSS)", meaning: "A statistical estimate, from FIRST, of how likely a weakness is to be exploited in the next 30 days. A guide for ordering work, not a confirmed attack." },
     { term: "Malicious component", meaning: "Software built to do damage, such as stealing data. Not an accidental bug." },
     { term: "Configuration gap", meaning: "A setting that falls short of good practice, such as a missing HTTPS safeguard or weak email anti-spoofing records." },
     { term: "Exposed credential", meaning: "A password or access key sitting in website code where any visitor could read it." },
@@ -1106,6 +1302,10 @@ export function buildExecutiveSummary(report) {
     configuration_issues_by_severity: nc(cfgBySeverity),
     systems_with_configuration_issues: nc(cfgSystems.size),
     exposed_credentials: secretsInfo.known ? secretsInfo.total : null,
+    // null = the exploit feed was unavailable, not "none".
+    known_exploited: vulnsAssessed && intel.kevKnown ? kevCount : null,
+    high_exploit_likelihood: vulnsAssessed && intel.epssKnown && epssT !== null ? epssHigh.length : null,
+    exploit_data_complete: vulnsAssessed ? (intel.kevKnown && intel.epssKnown && !intel.epssPartial) : null,
   };
 
   // Ready-to-render figure cards. `value: null` means "not checked" and is shown
@@ -1117,12 +1317,14 @@ export function buildExecutiveSummary(report) {
   const weaknessSub = (vulnsAssessed
     ? (sevSummary(bySeverity) || "None found")
     : "Not checked in this scan") +
-    (maliciousComponents > 0 ? ` + ${count(maliciousComponents, "malicious component")}` : "");
+    (maliciousComponents > 0 ? ` + ${count(maliciousComponents, "malicious component")}` : "") +
+    (kevCount > 0 ? ` + ${count(kevCount, "known-exploited weakness", "known-exploited weaknesses")}` : "");
   const cfgSub = cfgChecked
     ? ((sevSummary(cfgBySeverity) || "None found") + (cfgSystems.size ? ` on ${count(cfgSystems.size, "system")}` : ""))
     : "No system was reachable to check";
   const credSub = secretsInfo.known ? "Passwords / keys found in website code" : "Credential search did not run or did not complete";
-  const weaknessTone = maliciousComponents > 0 ? "critical" : figureTone(worstOf(bySeverity), vulnsAssessed ? regular.length : null);
+  let weaknessTone = maliciousComponents > 0 ? "critical" : figureTone(worstOf(bySeverity), vulnsAssessed ? regular.length : null);
+  if (kevCount > 0 && weaknessTone !== "critical") weaknessTone = "high";
 
   const figures = [
     { label: "Systems examined", value: reached, sub: sysSub, tone: reached > 0 ? "" : "high" },
@@ -1137,6 +1339,8 @@ export function buildExecutiveSummary(report) {
     { label: "Components affected", value: nv(vulnerableComponents), sub: "With a known weakness or flagged as malicious", tone: figureTone("high", nv(vulnerableComponents)) },
     { label: "Malicious components", value: nv(maliciousComponents), sub: "Deliberately harmful software", tone: figureTone("critical", nv(maliciousComponents)) },
     { label: "Known weaknesses", value: nv(regular.length), sub: vulnsAssessed ? sevSummary(bySeverity) : "Not checked in this scan", tone: figureTone("medium", nv(regular.length)) },
+    { label: "Known exploited", value: vulnsAssessed && intel.kevKnown ? kevCount : null, sub: !vulnsAssessed ? "Not checked in this scan" : intel.kevKnown ? "Weaknesses on the CISA exploited-in-the-wild list" : "Exploit list unreachable — unknown", tone: vulnsAssessed && intel.kevKnown ? figureTone("high", kevCount) : "" },
+    ...(epssT !== null ? [{ label: "High exploit likelihood", value: vulnsAssessed && intel.epssKnown ? epssHigh.length : null, sub: !vulnsAssessed ? "Not checked in this scan" : intel.epssKnown ? `EPSS estimate of ${parseFloat((epssT * 100).toFixed(2))}% or more` + (intel.epssPartial ? " (some scores missing)" : "") : "EPSS data unreachable — unknown", tone: vulnsAssessed && intel.epssKnown ? figureTone("medium", epssHigh.length) : "" }] : []),
     { label: "Fix available", value: vulnsAssessed ? `${pct(withFix, regular.length)}%` : null, sub: vulnsAssessed ? `${withFix} of ${regular.length} can be fixed by updating` : "No component had a checkable version", tone: "" },
     { label: "Configuration issues", value: nc(misconfigs.length), sub: cfgSub, tone: figureTone("medium", nc(misconfigs.length)) },
     { label: "Exposed credentials", value: secretsInfo.known ? secretsInfo.total : null, sub: credSub, tone: figureTone("high", secretsInfo.known ? secretsInfo.total : null) },
@@ -1184,14 +1388,14 @@ export function buildExecutiveSummary(report) {
     glance_cards,
     key_findings: keyFindings,
     configuration_themes: themes.map(({ worst_rank, ...t }) => t),
-    components_to_fix_first: buildPriorityComponents(vulns, inventory, 5),
+    components_to_fix_first: buildPriorityComponents(vulns, inventory, epssT, 5),
     systems_to_review_first: buildSystemsToReview(report, 5),
     recommended_actions: actions,
     recommended_actions_basis: "Actions are generated from the counts in this report. Timeframes are general defaults built into the tool, not your organization's remediation policy; adjust them to your own standards.",
     compliance_overview: complianceOverview,
     scope,
     methodology: buildMethodology(report, {
-      scan, secretsInfo, vulnsAssessed, cfgChecked, reached, notChecked, hidden, minSeverity, discovery,
+      scan, secretsInfo, vulnsAssessed, cfgChecked, reached, notChecked, hidden, minSeverity, discovery, intel,
     }),
     notes,
     glossary,

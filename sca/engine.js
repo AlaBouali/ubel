@@ -665,6 +665,27 @@ async function generateHTMLReport(data) {
               }).join('') + '</tbody></table></div></div>';
           }
 
+          // Possible upgrade paths for one component (from suggested_fixes), closest first.
+          const fixOptionsHtml = function (c) {
+            const opts = c.fix_options || [];
+            if (!opts.length) return '';
+            const rows = opts.map(function (o) {
+              const major = o.scope === 'major';
+              return '<li class="flex flex-wrap items-center gap-x-2 gap-y-1">' +
+                '<span class="mono text-neutral-100">' + esc(o.version) + '</span>' +
+                (o.recommended ? badge('none', 'Best') : '') +
+                (major ? badge('medium', 'Major') : '') +
+                '<span class="text-neutral-400">fixes ' + esc(o.resolves) + ' of ' + esc(o.of) +
+                (o.known_exploited_total ? ' (' + esc(o.resolves_known_exploited) + ' of ' + esc(o.known_exploited_total) + ' exploited)' : '') +
+                '</span></li>';
+            }).join('');
+            return '<div class="mt-3 pt-2 border-t border-neutral-800"><div class="text-[10px] uppercase tracking-widest text-neutral-500 mb-1">Possible fixes</div>' +
+              '<ul class="space-y-1 text-[11px]">' + rows + '</ul>' +
+              (c.fix_options_more ? '<div class="text-[10px] text-neutral-500 mt-1">+' + esc(c.fix_options_more) + ' more in the Inventory tab</div>' : '') +
+              (c.no_fix_yet ? '<div class="text-[10px] text-neutral-500 mt-1">' + esc(c.no_fix_yet) + ' ' + (c.no_fix_yet === 1 ? 'issue has' : 'issues have') + ' no published fix yet.</div>' : '') +
+              '</div>';
+          };
+
           // Components to fix first
           const comps = es.components_to_fix_first || [];
           if (comps.length) {
@@ -684,9 +705,9 @@ async function generateHTMLReport(data) {
                   (hasSystems ? '<td class="py-4 align-top"><div>' + esc(c.systems_affected) + '</div>' +
                     ((c.example_systems || []).length ? '<div class="mono text-[10px] text-neutral-500 break-all max-w-[12rem]">' + c.example_systems.map(esc).join(', ') + (c.systems_affected > c.example_systems.length ? ', ...' : '') + '</div>' : '') + '</td>' : '') +
                   '<td class="py-4 align-top">' + esc(c.issue_count) + '</td>' +
-                  '<td class="py-4 align-top">' + badge(c.worst_severity, c.worst_severity_label) + '</td>' +
+                  '<td class="py-4 align-top">' + badge(c.worst_severity, c.worst_severity_label) + (c.known_exploited ? '<div class="mt-1">' + badge('critical', 'Exploited') + '</div>' : '') + '</td>' +
                   (hasUse ? '<td class="py-4 align-top text-xs ' + (c.likely_in_use ? 'text-neutral-200' : 'text-neutral-500') + '">' + (c.likely_in_use ? 'Yes' : 'Probably not') + '</td>' : '') +
-                  '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + '</td></tr>';
+                  '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + fixOptionsHtml(c) + '</td></tr>';
               }).join('') + '</tbody></table></div>' +
               '<p class="text-[11px] text-neutral-500 italic mt-2">Identifiers under each component are the advisory references, for tickets and audit trails.</p></div>';
           }
@@ -832,6 +853,15 @@ async function generateHTMLReport(data) {
             document.getElementById('policy-block-unknown-license').textContent = blockUnkLicense;
             document.getElementById('policy-infection').textContent = 'block (always)';
             document.getElementById('policy-secrets').textContent = 'block (always)';
+            document.getElementById('policy-kev').textContent = pol.block_kev === false ? 'allow' : 'block';
+            const epssT = parseFloat(pol.epss_threshold);
+            document.getElementById('policy-epss').textContent = (epssT > 0 && epssT <= 1) ? ('block >= ' + parseFloat((epssT * 100).toFixed(2)) + '%') : 'off';
+            const tiWarnings = (reportData.threat_intel && Array.isArray(reportData.threat_intel.warnings)) ? reportData.threat_intel.warnings : [];
+            if (tiWarnings.length) {
+                const tiEl = document.getElementById('threat-intel-warning');
+                tiEl.textContent = tiWarnings.join(' ');
+                tiEl.style.display = 'block';
+            }
 
             const ctxSev = document.getElementById('severityChart').getContext('2d');
             const sevStats = stats.vulnerabilities_stats.severity;
@@ -1165,6 +1195,7 @@ async function generateHTMLReport(data) {
                     </div>
                     <div class="flex items-center gap-3">
                         \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
+                        \${v.is_kev ? '<span class="text-[10px] font-bold text-red-400 border border-red-400 rounded px-1.5 py-0.5">KEV</span>' : ''}
                         \${v.is_policy_violation ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>' : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </div>
@@ -1401,6 +1432,7 @@ async function generateHTMLReport(data) {
                     </div>
                     <div class="flex items-center gap-3">
                         \${v.severity_score != null ? \`<span class="mono text-xs text-neutral-400">\${parseFloat(v.severity_score).toFixed(1)}</span>\` : ''}
+                        \${v.is_kev ? '<span class="text-[10px] font-bold text-red-400 border border-red-400 rounded px-1.5 py-0.5">KEV</span>' : ''}
                         \${v.is_policy_violation ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>' : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </div>
@@ -1501,6 +1533,7 @@ async function generateHTMLReport(data) {
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Modified</p><p class="text-xs mono">\${new Date(v.modified).toLocaleDateString()}</p></div>
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Vector</p><p class="text-[10px] mono text-neutral-400 truncate" title="\${v.severity_vector}">\${v.severity_vector}</p></div>
                     </div>
+                    \${renderThreatIntelSection(v)}
                     <div>
                         <h4 class=\"text-sm font-semibold mb-3 text-neutral-300\">Reachability Analysis</h4>
                         \${renderReachabilitySection(v.reachability)}
@@ -1582,6 +1615,24 @@ async function generateHTMLReport(data) {
 
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
+        }
+
+        // Threat intel (KEV / EPSS) helpers
+        function tiEsc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        function fmtPct(x) { return (x == null || isNaN(Number(x))) ? '\u2014' : (Number(x) * 100).toFixed(2) + '%'; }
+        function renderThreatIntelSection(v) {
+            const kevCell = v.is_kev === true
+                ? '<span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold text-red-400 border-red-400">KEV</span>'
+                : (v.is_kev === false ? '<span class="text-xs mono text-neutral-400">No</span>' : '<span class="text-xs mono text-neutral-500">Unknown</span>');
+            const cell = (label, inner) => '<div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">' + label + '</p>' + inner + '</div>';
+            const txt  = (x) => '<p class="text-xs mono">' + (x == null ? '\u2014' : tiEsc(x)) + '</p>';
+            return '<div class="grid grid-cols-2 md:grid-cols-5 gap-4 pb-4 border-b border-neutral-800">'
+                + cell('Known Exploited', kevCell)
+                + cell('KEV Added', txt(v.kev_added))
+                + cell('KEV Deadline', txt(v.kev_deadline))
+                + cell('EPSS Score', txt(v.epss_score == null ? null : fmtPct(v.epss_score)))
+                + cell('EPSS Percentile', txt(v.epss_percentile == null ? null : fmtPct(v.epss_percentile)))
+                + '</div>';
         }
 
         // Compliance framework helpers
@@ -1749,7 +1800,7 @@ async function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p><div id="threat-intel-warning" class="mt-3 text-xs text-yellow-400" style="display:none"></div></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr><tr><td class="pr-2">Block KEV</td><td id="policy-kev">...</td></tr><tr><td class="pr-2">EPSS Threshold</td><td id="policy-epss">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Executive Summary Section (plain-language, for non-technical readers) -->
@@ -3077,6 +3128,139 @@ export function sortVulnerabilities(vulns) {
 }
 
 
+// ── Threat intelligence: CISA KEV + FIRST EPSS ───────────────────────────────
+//
+// Adds to every vulnerability: is_kev, kev_added, kev_deadline, epss_score,
+// epss_percentile.  CVE ids come from the vuln id (CVE-*) and its `aliases`.
+//
+// Neither feed is allowed to abort a scan.  If one is unreachable the
+// affected fields are null (unknown — distinct from false / 0), the feed is
+// marked unavailable in report.threat_intel, a warning is printed, and the
+// matching policy rule is simply not enforced for that run.
+const KEV_URL          = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json";
+const EPSS_URL         = "https://api.first.org/data/v1/epss";
+const EPSS_BATCH_SIZE  = 100;
+const INTEL_FETCH_OPTS = { timeoutMs: 15000, maxRetries: 2 };
+
+export function extractCveIds(v) {
+  const out = new Set();
+  const add = (s) => {
+    if (typeof s !== "string") return;
+    const t = s.trim().toUpperCase();
+    if (/^CVE-\d{4}-\d{4,}$/.test(t)) out.add(t);
+  };
+  add(v.id);
+  for (const a of (Array.isArray(v.aliases) ? v.aliases : [])) add(a);
+  return [...out];
+}
+
+async function loadKevCatalog() {
+  const res = await fetchJSON(KEV_URL, "GET", null, INTEL_FETCH_OPTS);
+  if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+  if (!res.body || !Array.isArray(res.body.vulnerabilities)) throw new Error("unexpected response format");
+  const entries = new Map();
+  for (const e of res.body.vulnerabilities) {
+    if (e && e.cveID) entries.set(String(e.cveID).toUpperCase(), { added: e.dateAdded ?? null, deadline: e.dueDate ?? null });
+  }
+  return { entries, version: res.body.catalogVersion ?? null };
+}
+
+async function loadEpssScores(cves) {
+  const scores = new Map();
+  let failed = 0;
+  let error  = null;
+  for (let i = 0; i < cves.length; i += EPSS_BATCH_SIZE) {
+    const chunk = cves.slice(i, i + EPSS_BATCH_SIZE);
+    try {
+      const res = await fetchJSON(`${EPSS_URL}?cve=${chunk.join(",")}`, "GET", null, INTEL_FETCH_OPTS);
+      if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+      if (!res.body || !Array.isArray(res.body.data)) throw new Error("unexpected response format");
+      for (const row of res.body.data) {
+        const score      = parseFloat(row?.epss);
+        const percentile = parseFloat(row?.percentile);
+        if (row?.cve && Number.isFinite(score) && Number.isFinite(percentile)) {
+          scores.set(String(row.cve).toUpperCase(), { score, percentile });
+        }
+      }
+    } catch (err) {
+      failed += chunk.length;
+      error ??= err.message;
+    }
+  }
+  return { scores, failed, error };
+}
+
+export async function enrichWithThreatIntel(vulnerabilities) {
+  const intel = { kev: { status: "ok" }, epss: { status: "ok" }, warnings: [] };
+
+  const cvesByVuln = new Map(vulnerabilities.map(v => [v, extractCveIds(v)]));
+  const allCves    = [...new Set([...cvesByVuln.values()].flat())];
+
+  if (allCves.length === 0) {
+    // Nothing to look up (e.g. only MAL-* advisories).
+    intel.kev.status = intel.epss.status = "skipped";
+    for (const v of vulnerabilities) {
+      v.is_kev = false; v.kev_added = null; v.kev_deadline = null;
+      v.epss_score = null; v.epss_percentile = null;
+    }
+    return intel;
+  }
+
+  const [kevR, epssR] = await Promise.allSettled([loadKevCatalog(), loadEpssScores(allCves)]);
+
+  let kev = null;
+  if (kevR.status === "fulfilled") {
+    kev = kevR.value;
+    intel.kev.catalog_version = kev.version;
+    intel.kev.entries         = kev.entries.size;
+  } else {
+    intel.kev.status = "unavailable";
+    intel.kev.error  = kevR.reason?.message || String(kevR.reason);
+    intel.warnings.push(`CISA KEV feed unreachable (${intel.kev.error}): KEV status is unknown and KEV blocking was NOT enforced for this scan.`);
+  }
+
+  let epss = new Map();
+  if (epssR.status === "fulfilled") {
+    epss = epssR.value.scores;
+    intel.epss.queried = allCves.length;
+    intel.epss.scored  = epss.size;
+    if (epssR.value.failed > 0) {
+      intel.epss.status = epssR.value.failed >= allCves.length ? "unavailable" : "partial";
+      intel.epss.error  = epssR.value.error;
+      intel.epss.failed = epssR.value.failed;
+      intel.warnings.push(
+        intel.epss.status === "unavailable"
+          ? `FIRST EPSS API unreachable (${intel.epss.error}): EPSS scores are unknown and EPSS blocking was NOT enforced for this scan.`
+          : `FIRST EPSS API failed for ${intel.epss.failed} of ${allCves.length} CVE(s) (${intel.epss.error}): those CVEs have unknown EPSS and were NOT evaluated against the EPSS threshold.`
+      );
+    }
+  } else {
+    intel.epss.status = "unavailable";
+    intel.epss.error  = epssR.reason?.message || String(epssR.reason);
+    intel.warnings.push(`FIRST EPSS API unreachable (${intel.epss.error}): EPSS scores are unknown and EPSS blocking was NOT enforced for this scan.`);
+  }
+
+  for (const v of vulnerabilities) {
+    const cves = cvesByVuln.get(v);
+
+    let hit = null;
+    if (kev) for (const c of cves) { if (kev.entries.has(c)) { hit = kev.entries.get(c); break; } }
+    v.is_kev       = kev ? hit !== null : null;
+    v.kev_added    = hit?.added    ?? null;
+    v.kev_deadline = hit?.deadline ?? null;
+
+    // Several CVEs can map to one advisory — keep the highest-risk score.
+    let best = null;
+    for (const c of cves) {
+      const s = epss.get(c);
+      if (s && (!best || s.score > best.score)) best = s;
+    }
+    v.epss_score      = best?.score      ?? null;
+    v.epss_percentile = best?.percentile ?? null;
+  }
+  return intel;
+}
+
 // ── Policy ────────────────────────────────────────────────────────────────────
 //
 // Schema:
@@ -3101,13 +3285,28 @@ export function sortVulnerabilities(vulns) {
 //                                   (unparseable free text, missing metadata),
 //                                   not a real compliance finding, so it's off
 //                                   by default even when a threshold is set.
+//   block_kev                     — block any vulnerability listed in the CISA
+//                                   Known Exploited Vulnerabilities catalog.
+//                                   Default true. Not enforced if the KEV feed
+//                                   was unreachable (reported in threat_intel).
+//   epss_threshold                — block vulnerabilities whose EPSS score is
+//                                   >= this value (fraction 0-1, so 0.1 = 10%).
+//                                   Default 0.1. "none" disables. Not enforced
+//                                   for CVEs with no/unavailable EPSS score.
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
   block_unknown_vulnerabilities: true,
   license_risk_threshold:        "none",
   block_unknown_license_risk:    false,
+  block_kev:                     true,
+  epss_threshold:                0.1,
 };
+
+function parseEpssThreshold(raw) {
+  const n = typeof raw === "string" ? parseFloat(raw) : raw;
+  return (typeof n === "number" && Number.isFinite(n) && n > 0 && n <= 1) ? n : null;
+}
 
 // ── Sentinel: thrown on a policy block so finally can revert before exit ─────
 // main() catches this and exits with code 1 without printing an extra message.
@@ -3124,6 +3323,7 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
   const threshold    = (policy.severity_threshold || "").toLowerCase();
   const thresholdIdx = SEVERITY_ORDER_POLICY.indexOf(threshold);
   const blockUnknown = policy.block_unknown_vulnerabilities === true;
+  const epssThreshold = parseEpssThreshold(policy.epss_threshold);
 
   for (const v of vulnerabilities) {
     // Confirmed unreachable by static analysis → never block on policy.
@@ -3144,6 +3344,18 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
 
     if (confirmedUnreachable) {
       v.policy_decision = "allow";
+      continue;
+    }
+
+    // Threat-intel rules apply regardless of severity (a low/unknown-severity
+    // CVE that is actively exploited must still block). null = feed was
+    // unreachable / no score, so the rule can't fire.
+    const reasons = [];
+    if (policy.block_kev !== false && v.is_kev === true) reasons.push("kev");
+    if (epssThreshold !== null && typeof v.epss_score === "number" && v.epss_score >= epssThreshold) reasons.push("epss");
+    if (reasons.length) {
+      v.policy_reasons  = reasons;
+      v.policy_decision = "block";
       continue;
     }
 
@@ -3231,13 +3443,13 @@ export class UbelEngineInstance {
   loadPolicy() {
     this.initiateLocalPolicy();
     const file = path.join(this.policyDir, this.POLICY_FILENAME);
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
+    return { ...DEFAULT_POLICY, ...JSON.parse(fs.readFileSync(file, "utf-8")) };
   }
 
   /**
    * Set a single top-level policy field and persist it to disk.
    *
-   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"|"block_unknown_license_risk"} key
+   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"|"block_unknown_license_risk"|"block_kev"|"epss_threshold"} key
    * @param {string|boolean} value
    */
   setPolicyField(key, value) {
@@ -3584,6 +3796,22 @@ export class UbelEngineInstance {
 
       [vulnerabilities, inventory] = filterFalsePositiveInfections(inventory, vulnerabilities);
 
+      // ── KEV + EPSS enrichment (never aborts the scan) ─────────────────────
+      let threatIntel = { kev: { status: "skipped" }, epss: { status: "skipped" }, warnings: [] };
+      if (scan_vulns && vulnerabilities.length > 0) {
+        try {
+          threatIntel = await enrichWithThreatIntel(vulnerabilities);
+        } catch (err) {
+          const msg = `Threat-intel enrichment failed (${err.message}): KEV/EPSS data unavailable and KEV/EPSS blocking was NOT enforced for this scan.`;
+          threatIntel = { kev: { status: "unavailable", error: err.message }, epss: { status: "unavailable", error: err.message }, warnings: [msg] };
+          for (const v of vulnerabilities) {
+            v.is_kev = null; v.kev_added = null; v.kev_deadline = null;
+            v.epss_score = null; v.epss_percentile = null;
+          }
+        }
+        for (const w of threatIntel.warnings) console.warn(`[!] ${w}`);
+      }
+
       // ── Stats ──────────────────────────────────────────────────────────────
       const severityBuckets = { critical:0, high:0, medium:0, low:0, unknown:0 };
       const infectedPurls   = new Set();
@@ -3777,6 +4005,7 @@ export class UbelEngineInstance {
         vulnerabilities:   sortVulnerabilities(vulnerabilities),
         inventory,
         policy,
+        threat_intel: threatIntel,
         //dependencies_tree: buildImpactDependencyTree(inventory),  // kept for compatibility but not used in new graph
       };
 
@@ -3873,8 +4102,11 @@ export class UbelEngineInstance {
           for (const vuln of pkg.vulnerabilities) {
             const label = vuln.is_infection ? "INFECTION" : vuln.severity.toUpperCase();
             const score = vuln.severity_score != null ? ` (${vuln.severity_score})` : "";
+            // GHSA-/OSV-style ids hide the CVE; surface it (from aliases) next to the id.
+            const cves  = extractCveIds(vuln).filter(c => c !== String(vuln.id).toUpperCase());
+            const cveTag = cves.length ? `  [${cves.join(", ")}]` : "";
             if (!is_script) {
-              console.log(`    \u2022 ${vuln.id}  ${label}${score}`);
+              console.log(`    \u2022 ${vuln.id}${cveTag}  ${label}${score}`);
               for (const fix of (vuln.fixes || [])) {
                 console.log(`      fix: ${fix}`);
               }

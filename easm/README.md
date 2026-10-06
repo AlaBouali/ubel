@@ -4,7 +4,10 @@
 > ## ⚠ Authorized use only
 > `ubel-url` sends live, unauthenticated HTTP(S) requests to every target you
 > give it, then discloses what it fingerprints (product/version banners) to
-> OSV.dev, NVD, and/or wpvulnerability.net to look up known vulnerabilities.
+> OSV.dev, NVD, and/or wpvulnerability.net to look up known vulnerabilities,
+> then sends the CVE ids of whatever it finds to FIRST.org's EPSS API (and
+> downloads CISA's public KEV catalog) — see
+> [Exploit intelligence](#exploit-intelligence-kev--epss).
 > `ubel-domain` does the same, but **discovers its own target list** from
 > Certificate Transparency logs first — meaning it can end up scanning hosts
 > you didn't explicitly name and may not have expected to exist. `ubel-host`
@@ -230,6 +233,12 @@ dependency; if it's answering HTTP requests, it's running.
 - Automatic report generation: timestamped **JSON** + interactive **HTML**,
   plus `latest.*` convenience copies
 - `--fail-on` severity/count gate — same syntax as `ubel-cloud` — for CI use
+- **Exploit intelligence** — every vulnerability is checked against the
+  [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
+  catalog and scored with [FIRST EPSS](https://www.first.org/epss/); by
+  default a KEV entry or an EPSS score of 10% or more fails the run (exit
+  `2`), tunable with `--block-kev` / `--epss-threshold`. A feed outage never
+  aborts the scan (see [Exploit intelligence](#exploit-intelligence-kev--epss))
 - **Client-side secret detection** — each live host's inline `<script>`
   blocks and referenced `.js` files are fetched and scanned with the same
   rule set as `ubel-secrets`, reporting the exact URL and line:column of
@@ -343,6 +352,8 @@ ubel-url example.com --min-severity high                # only list high/critica
 ubel-url example.com --fail-on high                     # non-zero exit on high or critical (default: critical)
 ubel-url example.com --fail-on 5:high                   # non-zero exit only once MORE than 5 high-or-above findings exist
 ubel-url example.com --fail-on none                     # always exit 0 (reports are still written)
+ubel-url example.com --epss-threshold 5%                # also fail on any EPSS score >= 5% (default: 10%)
+ubel-url example.com --block-kev false                  # don't fail on CISA KEV entries (default: fail)
 ubel-url example.com --verbose                          # per-target fingerprinting/NVD-query progress
 ubel-url example.com --quiet                            # suppress the console summary; reports still written
 ubel-url --help
@@ -369,7 +380,8 @@ ubel-domain --help
 `<domain>` is a bare registrable domain — `example.com`, not a URL, a
 `host:port` pair, or a wildcard; exactly one per run. It shares every
 scanning/reporting flag with `ubel-url` (`--allow-private`, `--concurrency`,
-`--working-dir`, `--min-severity`, `--fail-on`, `--verbose`, `--quiet`) and
+`--working-dir`, `--min-severity`, `--fail-on`, `--block-kev`,
+`--epss-threshold`, `--verbose`, `--quiet`) and
 behaves identically for all of them, because both drive the same engine.
 
 Discovery is **passive** — Certificate Transparency logs only, via
@@ -413,7 +425,8 @@ ubel-host --help
 `<host>` is a single bare hostname or IPv4 address — not a URL, not a
 `host:port` pair; exactly one per run. It shares every scanning/reporting
 flag with `ubel-url` (`--allow-private`, `--concurrency`, `--working-dir`,
-`--min-severity`, `--fail-on`, `--no-secrets`, `--verbose`, `--quiet`), plus
+`--min-severity`, `--fail-on`, `--block-kev`, `--epss-threshold`,
+`--no-secrets`, `--verbose`, `--quiet`), plus
 its own discovery-stage flags (`--ports`, `--port-concurrency`,
 `--port-timeout`, `--http-concurrency`, `--http-timeout`).
 
@@ -527,7 +540,11 @@ Exit code is `2` if the `--fail-on` condition is met (default: any
 vulnerability at `critical` severity or an infection; pass `--fail-on none`
 to always exit `0`, or `--fail-on <count>:<severity>` — e.g. `5:high` — to
 fail only once MORE than `<count>` matches at or above `<severity>` exist,
-for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1` on a fatal/unexpected error (including `ubel-domain` finding no hosts, `ubel-easm` finding no scannable IP for the domain, or a vulnerability lookup against OSV/NVD that can't be completed — a run never reports a clean result for a lookup it couldn't make). `--fail-on` gates only
+for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1` on a fatal/unexpected error (including `ubel-domain` finding no hosts, `ubel-easm` finding no scannable IP for the domain, or a vulnerability lookup against OSV/NVD that can't be completed — a run never reports a clean result for a lookup it couldn't make). Independently of `--fail-on`'s severity bar, the exit code is also `2` if any
+reported vulnerability is in the CISA KEV catalog (`--block-kev`, default on)
+or has an EPSS score at or above `--epss-threshold` (default 10%), whatever its
+severity — see [Exploit intelligence](#exploit-intelligence-kev--epss);
+`--fail-on none` turns these off too. `--fail-on` gates only
 on **vulnerabilities** (and infections) — a scan that finds nothing but
 critical misconfigurations still exits `0`; misconfiguration severity isn't
 part of the exit-code gate today (see [Known
@@ -805,6 +822,70 @@ hosts (see [Features](#features) — de-duplication).
 
 ---
 
+## Exploit intelligence (KEV & EPSS)
+
+Severity says how bad a flaw *could* be; these two feeds say whether it is
+actually being exploited or is likely to be. After the OSV/NVD/wpvulnerability
+lookups and de-duplication, every vulnerability is enriched with:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `is_kev` | [CISA KEV catalog](https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json) | `true` if the CVE is in the catalog, `false` if not, `null` if the catalog couldn't be fetched |
+| `kev_added` | CISA KEV | Date the CVE was added to the catalog (`YYYY-MM-DD`), else `null` |
+| `kev_deadline` | CISA KEV | CISA's remediation due date, else `null` |
+| `epss_score` | [FIRST EPSS](https://api.first.org/data/v1/epss) | Probability (0–1) of exploitation in the next 30 days, else `null` |
+| `epss_percentile` | FIRST EPSS | Percentile (0–1) of that score among all scored CVEs, else `null` |
+
+`null` always means *unknown* (feed down, or no EPSS score exists for the CVE),
+never "not exploited" or `0`. The HTML report shows the EPSS score and
+percentile as percentages (×100); the JSON report keeps the raw 0–1 values.
+
+The CVE id is taken from the vulnerability `id` if it starts with `CVE-`, and
+from its `aliases` otherwise (OSV and wpvulnerability.net advisories are often
+not CVE-keyed). If an advisory maps to several CVEs it counts as KEV if any of
+them is, and the highest EPSS score is reported. The console summary prints
+those CVE ids next to the advisory id, and tags KEV entries:
+
+```
+[LOW] GHSA-xxxx-xxxx-xxxx  [CVE-2026-88779]  KEV  (nginx@1.2.3)
+```
+
+**Exit-code gate.** EASM has no policy file, so the same defaults the SCA
+policy uses are applied to the exit code (`2`), independently of `--fail-on`'s
+severity bar and regardless of severity:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--block-kev [true\|false]` | `true` | Exit `2` if any reported vulnerability is in the CISA KEV catalog. A bare flag means `true`. |
+| `--epss-threshold <value>` | `0.1` | Exit `2` if any reported vulnerability's EPSS score is `>=` the value: a fraction in (0, 1] (`0.1`), a percentage (`10%`), or `none`. A bare number above 1 (`10`) is rejected as ambiguous; `0` is rejected because it would fail every run. |
+
+Both flags are on all four CLIs. `--fail-on none` ("always exit 0") disables
+both, and `null` values can never trip either rule. The gate looks at the
+vulnerabilities that survive `--min-severity`, the same list `--fail-on`
+evaluates.
+
+**When a feed is unreachable.** KEV/EPSS only *add* risk signal, so unlike
+OSV/NVD (where a failed lookup fails the run, because a missing answer would
+look like "no vulnerabilities") an outage degrades the result instead of
+aborting it:
+
+- the scan completes and the affected fields are `null`;
+- a `[!]` warning is printed when it happens, repeated in the console summary
+  (which shows the KEV/EPSS counts as `unknown`, not `0`), shown as a banner
+  above the HTML Vulnerabilities table, and recorded under `threat_intel` in
+  the JSON report (`status` of `ok`, `partial`, `unavailable` or `skipped` per
+  feed, plus the error);
+- the matching exit-code rule can't fire for that run, while everything else
+  (severity gate, the other feed, infections) is unaffected.
+
+Each feed is tried with a 15-second timeout and two retries. There is
+currently no endpoint override for either feed (unlike
+`UBEL_OSV_ENDPOINT` and friends above), so an air-gapped deployment runs
+without KEV/EPSS data. Only CVE ids — never hostnames, URLs or banners — are
+sent to FIRST's API.
+
+---
+
 ## Reports
 
 All four CLIs follow the same reporting flow the SAST/malware scanners use:
@@ -905,12 +986,15 @@ other UBEL report vendors them) and includes:
   [Executive summary](#executive-summary) below
 - Searchable, filterable Components table (state + free-text search) with a
   per-component detail modal (every host/port it was seen on, its full CPE
-  id, and every vulnerability that affects it)
+  id, every vulnerability that affects it, and its **suggested fixes** — see
+  [Suggested fixes](#suggested-fixes))
 - Searchable, filterable Vulnerabilities table (severity + source +
   free-text search) with a per-vulnerability detail modal (CVSS
-  score/vector, description, fix-version recommendation, references,
-  aliases, IOC table for the rare infection-flagged entry, and compliance
-  framework mapping)
+  score/vector, KEV status/dates and EPSS score/percentile, description,
+  fix-version recommendation, references, aliases, IOC table for the rare
+  infection-flagged entry, and compliance framework mapping; KEV entries
+  carry a badge in the table, and a banner appears if a KEV/EPSS feed was
+  unavailable)
 - **Secrets tab** — every credential found in the JavaScript the target
   serves, with its URL, line:column, source (inline block vs `.js` file),
   and a redacted preview; filterable by severity, source and free text,
@@ -946,14 +1030,28 @@ other UBEL report vendors them) and includes:
   count for each)
 
 The JSON report is the full machine-readable equivalent — `executive_summary`,
-`scan_options`, `discovery` (ubel-domain / ubel-easm), `stats` (including
+`scan_options`, `threat_intel` (KEV/EPSS feed status and warnings),
+`discovery` (ubel-domain / ubel-easm), `stats` (including
 `stats.resolution` with the dead-host list and `stats.misconfigurations`),
 `compliance_summary`, `usage_notice`, `assets` (per-target status, resolved
-IP), the complete `inventory` (fingerprinted components), the complete
+IP), the complete `inventory` (fingerprinted components, each with its
+`suggested_fixes`), the complete
 `vulnerabilities` array, `secrets` / `secrets_errors` (exposed credentials
 with URL and position), and `misconfigurations` / `misconfigurations_errors`
 (one entry per rule id, each carrying its own occurrence list) — and can be
 consumed by CI/CD tooling directly.
+
+### Suggested fixes
+
+Every fingerprinted component carries `suggested_fixes`, computed by
+`sca/suggested_fixes.js` (shared with SCA) after de-duplication: for each
+release line above the detected version (`4.17.x`, `4.18.x`, …, then each higher
+major `5.x`, …) the fewest, highest versions that clear the most of the
+component's vulnerabilities, as `fixes: [{ version, count, range, vulnerabilities }]`
+plus `unfixed` (issues with no fix at all). A vulnerability can appear under
+several lines: each is an alternative upgrade path. It is shown in the component
+modal and summarised in the executive summary (below). With `--min-severity` the
+vulnerability list is filtered but `suggested_fixes` still reflects every issue.
 
 ### Executive summary
 
@@ -971,8 +1069,8 @@ one-sentence headline (risk level first, then at most three drivers), the top
 three risks, the three things to do first (each with a suggested owner), and
 four key figures. Below it, *Details*: why the rating, all key findings,
 at-a-glance figures, configuration issues by area, components and systems to
-fix or review first (with advisory IDs for tickets and audits), all suggested
-actions, and a compliance overview. Last, an *Appendix*: methodology (only the
+fix or review first (with advisory IDs for tickets and audits, and for each
+component the possible upgrade paths — see below), all suggested actions, and a compliance overview. Last, an *Appendix*: methodology (only the
 steps that actually ran, how the rating is decided, prioritization,
 limitations), scope notes and a glossary. The appendix is collapsed on screen
 and expanded in print.
@@ -999,6 +1097,25 @@ Design rules, so the summary can't mislead:
   no policy, and `--fail-on` only sets the exit code.
 - **No reachability discount.** Everything an EASM scan sees is already
   internet-facing, so nothing is down-ranked as "probably unused".
+- **Exploit intelligence feeds the rating.** A weakness in the CISA KEV catalog
+  makes the overall rating at least *High* whatever its severity; components
+  with a KEV entry rank first (after malicious ones), and a high EPSS score
+  (at or above `--epss-threshold`) lifts a component within its severity tier.
+  The summary adds a KEV finding, an EPSS finding, an "Immediately" action for
+  exploited weaknesses, and *Known exploited* / *High exploit likelihood*
+  figures. As everywhere else, a figure from a feed that was unreachable is
+  `null` / "n/a" (never `0`), a "exploit data not fully available" finding is
+  added, and a Low/Medium rating carries a note that it could be understated.
+  With `--epss-threshold none` the EPSS figures and ranking boost are off.
+- **Possible fixes per component.** Each entry in `components_to_fix_first`
+  lists every upgrade path from the component's
+  [suggested fixes](#suggested-fixes) (`fix_options`: version, release line,
+  whether it is a major change, how many of the component's issues and how many
+  KEV ones it resolves, closest line first, at most five with
+  `fix_options_more` for the rest, and `no_fix_yet`). The one marked *Best* is
+  the closest that resolves the most issues and is also the version in the
+  "what to do" text; if the analysis is unavailable for a component the older
+  highest-of-the-closest-fixes suggestion is used instead.
 - Credential values and cookie/header values are never written into the
   summary; the scan subject has any `user:pass@` URL userinfo stripped.
 
@@ -1008,7 +1125,9 @@ in `lib/executive_summary.js`; the methodology text restates them, so change
 both together.
 
 New report fields supporting this: `scan_options` (`scan_secrets`,
-`min_severity`, `used_cookie`, `custom_header_names`) and, for ubel-domain /
+`min_severity`, `block_kev`, `epss_threshold`, `used_cookie`,
+`custom_header_names`), `threat_intel`, per-vulnerability `is_kev` /
+`kev_added` / `kev_deadline` / `epss_score` / `epss_percentile`, and, for ubel-domain /
 ubel-easm, `discovery` (`source`, `ok`, `attempts`, `certificate_records`,
 `hosts_discovered`, `hosts_included`, `hosts_excluded`).
 
@@ -1139,7 +1258,9 @@ supported path for CI and scripting alike.
 ## CI/CD Integration
 
 All four EASM CLIs exit non-zero on vulnerabilities that clear the
-configured `--fail-on` bar, making them native to any CI runner — **only
+configured `--fail-on` bar (or that are in the CISA KEV catalog / at or above
+the EPSS threshold — on by default, see
+[Exploit intelligence](#exploit-intelligence-kev--epss)), making them native to any CI runner — **only
 against infrastructure the pipeline itself owns/deploys**, e.g. a
 post-deploy check against your own staging or production environment right
 after a release:
@@ -1266,7 +1387,13 @@ rather than every push.
   either one yet; skipping or retiming them today means calling
   `scanTargets()` (or `scanMisconfigurations()` directly) programmatically
   instead of through the binaries.
-- `--fail-on` only gates on vulnerabilities/infections, not on
+- KEV/EPSS are best-effort and have no endpoint override: if a feed is
+  unreachable (or the deployment is air-gapped) the affected fields are
+  `null`, the matching exit-code rule can't fire, and the run says so. They
+  do feed the executive summary (rating, ranking, figures), but only for
+  CVE-keyed advisories; when a feed was down the summary says its exploit data
+  is incomplete rather than treating the gap as "not exploited".
+- `--fail-on` (and the KEV/EPSS gate) only gates on vulnerabilities/infections, not on
   misconfiguration findings — a scan that turns up only critical
   misconfigurations (an exposed `.git` directory, say) with no matching
   vulnerability still exits `0`. The findings are still written to every

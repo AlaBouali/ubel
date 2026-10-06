@@ -8,10 +8,19 @@
  *   "license_risk_threshold": "none",          // block this license risk level
  *                                              // and above; "none" disables
  *                                              // license-risk blocking (default)
- *   "block_unknown_license_risk": false        // separately block packages whose
+ *   "block_unknown_license_risk": false,       // separately block packages whose
  *                                              // license couldn't be classified
  *                                              // at all (default: false)
+ *   "block_kev": true,                         // block vulnerabilities in the CISA
+ *                                              // Known Exploited Vulnerabilities catalog
+ *   "epss_threshold": 0.1                      // block EPSS score >= this (fraction,
+ *                                              // 0.1 = 10%); "none" disables
  * }
+ *
+ * KEV / EPSS are evaluated per vulnerability in engine.js (which records the
+ * reasons in vuln.policy_reasons); this file only turns those into a decision.
+ * If a feed was unreachable the rule could not fire — the scan still completes
+ * and the pass/fail reason says so (see report.threat_intel).
  *
  * Severity order (ascending): low → medium → high → critical
  * "unknown" is governed solely by block_unknown_vulnerabilities.
@@ -76,6 +85,23 @@ export function evaluatePolicy(report) {
     return [false, "Blocked: secrets detected (always enforced)"];
   }
 
+  // ── 1b. Threat intel: CISA KEV, then EPSS ────────────────────────────────
+  const vulns = Array.isArray(report.vulnerabilities) ? report.vulnerabilities : [];
+  const idsWith = (reason) => [...new Set(
+    vulns.filter(v => Array.isArray(v.policy_reasons) && v.policy_reasons.includes(reason)).map(v => v.id)
+  )];
+  const fmtIds = (ids) => ids.length > 5 ? `${ids.slice(0, 5).join(", ")} and ${ids.length - 5} more` : ids.join(", ");
+
+  const kevIds = idsWith("kev");
+  if (kevIds.length > 0) {
+    return [false, `Blocked by policy: ${kevIds.length} known-exploited (CISA KEV) vulnerabilit${kevIds.length === 1 ? "y" : "ies"} detected: ${fmtIds(kevIds)}`];
+  }
+  const epssIds = idsWith("epss");
+  if (epssIds.length > 0) {
+    const pct = parseFloat((Number(policy.epss_threshold) * 100).toFixed(2));
+    return [false, `Blocked by policy: ${epssIds.length} vulnerabilit${epssIds.length === 1 ? "y" : "ies"} with EPSS >= ${pct}% detected: ${fmtIds(epssIds)}`];
+  }
+
   // ── 2. Severity threshold ─────────────────────────────────────────────────
   const rawThreshold = (policy.severity_threshold || "").toLowerCase();
   if (rawThreshold && SEVERITY_ORDER.includes(rawThreshold)) {
@@ -122,6 +148,17 @@ export function evaluatePolicy(report) {
     if (unknownLicenseCount > 0) {
       return [false, `Blocked by policy: ${unknownLicenseCount} package(s) with unclassified license risk detected`];
     }
+  }
+
+  // Passed — but say so if KEV/EPSS couldn't be checked, so a pass is never
+  // mistaken for "checked and clean".
+  const ti = report.threat_intel || {};
+  const unavailable = [];
+  if (ti.kev?.status === "unavailable")  unavailable.push("CISA KEV");
+  if (ti.epss?.status === "unavailable") unavailable.push("EPSS");
+  if (ti.epss?.status === "partial")     unavailable.push("EPSS (partial)");
+  if (unavailable.length > 0) {
+    return [true, `Policy passed (note: ${unavailable.join(" and ")} data unavailable — not enforced for this scan)`];
   }
 
   return [true, "Policy passed"];

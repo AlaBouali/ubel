@@ -596,6 +596,8 @@ export function buildReportPayload(scanResult, meta = {}) {
     scan_options: {
       scan_secrets: typeof meta.scanSecrets === "boolean" ? meta.scanSecrets : null,
       min_severity: meta.minSeverity || null,
+      block_kev: typeof meta.blockKev === "boolean" ? meta.blockKev : null,
+      epss_threshold: meta.epssThreshold ?? null,
       used_cookie: !!meta.usedCookie,
       custom_header_names: Array.isArray(meta.customHeaderNames) ? meta.customHeaderNames : [],
     },
@@ -628,6 +630,7 @@ export function buildReportPayload(scanResult, meta = {}) {
     secrets_errors: secretsResult.errors || [],
     misconfigurations: groupedMisconfigs,
     misconfigurations_errors: misconfigResult.errors || [],
+    threat_intel: scanResult.threat_intel || null,
   };
 
   // Executive summary (plain-language overview for non-technical readers).
@@ -911,6 +914,8 @@ export async function generateHtmlReport(reportPayload) {
           <option value="wpvulnerability">WPVulnerability</option>
         </select>
       </div>
+
+      <div id="v-intel-warning" class="mb-4 text-xs text-yellow-400" style="display:none"></div>
 
       <div class="glass rounded-xl overflow-x-auto">
         <table class="w-full text-left">
@@ -1259,6 +1264,26 @@ const reportData = ${safeJson};
 function escH(s) {
   if (s === null || s === undefined) return '';
   return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+function intelPct(x) {
+  return (x === null || x === undefined || isNaN(Number(x))) ? '—' : (Number(x) * 100).toFixed(2) + '%';
+}
+
+function kevBadge(v) {
+  return v.is_kev === true
+    ? ' <span class="ml-1 px-1.5 py-0.5 rounded border text-[10px] uppercase font-bold text-red-400 border-red-400">KEV</span>'
+    : '';
+}
+
+function renderIntelCells(v) {
+  const cell = (label, val) => '<div><span class="text-neutral-500">' + label + '</span><div class="mono text-neutral-200">' + val + '</div></div>';
+  const kev = v.is_kev === true ? 'Yes' : (v.is_kev === false ? 'No' : 'Unknown');
+  return cell('Known exploited (CISA KEV)', kev)
+    + cell('KEV added', escH(v.kev_added || '—'))
+    + cell('KEV deadline', escH(v.kev_deadline || '—'))
+    + cell('EPSS score', intelPct(v.epss_score))
+    + cell('EPSS percentile', intelPct(v.epss_percentile));
 }
 
 function sevClass(s) {
@@ -1836,6 +1861,9 @@ function applyVulnFilters() {
 }
 
 function renderVulnsTable() {
+  const tiWarnings = (reportData.threat_intel && reportData.threat_intel.warnings) || [];
+  const tiEl = document.getElementById('v-intel-warning');
+  if (tiEl && tiWarnings.length) { tiEl.textContent = tiWarnings.join(' '); tiEl.style.display = 'block'; }
   const tbody = document.getElementById('vulns-table-body');
   tbody.innerHTML = '';
 
@@ -1853,7 +1881,7 @@ function renderVulnsTable() {
     const fix = v.has_fix ? (recommendedFix ? recommendedFix.version : (v.fixed_versions || [])[0] || 'available') : 'none published';
     row.innerHTML = \`
       <td class="px-4 py-3"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold \${sevClass(vulnSeverityKey(v))}">\${escH(v.is_infection ? 'infection' : v.severity)}</span></td>
-      <td class="px-4 py-3 mono text-xs text-white">\${escH(v.id)}</td>
+      <td class="px-4 py-3 mono text-xs text-white">\${escH(v.id)}\${kevBadge(v)}</td>
       <td class="px-4 py-3 text-sm text-neutral-300">\${escH(componentLabel(v.affected_package_id))}</td>
       <td class="px-4 py-3 mono text-[11px] text-neutral-400">\${escH(hosts.slice(0,2).join(', '))}\${hosts.length > 2 ? ' +' + (hosts.length - 2) : ''}</td>
       <td class="px-4 py-3 text-xs uppercase text-neutral-500">\${escH(v.source || '—')}</td>
@@ -1880,6 +1908,7 @@ function openVulnModal(key) {
       <div class="grid grid-cols-2 gap-3 text-xs">
         <div><span class="text-neutral-500">Component</span><div class="mono text-neutral-200">\${escH(componentLabel(v.affected_package_id))}</div></div>
         <div><span class="text-neutral-500">CVSS</span><div class="mono text-neutral-200">\${v.severity_score != null ? v.severity_score : '—'}\${v.severity_vector ? ' (' + escH(v.severity_vector) + ')' : ''}</div></div>
+        \${renderIntelCells(v)}
         <div class="col-span-2">
           <span class="text-neutral-500">Seen on (\${hostsOfComponentId(v.affected_package_id).length})</span>
           <div class="mono text-neutral-200 bg-neutral-900 rounded-lg p-2 mt-1 border border-neutral-800 max-h-32 overflow-y-auto space-y-0.5">
@@ -2920,6 +2949,26 @@ function renderExecutiveSummary() {
       }).join('') + '</tbody></table></div></div>';
   }
 
+  // Possible upgrade paths for one component (from suggested_fixes), closest first.
+  const fixOptionsHtml = function (c) {
+    const opts = c.fix_options || [];
+    if (!opts.length) return '';
+    const rows = opts.map(function (o) {
+      return '<li class="flex flex-wrap items-center gap-x-2 gap-y-1">' +
+        '<span class="mono text-neutral-100">' + esc(o.version) + '</span>' +
+        (o.recommended ? badge('none', 'Best') : '') +
+        (o.scope === 'major' ? badge('medium', 'Major') : '') +
+        '<span class="text-neutral-400">fixes ' + esc(o.resolves) + ' of ' + esc(o.of) +
+        (o.known_exploited_total ? ' (' + esc(o.resolves_known_exploited) + ' of ' + esc(o.known_exploited_total) + ' exploited)' : '') +
+        '</span></li>';
+    }).join('');
+    return '<div class="mt-3 pt-2 border-t border-neutral-800"><div class="text-[10px] uppercase tracking-widest text-neutral-500 mb-1">Possible fixes</div>' +
+      '<ul class="space-y-1 text-[11px]">' + rows + '</ul>' +
+      (c.fix_options_more ? '<div class="text-[10px] text-neutral-500 mt-1">+' + esc(c.fix_options_more) + ' more in the component details</div>' : '') +
+      (c.no_fix_yet ? '<div class="text-[10px] text-neutral-500 mt-1">' + esc(c.no_fix_yet) + ' ' + (c.no_fix_yet === 1 ? 'issue has' : 'issues have') + ' no published fix yet.</div>' : '') +
+      '</div>';
+  };
+
   // Components to fix first
   const comps = es.components_to_fix_first || [];
   if (comps.length) {
@@ -2939,9 +2988,9 @@ function renderExecutiveSummary() {
           (hasSystems ? '<td class="py-4 align-top"><div>' + esc(c.systems_affected) + '</div>' +
             ((c.example_systems || []).length ? '<div class="mono text-[10px] text-neutral-500 break-all max-w-[12rem]">' + c.example_systems.map(esc).join(', ') + (c.systems_affected > c.example_systems.length ? ', ...' : '') + '</div>' : '') + '</td>' : '') +
           '<td class="py-4 align-top">' + esc(c.issue_count) + '</td>' +
-          '<td class="py-4 align-top">' + badge(c.worst_severity, c.worst_severity_label) + '</td>' +
+          '<td class="py-4 align-top">' + badge(c.worst_severity, c.worst_severity_label) + (c.known_exploited ? '<div class="mt-1">' + badge('critical', 'Exploited') + '</div>' : '') + '</td>' +
           (hasUse ? '<td class="py-4 align-top text-xs ' + (c.likely_in_use ? 'text-neutral-200' : 'text-neutral-500') + '">' + (c.likely_in_use ? 'Yes' : 'Probably not') + '</td>' : '') +
-          '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + '</td></tr>';
+          '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + fixOptionsHtml(c) + '</td></tr>';
       }).join('') + '</tbody></table></div>' +
       '<p class="text-[11px] text-neutral-500 italic mt-2">Identifiers under each component are the advisory references, for tickets and audit trails.</p></div>';
   }

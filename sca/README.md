@@ -12,7 +12,8 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
-- Policy engine — block/allow by severity threshold, unknown-severity packages, and (on `health` scans) license risk
+- **Exploit intelligence** — every vulnerability is checked against the [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/); policy blocks KEV entries and anything at or above an EPSS threshold, and a feed outage never aborts the scan (see [Exploit Intelligence](#exploit-intelligence-kev--epss))
+- Policy engine — block/allow by severity threshold, unknown-severity packages, CISA KEV membership, EPSS score, and (on `health` scans) license risk
 - Malicious package (infection) detection — always blocked regardless of policy
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
@@ -27,7 +28,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation for the ecosystems listed under [Import scan coverage](#import-scan-coverage) (see [Reachability Analysis](#reachability-analysis))
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
-- **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings, the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
+- **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer minor/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary; included by default in every scan, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
@@ -93,7 +94,7 @@ Both are intended for self-hosted or air-gapped deployments — e.g. an internal
 
 If a configured endpoint (or the public API) is unreachable, rate-limited, or returns an error or a malformed response, the scan **fails** (non-zero exit) instead of reporting a clean result — an air-gapped or mirrored deployment therefore needs a mirror that is actually reachable and complete.
 
-Aside from these (and the OS/NVD-name CPE lookups they front), UBEL makes no other outbound network calls during a scan. Earlier versions queried a third-party IP-lookup API (ipify) to record the host's public IP in reports; this was removed — it was a network call to an external service on every scan for a display-only field with no other consumer, which cut against the zero-third-party-dependency, fully-local-execution positioning above. (The EASM modules' private/own-address safety guard used the same service and now compares against the machine's own network interfaces instead — also with no network request.) The scan's *local* network interfaces are still recorded (used internally to tag which host a given inventory item's filesystem path came from, useful once reports from multiple hosts/containers get combined) — that information never leaves the machine.
+Aside from these (and the OS/NVD-name CPE lookups they front), the only other outbound calls UBEL makes during a scan are the two exploit-intelligence lookups — the CISA KEV catalog (`www.cisa.gov`) and the FIRST EPSS API (`api.first.org`) — see [Exploit Intelligence](#exploit-intelligence-kev--epss). Unlike OSV/NVD, these are best-effort: if either is unreachable the scan still completes (and says so), and there is currently no endpoint override for them, so a fully air-gapped deployment runs without KEV/EPSS data. Earlier versions queried a third-party IP-lookup API (ipify) to record the host's public IP in reports; this was removed — it was a network call to an external service on every scan for a display-only field with no other consumer, which cut against the zero-third-party-dependency, fully-local-execution positioning above. (The EASM modules' private/own-address safety guard used the same service and now compares against the machine's own network interfaces instead — also with no network request.) The scan's *local* network interfaces are still recorded (used internally to tag which host a given inventory item's filesystem path came from, useful once reports from multiple hosts/containers get combined) — that information never leaves the machine.
 
 ```bash
 # Point live queries at internal mirrors instead of the public APIs
@@ -125,6 +126,7 @@ ubel-yum   <mode> [packages...]
 # Any of the above, on health | check | install — one-off policy overrides, nothing saved:
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
                                [--license-risk <level>] [--license-block-unknown [true|false]]
+                               [--block-kev [true|false]] [--epss-threshold <fraction|percent|none>]
 ```
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
@@ -504,8 +506,10 @@ Every policy field that has a mode can also be passed as a flag on `health`, `ch
 | `--block-unknown [true\|false]` | `block_unknown_vulnerabilities` | `true` \| `false` (bare flag = `true`) | all |
 | `--license-risk <level>` | `license_risk_threshold` | `none` \| `low` \| `medium` \| `high` | npm/pnpm/bun/yarn/composer |
 | `--license-block-unknown [true\|false]` | `block_unknown_license_risk` | `true` \| `false` (bare flag = `true`) | npm/pnpm/bun/yarn/composer |
+| `--block-kev [true\|false]` | `block_kev` | `true` \| `false` (bare flag = `true`) | all |
+| `--epss-threshold <value>` | `epss_threshold` | a fraction in (0, 1] (`0.1`), a percentage (`10%`), or `none` | all |
 
-Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/apt/dnf/yum, exits `1` with an error before any scan starts. `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
+Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
 
 ```bash
 # Block only critical vulnerabilities for this run; saved policy untouched
@@ -517,9 +521,12 @@ ubel-pnpm install --threshold=medium --block-unknown react
 # CI: fail a health scan on high-risk licenses without editing the shared policy file
 ubel-npm health --license-risk high --license-block-unknown
 
-# Linux / Python engines take the two vulnerability flags
+# Linux / Python engines take the vulnerability flags (severity, unknown, KEV, EPSS)
 ubel-apt check --threshold critical curl
 ubel-pip install --threshold high requests==2.31.0
+
+# Block anything with EPSS >= 5% for this run, but don't block on KEV membership
+ubel-npm check --epss-threshold 5% --block-kev false
 ```
 
 `license-risk` / `license-block-unknown` keep their usual scope: they're only evaluated on `health` scans, so passing them to `check`/`install` has no effect on the result.
@@ -539,7 +546,9 @@ Default policy created on first run:
     "severity_threshold": "high",
     "block_unknown_vulnerabilities": true,
     "license_risk_threshold": "none",
-    "block_unknown_license_risk": false
+    "block_unknown_license_risk": false,
+    "block_kev": true,
+    "epss_threshold": 0.1
 }
 ```
 
@@ -551,7 +560,54 @@ Default policy created on first run:
 
 **Block unknown license risk** — separately controls whether packages whose license couldn't be classified at all cause a block. Defaults to `false`, for the same reason `license_risk_threshold` excludes `unknown` from its ordered levels: an unclassified license is more often a detection gap than a real finding. Same `health`-mode-only scope.
 
+**Block KEV** — when `true` (the default), any vulnerability listed in the CISA Known Exploited Vulnerabilities catalog causes a block, regardless of its severity. Policy files created before this field existed pick up the default automatically.
+
+**EPSS threshold** — vulnerabilities whose EPSS score is at or above this value cause a block, regardless of severity. Stored as a fraction (`0.1` = 10%); defaults to `0.1`. Set to `"none"` to disable.
+
+Both rules need data from an external feed; if it couldn't be fetched the rule cannot fire — see [Exploit Intelligence](#exploit-intelligence-kev--epss).
+
 **Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to any of the settings above.
+
+---
+
+## Exploit Intelligence (KEV & EPSS)
+
+Severity says how bad a flaw *could* be; these two feeds say whether it is actually being exploited or is likely to be. Every vulnerability is enriched with:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `is_kev` | [CISA KEV catalog](https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json) | `true` if the CVE is in the catalog, `false` if not, `null` if the catalog couldn't be fetched |
+| `kev_added` | CISA KEV | Date the CVE was added to the catalog (`YYYY-MM-DD`), else `null` |
+| `kev_deadline` | CISA KEV | CISA's remediation due date, else `null` |
+| `epss_score` | [FIRST EPSS](https://api.first.org/data/v1/epss) | Probability (0–1) of exploitation in the next 30 days, else `null` |
+| `epss_percentile` | FIRST EPSS | Percentile (0–1) of that score among all scored CVEs, else `null` |
+
+`null` always means *unknown* (feed down, or no EPSS score exists for the CVE), never "not exploited" or `0`. The HTML report shows `epss_score` and `epss_percentile` as percentages (×100) and flags KEV entries with a badge; The JSON report keeps the raw 0–1 values. The SBOM and SARIF outputs carry them too — see [Output](#exploit-intelligence-output).
+
+**CVE matching.** OSV advisories are frequently GHSA/other ids, so the CVE is taken from the vulnerability `id` if it starts with `CVE-`, and from its `aliases` otherwise. If an advisory maps to several CVEs, it is KEV if any of them is, and the highest EPSS score is reported. The CVE ids are also printed next to the advisory id in the console findings list:
+
+```
+• GHSA-xxxx-xxxx-xxxx  [CVE-2026-88779]  HIGH (8.1)
+```
+
+**Policy.** With the defaults, a scan blocks on any KEV entry (`block_kev: true`) and on any vulnerability with `epss_score >= 0.1` (10%), whatever its severity. Both are tunable with [`--block-kev` / `--epss-threshold`](#per-run-policy-flags) or in `config.json`. The block reason names the offending ids, e.g. `Blocked by policy: 1 known-exploited (CISA KEV) vulnerability detected: GHSA-xxxx-xxxx-xxxx`.
+
+**When a feed is unreachable.** Unlike OSV/NVD (where a failed lookup fails the scan, because a missing answer would look like "no vulnerabilities"), KEV/EPSS only *add* risk signal, so an outage degrades the result instead of aborting it:
+
+- the scan completes and the affected fields are `null`;
+- a warning is printed, shown in the HTML decision box, and recorded under `threat_intel` in the report (`status` of `ok`, `partial`, `unavailable` or `skipped` per feed, plus the error);
+- the matching policy rule is not enforced for that run, and a passing verdict says so — e.g. `Policy passed (note: CISA KEV data unavailable — not enforced for this scan)`;
+- other rules (severity, the other feed, infections, secrets) are unaffected.
+
+Each feed is tried with a 15-second timeout and two retries. There is currently no endpoint override for either feed.
+
+### Exploit intelligence output
+
+<a id="exploit-intelligence-output"></a>
+
+- **JSON**: the five fields above on every vulnerability, plus `threat_intel` (feed status and warnings).
+- **SBOM (CycloneDX v1.6)**: on each `vulnerabilities[]` entry, the properties `kev.listed` (`true`, `false` or `unknown`), `kev.date_added` and `kev.due_date` (KEV entries only), and `epss.score` / `epss.percentile` (raw 0–1; `unknown` when no score). A KEV entry also gets an advisory link to the CISA catalog. EPSS is also added as a second `ratings[]` entry (`method: "other"`, source `FIRST EPSS`) whose `score` is the probability **in percent (0–100)**, since CycloneDX 1.6 has no EPSS method. Nothing is written when enrichment never ran. The root `properties` carry `kev_vulnerabilities` (count) and `ubel:threat_intel` (feed status as a JSON string) — read the count together with that status, because a feed outage leaves the count at 0.
+- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties` (`null` = unknown); rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100, omitted when there is no signal. A KEV result is reported at level `error` whatever its severity, unless reachability confidently ruled it out (then `none`, as for any unreachable finding). The run's `properties.threat_intel` holds the feed status.
 
 ---
 
@@ -981,15 +1037,23 @@ Every report (JSON and HTML) carries an `executive_summary` written for readers 
 | Rating | Assigned when |
 |---|---|
 | Critical | any malicious (`MAL-*`) component was found |
-| High | any Critical/High-severity vulnerability that isn't confirmed unreachable, or any exposed High/Critical credential |
-| Moderate | Medium/unrated issues, lower-severity secrets, or Critical/High issues that reachability analysis confirmed are not used by production code |
-| Low | only Low-severity issues, or Medium/unrated issues that reachability analysis confirmed are all unused |
+| High | any Critical/High-severity vulnerability that isn't confirmed unreachable, any [CISA KEV](#exploit-intelligence-kev--epss) vulnerability that isn't confirmed unreachable (whatever its severity), or any exposed High/Critical credential |
+| Medium | Medium/unrated issues, vulnerabilities at or above the EPSS threshold, lower-severity secrets, or Critical/High/KEV issues that reachability analysis confirmed are not used by production code |
+| Low | only Low-severity issues (none at or above the EPSS threshold), or Medium/unrated issues that reachability analysis confirmed are all unused |
 | Minimal | nothing found |
 | Not assessed | the scan skipped vulnerability lookups (`scan_info.vulnerability_scan: false`, e.g. `ubel-license`) and nothing else raised the rating — shown instead of "Minimal" so an unchecked scan is never read as a clean one |
 
 Reachability is a heuristic (see [Reachability Analysis](#reachability-analysis)); a finding with no reachability result is treated as potentially reachable.
 
-The rating and the policy verdict are independent. The rating discounts findings that reachability analysis confirmed unused; the verdict comes from `policy.js`, which counts every finding at or above the blocking thresholds (and any exposed secret, of any severity), so a report can be rated Moderate yet still be blocked.
+The rating and the policy verdict are independent. The rating discounts findings that reachability analysis confirmed unused; the verdict comes from `policy.js`, which counts every finding at or above the blocking thresholds (and any exposed secret, of any severity), so a report can be rated Medium yet still be blocked.
+
+### Exploit intelligence in the summary
+
+The summary uses the same two signals the policy blocks on (see [Exploit Intelligence](#exploit-intelligence-kev--epss)), so a report is never rated "Low" while the policy blocks it for an actively exploited vulnerability:
+
+- **Known-exploited (`is_kev: true`)** — gets its own key finding (with CISA's earliest remediation due date), an *Immediately* suggested action, the **Known to be exploited** card, and raises the rating to High unless reachability analysis confirmed the code unused (then Medium). Components with a known-exploited issue rank first among the non-malicious ones and carry an *Exploited* badge.
+- **High EPSS** — vulnerabilities at or above `epss_threshold` that aren't already KEV get a key finding and, when they are lower-severity, a *Within days* action; they set a floor of Medium. If the EPSS rule is turned off in the policy, 10% is still used for this informational reporting, and the text says the policy doesn't block on it.
+- **Unknown stays unknown** — if a feed was unreachable, the matching figures are `null` (shown as "n/a", never `0`), a key finding says so, the methodology shows the lookup as *incomplete*, and a Low/Medium rating notes that it could be understated.
 
 ### JSON structure
 
@@ -1008,10 +1072,12 @@ The rating and the policy verdict are independent. The rating discounts findings
     "at_a_glance": { "vulnerabilities_assessed": true, "components_reviewed": 142, "components_with_issues": 4, "malicious_components": 0,
                      "total_vulnerabilities": 9, "by_severity": { "critical": 1, "high": 2, "medium": 4, "low": 2, "unknown": 0 },
                      "fix_available": 7, "fix_available_percent": 78, "likely_in_use": 6, "not_in_use": 3,
-                     "blocking_policy": 3, "exposed_credentials": 2 },
+                     "blocking_policy": 3, "exposed_credentials": 2,
+                     "known_exploited": 1, "high_exploit_likelihood": 2, "exploit_data_complete": true },
     "key_findings": [ { "severity": "high", "title": "...", "detail": "..." } ],
     "components_to_fix_first": [ { "name": "lodash", "version": "4.17.15", "issue_count": 3, "worst_severity": "critical",
-                                   "worst_severity_label": "Critical", "likely_in_use": true, "blocks_policy": true,
+                                   "worst_severity_label": "Critical", "likely_in_use": true, "blocks_policy": true, "known_exploited": 1, "max_epss": 0.42, "upgrade_to": "4.17.21",
+                                   "fix_options": [ { "version": "4.17.21", "range": "4.17.x", "scope": "minor", "resolves": 3, "of": 3, "resolves_known_exploited": 1, "known_exploited_total": 1, "recommended": true } ], "fix_options_more": 0, "no_fix_yet": 0,
                                    "references": [ "GHSA-xxxx-xxxx-xxxx" ], "more_references": 2, "action": "Upgrade to version 4.17.21." } ],
     "recommended_actions": [ { "priority": 1, "timeframe": "Immediately", "owner": "...", "action": "...", "why": "..." } ],
     "compliance_overview": { "frameworks_touched": 3, "most_affected": [ { "framework": "...", "findings": 5 } ], "statement": "...", "disclaimer": "..." },
@@ -1031,7 +1097,7 @@ The HTML tab is laid out so the first screen can be read on its own and fits one
 3. **Details** — why this rating, all key findings, at-a-glance cards (`glance_cards`), components to fix first, all suggested actions, and compliance exposure.
 4. **Appendix** — methodology, "About this report" (scope and notes), and the plain-language glossary. The appendix is collapsed on screen and expanded automatically when printing.
 
-A **Print / save as PDF** button at the top of the tab prints the summary only (on a white background, other tabs hidden), so it can be handed to someone who never opens the interactive report. In the *Components to fix first* table, the identifiers under each component are the advisory references, for tickets and audit trails. For multi-system scans, the tab also shows *Configuration issues by area* and *Systems to review first* tables when that data is present.
+A **Print / save as PDF** button at the top of the tab prints the summary only (on a white background, other tabs hidden), so it can be handed to someone who never opens the interactive report. In the *Components to fix first* table, the identifiers under each component are the advisory references, for tickets and audit trails, and an *Exploited* badge marks components with a known-exploited issue. For multi-system scans, the tab also shows *Configuration issues by area* and *Systems to review first* tables when that data is present.
 
 ### Scan subject and labelling
 
@@ -1041,7 +1107,7 @@ A **Print / save as PDF** button at the top of the tab prints the summary only (
 
 ### Methodology
 
-`executive_summary.methodology` (and the Methodology section of the HTML tab) describes how that specific report was produced. Steps are included only if the stage ran for that scan: the usage estimate needs reachability results, the credential search needs secrets scanning on, license review appears on `health` scans only, and compliance mapping needs a `compliance_summary`. The Policy check step prints the policy values actually in force. The section also states the risk-rating rules, how components are prioritized, that the action timeframes are built-in defaults rather than your SLAs, and the main limitations.
+`executive_summary.methodology` (and the Methodology section of the HTML tab) describes how that specific report was produced. Steps are included only if the stage ran for that scan: the usage estimate needs reachability results, the exploit-intelligence lookup needs vulnerability lookups (and is labelled *incomplete* when a feed failed), the credential search needs secrets scanning on, license review appears on `health` scans only, and compliance mapping needs a `compliance_summary`. The Policy check step prints the policy values actually in force, including the KEV and EPSS rules. The section also states the risk-rating rules, how components are prioritized, that the action timeframes are built-in defaults rather than your SLAs, and the main limitations.
 
 ```json
 "methodology": {
@@ -1055,7 +1121,7 @@ The rating and prioritization text in `methodology` is a prose copy of the logic
 
 **Checks that didn't run or didn't finish.** When vulnerability lookups were skipped, the vulnerability-derived `at_a_glance` figures are `null` (shown as "n/a" in the HTML tab), not `0`, and the methodology lists the lookup as "not run". When the secrets pass was enabled but failed (`secrets.error`), `exposed_credentials` is `null`, the credential-search step is omitted, and a key finding and note say the result is unavailable instead of reporting zero. Components with no determinable version (`stats.inventory_stats.undetermined`) are called out in the inventory step, the limitations, and the notes, since they can't be matched against vulnerability databases. Malicious-component advisories are counted separately in the summary, so "Known weaknesses" can be lower than the Vulnerabilities tab total; a note says so when it applies.
 
-`compliance_overview` is `null` when no findings map to a framework. `components_to_fix_first` lists at most five components, ranked by malicious status, then whether they're likely in use, then worst severity, then issue count; the suggested upgrade is indicative, not a guarantee. Upgrade suggestions come from the per-package analysis described in [Recommended Package Fixes](#recommended-package-fixes).
+`compliance_overview` is `null` when no findings map to a framework. `components_to_fix_first` lists at most five components, ranked by malicious status, then known-exploited (and not judged unused), then whether they're likely in use, then worst severity, then forecast exploit likelihood, then issue count. The suggested upgrade is the closest upgrade path from the per-package analysis in [Recommended Package Fixes](#recommended-package-fixes) that resolves the most of that component's issues (a major version change is called out, and any issues it leaves open are stated); if that analysis is missing or failed for a package, the older per-issue heuristic is used instead. Each component also lists every upgrade path from that analysis as `fix_options` (closest release line first, at most five, the recommended one always kept, `fix_options_more` for the rest): the version, its range, whether it is a `major` change, how many of the component's issues it resolves and how many of the known-exploited ones, plus `no_fix_yet` for issues no version fixes. The HTML tab shows them under the action as a **Possible fixes** list with *Best* and *Major* badges. Either way the suggested upgrade is indicative, not a guarantee.
 
 ---
 
@@ -1085,6 +1151,8 @@ Open the **Inventory** tab and click a package: its detail modal has a **Suggest
 **Ordering.** Vulnerabilities inside every group are ordered most severe first: malicious (infection), then critical, high, medium, low, unknown; ties are broken by CVSS score, then ID.
 
 **Ecosystem-aware version comparison.** Versions are compared with one ecosystem-agnostic comparator that handles semver, PEP 440, and deb/rpm-style versions — including epochs (`1:2.3`), `v` prefixes, pre-release tags (`1.0.0-rc1` sorts below `1.0.0`), and ignored build metadata (`+build`) — across every supported ecosystem.
+
+**In SBOM and SARIF.** SBOM: each component has a `suggested_fixes` property (JSON string), and each vulnerability the properties `suggested_fix_version` and `suggested_fix_bulk_count` when a suggested version covers it. SARIF: each result has `suggested_fix_version` and `suggested_fixes` in `properties`, and the run's `properties.inventory_suggested_fixes` lists the plan per package.
 
 Suggestions are computed only when vulnerability lookups ran, so they are absent from `ubel-license` scans (and from any scan run with `scan_vulns: false`).
 

@@ -1,7 +1,7 @@
 # UBEL — Supply-Chain & Secrets Scanner for VS Code
 
 **Multi-ecosystem dependency and secrets scanner for the developer's machine and tools.**  
-Covers source repos, developer machines, and exposed secrets — zero cloud calls except for osv.dev and NVD API (both mirror-configurable).
+Covers source repos, developer machines, and exposed secrets — runs entirely locally. The only network calls are to osv.dev and the NVD API for vulnerability data (both mirror-configurable), plus best-effort lookups to the CISA KEV catalog and the FIRST EPSS API for exploit intelligence.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
@@ -15,7 +15,7 @@ UBEL is a **software composition analysis (SCA)** tool, **secrets detector**, an
 
 As a project, UBEL spans the entire delivery chain: from the moment a developer adds a dependency, through CI validation, to what is running on a deployment server or inside an AI agent's runtime environment.
 
-**This specific extension** covers the editor-side slice of that: dependency vulnerability scanning (SCA), secrets detection, and host/editor-extension auditing, all in `health` (report-only) mode. It does **not** include the install-time firewall (the scan-before-you-install gate that blocks a malicious package before it ever reaches `node_modules`), AI-powered SAST/malicious-code scanning, or CI/CD wiring — those live in the `@arcane-spark/ubel-node` CLI package ([npm](https://www.npmjs.com/package/@arcane-spark/ubel-node), [docs](https://github.com/AlaBouali/ubel/blob/main/README.md)) and the [official GitHub Action](https://github.com/AlaBouali/ubel), which this extension is a companion to rather than a replacement for.
+**This specific extension** covers the editor-side slice of that: dependency vulnerability scanning (SCA) enriched with exploit intelligence (CISA KEV + EPSS), secrets detection, license compliance, and host/editor-extension auditing, all in `health` (report-only) mode. It is built directly on the SCA engine of the `@arcane-spark/ubel-node` package, so findings, policy, and reports are identical to what the CLI's `health` mode produces (see [Extension vs. CLI](#extension-vs-cli)). It does **not** include the install-time firewall (the scan-before-you-install gate that blocks a malicious package before it ever reaches `node_modules`), AI-powered SAST/malicious-code scanning, or CI/CD wiring — those live in the `@arcane-spark/ubel-node` CLI package ([npm](https://www.npmjs.com/package/@arcane-spark/ubel-node), [docs](https://github.com/AlaBouali/ubel/blob/main/README.md)) and the [official GitHub Action](https://github.com/AlaBouali/ubel), which this extension is a companion to rather than a replacement for.
 
 ---
 
@@ -25,17 +25,18 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - Vulnerability scanning via batched API queries to OSV.dev and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
-- Policy engine — block/allow by severity threshold, unknown-severity packages, and license risk
+- **Exploit intelligence** — every vulnerability is checked against the [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/); policy blocks KEV entries and anything at or above an EPSS threshold, and a feed outage never aborts the scan (see [Exploit Intelligence](#exploit-intelligence-kev--epss))
+- Policy engine — block/allow by severity threshold, unknown-severity packages, CISA KEV membership, EPSS score, and license risk
 - Malicious package (infection) detection — always blocked regardless of policy
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, Stripe restricted keys, Twilio SIDs, URL-embedded git credentials, and more). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
-- Dependency graph with introduced-by and parent tracking
-- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links
+- Dependency graph with introduced-by and parent tracking (Swift and Flutter/Dart lockfiles don't record a dependency graph, so those packages have no edges)
+- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of each scan's reports is saved too
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
-- **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings, the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
+- **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
@@ -52,6 +53,18 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 | **UBEL: Scan project for License Compliance** | `Ctrl+Alt+L` | `Cmd+Alt+L` | License-only pass over the open workspace folder — full dependency resolution, no vulnerability lookups, no secrets scan |
 
 All five commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
+
+**What each command runs**
+
+| Command | Dependency resolution | Host OS / dev tools | Vulnerability lookups (OSV / NVD) | KEV / EPSS enrichment | Secrets scan | License classification |
+|---|---|---|---|---|---|---|
+| Scan Project | ✅ every ecosystem | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Scan Code Editor's Extensions | ✅ npm packages | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Scan Host Platform | ❌ | ✅ | ✅ (CPE / NVD) | ✅ | ❌ | ✅ |
+| Scan project for Exposed Secrets | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Scan project for License Compliance | ✅ every ecosystem | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+Only one scan runs at a time — starting a second while one is in progress shows a warning and does nothing.
 
 ---
 
@@ -71,7 +84,7 @@ Search for **UBEL** in the VS Code Extensions panel
 
 ## Scan Project (`Ctrl+Alt+U`)
 
-Scans every ecosystem present anywhere inside the currently open workspace folder. Monorepos with mixed stacks are fully covered in a single pass — no configuration needed.
+Scans every ecosystem present anywhere inside the currently open workspace folder. Monorepos with mixed stacks are fully covered in a single pass — no configuration needed. Each discovered package is deduplicated by PURL, so packages shared across sub-projects are scanned exactly once. See [Supported Ecosystems](#supported-ecosystems-project-scan) for Swift and Flutter/Dart specifics.
 
 **What gets scanned**
 
@@ -79,7 +92,7 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 |---|---|
 | Node.js (npm, pnpm, yarn, bun) | `node_modules/` on-disk walk |
 | Python | `.venv/`, `venv/`, virtual environment directories |
-| PHP | `vendor/` |
+| PHP | `vendor/`, `composer.lock` |
 | Rust | `Cargo.lock` |
 | Go | `go.sum` |
 | C#/.NET | `packages.lock.json`, `obj/project.assets.json` |
@@ -98,7 +111,7 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 
 ## Scan VS Code Extensions (`Ctrl+Alt+X`)
 
-Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codium extensions (`~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions`). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently.
+Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codium extensions (`~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions`). Extensions are a meaningful supply-chain surface — they run with full Node.js access in the editor host process and are updated silently. The extension detects which editor is hosting it (VS Code, Cursor, or VSCodium) and scans that editor's directory. As with a project scan, the secrets pass and license classification are included, and the report header is tagged with the scanned editor and its version.
 
 **Report location**
 
@@ -122,6 +135,8 @@ Audits the system-level software installed on the developer's machine itself —
 
 This catches what dependency scanners miss: a vulnerable version of Git, an unpatched Python interpreter, an outdated Docker Desktop install, or an end-of-life .NET runtime.
 
+Every detected component carries its actual license or vendor EULA — proprietary Microsoft/vendor components (Windows itself, Defender, Edge, Chrome, Docker Desktop, Visual Studio, Cursor, Claude Code, …) resolve to a `LicenseRef-*` identifier rather than `unknown`, while open-source runtimes and tools resolve to their real SPDX id (e.g. `MIT` for Node.js/.NET, `PSF-2.0` for Python). Findings are also enriched with KEV/EPSS data. The host-platform scan does **not** run the secrets pass.
+
 **Windows** — detected via registry probes and PowerShell, no elevated privileges required:
 
 | Category | Components |
@@ -131,7 +146,7 @@ This catches what dependency scanners miss: a vulnerable version of Git, an unpa
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, VS Code, Cursor |
+| Developer tools | Git, Docker Desktop, Visual Studio, VS Code, Cursor, Claude Code |
 | Shell | PowerShell |
 
 **Linux** — reads the system package database directly, works as a standard user on most distributions:
@@ -139,8 +154,8 @@ This catches what dependency scanners miss: a vulnerable version of Git, an unpa
 | Distro family | Source |
 |---|---|
 | Debian / Ubuntu | `/var/lib/dpkg/status` |
-| Alpine | `/lib/apk/db/installed` |
-| Red Hat / AlmaLinux / Rocky | `rpm -qa` |
+| Alpine / Alpaquita | `/lib/apk/db/installed` |
+| Red Hat / AlmaLinux / Rocky / CentOS / Fedora | `rpm -qa` |
 
 > On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
 
@@ -162,12 +177,16 @@ Runs a secrets-only pass over the open workspace folder — no dependency resolu
 - Google Cloud API keys and OAuth access tokens
 - Anthropic and OpenRouter API keys
 - Firebase tokens
+- Amazon MWS auth tokens
 - Stripe restricted keys (`rk_live_` / `rk_test_`)
 - Twilio Account/App SIDs
 - Square and Braintree credentials
 - Credentials embedded in a git remote URL (`https://user:token@host/...`)
+- Generic high-entropy and key-value fallback rules for unknown vendors
 
 Match previews shown in every report are redacted — the raw secret value is never written to disk, in this report or any other.
+
+In the other report formats, secrets are exposed as a `ubel:secrets` entry in the SBOM's root `properties`, and as their own `run` in the SARIF file (separate tool driver and rule set from the dependency-vulnerability run).
 
 **This scan also runs automatically** as part of **UBEL: Scan Project** (`Ctrl+Alt+U`) — this command exists for when you want a fast, dependency-resolution-free pass, e.g. before a commit.
 
@@ -206,8 +225,10 @@ Every scan ends with a VS Code notification:
 | Result | Notification | Meaning |
 |---|---|---|
 | ✅ | Scan complete — no policy violations | All packages passed |
-| ⚠️ | Policy violation | Vulnerable or malicious package found above threshold |
-| ❌ | Scan error | Unexpected failure — message contains details |
+| ⚠️ | Policy violation | A malicious package, a vulnerability at or above the severity threshold, a known-exploited (CISA KEV) or high-EPSS vulnerability, an exposed secret, or a configured license-risk gate was hit — see [Policy](#policy) |
+| ❌ | Scan error | Unexpected failure — message contains details. This includes an OSV.dev/NVD lookup that couldn't be completed: an incomplete lookup is a failed scan, never a clean one |
+
+KEV/EPSS lookups are the exception: they only add risk signal, so if either feed is unreachable the scan still completes, the affected fields are `null` (unknown), a warning is shown in the report, and the matching policy rule is not enforced for that run — see [Exploit Intelligence](#exploit-intelligence-kev--epss).
 
 Every notification includes an **Open Report** button that opens the full interactive HTML report in your browser.
 
@@ -219,15 +240,15 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 
 | Tab | Contents |
 |---|---|
-| **Dashboard** | Vulnerability counts by severity, policy decision summary, scan metadata |
+| **Dashboard** | Vulnerability counts by severity, policy decision summary (including threat-intel feed warnings), license-risk stats card, scan metadata |
 | **Executive Summary** | Plain-language risk rating, policy verdict, key findings, components to fix first, and suggested actions for non-technical readers, printable as a PDF — see [Executive Summary](#executive-summary) |
 | **Secrets** | Exposed secrets by category, severity, file/line, and redacted match preview |
-| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, reachability level, and policy decision |
+| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS score/percentile, KEV badge, severity, fix version, reachability level, and policy decision. Click any row for a detail modal (CVSS vector, fix recommendations, OSV/NVD references, compliance frameworks) |
 | **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count. Click a package for its detail modal, which includes **Suggested Fixes** — see [Recommended Package Fixes](#recommended-package-fixes) |
 | **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
-| **System Info** | OS metadata, Node.js version, scan engine info |
+| **System Info** | OS metadata, local network interfaces, git info, Node.js version, engine/tool versions |
 
 ---
 
@@ -241,11 +262,11 @@ In the HTML report it is the **Executive Summary** tab, placed right after the D
 
 | Section | What it tells the reader |
 |---|---|
-| Overall risk rating | One of Critical / High / Moderate / Low / Minimal / Not assessed, with a rationale and general business-impact text |
+| Overall risk rating | One of Critical / High / Medium / Low / Minimal / Not assessed, with a rationale and general business-impact text |
 | Headline & verdict | A one-sentence overview and whether the scan meets or fails the security policy, in plain language (with the technical reason alongside) |
-| At a glance | Components reviewed and with issues, vulnerabilities by severity, how many have a fix available, how many are likely in use by your code vs. not, how many block policy, exposed credentials |
+| At a glance | Components reviewed and with issues, vulnerabilities by severity, how many have a fix available, how many are likely in use by your code vs. not, how many block policy, exposed credentials, how many are known to be exploited (KEV) or have a high exploit likelihood (EPSS) |
 | Key findings | The handful of things that matter most, each with a severity |
-| Components to fix first | Up to five components, ranked by malicious status, then whether they're likely in use, then worst severity, then issue count — each with a suggested upgrade action |
+| Components to fix first | Up to five components, ranked by malicious status, then known-exploited (and not judged unused), then whether they're likely in use, then worst severity, then forecast exploit likelihood, then issue count — each with a suggested upgrade action and the possible upgrade paths (see [Recommended Package Fixes](#recommended-package-fixes)) |
 | Suggested actions | Prioritized actions with a timeframe and the reason for each |
 | Compliance overview | Which frameworks the findings touch and which are most affected (omitted when nothing maps to a framework) — see [Compliance Framework Mapping](#compliance-framework-mapping) |
 | Scope, methodology & glossary | What was scanned, how this specific report was produced, and plain-language definitions of the terms used |
@@ -266,15 +287,21 @@ A **Print / save as PDF** button at the top of the tab prints the summary only (
 | Rating | Assigned when |
 |---|---|
 | Critical | any malicious (`MAL-*`) component was found |
-| High | any Critical/High-severity vulnerability that isn't confirmed unreachable, or any exposed High/Critical credential |
-| Moderate | Medium/unrated issues, lower-severity secrets, or Critical/High issues that [reachability analysis](#reachability-analysis) confirmed are not used by production code |
-| Low | only Low-severity issues, or Medium/unrated issues confirmed unused |
+| High | any Critical/High-severity vulnerability that isn't confirmed unreachable, any [CISA KEV](#exploit-intelligence-kev--epss) vulnerability that isn't confirmed unreachable (whatever its severity), or any exposed High/Critical credential |
+| Medium | Medium/unrated issues, vulnerabilities at or above the EPSS threshold, lower-severity secrets, or Critical/High/KEV issues that [reachability analysis](#reachability-analysis) confirmed are not used by production code |
+| Low | only Low-severity issues (none at or above the EPSS threshold), or Medium/unrated issues that reachability analysis confirmed are all unused |
 | Minimal | nothing found |
 | Not assessed | the scan skipped vulnerability lookups (e.g. **UBEL: Scan project for License Compliance**) and nothing else raised the rating — shown instead of "Minimal" so an unchecked scan is never read as a clean one |
 
-The rating and the policy verdict are independent: the rating discounts findings that reachability analysis confirmed are unused, while the verdict counts every finding at or above the blocking thresholds (and any exposed secret), so a report can be rated Moderate yet still be blocked.
+The rating and the policy verdict are independent: the rating discounts findings that reachability analysis confirmed are unused, while the verdict counts every finding at or above the blocking thresholds (and any exposed secret), so a report can be rated Medium yet still be blocked. Reachability is a heuristic; a finding with no reachability result is treated as potentially reachable.
 
-**Checks that didn't run or didn't finish.** When vulnerability lookups were skipped, the vulnerability-derived figures are `null` (shown as "n/a" in the HTML tab), not `0`. When the secrets pass failed, `exposed_credentials` is `null` and a key finding says the result is unavailable instead of reporting zero. Components with no determinable version can't be matched against vulnerability databases, so they are called out in the methodology, limitations, and notes.
+**Exploit intelligence in the summary.** The summary uses the same two signals the policy blocks on, so a report is never rated "Low" while the policy blocks it for an actively exploited vulnerability:
+
+- **Known-exploited (`is_kev: true`)** — gets its own key finding (with CISA's earliest remediation due date), an *Immediately* suggested action, the **Known to be exploited** card, and raises the rating to High unless reachability analysis confirmed the code unused (then Medium). Components with a known-exploited issue rank first among the non-malicious ones and carry an *Exploited* badge.
+- **High EPSS** — vulnerabilities at or above `epss_threshold` that aren't already KEV get a key finding and, when they are lower-severity, a *Within days* action; they set a floor of Medium. If the EPSS rule is turned off in the policy, 10% is still used for this informational reporting, and the text says the policy doesn't block on it.
+- **Unknown stays unknown** — if a feed was unreachable, the matching figures are `null` (shown as "n/a", never `0`), a key finding says so, the methodology shows the lookup as *incomplete*, and a Low/Medium rating notes that it could be understated.
+
+**Checks that didn't run or didn't finish.** When vulnerability lookups were skipped, the vulnerability-derived figures (including the exploit-intelligence ones) are `null` (shown as "n/a" in the HTML tab), not `0`. When the secrets pass failed, `exposed_credentials` is `null` and a key finding says the result is unavailable instead of reporting zero. Components with no determinable version can't be matched against vulnerability databases, so they are called out in the methodology, limitations, and notes.
 
 **Good to know**
 
@@ -282,6 +309,8 @@ The rating and the policy verdict are independent: the rating discounts findings
 - Action timeframes are built-in defaults, not your organization's remediation SLAs. The HTML tab labels the section "Suggested actions" for this reason.
 - Suggested upgrades are indicative, not a guarantee.
 - Malicious-component advisories are counted separately, so "Known weaknesses" can be lower than the Vulnerabilities tab total; a note says so when it applies.
+- `scope.subject` identifies what was scanned: `name`, `repository`, `branch`, `commit` (first 8 characters), `scanned_at` and `tool`, taken from the report's git, runtime, and tool metadata. Fields that aren't available are omitted from the header.
+- `overall_risk.basis` and `recommended_actions_basis` state that the rating scale is UBEL's own (not CVSS or a regulatory standard) and that action timeframes are built-in defaults rather than your organization's remediation policy.
 - For host-platform scans, the project name is left empty rather than showing a temp or home directory. Credentials embedded in a git remote URL are stripped from the scan header.
 
 **JSON**
@@ -298,23 +327,29 @@ The rating and the policy verdict are independent: the rating discounts findings
     "glance_cards": [ { "label": "...", "value": 142, "sub": "...", "tone": null } ],
     "headline": "This scan reviewed 142 software components and found ...",
     "verdict": { "status": "blocked", "label": "Does not meet security policy", "statement": "...", "technical_reason": "..." },
-    "at_a_glance": { "components_reviewed": 142, "components_with_issues": 4, "malicious_components": 0,
+    "at_a_glance": { "vulnerabilities_assessed": true, "components_reviewed": 142, "components_with_issues": 4, "malicious_components": 0,
                      "total_vulnerabilities": 9, "by_severity": { "critical": 1, "high": 2, "medium": 4, "low": 2, "unknown": 0 },
                      "fix_available": 7, "fix_available_percent": 78, "likely_in_use": 6, "not_in_use": 3,
-                     "blocking_policy": 3, "exposed_credentials": 2 },
+                     "blocking_policy": 3, "exposed_credentials": 2,
+                     "known_exploited": 1, "high_exploit_likelihood": 2, "exploit_data_complete": true },
     "key_findings": [ { "severity": "high", "title": "...", "detail": "..." } ],
     "components_to_fix_first": [ { "name": "lodash", "version": "4.17.15", "issue_count": 3, "worst_severity": "critical",
-                                   "worst_severity_label": "Critical", "likely_in_use": true, "blocks_policy": true,
+                                   "worst_severity_label": "Critical", "likely_in_use": true, "blocks_policy": true, "known_exploited": 1, "max_epss": 0.42, "upgrade_to": "4.17.21",
+                                   "fix_options": [ { "version": "4.17.21", "range": "4.17.x", "scope": "minor", "resolves": 3, "of": 3, "resolves_known_exploited": 1, "known_exploited_total": 1, "recommended": true } ], "fix_options_more": 0, "no_fix_yet": 0,
                                    "references": [ "GHSA-xxxx-xxxx-xxxx" ], "more_references": 2, "action": "Upgrade to version 4.17.21." } ],
     "recommended_actions": [ { "priority": 1, "timeframe": "Immediately", "owner": "...", "action": "...", "why": "..." } ],
     "compliance_overview": { "frameworks_touched": 3, "most_affected": [ { "framework": "...", "findings": 5 } ], "statement": "...", "disclaimer": "..." },
-    "scope": { "scan_type": "health", "description": "...", "target": "a code repository", "ecosystems": ["npm"], "components_reviewed": 142 },
+    "scope": { "scan_type": "health", "description": "...", "target": "a code repository", "subject": { "name": "my-app", "repository": "...", "branch": "main", "commit": "a1b2c3d4", "scanned_at": "...", "tool": "..." }, "ecosystems": ["npm"], "components_reviewed": 142 },
     "methodology": { "steps": [], "rating_rules": [], "prioritization": "...", "timeframes": "...", "limitations": [] },
     "notes": [ "..." ],
     "glossary": [ { "term": "Vulnerability", "meaning": "..." } ]
   }
 }
 ```
+
+**Methodology.** `executive_summary.methodology` (and the Methodology section of the HTML tab) describes how that specific report was produced. Steps are included only if the stage ran for that scan: the usage estimate needs reachability results, the exploit-intelligence lookup needs vulnerability lookups (and is labelled *incomplete* when a feed failed), the credential search needs secrets scanning on, license review appears on `health` scans, and compliance mapping needs a `compliance_summary`. The *Policy check* step prints the policy values actually in force, including the KEV and EPSS rules.
+
+**Fix options.** The suggested upgrade for each component comes from the per-package analysis in [Recommended Package Fixes](#recommended-package-fixes): the closest upgrade path that resolves the most of that component's issues (a major version change is called out, and any issues it leaves open are stated). Every upgrade path is also listed as `fix_options` — closest release line first, at most five, the recommended one always kept — with the version, its range, whether it is a `major` change, how many of the component's issues it resolves (and how many of the known-exploited ones), plus `no_fix_yet` for issues no version fixes. The HTML tab shows them as a **Possible fixes** list with *Best* and *Major* badges. If the per-package analysis is missing or failed, the older per-issue heuristic is used instead. Either way, the suggested upgrade is indicative, not a guarantee.
 
 ---
 
@@ -344,6 +379,8 @@ Open the **Inventory** tab and click a package: its detail modal has a **Suggest
 **Ordering.** Vulnerabilities inside every group are ordered most severe first: malicious (infection), then critical, high, medium, low, unknown; ties are broken by CVSS score, then ID.
 
 **Ecosystem-aware version comparison.** Versions are compared with one ecosystem-agnostic comparator that handles semver, PEP 440, and deb/rpm-style versions — including epochs (`1:2.3`), `v` prefixes, pre-release tags (`1.0.0-rc1` sorts below `1.0.0`), and ignored build metadata (`+build`) — across every supported ecosystem.
+
+**In SBOM and SARIF.** SBOM: each component has a `suggested_fixes` property (JSON string), and each vulnerability gets the properties `suggested_fix_version` and `suggested_fix_bulk_count` when a suggested version covers it. SARIF: each result has `suggested_fix_version` and `suggested_fixes` in `properties`, and the run's `properties.inventory_suggested_fixes` lists the plan per package.
 
 Suggestions are computed only when vulnerability lookups ran, so they are absent from license-only scans.
 
@@ -383,6 +420,40 @@ If suggestions can't be computed for a package, its `suggested_fixes` carries an
 
 ---
 
+## Exploit Intelligence (KEV & EPSS)
+
+Severity says how bad a flaw *could* be; these two feeds say whether it is actually being exploited or is likely to be. Every vulnerability found by a scan that performs vulnerability lookups is enriched with:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `is_kev` | [CISA KEV catalog](https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json) | `true` if the CVE is in the catalog, `false` if not, `null` if the catalog couldn't be fetched |
+| `kev_added` | CISA KEV | Date the CVE was added to the catalog (`YYYY-MM-DD`), else `null` |
+| `kev_deadline` | CISA KEV | CISA's remediation due date, else `null` |
+| `epss_score` | [FIRST EPSS](https://api.first.org/data/v1/epss) | Probability (0–1) of exploitation in the next 30 days, else `null` |
+| `epss_percentile` | FIRST EPSS | Percentile (0–1) of that score among all scored CVEs, else `null` |
+
+`null` always means *unknown* (feed down, or no EPSS score exists for the CVE), never "not exploited" or `0`. The HTML report shows EPSS as percentages and flags KEV entries with a badge; the JSON report keeps the raw 0–1 values.
+
+**CVE matching.** OSV advisories are frequently GHSA/other ids, so the CVE is taken from the vulnerability `id` if it starts with `CVE-`, and from its `aliases` otherwise. If an advisory maps to several CVEs, it is KEV if any of them is, and the highest EPSS score is reported.
+
+**Policy.** With the defaults, a scan blocks on any KEV entry (`block_kev: true`) and on any vulnerability with `epss_score >= 0.1` (10%), whatever its severity. Both are tunable in `config.json` — see [Policy](#policy). The block reason names the offending ids, e.g. `Blocked by policy: 1 known-exploited (CISA KEV) vulnerability detected: GHSA-xxxx-xxxx-xxxx`.
+
+**When a feed is unreachable.** Unlike OSV/NVD (where a failed lookup fails the scan, because a missing answer would look like "no vulnerabilities"), KEV/EPSS only *add* risk signal, so an outage degrades the result instead of aborting it:
+
+- the scan completes and the affected fields are `null`;
+- a warning is shown in the HTML decision box and recorded under `threat_intel` in the report (`status` of `ok`, `partial`, `unavailable` or `skipped` per feed, plus the error);
+- the matching policy rule is not enforced for that run, and a passing verdict says so — e.g. `Policy passed (note: CISA KEV data unavailable — not enforced for this scan)`;
+- other rules (severity, the other feed, infections, secrets) are unaffected.
+
+Each feed is tried with a 15-second timeout and two retries. There is currently no endpoint override for either feed, so a fully air-gapped setup runs without KEV/EPSS data.
+
+**Other report formats**
+
+- **SBOM (CycloneDX v1.6)**: each `vulnerabilities[]` entry gets the properties `kev.listed` (`true`, `false` or `unknown`), `kev.date_added`, `kev.due_date`, `epss.score` and `epss.percentile`; KEV entries also get an advisory link to the CISA catalog, and EPSS is added as a second `ratings[]` entry (source `FIRST EPSS`, score in percent). The root `properties` carry `kev_vulnerabilities` and `ubel:threat_intel` — read the count together with the feed status, since an outage leaves the count at 0.
+- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties`; rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100. A KEV result is reported at level `error` whatever its severity, unless reachability confidently ruled it out.
+
+---
+
 ## Reachability Analysis
 
 Every vulnerability in the report is annotated with a reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and performs a source-level import scan over the workspace files to confirm or refute whether the vulnerable package is actually used by application code.
@@ -411,13 +482,13 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 
 **Priority 1 (non-library type)** — Frameworks, applications, plugins, and OS-level packages have no meaningful import boundary. The component itself is the attack surface.
 
-**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes.
+**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes. For Node.js, scope is derived from `devDependencies` and propagated through the dependency graph.
 
 **Priorities 3–4 (import scan)** — UBEL scans workspace source files for import statements matching the package. For transitive dependencies where the package itself is not directly imported, it checks whether any of the package's parents in the dependency graph are imported — confirming that the transitive path is exercised.
 
 **Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools not called by application code.
 
-**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies.
+**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. Network-reachable (`AV:N`) and shallow (`depth ≤ 1`) packages score higher.
 
 ### Import scan coverage
 
@@ -434,7 +505,29 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 | Flutter / Dart | `.dart` | `import 'package:<pkg>/…'`, `export 'package:<pkg>/…'` |
 | Swift | `.swift` `.m` `.mm` `.h` | `import <Module>`, `@import <Module>`, `#import <Module/…>` |
 
-Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field.
+Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field:
+
+```json
+{
+  "reachability": {
+    "reachable": true,
+    "level": "high",
+    "confidence": "high",
+    "rationale": "Import of this package was found in project source code. Found in 2 source file(s): src/index.js, src/utils.js. Depth=0, AV=N.",
+    "tags": ["import_confirmed", "network_av"],
+    "signals": { "depth": 0, "attack_vector": "N", "scope": "prod", "pkg_type": "library", "import_scan": { "searched": true, "found": true, "files_scanned": 87 } }
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `reachable` | `true` if the vulnerable code is considered reachable from production |
+| `level` | `total`, `high`, `medium`, or `low` |
+| `confidence` | `high`, `medium`, or `low` — how much evidence backs the verdict |
+| `rationale` | Human-readable explanation of which signal drove the decision |
+| `tags` | Machine-readable labels for the signals that fired (e.g. `import_confirmed`, `dev_scope`, `malware`, `env_scope`) |
+| `signals` | Snapshot of all inputs considered, regardless of which rule fired (abbreviated above) |
 
 ---
 
@@ -444,17 +537,25 @@ Every project scan classifies each package's declared license by default. Licens
 
 | Category | Examples | Risk |
 |---|---|---|
-| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC | `low` |
-| Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0 | `medium` |
+| Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC, 0BSD | `low` |
+| Public domain | Unlicense (OSI-approved), CC0-1.0 | `low` |
+| Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0, CDDL | `medium` |
+| Strong copyleft with linking exception | GPL-2.0-only WITH Classpath-exception-2.0 (OpenJDK JRE/JDK) | `medium` |
 | Strong copyleft | GPL-2.0/3.0, AGPL-3.0 | `high` |
-| Proprietary / source-available | npm `UNLICENSED`, SSPL-1.0, BUSL-1.1 | `high` |
+| Source-available / rejected by OSI | SSPL-1.0, BUSL-1.1, Elastic-2.0 | `high` |
+| Proprietary | npm `UNLICENSED`, `Proprietary`, `LicenseRef-*` vendor EULAs (Windows, Defender, Chrome, Docker Desktop, …) | `high` |
 | None / unrecognized | missing, `unknown`, or unparseable text | `unknown` |
 
-npm's `UNLICENSED` sentinel (proprietary — all rights reserved) is deliberately not confused with the SPDX `Unlicense` public-domain license; dual-licensed packages (`OR`) are classified using the most favorable option, since the consumer may legally choose it.
+npm's `UNLICENSED` sentinel (proprietary — all rights reserved) is deliberately not confused with the SPDX `Unlicense` public-domain license; dual-licensed packages (`OR`) are classified using the most favorable option, since the consumer may legally choose it, while conjunctively-licensed packages (`AND`) are classified using the most restrictive one, since all obligations stack.
+
+Other shapes that are normalized: case/whitespace variants, SPDX expressions (`GPL-2.0-or-later`, `GPL-2.0+`), `WITH` exception expressions (the Classpath exception permits linking without inheriting GPL's copyleft obligations, so it's capped at `medium`), `LicenseRef-*` identifiers (a real, named vendor license with no SPDX id — treated as proprietary-leaning rather than "unrecognized"), legacy npm object/array forms, and Python trove classifiers (`License :: OSI Approved :: MIT License` → `MIT`). `SEE LICENSE IN <file>` is flagged as unverifiable rather than guessed at, and missing/empty/`unknown` values are classified as `none`. `osi_approved` is `true` only for licenses on the OSI-approved list, `false` for a real license that isn't on it (proprietary, source-available, Creative Commons), and `null` when there's nothing to check.
 
 Run standalone via **UBEL: Scan project for License Compliance** (`Ctrl+Alt+L`) — see above — when you want license data only, with no vulnerability lookups or secrets scan.
 
-Results appear in the **Inventory** tab of the HTML report (per-package license, OSI-approved status, and risk) and in the machine-readable JSON/SBOM/SARIF reports under each package's `license_info` field.
+Results appear in the **Inventory** tab of the HTML report (per-package license, OSI-approved status, and risk) and in the machine-readable JSON/SBOM/SARIF reports under each package's `license_info` field. The report-level `stats.license_stats` summarizes the whole inventory (`total`, `osi_approved`, `not_osi_approved`, `unknown`, and `by_risk`).
+
+- **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name`; OSI status, risk, category, and reason are added as component `properties`, and the root `properties` carry the OSI/unknown counts.
+- **SARIF 2.1.0**: a dedicated `ubel-license-compliance` run, separate from the vulnerability and secrets runs. Only packages that need review are reported — any package with `risk: "high"`, or `osi_approved` not equal to `true` — so a fully permissively-licensed tree produces no findings. Result `level` maps from risk (`high` → `error`, `medium` → `warning`, `low` → `note`).
 
 ---
 
@@ -462,7 +563,7 @@ Results appear in the **Inventory** tab of the HTML report (per-package license,
 
 Every dependency vulnerability and secrets-in-source finding is mapped onto industry compliance/security frameworks by default — no separate flag or mode needed, and included in every report format. This is distinct from [License Compliance](#license-compliance) above, which is about license-obligation risk on installed software; this is about mapping *security* findings onto the frameworks an org is typically audited against.
 
-Each finding is first assigned one or more internal risk categories (e.g. `injection`, `secrets_management`, `vulnerable_components` — the latter always applied to a dependency finding as a baseline, since every SCA finding is a known-vulnerable-component finding by definition), and each category carries a fixed list of framework control references, so two findings with the same underlying risk always map identically.
+Each finding is first assigned one or more internal risk categories — for a dependency vulnerability, derived from its advisory's CWE(s); for a secrets finding, always `secrets_management` (e.g. `injection`, `secrets_management`, `vulnerable_components` — the latter always applied to a dependency finding as a baseline, since every SCA finding is a known-vulnerable-component finding by definition), and each category carries a fixed list of framework control references, so two findings with the same underlying risk always map identically.
 
 **Frameworks covered**
 
@@ -483,13 +584,26 @@ Each finding is first assigned one or more internal risk categories (e.g. `injec
 
 - **HTML report**: a dedicated **Compliance** tab with one card per framework (control breakdown + finding counts), plus a Compliance Frameworks section in each vulnerability's detail modal.
 - **JSON report**: a `compliance` object on every vulnerability and secrets finding, plus a report-level `compliance_summary` aggregating all findings into per-framework, per-control counts.
-- **SARIF report**: `compliance_categories` / `compliance_frameworks` on each rule, and the full `compliance` object on each result.
+- **SARIF report**: `compliance_categories` / `compliance_frameworks` on each rule, and the full `compliance` object on each result — in both the dependency-vulnerability run and the secrets run.
 
 ---
 
 ## Policy
 
-All package managers share the same policy engine. Policy is stored per-project in `.ubel/local/policy/config.json`.
+All ecosystems share the same policy engine. Policy is stored as JSON at `.ubel/local/policy/config.json`, relative to the scan root — `<project-root>` for project, secrets, and license scans, the editor's extensions directory for the extensions scan, and `~` for the host-platform scan. The file is created with defaults on the first scan.
+
+The extension has no `threshold` / `block-unknown` / per-run-flag commands (those belong to the CLI) — to change policy, edit `config.json` directly. Default policy:
+
+```json
+{
+  "severity_threshold": "high",
+  "block_unknown_vulnerabilities": true,
+  "license_risk_threshold": "none",
+  "block_unknown_license_risk": false,
+  "block_kev": true,
+  "epss_threshold": 0.1
+}
+```
 
 | Field | Values | Default | Behaviour |
 |---|---|---|---|
@@ -497,9 +611,11 @@ All package managers share the same policy engine. Policy is stored per-project 
 | `block_unknown_vulnerabilities` | `true` `false` | `true` | Block packages with CVEs but no CVSS score |
 | `license_risk_threshold` | `none` `low` `medium` `high` | `none` | Block packages whose license risk is at or above this level; never blocks on `unknown` regardless of setting (see `block_unknown_license_risk`) |
 | `block_unknown_license_risk` | `true` `false` | `false` | Separately block packages whose license couldn't be classified at all |
+| `block_kev` | `true` `false` | `true` | Block any vulnerability listed in the CISA KEV catalog, regardless of severity |
+| `epss_threshold` | fraction in (0, 1], or `"none"` | `0.1` | Block any vulnerability whose EPSS score is at or above this value (`0.1` = 10%), regardless of severity |
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
-The severity threshold is inclusive — `high` blocks both `high` and `critical`. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every extension scan runs in `health` mode, where these two gates are active.
+The severity threshold is inclusive — `high` blocks both `high` and `critical`. KEV and EPSS blocking apply on top of it: a Low-severity vulnerability that is known to be exploited, or whose EPSS score is at or above the threshold, still blocks. Both rules need data from an external feed; if it couldn't be fetched, that rule can't fire for the run (see [Exploit Intelligence](#exploit-intelligence-kev--epss)), and a passing verdict says so. Policy files created before these fields existed pick up the defaults automatically. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every extension scan runs in `health` mode, where these two gates are active.
 
 ---
 
@@ -536,7 +652,7 @@ Detected via registry probes and PowerShell — no elevated privileges required.
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, VS Code, Cursor |
+| Developer tools | Git, Docker Desktop, Visual Studio, VS Code, Cursor, Claude Code |
 | Shell | PowerShell |
 
 ### Linux
@@ -546,8 +662,8 @@ Detected by reading the system package database directly.
 | Distro family | Package manager | Source |
 |---|---|---|
 | Debian / Ubuntu | dpkg | `/var/lib/dpkg/status` |
-| Alpine | apk | `/lib/apk/db/installed` |
-| Red Hat / AlmaLinux / Rocky | rpm | `rpm -qa` |
+| Alpine / Alpaquita | apk | `/lib/apk/db/installed` |
+| Red Hat / AlmaLinux / Rocky / CentOS / Fedora | rpm | `rpm -qa` |
 
 > On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
 
@@ -559,7 +675,7 @@ Detected by reading the system package database directly.
 |---|---|---|
 | **Node.js** | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
 | **Python** | pip / virtualenv | `.venv`, `venv`, virtual environment directories |
-| **PHP** | Composer | `vendor/` |
+| **PHP** | Composer | `vendor/`, `composer.lock` |
 | **Rust** | Cargo | `Cargo.lock` |
 | **Go** | Go Modules | `go.sum` |
 | **C#/.NET** | NuGet | `packages.lock.json` / `obj/project.assets.json` |
@@ -568,11 +684,20 @@ Detected by reading the system package database directly.
 | **Swift** | SwiftPM, Carthage | `Package.resolved` / `.build/workspace-state.json` / `Cartfile.resolved` |
 | **Flutter/Dart** | pub | `pubspec.lock` / `.dart_tool/package_config.json` |
 
+**Swift and Flutter/Dart notes.** PURLs are `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV ecosystem `SwiftURL`) and `pkg:pub/<name>@<version>`, with `?repository_url=` / `?vcs_url=` qualifiers on pub packages from a non-pub.dev registry or a git repository. Local packages (SwiftPM `fileSystem` / `localSourceControl`, pub `path`) and pub `sdk` packages are skipped, and CocoaPods (`Podfile.lock`) is intentionally not scanned because OSV has no CocoaPods ecosystem. A SwiftPM pin on a branch or bare commit is inventoried with an empty version and dropped from vulnerability lookups. Swift lockfiles carry no dev/prod signal, so every Swift package is `prod`; for pub, `direct dev` → `dev` and everything else → `prod`. Neither lockfile records a dependency graph or license data, so these packages have no introduced-by/parent edges and their license is `unknown`.
+
 ---
 
 ## Reports
 
-Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** + **SARIF** reports.
+Every scan writes a self-contained interactive **HTML** report plus machine-readable **JSON**, **SBOM**, and **SARIF** files:
+
+| File | Format | Notes |
+|---|---|---|
+| `latest.html` | Self-contained HTML | Works fully offline, no server needed |
+| `latest.json` | JSON | Full report, including the executive summary, suggested fixes, reachability, KEV/EPSS, and compliance data |
+| `latest.cdx.json` | CycloneDX v1.6 SBOM | Components, dependency graph, and vulnerabilities as VEX; secrets, license, KEV/EPSS, and suggested-fix data in `properties` |
+| `latest.sarif.json` | SARIF 2.1.0 | Separate runs for dependency vulnerabilities, secrets, and license compliance |
 
 | Scan target | Report path |
 |---|---|
@@ -582,7 +707,7 @@ Every scan writes a self-contained interactive **HTML** + **JSON** + **SBOM** + 
 | VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest*` or `~/.vscode-oss/extensions/.ubel/reports/latest*` or `~/.cursor/extensions/.ubel/reports/latest*` |
 | Host platform | `~/.ubel/reports/latest*` |
 
-Previous scans are retained under:
+Previous scans are retained as timestamped zipped snapshots (`<ecosystem>_<mode>_<engine>__<timestamp>.zip`) under:
 
 - `<project-root>/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
 - `~/.vscode/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
@@ -592,18 +717,40 @@ Previous scans are retained under:
 
 ---
 
+## Extension vs. CLI
+
+The extension runs the same engine as the CLI's `health` mode. These parts of the [`@arcane-spark/ubel-node`](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) package are **not** in the extension:
+
+- The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection
+- `ubel-docker` container-image scanning
+- Fixed-configuration CLIs for AI-agent sandboxes and CI/CD (`ubel-agent`, `ubel-cicd`)
+- Persistent policy modes and per-run policy flags (`--threshold`, `--block-kev`, `--epss-threshold`, …) — in the extension, edit `config.json` instead
+- The GitHub Action
+
+---
+
 ## Requirements
 
 - Node.js `>=18.0.0`
 - VS Code `^1.85.0` (extension only)
+- Network access to osv.dev and the NVD API (or your configured mirrors) for vulnerability lookups; KEV/EPSS lookups are best-effort
 
 ---
 
 ## Privacy
 
-UBEL is fully local. The only external calls are to [osv.dev's public API](https://osv.dev/) and [NVD's API](https://nvd.nist.gov/), which receive package PURLs (package name + version) to check for known vulnerabilities. No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If either lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
+UBEL is fully local. The external calls it makes are:
 
-Both endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where even those two calls need to stay on an internal network. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
+| Service | Purpose | Failure behavior |
+|---|---|---|
+| [osv.dev](https://osv.dev/) public API | Vulnerability lookups — receives package PURLs (package name + version) | Scan fails with an error |
+| [NVD API](https://nvd.nist.gov/) | Host-platform CPE lookups and advisory enrichment | Scan fails with an error |
+| [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) (`www.cisa.gov`) | Known-exploited flag | Best-effort — scan completes, KEV fields are `null` |
+| [FIRST EPSS API](https://www.first.org/epss/) (`api.first.org`) | Exploit-likelihood score, queried by CVE id | Best-effort — scan completes, EPSS fields are `null` |
+
+No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. UBEL does not look up your public IP address; the local network interfaces recorded in reports are used only inside the report and never leave the machine. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If an OSV or NVD lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
+
+The OSV and NVD endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where those calls need to stay on an internal network. A mirror must expose the same path shape as the public API, and the "view online" reference links in reports still point at the public sites. There is currently no endpoint override for KEV/EPSS: in a fully air-gapped setup the scan runs without that data and says so. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 
 ---
 

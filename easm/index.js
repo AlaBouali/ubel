@@ -9,6 +9,8 @@ import {
   parseFailOn,
   filterByMinSeverity,
   failOnExitCode,
+  parseEpssThresholdArg,
+  DEFAULT_EPSS_THRESHOLD,
   writeEasmReports,
   printScanSummary,
   collectScanMetadata,
@@ -65,6 +67,17 @@ Options:
                             exits 0. "N:sev" fails only once MORE than N
                             matches exist, e.g. "5:high" — for CI gates
                             that tolerate a known baseline.
+  --block-kev [true|false]
+                            Exit 2 if any vulnerability is in the CISA Known
+                            Exploited Vulnerabilities catalog, whatever its
+                            severity (default: true; a bare flag means true).
+  --epss-threshold <value>
+                            Exit 2 if any vulnerability's FIRST EPSS score is at
+                            or above <value>: a fraction (0.1), a percentage
+                            (10%) or "none" (default: 0.1). KEV/EPSS data is
+                            best-effort: if either feed is unreachable the scan
+                            still completes, the report says so, and that rule
+                            is not enforced. "--fail-on none" disables both.
   --no-secrets             Skip the client-side JavaScript secrets crawl (see
                             below). Cuts one page fetch plus its script
                             fetches per live host.
@@ -129,6 +142,8 @@ function parseArgs(argv) {
     concurrency: 4,
     minSeverity: 'unknown',
     failOn: 'critical',
+    blockKev: true,
+    epssThreshold: DEFAULT_EPSS_THRESHOLD,
     scanSecrets: true,
     cookie: null,
     headers: {},
@@ -160,6 +175,18 @@ function parseArgs(argv) {
     else if (a === '--working-dir') args.workingDir = argv[++i];
     else if (a === '--min-severity') args.minSeverity = argv[++i];
     else if (a === '--fail-on') args.failOn = argv[++i];
+    else if (a === '--block-kev') {
+      const next = argv[i + 1];
+      if (next !== undefined && /^(true|false)$/i.test(next)) { args.blockKev = next.toLowerCase() === 'true'; i++; }
+      else args.blockKev = true;
+    } else if (a === '--epss-threshold') {
+      const v = parseEpssThresholdArg(String(argv[++i] ?? '').toLowerCase());
+      if (v === undefined) {
+        console.error('--epss-threshold must be a fraction in (0, 1] (e.g. 0.1), a percentage (e.g. 10%), or "none"');
+        process.exit(2);
+      }
+      args.epssThreshold = v;
+    }
     else if (a === '--no-secrets') args.scanSecrets = false;
     else if (a === '--cookie') {
       const val = argv[++i];
@@ -252,6 +279,8 @@ async function main() {
     // --min-severity hid findings from the vulnerability list.
     scanSecrets: args.scanSecrets,
     minSeverity: args.minSeverity,
+    blockKev: args.blockKev,
+    epssThreshold: args.epssThreshold,
     osvEndpoint: process.env.UBEL_OSV_ENDPOINT || null,
     nvdEndpoint: process.env.UBEL_NVD_ENDPOINT || null,
     wpvulnerabilityEndpoint: process.env.UBEL_WPVULNERABILITY_ENDPOINT || null,
@@ -263,7 +292,7 @@ async function main() {
 
   await writeEasmReports(reportPayload, args, { reportType: 'easm-url', cliLabel: '[ubel-url]' });
 
-  process.exitCode = failOnExitCode(scanResult.vulnerabilities, args.failOn);
+  process.exitCode = failOnExitCode(scanResult.vulnerabilities, args.failOn, { blockKev: args.blockKev, epssThreshold: args.epssThreshold });
 }
 
 export { main, parseArgs, USAGE_NOTICE };

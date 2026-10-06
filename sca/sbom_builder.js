@@ -41,6 +41,28 @@ export class CycloneDXBuilder {
     return hit ? { version: hit.version, count: hit.count } : null;
   }
 
+  /**
+   * KEV / EPSS as flat CycloneDX properties. Nothing is emitted when the
+   * enrichment never ran; a null (feed unavailable) is written as "unknown"
+   * so it is not mistaken for "not listed" / zero.
+   */
+  _threatIntelProps(v) {
+    if (v.is_kev === undefined && v.epss_score === undefined) return [];
+    const out = [];
+    out.push({ name: "kev.listed", value: v.is_kev === true ? "true" : v.is_kev === false ? "false" : "unknown" });
+    if (v.is_kev === true) {
+      if (v.kev_added)    out.push({ name: "kev.date_added", value: String(v.kev_added) });
+      if (v.kev_deadline) out.push({ name: "kev.due_date",   value: String(v.kev_deadline) });
+    }
+    if (typeof v.epss_score === "number") {
+      out.push({ name: "epss.score", value: String(v.epss_score) });
+      if (typeof v.epss_percentile === "number") out.push({ name: "epss.percentile", value: String(v.epss_percentile) });
+    } else {
+      out.push({ name: "epss.score", value: "unknown" });
+    }
+    return out;
+  }
+
   /** Build properties array from selected keys. */
   _props(record, keys) {
     const out = [];
@@ -203,6 +225,13 @@ export class CycloneDXBuilder {
 
       const refs = v.references || [];
       const advisories = refs.filter(r => r.url).map(r => ({ url: r.url }));
+      // Link the CISA KEV catalog entry when the CVE is listed there.
+      if (v.is_kev === true) {
+        advisories.push({
+          title: "CISA Known Exploited Vulnerabilities Catalog",
+          url: "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        });
+      }
 
       const fixes = v.fixes || [];
       const recommendation = fixes.join("\n");
@@ -242,10 +271,26 @@ export class CycloneDXBuilder {
       }
       if (v.severity_vector) rating.vector = v.severity_vector;
 
+      const ratings = [rating];
+      // EPSS as its own rating: CycloneDX 1.6 has no EPSS method, so it is
+      // method "other"; `score` is the 0-100 percent probability of
+      // exploitation in the next 30 days (raw 0-1 value is in properties).
+      if (typeof v.epss_score === "number") {
+        const pctScore = Math.round(v.epss_score * 10000) / 100;
+        ratings.push({
+          source: { name: "FIRST EPSS", url: "https://www.first.org/epss/" },
+          score: pctScore,
+          method: "other",
+          justification:
+            `EPSS: ${pctScore}% estimated probability of exploitation in the next 30 days` +
+            (typeof v.epss_percentile === "number" ? ` (percentile ${Math.round(v.epss_percentile * 10000) / 100})` : ""),
+        });
+      }
+
       const entry = {
         id: vid,
         source: { name: sourceName, url: sourceUrl },
-        ratings: [rating],
+        ratings,
         cwes: (v.cwes || []).map(c => {
           const n = typeof c === "number" ? c : parseInt(String(c).replace(/^CWE-/i, ""), 10);
           return isNaN(n) ? null : n;
@@ -277,6 +322,15 @@ export class CycloneDXBuilder {
             { name: "reachability.signals.introduced_by_count",value: String(reach.signals.introduced_by_count ?? "") },
           ] : []),
         ];
+      }
+
+      // Exploit intelligence (CISA KEV + FIRST EPSS).
+      {
+        const ti = this._threatIntelProps(v);
+        if (ti.length) {
+          entry.properties = entry.properties || [];
+          entry.properties.push(...ti);
+        }
       }
 
       // Suggested fix version for this vulnerability (omitted when none covers it).
@@ -346,6 +400,8 @@ export class CycloneDXBuilder {
   generate() {
     const decision = this.data.decision || {};
     const stats = this.data.stats || {};
+    const vulns = this.data.vulnerabilities || [];
+    const ti = this.data.threat_intel || null;
     return {
       bomFormat: "CycloneDX",
       specVersion: this.CYCLONEDX_VERSION,
@@ -365,6 +421,10 @@ export class CycloneDXBuilder {
         { name: "license_not_osi_approved", value: String((stats.license_stats || {}).not_osi_approved || 0) },
         { name: "license_unknown", value: String((stats.license_stats || {}).unknown || 0) },
         { name: "secrets_found", value: String((this.data.secrets || {}).count || 0) },
+        // Exploit intelligence roll-up. Counts are only meaningful when the
+        // feed was reachable, so feed status travels with them.
+        { name: "kev_vulnerabilities", value: String(vulns.filter(v => v.is_kev === true).length) },
+        ...(ti ? [{ name: "ubel:threat_intel", value: JSON.stringify(ti) }] : []),
         // Full secrets payload — CycloneDX's root schema forbids
         // additionalProperties, so this can't be a top-level "x-"
         // key (see buildSecrets() docstring); it has to travel as a

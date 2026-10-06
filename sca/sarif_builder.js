@@ -327,6 +327,35 @@ export class SarifBuilder {
     return locations;
   }
 
+  /**
+   * KEV / EPSS fields for one vulnerability (see enrichWithThreatIntel in
+   * engine.js). null means "feed unavailable / not checked" and is kept
+   * distinct from false / 0 so consumers don't read unknown as safe.
+   */
+  _threatIntel(v) {
+    const num = x => (typeof x === "number" && isFinite(x) ? x : null);
+    return {
+      is_kev:          typeof v.is_kev === "boolean" ? v.is_kev : null,
+      kev_added:       v.kev_added || null,
+      kev_deadline:    v.kev_deadline || null,
+      epss_score:      num(v.epss_score),
+      epss_percentile: num(v.epss_percentile),
+    };
+  }
+
+  /**
+   * SARIF result.rank (0-100, higher = more urgent). A CISA KEV entry is
+   * already exploited in the wild, so it ranks 100; otherwise the EPSS
+   * probability (0-1) scaled to 0-100. Returns null (rank omitted, SARIF
+   * default -1) when there is no exploit signal at all.
+   */
+  _rank(v) {
+    const ti = this._threatIntel(v);
+    if (ti.is_kev === true) return 100;
+    if (ti.epss_score !== null) return Math.round(Math.min(Math.max(ti.epss_score, 0), 1) * 1000) / 10;
+    return null;
+  }
+
   /** Build help URI */
   _helpUri(v) {
     return v.url;
@@ -480,8 +509,19 @@ export class SarifBuilder {
 
           is_infection:
             !!v.is_infection,
+
+          // Exploit intelligence: CISA KEV + FIRST EPSS (null = unknown).
+          ...this._threatIntel(v),
         },
       };
+
+      // Searchable tags (shown by GitHub code scanning and the SARIF viewer).
+      {
+        const tags = [];
+        if (v.is_kev === true) tags.push("kev", "known-exploited");
+        if (typeof v.epss_score === "number") tags.push("epss");
+        if (tags.length) rule.properties.tags = tags;
+      }
 
       if (relationships.length) {
         rule.relationships = relationships;
@@ -547,7 +587,13 @@ export class SarifBuilder {
         v.id ||
         "Security issue detected.";
 
-      results.push({
+      // A CISA KEV entry is exploited in the wild: report it as an error
+      // however it is scored (same rule the executive summary applies),
+      // unless reachability confidently ruled it out.
+      const ti = this._threatIntel(v);
+      const rank = this._rank(v);
+
+      const result = {
         ruleId,
 
         ruleIndex:
@@ -555,7 +601,7 @@ export class SarifBuilder {
 
         level: isUnreachable
           ? "none"
-          : this._severityToLevel(v.severity, isInfection),
+          : (ti.is_kev === true ? "error" : this._severityToLevel(v.severity, isInfection)),
 
         message: {
           text: this._truncate(
@@ -659,8 +705,15 @@ export class SarifBuilder {
 
           suggested_fixes:
             this._invById.get(v.affected_package_id)?.suggested_fixes ?? null,
+
+          // Exploit intelligence: CISA KEV + FIRST EPSS (null = unknown).
+          ...ti,
+          exploit_rank: rank,
         },
-      });
+      };
+
+      if (rank !== null) result.rank = rank;
+      results.push(result);
     }
 
     return results;
@@ -1301,6 +1354,10 @@ export class SarifBuilder {
 
         inventory_suggested_fixes:
           this.buildInventorySuggestedFixes(),
+
+        // Feed status of the KEV / EPSS enrichment for this scan.
+        threat_intel:
+          this.data.threat_intel || null,
       },
     };
 
