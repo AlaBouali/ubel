@@ -5,12 +5,21 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 // Canonical language-family codes — must match constants.js FAMILY_LABELS.
-const ALL_LANGUAGES = ['js', 'python', 'php', 'ruby', 'go', 'rust', 'java', 'kotlin', 'csharp', 'c'];
+const ALL_LANGUAGES = ['js', 'python', 'php', 'ruby', 'go', 'rust', 'java', 'kotlin', 'dart', 'swift', 'csharp', 'c'];
 
 // "Web"-shaped languages: everything except C, which essentially never hosts
 // the request/response, ORM, templating, or session-cookie code these
 // classes are about. Used for the many web-app-flavoured classes below.
 const WEB_LANGUAGES = ['js', 'python', 'php', 'ruby', 'go', 'rust', 'java', 'kotlin', 'csharp'];
+
+// Dart (Flutter) and Swift (iOS/macOS) are deliberately NOT in WEB_LANGUAGES:
+// they are overwhelmingly client/mobile code, and sending ~25 server-side
+// classes (CSRF, cookie attributes, CORS, GraphQL, host-header …) with every
+// Flutter/iOS chunk would add cost and noise. They receive the generic
+// ALL_LANGUAGES classes, a handful of web-adjacent classes opted in by name
+// below (XSS via WebView/templating, JWT handling, code injection, ReDoS), and
+// the dedicated mobile classes scoped to MOBILE_LANGUAGES.
+const MOBILE_LANGUAGES = ['dart', 'swift'];
 
 // Each entry: { name, cwe, needsUserInput, languages, signals }
 //   name         — canonical label used in vuln_name output field
@@ -34,6 +43,8 @@ const DEFAULT_VULN_CLASSES = [
       'Connection strings or DSN literals that include a password component',
       'Private keys or certificates embedded in source (BEGIN PRIVATE KEY, BEGIN RSA PRIVATE KEY, etc.)',
       'OAuth/JWT secrets, HMAC signing keys, or encryption keys as string literals',
+      'Dart/Flutter: API keys, tokens or passwords as `const` / `static final` String literals, or as the `defaultValue:` of `String.fromEnvironment(...)`; secrets loaded from a `.env` file bundled as a Flutter asset (flutter_dotenv) still ship inside the app and are extractable by anyone who unpacks it',
+      'Swift/iOS: API keys, client secrets or tokens in `static let` constants, string literals passed to request headers or SDK initialisers; any secret compiled into the app binary is recoverable by a user with the IPA',
     ],
   },
   {
@@ -46,6 +57,8 @@ const DEFAULT_VULN_CLASSES = [
       'ORM raw() / execute() / query() called with a non-parameterized string built from user input',
       'Dynamic ORDER BY / table name / column name constructed from user-supplied values without allowlist validation',
       'Second-order injection: user input stored to DB then later read back and used in another query without re-sanitisation',
+      'Dart: sqflite / drift / sqlite3 `rawQuery`, `rawInsert`, `rawUpdate`, `rawDelete`, `execute`, or drift `customSelect` / `customStatement` built with string interpolation (`$var`, `${expr}`) or `+` concatenation instead of `?` placeholders with an arguments list',
+      'Swift: `sqlite3_exec` / `sqlite3_prepare` with an interpolated string, GRDB or SQLite.swift raw SQL built with string interpolation instead of `arguments:`, or `NSPredicate(format:)` assembled by concatenating user input',
     ],
   },
   {
@@ -58,6 +71,8 @@ const DEFAULT_VULN_CLASSES = [
       'Template string or concatenation used to build a shell command',
       'User input passed as an argument that is later interpreted by a shell (pipes, semicolons, backticks not sanitised)',
       'Indirect: user-controlled value flows into a function that internally calls a shell command',
+      'Dart: `Process.run` / `Process.start` / `Process.runSync` with `runInShell: true`, or an executable or argument list assembled from user input (`sh -c`, `cmd /c`)',
+      'Swift: `Process` / `NSTask` launching `/bin/sh -c` with an interpolated command string, or `posix_spawn`, `system()`, `popen()` with user-controlled input (macOS and server-side Swift)',
     ],
   },
   {
@@ -70,13 +85,15 @@ const DEFAULT_VULN_CLASSES = [
       'Direct use of user input as a filename in fs.readFile, open(), File(), readFileSync, etc.',
       'Zip/archive extraction without validating that each entry\'s path stays within the destination directory (Zip Slip)',
       'Static file serving with user-controlled path segments that are not normalized with path.resolve + startsWith check',
+      'Dart: `File(path)`, `Directory(path)`, `File.copy` / `rename` where `path` includes user input without normalising it and checking it stays inside the intended directory; archive extraction (`ZipDecoder`, `TarDecoder`) that writes entries using `file.name` without rejecting `..` components (zip-slip)',
+      'Swift: `FileManager`, `URL(fileURLWithPath:)` or `Data(contentsOf:)` using user input without standardising the path and confirming it stays inside the intended directory; archive extraction (ZIPFoundation, SSZipArchive) that writes entries without rejecting `..` components',
     ],
   },
   {
     name: 'unsafe deserialization',
     cwe: 'CWE-502',
     needsUserInput: true,
-    languages: ['python', 'java', 'kotlin', 'php', 'csharp', 'ruby', 'js'],
+    languages: ['python', 'java', 'kotlin', 'php', 'csharp', 'ruby', 'js', 'swift'],
     signals: [
       'pickle.loads / pickle.load / yaml.load (without Loader=yaml.SafeLoader) / marshal.loads on user-controlled data',
       'Java ObjectInputStream.readObject on data arriving from the network or a user-supplied file',
@@ -86,19 +103,21 @@ const DEFAULT_VULN_CLASSES = [
       'Ruby: Marshal.load or YAML.load called on user-controlled input, allowing arbitrary code execution',
       'Node.js node-serialize / serialize-javascript eval path on untrusted data',
       'Deserialization of JSON/XML with class mapping that can instantiate arbitrary types (e.g. Jackson polymorphic typing enabled globally)',
+      'Swift: `NSKeyedUnarchiver.unarchiveObject(with:)` / `unarchiveTopLevelObjectWithData` or `NSCoding` decoding without `requiresSecureCoding = true` or a class allow-list (`unarchivedObject(ofClasses:from:)`) on data from the network, a file, the pasteboard or a URL scheme',
     ],
   },
   {
     name: 'XSS / template injection',
     cwe: 'CWE-79 / CWE-94',
     needsUserInput: true,
-    languages: WEB_LANGUAGES,
+    languages: [...WEB_LANGUAGES, ...MOBILE_LANGUAGES],
     signals: [
       'User input rendered into HTML without escaping: innerHTML, document.write, dangerouslySetInnerHTML, v-html, [innerHTML]=',
       'Server-side template engines (Jinja2, Twig, Pebble, Velocity, Freemarker, Handlebars, EJS) receiving user input in the template string rather than only in the context variables',
       'React/Vue/Angular bypassing the framework\'s auto-escaping via raw HTML APIs',
       'eval() or new Function() called with a template string that contains user data',
       'DOM clobbering: user-controlled HTML inserted adjacent to code that reads named DOM properties',
+      'Dart/Swift: HTML assembled from user input and passed to a WebView (`loadHtmlString`, `loadData`, `loadHTMLString`) or to a server-side template (Vapor Leaf `#unsafeHTML`, mustache `{{{ }}}`) without escaping',
     ],
   },
   {
@@ -176,7 +195,7 @@ const DEFAULT_VULN_CLASSES = [
     name: 'code injection / dangerous eval',
     cwe: 'CWE-95',
     needsUserInput: true,
-    languages: ['js', 'python', 'ruby', 'php'],
+    languages: ['js', 'python', 'ruby', 'php', 'dart', 'swift'],
     signals: [
       'eval(), new Function(), setTimeout/setInterval with a string argument, execScript receiving user data',
       'Python exec() / compile() / eval() on user-supplied code strings',
@@ -184,6 +203,8 @@ const DEFAULT_VULN_CLASSES = [
       'PHP eval(), preg_replace with /e modifier, assert() with a string argument on user data',
       'Server-side template rendered from a string built with user content (distinct from XSS — focuses on server execution)',
       'Dynamic require() / import() with a user-controlled module path',
+      'Dart: `WebViewController.runJavaScript` / `runJavaScriptReturningResult`, flutter_inappwebview `evaluateJavascript`, or `Isolate.spawnUri` executing script text or a URI built from user input',
+      'Swift: `WKWebView.evaluateJavaScript` or `JSContext.evaluateScript` called with a string that interpolates user-controlled data',
     ],
   },
   {
@@ -209,6 +230,8 @@ const DEFAULT_VULN_CLASSES = [
       'Logging statements (console.log, logger.debug, print) that output passwords, tokens, PII, or full request bodies',
       'Sensitive fields included in serialised API responses without an explicit exclusion list',
       'Directory listing or source file exposure through misconfigured static file serving',
+      'Dart: `print`, `debugPrint`, `log()` (dart:developer) or logger calls that output tokens, passwords, PII or full request / response bodies — `print` is not stripped from release builds',
+      'Swift: `print`, `NSLog`, `os_log` / `Logger` with `privacy: .public` (or legacy `%{public}@`) on tokens, passwords or PII; `dump()` of objects holding credentials',
     ],
   },
   {
@@ -223,17 +246,20 @@ const DEFAULT_VULN_CLASSES = [
       'Insufficient key length: RSA < 2048 bits, AES-128 for highly sensitive data, ECDSA curves below P-256',
       'Password stored with a non-password-hashing algorithm (plain SHA-*/MD5 without salt, or reversible encryption)',
       'TLS/SSL version pinned to TLSv1.0 or TLSv1.1, or certificate verification disabled (verify=False, rejectUnauthorized: false)',
+      'Dart: `Random()` (instead of `Random.secure()`) used for tokens, keys, IVs, nonces or OTPs; `md5` / `sha1` from package:crypto used for passwords or integrity; package:encrypt AES with `AESMode.ecb`, a hardcoded `Key.fromUtf8(...)`, or a static / all-zero IV (`IV.fromLength(16)`) reused across messages',
+      'Swift: CommonCrypto `CC_MD5` / `CC_SHA1` / `kCCAlgorithmDES` / `kCCOptionECBMode`; CryptoKit `Insecure.MD5` / `Insecure.SHA1` used for security purposes; `random()` / `rand()` / `drand48()` for tokens (use `SecRandomCopyBytes` or `SystemRandomNumberGenerator`); hardcoded keys or IVs passed to AES.GCM / `CCCrypt`',
     ],
   },
   {
     name: 'integer overflow / underflow',
     cwe: 'CWE-190',
     needsUserInput: true,
-    languages: ['c', 'rust', 'go', 'java', 'kotlin', 'csharp'],
+    languages: ['c', 'rust', 'go', 'java', 'kotlin', 'swift', 'csharp'],
     signals: [
       'Arithmetic on user-supplied numeric values used as buffer sizes, array indices, or loop bounds without range checks',
       'Signed/unsigned integer conversion where user input could produce a negative buffer size',
       'Multiplication of user-controlled values used to allocate memory (e.g. width * height without overflow check)',
+      'Swift: `+`, `-`, `*` or `Int(...)` conversions on attacker-controlled integers trap at runtime on overflow (crash / denial of service); `Int32(truncatingIfNeeded:)`, `&+`, `&*` or `unsafeBitCast` silently wrap or reinterpret values later used as sizes or indices',
     ],
   },
   {
@@ -248,6 +274,8 @@ const DEFAULT_VULN_CLASSES = [
       'Kotlin: use of the `!!` (not-null assertion) operator on a nullable type that could reasonably be null based on control flow or external input',
       'Kotlin: accessing a `lateinit` property before it has been initialized without using `::property.isInitialized`',
       'Kotlin: Java interop where a nullable Java type is treated as non-nullable in Kotlin without explicit null checks',
+      'Dart: the `!` null-assertion operator on a value that can be null from external input, a map lookup, a failed parse or an async result; `late` fields read before initialisation (LateInitializationError); unchecked `as` casts of decoded JSON or platform-channel values that throw on unexpected types',
+      'Swift: force-unwrap `!`, implicitly unwrapped optionals, `try!`, or `as!` applied to values from the network, user input, files, URL / deep-link components or JSON decoding — a crash an attacker can trigger repeatedly (denial of service)',
     ],
   },
   {
@@ -300,6 +328,8 @@ const DEFAULT_VULN_CLASSES = [
       'Go: shared mutable state accessed by multiple goroutines without synchronization (mutex, channel), leading to data races',
       'Kotlin: shared mutable state accessed by multiple coroutines without proper synchronization (Mutex, synchronized), leading to race conditions',
       'Kotlin: coroutine scope not properly managed, causing coroutines to outlive their parent scope and consume resources',
+      'Swift: mutable state shared across threads / GCD queues / Tasks without an actor, serial queue, lock or `@MainActor` isolation',
+      'Dart: check-then-act across an `await` where state can change between the check and the act (async re-entrancy), e.g. a balance / token / permission check followed by an awaited call and then the action',
     ],
   },
   {
@@ -330,7 +360,7 @@ const DEFAULT_VULN_CLASSES = [
     // Go's regexp and Rust's regex crate both use RE2-style finite-automaton
     // engines that are immune to catastrophic backtracking, so they're
     // excluded here.
-    languages: ['js', 'python', 'php', 'ruby', 'java', 'kotlin', 'csharp', 'c'],
+    languages: ['js', 'python', 'php', 'ruby', 'java', 'kotlin', 'dart', 'swift', 'csharp', 'c'],
     signals: [
       'User-controlled input matched against a regular expression that contains catastrophic backtracking patterns: nested quantifiers, alternation inside repetition (e.g. (a+)+, (a|aa)+)',
       'User-supplied string used as the regex pattern itself (RegExp(userInput))',
@@ -472,13 +502,14 @@ const DEFAULT_VULN_CLASSES = [
     name: 'JWT / token validation weakness',
     cwe: 'CWE-347',
     needsUserInput: false,
-    languages: WEB_LANGUAGES,
+    languages: [...WEB_LANGUAGES, ...MOBILE_LANGUAGES],
     signals: [
       'JWT decoded/parsed without signature verification, or verification called with `verify: false` / equivalent',
       'Signing algorithm not pinned server-side, allowing `alg: none` or RS256→HS256 confusion (public key reused as the HMAC secret)',
       'Token `exp`, `nbf`, `iss`, or `aud` claims not checked after signature verification, allowing expired or wrong-audience tokens to be accepted',
       'Refresh token, password-reset token, or email-verification token generated without sufficient entropy, or not invalidated/rotated after use',
       'Token revocation not enforced server-side (e.g., logout only deletes the client-side cookie, no server-side blocklist or short-lived token design)',
+      'Dart/Swift: JWT payload decoded on the device (`JwtDecoder.decode`, manual base64 split) and trusted for authorisation decisions (isAdmin, role, expiry) without signature verification',
     ],
   },
   {
@@ -579,6 +610,70 @@ const DEFAULT_VULN_CLASSES = [
       'Authorization checks that are missing or inconsistent across different endpoints that perform the same or related sensitive actions (e.g., one endpoint allows admin action, another does not)',
       'User‑controlled `step`, `stage`, or `status` values that bypass workflow validation without server‑side checks',
       'Business constraints (e.g., maximum order quantity, minimum age, unique email) not enforced server‑side before completing an operation',
+    ],
+  },
+  // ─── Mobile (Flutter / Dart and Swift / iOS) ────────────────────────────
+  {
+    name: 'insecure local data storage (mobile)',
+    cwe: 'CWE-922',
+    needsUserInput: false,
+    languages: MOBILE_LANGUAGES,
+    signals: [
+      'Dart: tokens, passwords, session IDs, private keys or PII written to `SharedPreferences`, a `Hive` / `GetStorage` box without encryption, a plain file in the documents directory, or an unencrypted `sqflite` database instead of `flutter_secure_storage`',
+      'Dart: `flutter_secure_storage` configured with overly permissive keychain accessibility, or secrets mirrored into `SharedPreferences` as a cache',
+      'Swift: tokens, passwords or PII stored in `UserDefaults`, a plist, a plain file in Documents / Caches / tmp, Core Data or SQLite without file protection, instead of the Keychain',
+      'Swift: Keychain items saved with `kSecAttrAccessibleAlways` / `kSecAttrAccessibleAlwaysThisDeviceOnly` (readable while the device is locked), or files written with `.noFileProtection`',
+      'Sensitive values copied to the system clipboard (`Clipboard.setData`, `UIPasteboard.general`) where other apps can read them',
+    ],
+  },
+  {
+    name: 'insecure TLS / certificate validation (mobile)',
+    cwe: 'CWE-295',
+    needsUserInput: false,
+    languages: MOBILE_LANGUAGES,
+    signals: [
+      'Dart: `HttpClient.badCertificateCallback = (cert, host, port) => true`, dio `onHttpClientCreate` / `validateCertificate` that accepts every certificate, or an `HttpOverrides.global` that disables certificate checks',
+      'Dart: plain `http://` URLs for authentication, token or personal-data endpoints (cleartext traffic)',
+      'Swift: a `URLSessionDelegate` `urlSession(_:didReceive:completionHandler:)` that answers `.useCredential` with `URLCredential(trust: challenge.protectionSpace.serverTrust!)` without evaluating the trust (`SecTrustEvaluateWithError`) or pinning',
+      'Swift: Alamofire `ServerTrustManager` using `DisabledTrustEvaluator`, `NSAllowsArbitraryLoads` / `NSExceptionAllowsInsecureHTTPLoads` set from code, or plain `http://` endpoints carrying sensitive data',
+      'Certificate / public-key pinning that is implemented but ineffective: the comparison result is ignored, always true, or only enforced in debug builds',
+    ],
+  },
+  {
+    name: 'insecure WebView or JavaScript bridge (mobile)',
+    cwe: 'CWE-749',
+    needsUserInput: false,
+    languages: MOBILE_LANGUAGES,
+    signals: [
+      'Dart: `WebViewController.loadRequest(Uri.parse(...))`, `InAppWebView` `initialUrlRequest` or `launchUrl` with a URL taken from a deep link, push payload, or query parameter with no scheme / host allow-list',
+      'Dart: `JavaScriptMode.unrestricted` combined with `addJavaScriptChannel` / `addJavaScriptHandler` handlers that perform sensitive actions (token access, file read, payment, navigation) for any page origin, including remote or user-supplied content',
+      'Dart: WebView settings enabling `allowFileAccess`, `allowFileAccessFromFileURLs` or `allowUniversalAccessFromFileURLs` while loading remote content',
+      'Swift: `WKWebView.load` / `loadHTMLString(_:baseURL:)` with a user-controlled URL or `baseURL`; a `WKScriptMessageHandler` acting on `message.body` without validating `message.frameInfo.securityOrigin` or the message schema',
+      'Swift: `allowFileAccessFromFileURLs` / `allowUniversalAccessFromFileURLs` enabled through `setValue(_:forKey:)`, or use of the deprecated `UIWebView`',
+    ],
+  },
+  {
+    name: 'unvalidated deep link / URL scheme / platform channel input (mobile)',
+    cwe: 'CWE-939',
+    needsUserInput: true,
+    languages: MOBILE_LANGUAGES,
+    signals: [
+      'Swift: `application(_:open:options:)`, `scene(_:openURLContexts:)` or `application(_:continue:restorationHandler:)` (universal links) acting on URL components (login tokens, redirect targets, file paths, action parameters) without validating the scheme, host, source application or parameter values',
+      'Swift: a custom URL scheme that triggers sensitive actions (sign-in, payment, account change, file import) with no user confirmation or re-authentication',
+      'Dart: `go_router` / `app_links` / `uni_links` / `Uri.base` parameters (token, redirect, url, path) used to authenticate, navigate to arbitrary routes, open a WebView or read files without validation',
+      'Dart: `MethodChannel` / `EventChannel` handlers (`setMethodCallHandler`) trusting `call.arguments` for file paths, URLs or privileged operations without validation',
+      'OAuth / login callback received through a custom URL scheme without a `state` check or PKCE, allowing another app to intercept the authorisation code',
+    ],
+  },
+  {
+    name: 'client-side-only biometric / local authentication gate (mobile)',
+    cwe: 'CWE-287',
+    needsUserInput: false,
+    languages: MOBILE_LANGUAGES,
+    signals: [
+      'Dart: the boolean result of `LocalAuthentication.authenticate()` used as the only gate to unlock secrets or sensitive actions, instead of protecting the secret with biometric-bound secure storage',
+      'Swift: the `LAContext.evaluatePolicy` reply used as the only gate to reveal data (bypassable by hooking the callback); Keychain items not protected with a `SecAccessControl` policy such as `.biometryCurrentSet` or `.userPresence`',
+      'A fallback path that skips authentication when biometrics are unavailable or error out, or when a debug / feature flag is set',
     ],
   },
   // ─── Docker (Dockerfile / Compose) ──────────────────────────────────────
@@ -767,6 +862,8 @@ const DISPLAY_LANG_TO_FAMILY = {
   rust:       'rust',
   java:       'java',
   kotlin:     'kotlin',
+  dart:       'dart',
+  swift:      'swift',
   'c#':       'csharp',
   c:          'c',
   'c++':      'c',
@@ -820,6 +917,7 @@ export {
   DEFAULT_VULN_CLASSES,
   ALL_LANGUAGES,
   WEB_LANGUAGES,
+  MOBILE_LANGUAGES,
   DISPLAY_LANG_TO_FAMILY,
   filterVulnClassesForLanguage,
   buildVulnCatalog,

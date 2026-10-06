@@ -7,7 +7,7 @@ import { EXT_FAMILY } from './constants.js';
 import { detectConfigKind, familyForKind } from './configDetect.js';
 import {
   chunkPython, chunkJS, chunkPHP, chunkRuby, chunkGo,
-  chunkRust, chunkJava, chunkKotlin, chunkCSharp, chunkC,
+  chunkRust, chunkJava, chunkKotlin, chunkDart, chunkSwift, chunkCSharp, chunkC,
   chunkDocker, chunkIac,
 } from './languages/index.js';
 
@@ -46,6 +46,8 @@ function chunkFile(filePath) {
     case 'rust':   chunks = chunkRust(filePath, lines);   break;
     case 'java':   chunks = chunkJava(filePath, lines);   break;
     case 'kotlin': chunks = chunkKotlin(filePath, lines); break;
+    case 'dart':   chunks = chunkDart(filePath, lines);   break;
+    case 'swift':  chunks = chunkSwift(filePath, lines);  break;
     case 'csharp': chunks = chunkCSharp(filePath, lines); break;
     case 'c':      chunks = chunkC(filePath, lines);      break;
     case 'docker': chunks = chunkDocker(filePath, lines); break;

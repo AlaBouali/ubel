@@ -201,7 +201,7 @@ Every finding gets a `compliance` object (categories + per-framework control lis
 
 ## SAST — AI-Powered Static Analysis & Malicious Code Scanner
 
-Chunks your codebase into semantically-bounded units (13 language families — 10 source-code languages plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 59-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
+Chunks your codebase into semantically-bounded units (15 language families — 12 source-code languages (including Dart/Flutter and Swift) plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 59-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
 
 ```bash
 # Vulnerability scan
@@ -536,8 +536,8 @@ below.
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
@@ -1057,21 +1057,23 @@ classified at all — both enforced only against health-mode scans, since
 license risk is a compliance concern on what's already installed, not an
 install-time security gate.
 
-### Malware SAST — 10 source-code language families, universally
+### Malware SAST — 12 source-code language families, universally
 
 Malware detection is a two-pass LLM pipeline covering 15 intentional-malice
-classes, applied identically across all 10 source-code families (JS,
-Python, PHP, Ruby, Go, Rust, Java, Kotlin, C#, C) — every malware catalog
+classes, applied identically across all 12 source-code families (JS,
+Python, PHP, Ruby, Go, Rust, Java, Kotlin, Dart, Swift, C#, C) — every malware catalog
 entry is tagged for `ALL_LANGUAGES`, so there's no ecosystem where malware
 detection is a second-class capability. It's explicitly separate from the
 vulnerability SAST catalog (different pipeline, different intent: is this
 code *deliberately* malicious vs. *accidentally* exploitable) and ships as
 its own CLI (`ubel-mal`), independent of the SCA/firewall engine.
 
-### Vulnerability SAST — 13 language/config families
+### Vulnerability SAST — 15 language/config families
 
-The vulnerability-finding catalog (59 CWE-mapped classes) spans a wider set
-than malware detection: the 10 source-code families above, plus Docker,
+The vulnerability-finding catalog (64 CWE-mapped classes) spans a wider set
+than malware detection: the 12 source-code families above (Dart/Flutter and Swift
+include dedicated mobile classes — local storage, TLS/pinning, WebView bridges,
+deep links, biometric gates), plus Docker,
 Kubernetes, and general IaC as first-class chunkable targets — meaning
 Dockerfiles, K8s manifests, and Terraform/CloudFormation get scanned with
 the same three-pass scan → verify → taint-trace rigor as application code,

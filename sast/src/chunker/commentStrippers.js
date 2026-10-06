@@ -195,6 +195,91 @@ function stripCommentsCSharp(code) {
   return stripCommentsJS(code);
 }
 
+// Dart and Swift share C-style comments but differ from JS in ways that make
+// the JS stripper unsafe for them:
+//   • no regex literals — the JS stripper's regex heuristic could misread a
+//     division as the start of one (and truncate the line)
+//   • multi-line strings (Dart '''…''' / """…""", Swift """…""") that can
+//     contain `//` (URLs) across lines
+//   • Swift block comments nest; Swift raw strings (#"…"#); Dart raw strings
+//     (r'…'); Dart single-quoted strings but Swift has no '…' strings at all
+// so one character-level scanner, parameterised per language, handles both.
+function stripCommentsCStyle(code, { singleQuoteStrings, nestedBlockComments, swiftRawStrings }) {
+  const n = code.length;
+  let out = '';
+  let i = 0;
+
+  while (i < n) {
+    const ch  = code[i];
+    const ch2 = code.slice(i, i + 2);
+    const ch3 = code.slice(i, i + 3);
+
+    if (ch2 === '//') { while (i < n && code[i] !== '\n') i++; continue; }
+
+    if (ch2 === '/*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        const two = code.slice(i, i + 2);
+        if (two === '*/') { depth--; i += 2; }
+        else if (nestedBlockComments && two === '/*') { depth++; i += 2; }
+        else { if (code[i] === '\n') out += '\n'; i++; }
+      }
+      continue;
+    }
+
+    // Swift raw strings: #"…"#, ##"…"##, #"""…"""#
+    if (swiftRawStrings && ch === '#') {
+      const m = code.slice(i, i + 12).match(/^(#+)("""|")/);
+      if (m) {
+        const closer = m[2] + m[1];
+        const start  = i;
+        i += m[0].length;
+        while (i < n && code.slice(i, i + closer.length) !== closer) i++;
+        i = Math.min(n, i + closer.length);
+        out += code.slice(start, i);
+        continue;
+      }
+    }
+
+    // Triple-quoted multi-line strings
+    if (ch3 === '"""' || (singleQuoteStrings && ch3 === "'''")) {
+      const start = i;
+      i += 3;
+      while (i < n && code.slice(i, i + 3) !== ch3) { if (code[i] === '\\') i++; i++; }
+      i = Math.min(n, i + 3);
+      out += code.slice(start, i);
+      continue;
+    }
+
+    // Ordinary strings. Dart raw strings (r'…') have no escapes.
+    if (ch === '"' || (singleQuoteStrings && ch === "'")) {
+      const raw = singleQuoteStrings && /[rR]/.test(code[i - 1] || '') && !/[\w$]/.test(code[i - 2] || '');
+      const start = i;
+      i++;
+      while (i < n && code[i] !== '\n') {
+        if (!raw && code[i] === '\\') { i += 2; continue; }
+        if (code[i] === ch) { i++; break; }
+        i++;
+      }
+      out += code.slice(start, i);
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+  return collapseBlankLines(out.split('\n'));
+}
+
+function stripCommentsDart(code) {
+  return stripCommentsCStyle(code, { singleQuoteStrings: true, nestedBlockComments: true, swiftRawStrings: false });
+}
+
+function stripCommentsSwift(code) {
+  return stripCommentsCStyle(code, { singleQuoteStrings: false, nestedBlockComments: true, swiftRawStrings: true });
+}
+
 // Dockerfile / Compose / Kubernetes / CloudFormation / Ansible: the only
 // comment marker is '#', and — unlike shell — it's only treated as a comment
 // when it starts the line or follows whitespace. This matters because these
@@ -274,6 +359,8 @@ function stripComments(code, filePath) {
     case 'rust':   return stripCommentsRust(code);
     case 'java':   return stripCommentsJava(code);
     case 'kotlin': return stripCommentsKotlin(code);
+    case 'dart':   return stripCommentsDart(code);
+    case 'swift':  return stripCommentsSwift(code);
     case 'csharp': return stripCommentsCSharp(code);
     case 'js':
     default:       return stripCommentsJS(code);
@@ -290,6 +377,8 @@ export {
   stripCommentsRust,
   stripCommentsJava,
   stripCommentsKotlin,
+  stripCommentsDart,
+  stripCommentsSwift,
   stripCommentsCSharp,
   stripCommentsHash,
   stripCommentsHcl,

@@ -11,6 +11,8 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.rs',
   '.java',
   '.kt', '.kts',
+  '.dart',
+  '.swift',
   '.cs',
   '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx',
   '.tf', '.tfvars',
@@ -27,6 +29,9 @@ const IGNORE_DIRS = new Set([
   'venv', '.venv', 'env', '.env', 'eggs', '.eggs', 'htmlcov',
   'dist', 'build', 'out', 'target', 'bin', 'obj',
   'vendor',
+  // Dart/Flutter, Swift/iOS dependency & build output (dot-dirs such as
+  // .dart_tool / .build / .symlinks are already skipped by the walker).
+  'Pods', 'Carthage', 'DerivedData', 'SourcePackages',
   '.gradle', '.idea', '.vs', 'packages',
   '.git', '.svn', '.hg',
   'coverage',
@@ -42,6 +47,8 @@ const EXT_FAMILY = {
   '.rs':  'rust',
   '.java':'java',
   '.kt':  'kotlin', '.kts': 'kotlin',
+  '.dart':  'dart',
+  '.swift': 'swift',
   '.cs':  'csharp',
   '.c':   'c',   '.h':   'c',
   '.cpp': 'c',   '.cc':  'c',   '.cxx': 'c',
@@ -64,6 +71,8 @@ const FAMILY_LABELS = {
   rust:   'rust',
   java:   'java',
   kotlin: 'kotlin',
+  dart:   'dart',
+  swift:  'swift',
   csharp: 'csharp',
   c:      'c',
   docker: 'docker',
@@ -79,6 +88,7 @@ const LANGUAGE_ALIASES = {
   rb: 'ruby',
   rs: 'rust',
   kt: 'kotlin', kts: 'kotlin',
+  flutter: 'dart',
   cs: 'csharp', 'c#': 'csharp', dotnet: 'csharp', '.net': 'csharp',
   net: 'csharp',
   cpp: 'c', 'c++': 'c', cxx: 'c', cc: 'c',
@@ -93,7 +103,7 @@ const LANGUAGE_ALIASES = {
   kubernetes: 'k8s', k8s: 'k8s',
 };
 
-const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'csharp', 'c', 'docker', 'iac', 'k8s'];
+const DEFAULT_LANGUAGES = ['js', 'php', 'python', 'rust', 'go', 'ruby', 'java', 'kotlin', 'dart', 'swift', 'csharp', 'c', 'docker', 'iac', 'k8s'];
 
 export {
   SUPPORTED_EXTENSIONS,

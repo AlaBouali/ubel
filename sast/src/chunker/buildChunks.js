@@ -19,6 +19,10 @@ function resolveFileFamily(fullPath, ext) {
   return kind ? familyForKind(kind) : undefined;
 }
 
+// Machine-generated Dart (build_runner / codegen output). Never hand-written,
+// large, and a source of noise findings — skipped the same way node_modules is.
+const GENERATED_DART = /(?:\.g|\.freezed|\.gr|\.mocks|\.chopper)\.dart$|^generated_plugin_registrant\.dart$/;
+
 function resolveLanguageSet(languages) {
   const families = new Set();
   for (const raw of languages) {
@@ -90,6 +94,7 @@ function buildChunks(targetPath, opts) {
           recurse(fullPath);
         } else if (entry.isFile()) {
           if (skipFileSet.has(nameLower)) continue;
+          if (GENERATED_DART.test(nameLower)) continue;
           const ext    = path.extname(entry.name).toLowerCase();
           const family = resolveFileFamily(fullPath, ext);
           if (family && langFamilies.has(family)) files.push(fullPath);

@@ -23,6 +23,8 @@ const EXT_LANG = {
   '.rs':   'Rust',
   '.java': 'Java',
   '.kt':   'Kotlin',     '.kts': 'Kotlin',
+  '.dart': 'Dart',
+  '.swift':'Swift',
   '.cs':   'C#',
   '.c':    'C',     '.h':   'C',
   '.cpp':  'C++',   '.cc':  'C++',  '.cxx': 'C++',

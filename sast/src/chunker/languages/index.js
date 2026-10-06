@@ -8,6 +8,8 @@ import { chunkGo }     from './go.js';
 import { chunkRust }   from './rust.js';
 import { chunkJava }   from './java.js';
 import { chunkKotlin } from './kotlin.js';
+import { chunkDart }   from './dart.js';
+import { chunkSwift }  from './swift.js';
 import { chunkCSharp } from './csharp.js';
 import { chunkC }      from './c.js';
 import { chunkDocker } from './docker.js';
@@ -22,6 +24,8 @@ export {
   chunkRust,
   chunkJava,
   chunkKotlin,
+  chunkDart,
+  chunkSwift,
   chunkCSharp,
   chunkC,
   chunkDocker,

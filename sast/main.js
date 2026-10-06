@@ -649,7 +649,7 @@ SCOPE & CHUNKING  (chunk, analyze, malware)
   --max-chunks <n>               Cap the number of chunks scanned
   --skip-folders <a,b,c>         Comma-separated folder names to exclude
   --skip-files <a,b,c>           Comma-separated file names to exclude
-  --languages <a,b,c>            Comma-separated language filter, e.g. java,kotlin
+  --languages <a,b,c>            Comma-separated language filter, e.g. java,kotlin,flutter,swift
 
 DIFF MODE  (analyze, malware)
   --only-diff                    Restrict Pass 1 to diff-changed chunks; full chunk set is still built for Pass 3

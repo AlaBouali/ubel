@@ -9,9 +9,9 @@ This document covers the **SAST / malware-scan** component (source-level code an
 
 ## Features
 
-- Semantic code chunker across 13 language families (10 source-code languages plus Docker, IaC, and Kubernetes) — class/function-aware boundaries, not naive line-splitting
+- Semantic code chunker across 15 language families (12 source-code languages — including Dart/Flutter and Swift — plus Docker, IaC, and Kubernetes) — class/function-aware boundaries, not naive line-splitting
 - Three-pass analysis pipeline for vulnerability findings: **scan** (Pass 1) → **verify** (Pass 2) → **taint trace** (Pass 3)
-- Structured, CWE-mapped vulnerability catalog — 59 classes across the 13 language families, each with concrete "detect when you see" signals fed to the model
+- Structured, CWE-mapped vulnerability catalog — 64 classes across the 15 language families, each with concrete "detect when you see" signals fed to the model
 - Per-language catalog filtering — classes irrelevant to a chunk's language are dropped before the prompt is built, cutting token usage and false positives
 - Cross-chunk call-graph resolution — `buildFullCallChain` walks callers/callees across chunk boundaries so the taint-trace pass reasons about real source→sink flow, not a single isolated snippet
 - Separate **malicious code / backdoor** scan — its own catalog (15 classes: reverse shells, C2 beacons, supply-chain implants, persistence, exfiltration, anti-analysis evasion, logic bombs, and more), own prompts, own report set, never mixed with accidental-vulnerability findings
@@ -125,7 +125,7 @@ Builds the semantic chunk set for a directory and writes it to `sast_chunks.json
 | `--max-chunks <n>` | int | `1000` | Hard cap on chunks returned |
 | `--skip-folders <a,b,c>` | CSV | `[]` | Extra folder names to exclude, on top of the built-in ignore set |
 | `--skip-files <a,b,c>` | CSV | `[]` | File names to exclude |
-| `--languages <a,b,c>` | CSV | all 13 families | Restrict to specific language families |
+| `--languages <a,b,c>` | CSV | all 15 families | Restrict to specific language families |
 
 Built-in ignore directories (always excluded, on top of `--skip-folders`): `node_modules`, `.nyc_output`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.tox`, `venv`, `.venv`, `env`, `.env`, `eggs`, `.eggs`, `htmlcov`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `vendor`, `.gradle`, `.idea`, `.vs`, `packages`, `.git`, `.svn`, `.hg`, `coverage`.
 
@@ -253,6 +253,8 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 | Rust | `.rs` |
 | Java | `.java` |
 | Kotlin | `.kt` `.kts` |
+| Dart / Flutter | `.dart` (generated `*.g.dart`, `*.freezed.dart`, `*.gr.dart`, `*.mocks.dart`, `*.chopper.dart` and `generated_plugin_registrant.dart` are skipped; alias `--languages flutter`) |
+| Swift | `.swift` |
 | C# | `.cs` |
 | C / C++ | `.c` `.h` `.cpp` `.cc` `.cxx` `.hpp` `.hh` `.hxx` |
 | Docker | `Docker` `docker-compose.yml` |
@@ -263,7 +265,7 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 
 ---
 
-## Vulnerability Catalog (59 classes)
+## Vulnerability Catalog (64 classes)
 
 Each catalog entry carries a canonical name, primary CWE, a `needsUserInput` flag (whether the class requires a visible attacker-controlled source to be reportable — hardcoded secrets don't, SQL injection does), the language families it realistically applies to, and a set of concrete "detect when you see" signal bullets shown to the model. Classes irrelevant to a chunk's language are filtered out before the prompt is built via `filterVulnClassesForLanguage()`.
 
@@ -273,18 +275,22 @@ Per-language filtering already trims this list before it reaches a prompt, autom
 
 | Language | Applicable classes |
 |---|---|
-| C | 19 / 59 |
-| Ruby | 34 / 59 |
-| Python | 34 / 59 |
-| C# | 34 / 59 |
-| Go | 33 / 59 |
-| JS/TS | 35 / 59 |
-| Java / Kotlin | 35 / 59 |
-| PHP | 36 / 59 |
-| Rust | 36 / 59 |
-| IaC (Terraform / CloudFormation / Ansible) | 5 / 59 |
-| Docker | 6 / 59 |
-| Kubernetes | 6 / 59 |
+| C | 19 / 64 |
+| Ruby | 34 / 64 |
+| Python | 34 / 64 |
+| C# | 34 / 64 |
+| Go | 33 / 64 |
+| JS/TS | 35 / 64 |
+| Java / Kotlin | 35 / 64 |
+| PHP | 36 / 64 |
+| Rust | 36 / 64 |
+| Dart / Flutter | 21 / 64 |
+| Swift | 23 / 64 |
+| IaC (Terraform / CloudFormation / Ansible) | 5 / 64 |
+| Docker | 6 / 64 |
+| Kubernetes | 6 / 64 |
+
+Dart/Flutter and Swift are mobile/client languages, so they intentionally do **not** receive the server-side web classes (CSRF, cookie attributes, CORS, GraphQL, host-header …). They get the generic classes (secrets, SQL/command injection, path traversal, crypto, null-deref, …), a few web-adjacent ones (XSS via WebView/templating, JWT handling, code injection, ReDoS), and five mobile-specific classes: insecure local data storage, insecure TLS / certificate validation, insecure WebView or JavaScript bridge, unvalidated deep link / URL scheme / platform channel input, and client-side-only biometric gates.
 
 ---
 
@@ -461,9 +467,9 @@ Approximating tokens as `chars / 4` (measured directly from the actual prompt-bu
 
 | Component | Chars | ≈ Tokens |
 |---|---|---|
-| Full vuln catalog, 59 classes, with signals (`--include-signals`) | 40,602 | ~10,151 |
-| Full vuln catalog, 59 classes, no signals *(default)* | 7,407 | ~1,852 |
-| Malware catalog, 15 classes, with signals (`--include-signals`) | 8,642 | ~2,161 |
+| Full vuln catalog, 64 classes, with signals (`--include-signals`) | 50,940 | ~12,735 |
+| Full vuln catalog, 64 classes, no signals *(default)* | 8,110 | ~2,028 |
+| Malware catalog, 15 classes, with signals (`--include-signals`) | 9,092 | ~2,273 |
 | Malware catalog, 15 classes, no signals *(default)* | 789 | ~197 |
 | Scan prompt scaffold (rules + schema + headers, catalog excluded) | ~2,600 | ~650 |
 | Verification prompt scaffold (excluding injected code + finding JSON) | ~1,000 | ~250 |
