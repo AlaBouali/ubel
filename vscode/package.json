@@ -2,7 +2,7 @@
   "name": "ubel-vscode",
   "displayName": "UBEL — Supply-Chain & Secrets Scanner",
   "description": "Multi-ecosystem software composition analysis (SCA), secrets detector, and license/compliance scanner. Scans Node.js, Python, PHP, Rust, Go, C#/.NET, Java/Kotlin, Ruby, Swift, and Flutter/Dart projects — plus your VS Code/Cursor extensions, exposed secrets, and the host developer machine — for known vulnerabilities (OSV.dev + NVD), malicious packages, hardcoded credentials, and license risk. Every vulnerability is enriched with CISA KEV and FIRST EPSS exploit intelligence, annotated with reachability analysis, and paired with suggested per-version upgrade fixes; every finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8. Reports include an executive summary plus HTML, JSON, CycloneDX SBOM, and SARIF output. Runs locally in report-only mode — the only network calls are osv.dev and NVD (both mirror-configurable) plus best-effort CISA KEV and FIRST EPSS lookups.",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "publisher": "Arcane-Spark",
   "author": {
     "name": "Ala Bouali",
