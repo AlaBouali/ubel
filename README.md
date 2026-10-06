@@ -531,14 +531,14 @@ below.
 | Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Python (pip/uv/pipx/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ | ✅ |
-| C | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
 | Terraform / CloudFormation (IaC) | — | — | ✅ (misconfig) | — | — | — | ✅ |
