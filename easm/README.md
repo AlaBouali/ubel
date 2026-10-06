@@ -1184,7 +1184,7 @@ import { scanTargets } from "../easm/lib/scan.js";
 import { buildReportPayload, generateHtmlReport } from "../easm/lib/html_report.js";
 
 const result = await scanTargets(["example.com"], { allowPrivate: false });
-const payload = buildReportPayload(result, { tool_version: "0.19.0", targets: ["example.com"] });
+const payload = buildReportPayload(result, { tool_version: "0.20.0", targets: ["example.com"] });
 const html = await generateHtmlReport(payload);
 ```
 

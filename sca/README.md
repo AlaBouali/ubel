@@ -1202,13 +1202,13 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
 - uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
   with:
     command: npm
-    version: 0.19.0
+    version: 0.20.0
     args: check
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: npm
-    version: 0.19.0
+    version: 0.20.0
     args: install
 
 - uses: AlaBouali/ubel@<commit-sha>
@@ -1218,25 +1218,25 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: pip
-    version: 0.19.0
+    version: 0.20.0
     args: install                     # scan-gated `pip install`, resolved from ./requirements.txt
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: composer
-    version: 0.19.0
+    version: 0.20.0
     args: install                     # scan-gated `composer install --no-scripts`, resolved from the existing composer.lock
 
 - uses: AlaBouali/ubel@<commit-sha>    # needs a preceding astral-sh/setup-uv step for `uv` itself
   with:
     command: uv
-    version: 0.19.0
+    version: 0.20.0
     args: install                     # same fallback + generated-file install as the pip example above
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: apt                      # dnf/yum work the same way, as their own `command` values
-    version: 0.19.0
+    version: 0.20.0
     args: check curl
 ```
 
