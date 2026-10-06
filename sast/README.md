@@ -19,6 +19,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - Configurable `--fail-on` exit-code gate (`any` / `valid` / `exploitable` for SAST, `any` / `confirmed` for malware) — reports always contain every finding regardless of this flag; it only changes the CI exit code
 - Pluggable LLM provider registry — OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, and local/Docker-hosted models (Ollama-compatible), selectable per run with no code changes
 - Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.*` convenience links, kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
+- **Executive Summary** in the JSON and HTML reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Executive summary](#executive-summary))
 - **Compliance framework mapping** — every finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Zero external runtime dependencies (Node.js stdlib only)
 
@@ -178,7 +179,7 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 
 | `--fail-on` | Fails the build when… |
 |---|---|
-| `any` *(default)* | Any finding exists at all — including ones Pass 2/3 couldn't resolve either way. "Didn't finish checking" is never silently treated as clean. |
+| `any` *(default)* | A finding is confirmed exploitable, verified valid, or couldn't be resolved either way (a Pass 2/3 error or inconclusive result) — "didn't finish checking" is never silently treated as clean. With both verification and taint-trace switched off, any finding at all fails the build. Findings Pass 2 dismissed as false positives never fail it. |
 | `valid` | A finding was verified `is_valid: true`, regardless of exploitability. |
 | `exploitable` | A finding was taint-traced with `exploitable: true`. |
 
@@ -221,7 +222,7 @@ Runs scan → verify against the 15-class intentional-malicious-code catalog. No
 
 | `--fail-on` | Fails the build when… |
 |---|---|
-| `any` *(default)* | Any finding exists at all, including unresolved ones. |
+| `any` *(default)* | Any finding exists at all, including unresolved ones and ones verification dismissed as false positives (unlike `analyze`'s `any`). |
 | `confirmed` | A finding was verified `is_valid: true` — unresolved findings still fail the build too, since "couldn't determine" is never treated as clean. |
 
 ```bash
@@ -370,7 +371,28 @@ Every `malware` run writes the equivalent set under its own namespace:
     malware__<timestamp>.zip
 ```
 
-The HTML report is fully self-contained (no server required) and includes a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware` and `meta.scan_options` records the non-secret run settings (verification and taint-trace on/off, diff mode, chunk limits, language/folder filters) the summary needs to say what was and was not checked; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+
+---
+
+## Executive summary
+
+`executive_summary` is a plain-language overview for readers who are not security engineers (management, risk, compliance, product owners). It is the source-code counterpart of the SCA, EASM and cloud-scanner executive summaries and follows the same rules: it is derived only from data already in the scan (no extra LLM or network calls), it is built once and shared by the JSON and HTML reports so they never differ, it avoids code and flags in its headline text, and a figure that could not be checked is `null` ("n/a" in the HTML), never `0`. Both `ubel-sast` and `ubel-mal` produce one; for `ubel-mal` the wording and rules switch to malicious-code terms.
+
+It contains the overall risk rating with its reason and business impact, a one-page `cover` / `bottom_line` (top three risks, three things to do first, four key numbers), key findings, a `triage` breakdown of every candidate finding, scan coverage (which passes ran, per-language counts, scope limits), issues grouped by kind of weakness, issue types and files to fix first, suggested actions with default timeframes and owners, a compliance overview, scope, a **methodology** (steps actually performed, how the rating is decided, how things are prioritized, limitations), notes and a glossary. In the HTML report the tab has a *Print / save as PDF* button that prints the summary alone.
+
+Findings are AI-proposed candidates, so the summary sorts each into exactly one group — **confirmed exploitable**, **confirmed real** (reachability not established), **blocked by other code**, **not cleared** (a pass errored or was inconclusive), **unverified** (verification off), or **dismissed as a false alarm** — and the groups add up to the total. Only the open groups count as risk; dismissed findings never do. The rating is evidence-weighted: a finding's severity is capped at **High** unless the taint trace confirmed it exploitable (so a run with `--no-taint` can't rate above High, and the summary says so), a weakness blocked by other code counts as Low, and for `ubel-mal` a confirmed malicious-code finding counts at least High.
+
+| Rating | `analyze` rule |
+|---|---|
+| Critical | at least one Critical-severity issue confirmed exploitable |
+| High | a High issue confirmed exploitable, or a Critical/High finding that is real or not cleared but not confirmed exploitable |
+| Medium | Medium-priority issues, nothing more serious |
+| Low | only low-priority issues, real weaknesses blocked by other code, or no issues but some code units could not be analyzed |
+| Minimal | nothing open, nothing uncleared, every code unit analyzed |
+| Not assessed | no code unit could be analyzed — no rating is given instead of "Minimal" |
+
+Anything that means "not everything was checked" — code units whose AI reply could not be decoded, verification or the taint trace switched off, `--only-diff`, `--max-chunks`/`--chunks-start`, `--languages`, `--skip-folders`/`--skip-files` — is stated in the summary and never presented as a clean result. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
 
 ---
 

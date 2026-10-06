@@ -35,6 +35,8 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
+- **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings, the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
+- **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
 ---
@@ -213,17 +215,171 @@ Every notification includes an **Open Report** button that opens the full intera
 
 ## The HTML Report
 
-Each scan produces a self-contained HTML file that works fully offline. It contains six tabs:
+Each scan produces a self-contained HTML file that works fully offline. It contains nine tabs:
 
 | Tab | Contents |
 |---|---|
 | **Dashboard** | Vulnerability counts by severity, policy decision summary, scan metadata |
+| **Executive Summary** | Plain-language risk rating, policy verdict, key findings, components to fix first, and suggested actions for non-technical readers, printable as a PDF — see [Executive Summary](#executive-summary) |
+| **Secrets** | Exposed secrets by category, severity, file/line, and redacted match preview |
 | **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS, severity, fix version, reachability level, and policy decision |
-| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count |
-| **Graph** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
+| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count. Click a package for its detail modal, which includes **Suggested Fixes** — see [Recommended Package Fixes](#recommended-package-fixes) |
+| **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
+| **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
-| **Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
-| **System** | OS metadata, Node.js version, scan engine info |
+| **System Info** | OS metadata, Node.js version, scan engine info |
+
+---
+
+## Executive Summary
+
+Every report (JSON and HTML) carries an `executive_summary` written for readers who don't work with CVEs, CVSS scores, or package URLs — management, risk and compliance teams, product owners. It is derived entirely from data already in the report (no extra scanning or network calls), so the JSON field and the HTML tab always show the same content. It is built after the policy decision is made and never fails a scan: if it can't be built, only the summary is omitted.
+
+In the HTML report it is the **Executive Summary** tab, placed right after the Dashboard.
+
+**What it contains**
+
+| Section | What it tells the reader |
+|---|---|
+| Overall risk rating | One of Critical / High / Moderate / Low / Minimal / Not assessed, with a rationale and general business-impact text |
+| Headline & verdict | A one-sentence overview and whether the scan meets or fails the security policy, in plain language (with the technical reason alongside) |
+| At a glance | Components reviewed and with issues, vulnerabilities by severity, how many have a fix available, how many are likely in use by your code vs. not, how many block policy, exposed credentials |
+| Key findings | The handful of things that matter most, each with a severity |
+| Components to fix first | Up to five components, ranked by malicious status, then whether they're likely in use, then worst severity, then issue count — each with a suggested upgrade action |
+| Suggested actions | Prioritized actions with a timeframe and the reason for each |
+| Compliance overview | Which frameworks the findings touch and which are most affected (omitted when nothing maps to a framework) — see [Compliance Framework Mapping](#compliance-framework-mapping) |
+| Scope, methodology & glossary | What was scanned, how this specific report was produced, and plain-language definitions of the terms used |
+
+**Layout and printing**
+
+The HTML tab is laid out so the first screen can be read on its own and fits one printed page:
+
+1. **Cover** — report title, what was scanned, report ID, date, and tool (`cover`).
+2. **Bottom line** — the overall risk rating next to the policy verdict, a one-paragraph summary, the **Top risks**, **Do this first** (each action with its timeframe and a *suggested owner*), and four key figures (`bottom_line`).
+3. **Details** — why this rating, all key findings, at-a-glance cards (`glance_cards`), components to fix first, all suggested actions, and compliance exposure.
+4. **Appendix** — methodology, "About this report" (scope and notes), and the plain-language glossary. The appendix is collapsed on screen and expanded automatically when printing.
+
+A **Print / save as PDF** button at the top of the tab prints the summary only (on a white background, other tabs hidden), so it can be handed to someone who never opens the interactive report. In the *Components to fix first* table, the identifiers under each component are the advisory references, for tickets and audit trails. For multi-system scans, the tab also shows *Configuration issues by area* and *Systems to review first* tables when that data is present.
+
+**Overall risk rating**
+
+| Rating | Assigned when |
+|---|---|
+| Critical | any malicious (`MAL-*`) component was found |
+| High | any Critical/High-severity vulnerability that isn't confirmed unreachable, or any exposed High/Critical credential |
+| Moderate | Medium/unrated issues, lower-severity secrets, or Critical/High issues that [reachability analysis](#reachability-analysis) confirmed are not used by production code |
+| Low | only Low-severity issues, or Medium/unrated issues confirmed unused |
+| Minimal | nothing found |
+| Not assessed | the scan skipped vulnerability lookups (e.g. **UBEL: Scan project for License Compliance**) and nothing else raised the rating — shown instead of "Minimal" so an unchecked scan is never read as a clean one |
+
+The rating and the policy verdict are independent: the rating discounts findings that reachability analysis confirmed are unused, while the verdict counts every finding at or above the blocking thresholds (and any exposed secret), so a report can be rated Moderate yet still be blocked.
+
+**Checks that didn't run or didn't finish.** When vulnerability lookups were skipped, the vulnerability-derived figures are `null` (shown as "n/a" in the HTML tab), not `0`. When the secrets pass failed, `exposed_credentials` is `null` and a key finding says the result is unavailable instead of reporting zero. Components with no determinable version can't be matched against vulnerability databases, so they are called out in the methodology, limitations, and notes.
+
+**Good to know**
+
+- The rating scale is UBEL's own — not CVSS or a regulatory standard — and the impact text is general guidance per rating level.
+- Action timeframes are built-in defaults, not your organization's remediation SLAs. The HTML tab labels the section "Suggested actions" for this reason.
+- Suggested upgrades are indicative, not a guarantee.
+- Malicious-component advisories are counted separately, so "Known weaknesses" can be lower than the Vulnerabilities tab total; a note says so when it applies.
+- For host-platform scans, the project name is left empty rather than showing a temp or home directory. Credentials embedded in a git remote URL are stripped from the scan header.
+
+**JSON**
+
+```json
+{
+  "executive_summary": {
+    "overall_risk": { "level": "high", "label": "High", "rationale": "...", "business_impact": "..." },
+    "cover": { "title": "...", "subject": "my-app", "report_id": "...", "generated_at": "2026-10-06T09:30:00Z", "tool": "...", "classification": "...", "statement": "..." },
+    "bottom_line": { "risk_label": "High", "summary": "...",
+                     "top_risks": [ { "severity": "high", "title": "...", "detail": "..." } ],
+                     "do_first": [ { "action": "...", "timeframe": "Immediately", "owner": "..." } ],
+                     "figures": [ { "label": "...", "value": 9, "sub": "...", "tone": "high" } ] },
+    "glance_cards": [ { "label": "...", "value": 142, "sub": "...", "tone": null } ],
+    "headline": "This scan reviewed 142 software components and found ...",
+    "verdict": { "status": "blocked", "label": "Does not meet security policy", "statement": "...", "technical_reason": "..." },
+    "at_a_glance": { "components_reviewed": 142, "components_with_issues": 4, "malicious_components": 0,
+                     "total_vulnerabilities": 9, "by_severity": { "critical": 1, "high": 2, "medium": 4, "low": 2, "unknown": 0 },
+                     "fix_available": 7, "fix_available_percent": 78, "likely_in_use": 6, "not_in_use": 3,
+                     "blocking_policy": 3, "exposed_credentials": 2 },
+    "key_findings": [ { "severity": "high", "title": "...", "detail": "..." } ],
+    "components_to_fix_first": [ { "name": "lodash", "version": "4.17.15", "issue_count": 3, "worst_severity": "critical",
+                                   "worst_severity_label": "Critical", "likely_in_use": true, "blocks_policy": true,
+                                   "references": [ "GHSA-xxxx-xxxx-xxxx" ], "more_references": 2, "action": "Upgrade to version 4.17.21." } ],
+    "recommended_actions": [ { "priority": 1, "timeframe": "Immediately", "owner": "...", "action": "...", "why": "..." } ],
+    "compliance_overview": { "frameworks_touched": 3, "most_affected": [ { "framework": "...", "findings": 5 } ], "statement": "...", "disclaimer": "..." },
+    "scope": { "scan_type": "health", "description": "...", "target": "a code repository", "ecosystems": ["npm"], "components_reviewed": 142 },
+    "methodology": { "steps": [], "rating_rules": [], "prioritization": "...", "timeframes": "...", "limitations": [] },
+    "notes": [ "..." ],
+    "glossary": [ { "term": "Vulnerability", "meaning": "..." } ]
+  }
+}
+```
+
+---
+
+## Recommended Package Fixes
+
+For every package in the inventory, UBEL looks at **all** of its vulnerabilities and the fixed version of every affected range, then suggests which versions to upgrade to. Instead of a single "latest" version, suggestions are grouped **per version range**, so you can pick the least disruptive upgrade that still closes the most issues:
+
+- **One group per minor range above your installed version** — e.g. `4.17.x`, `4.18.x` (same major version, so typically non-breaking)
+- **Then one group per higher major range** — e.g. `5.x`, `6.x` (may be breaking)
+
+Groups are listed closest-first: minor ranges, then major ranges, with the highest version first inside a range.
+
+**How versions are picked.** Inside each range, UBEL picks the version that fixes the most still-open vulnerabilities (ties go to the highest version), then repeats until nothing more can be fixed in that range — so you get the fewest, highest versions that cover the most. A vulnerability can therefore appear in several ranges: each range is an **alternative upgrade path**, not a sequence of steps to apply together.
+
+**Branch-aware matching.** A candidate version is only counted as a fix if it genuinely falls outside every affected range of that vulnerability — not merely because it is numerically higher than some fixed version. This matters for advisories fixed on several release branches (e.g. a fix backported to `4.17.21` while `4.18.0`–`4.18.2` stays affected). When an advisory carries no usable range data, UBEL falls back to "at or after a known fixed version". Git-commit ranges are ignored since they can't be compared to package versions. For NVD-sourced advisories, each branch's lower bound is kept alongside its fix version, so a fix on a lower branch (say `1.2.5` next to `1.3.2`) is recognized as a fix for that branch rather than looking still-affected.
+
+**Unfixed vulnerabilities.** Anything with no fixed version above the one you have installed — or that no candidate version actually clears — is listed separately as `unfixed` rather than silently dropped, so you can see what an upgrade won't solve.
+
+**In the HTML report**
+
+Open the **Inventory** tab and click a package: its detail modal has a **Suggested Fixes** section.
+
+- A table with one row per suggested version — **Range** (label plus *minor range* / *major range*), **Suggested version** (with "fixes N"), and **Vulnerabilities fixed**, each with its severity badge. Click any vulnerability to jump to its detail modal.
+- Below it, **Vulnerabilities with no fix (N)** — ID, severity, and score for everything no suggested version resolves.
+- Malicious (infection) entries are shown with an `infection` badge. If nothing can be fixed by upgrading, the modal says so; if the package has no suggestion data, it says that instead.
+
+**Ordering.** Vulnerabilities inside every group are ordered most severe first: malicious (infection), then critical, high, medium, low, unknown; ties are broken by CVSS score, then ID.
+
+**Ecosystem-aware version comparison.** Versions are compared with one ecosystem-agnostic comparator that handles semver, PEP 440, and deb/rpm-style versions — including epochs (`1:2.3`), `v` prefixes, pre-release tags (`1.0.0-rc1` sorts below `1.0.0`), and ignored build metadata (`+build`) — across every supported ecosystem.
+
+Suggestions are computed only when vulnerability lookups ran, so they are absent from license-only scans.
+
+**JSON**
+
+Each inventory item in the JSON report carries a `suggested_fixes` object:
+
+```json
+{
+  "suggested_fixes": {
+    "fixes": [
+      {
+        "version": "4.17.21",
+        "count": 3,
+        "range": { "key": "m:4.17", "label": "4.17.x", "scope": "minor" },
+        "vulnerabilities": [
+          { "id": "GHSA-xxxx-xxxx-xxxx", "severity": "critical", "severity_score": 9.8, "is_infection": false }
+        ]
+      }
+    ],
+    "unfixed": [
+      { "id": "CVE-0000-0000", "severity": "medium", "severity_score": 5.3, "is_infection": false }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `fixes[].version` | A suggested version to upgrade to |
+| `fixes[].count` | How many of the package's vulnerabilities that version resolves |
+| `fixes[].range` | The range the version belongs to: `scope` is `minor` (same major as installed) or `major` (higher major); `label` is e.g. `4.17.x` or `5.x` |
+| `fixes[].vulnerabilities` | The vulnerabilities resolved, most severe first |
+| `unfixed` | Vulnerabilities no suggested version resolves |
+
+If suggestions can't be computed for a package, its `suggested_fixes` carries an `error` message with empty `fixes`/`unfixed`, and the rest of the report is unaffected. Suggestions are computed once per scan, right after vulnerabilities are matched, and before the executive summary is built.
 
 ---
 

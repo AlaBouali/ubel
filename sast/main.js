@@ -8,6 +8,8 @@ import { buildChunks }            from './src/chunker/index.js';
 import { analyzeSast, analyzeMalware } from './src/analyzer/index.js';
 import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
+import { buildSastExecutiveSummary } from './executive_summary.js';
+import { evaluateSastGate, isUnresolvedSastFinding } from './sast_gate.js';
 import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
@@ -20,7 +22,19 @@ import {
   summarizeCompliance,
 } from '../sca/compliance_mappings.js';
 
+// ─── Console-printing helpers ──────────────────────────────────────────────────
+// Findings come from an LLM and any field can be missing. The HTML generator
+// already treats confidence/snippet/fix as optional; the console summaries must
+// too, or one sparse finding throws after the reports are written.
+const upper = v => String(v ?? '?').toUpperCase();
+const clip  = (v, n) => String(v ?? '').slice(0, n);
+
 // ─── Shared CLI flag parser ────────────────────────────────────────────────────
+
+// Flags that never take a value. Without this list, `ubel-sast --only-diff
+// /path/to/project` read "/path/to/project" as the value of --only-diff, left
+// the target path unset, and silently scanned the current directory instead.
+const BOOLEAN_FLAGS = new Set(['no-retry', 'no-verify', 'no-taint', 'include-signals', 'only-diff']);
 
 function parseArgs(args) {
   const flags = {};
@@ -28,7 +42,7 @@ function parseArgs(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith('--')) {
       const key = args[i].slice(2);
-      const val = (args[i + 1] && !args[i + 1].startsWith('--')) ? args[++i] : true;
+      const val = (!BOOLEAN_FLAGS.has(key) && args[i + 1] && !args[i + 1].startsWith('--')) ? args[++i] : true;
       flags[key] = val;
     } else if (!positional) {
       positional = args[i];
@@ -41,6 +55,41 @@ function atomicWrite(filePath, content) {
   const tmp = filePath + '.tmp';
   fs.writeFileSync(tmp, content);
   fs.renameSync(tmp, filePath);
+}
+
+// The non-secret run settings the report needs in order to say what was and
+// was not checked (verification off, diff mode, chunk limits, ...). Built from
+// an explicit whitelist — never spread `opts`, which carries the API key and
+// endpoint.
+function scanOptionsFor(opts, mode) {
+  return {
+    mode,
+    verify:          opts.verify !== false,
+    taint_trace:     mode === 'analyze' ? opts.taintTrace !== false : false,
+    include_signals: opts.skipSignals === false,
+    only_diff:       !!opts.onlyDiff,
+    diff_base:       opts.onlyDiff ? (opts.diffBase || 'HEAD^') : null,
+    max_chunk_size:  opts.maxChunkSize ?? null,
+    chunks_start:    opts.chunksStart  || null,
+    max_chunks:      opts.maxChunks    || null,
+    languages:       opts.languages    || null,
+    skip_folders:    opts.skipFolders  || null,
+    skip_files:      opts.skipFiles    || null,
+    fail_on:         opts.failOn       || 'any',
+  };
+}
+
+// Built once per run and handed to both the JSON and the HTML writer, so the
+// two always carry the same executive summary. Never allowed to fail the scan:
+// without it the JSON simply lacks the key and the HTML tab says it is not
+// available.
+function buildExecutiveSummarySafe(results, meta, tag) {
+  try {
+    return buildSastExecutiveSummary(results, meta);
+  } catch (e) {
+    console.warn(`[${tag}] Executive summary failed: ${e.message}`);
+    return null;
+  }
 }
 
 async function collectMetadata(opts) {
@@ -90,6 +139,8 @@ async function writeAnalyzeReports(results, opts) {
   const latestSarif = path.join(latestDir, 'latest.sast.sarif.json');
 
   const meta = await collectMetadata({ ...opts, workingDir });
+  meta.scan_type    = 'analyze';
+  meta.scan_options = scanOptionsFor(opts, 'analyze');
 
   // ── Normalize findings ────────────────────────────────────────────────────
   // The LLM outputs `vuln_name` (per the prompt schema). The HTML and SARIF
@@ -118,6 +169,8 @@ async function writeAnalyzeReports(results, opts) {
     results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
   );
 
+  const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-sast');
+
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // json/html/sarif used to be written out as three separate files per scan
   // alongside each other under reportDir; they're now bundled into a single
@@ -128,16 +181,20 @@ async function writeAnalyzeReports(results, opts) {
   // failed HTML/SARIF generation step.
   const bundleEntries = [];
 
-  const jsonPayload = JSON.stringify({ generated_at: meta.generated_at, meta, results }, null, 2);
+  const jsonPayload = JSON.stringify({
+    generated_at: meta.generated_at, meta,
+    ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
+    results,
+  }, null, 2);
   atomicWrite(latestJson, jsonPayload);
   bundleEntries.push({ name: 'report.json', data: jsonPayload });
-  console.log(`\n[ubel-sast] JSON  report : bundled in ${zipPath}`);
+  console.log(`\n[ubel-sast] JSON  report : ${latestJson}`);
 
   try {
-    const htmlReport = await generateSastHTMLReport(results, meta);
+    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
     atomicWrite(latestHtml, htmlReport);
     bundleEntries.push({ name: 'report.html', data: htmlReport });
-    console.log(`[ubel-sast] HTML  report : bundled in ${zipPath}`);
+    console.log(`[ubel-sast] HTML  report : ${latestHtml}`);
   } catch (e) {
     console.warn(`[ubel-sast] HTML report failed: ${e.message}`);
   }
@@ -147,7 +204,7 @@ async function writeAnalyzeReports(results, opts) {
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
     atomicWrite(latestSarif, sarifPayload);
     bundleEntries.push({ name: 'report.sarif.json', data: sarifPayload });
-    console.log(`[ubel-sast] SARIF report : bundled in ${zipPath}`);
+    console.log(`[ubel-sast] SARIF report : ${latestSarif}`);
   } catch (e) {
     console.warn(`[ubel-sast] SARIF report failed: ${e.message}`);
   }
@@ -166,25 +223,20 @@ async function writeAnalyzeReports(results, opts) {
     r.findings
       .filter(f => !f._parse_error)
       .map(f => ({ result: r, finding: f }))
-  ).filter(({ finding: f }) =>
-    f.taint?.exploitable !== true &&
-    !(f.is_valid === true && f.taint?.exploitable === false) &&
-    !(f.is_valid === false) &&
-    (f.verification_error || f.taint?.error || f.taint?.inconclusive_reason || f.is_valid === null)
-  );
+  ).filter(({ finding: f }) => isUnresolvedSastFinding(f));
 
   if (exploitableResults.length > 0) {
     console.log('\n── Exploitable findings ─────────────────────────────────────');
     for (const result of exploitableResults.slice(0, 10)) {
       for (const f of result.findings.filter(f => f.taint?.exploitable === true)) {
-        console.log(`\n  ⚠️ [${f.confidence.toUpperCase()}] ${f.vuln_name}`);
+        console.log(`\n  ⚠️ [${upper(f.confidence)}] ${f.vuln_name}`);
         console.log(`  Chunk : ${result.id}`);
         console.log(`  Lines : ${result.startLine}–${result.endLine}`);
         console.log(`  Issue : ${f.description}`);
-        console.log(`  Snip  : ${f.code_snippet.slice(0, 100)}`);
-        console.log(`  Fix   : ${f.fix.slice(0, 120)}`);
+        console.log(`  Snip  : ${clip(f.code_snippet, 100)}`);
+        console.log(`  Fix   : ${clip(f.fix, 120)}`);
         if (f.taint?.flow_path) console.log(`  Flow  : ${f.taint.flow_path}`);
-        if (f.taint?.reasoning) console.log(`  Reason: ${f.taint.reasoning.slice(0, 200)}`);
+        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 200)}`);
       }
     }
   } else if (unresolvedFindings.length === 0) {
@@ -204,11 +256,11 @@ async function writeAnalyzeReports(results, opts) {
         const status = f.taint?.reachable === false ? '(not reachable)' :
                        f.taint?.sanitized === true ? '(sanitized)' :
                        f.taint?.exploitable === false ? '(mitigated)' : '(unknown)';
-        console.log(`  🛡️ [${f.confidence.toUpperCase()}] ${f.vuln_name} ${status}`);
+        console.log(`  🛡️ [${upper(f.confidence)}] ${f.vuln_name} ${status}`);
         console.log(`  Chunk : ${result.id}`);
         console.log(`  Lines : ${result.startLine}–${result.endLine}`);
         console.log(`  Issue : ${f.description}`);
-        if (f.taint?.reasoning) console.log(`  Reason: ${f.taint.reasoning.slice(0, 150)}`);
+        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 150)}`);
       }
     }
   }
@@ -220,7 +272,7 @@ async function writeAnalyzeReports(results, opts) {
                   f.taint?.inconclusive_reason ||
                   (f.is_valid === null ? 'unknown' : 'unresolved');
       const detail = f.verification_error?.detail || f.taint?.error?.detail || '';
-      console.log(`\n  ❓ [${f.confidence.toUpperCase()}] ${f.vuln_name}  (reason: ${why})`);
+      console.log(`\n  ❓ [${upper(f.confidence)}] ${f.vuln_name}  (reason: ${why})`);
       console.log(`  Chunk : ${result.id}`);
       console.log(`  Lines : ${result.startLine}–${result.endLine}`);
       console.log(`  Issue : ${f.description}`);
@@ -232,26 +284,16 @@ async function writeAnalyzeReports(results, opts) {
   }
 
   // ── Pass/fail evaluation ────────────────────────────────────────────────────
+  // One shared definition (sast_gate.js): the executive summary states the same
+  // verdict from the same function, so the report and the exit code always agree.
   const failOn = opts.failOn || 'any';
-  const allFindings = results.flatMap(r => r.findings);
-  const hasExploitable          = allFindings.some(f => f.taint?.exploitable === true);
-  const hasValid                = allFindings.some(f => f.is_valid === true);
-  const hasFindingsWithoutPasses = !opts.verify && !opts.taintTrace && allFindings.some(f => !f._parse_error);
-  const hasUnresolved           = unresolvedFindings.length > 0;
-
-  let shouldFail;
-  switch (failOn) {
-    case 'exploitable':
-      shouldFail = hasExploitable || hasUnresolved;
-      break;
-    case 'valid':
-      shouldFail = hasValid || hasExploitable || hasUnresolved;
-      break;
-    case 'any':
-    default:
-      shouldFail = hasExploitable || hasValid || hasFindingsWithoutPasses || hasUnresolved;
-      break;
-  }
+  const gate = evaluateSastGate(results, {
+    mode: 'analyze', failOn, verify: opts.verify, taintTrace: opts.taintTrace,
+  });
+  const shouldFail    = gate.shouldFail;
+  const hasExploitable = gate.counts.exploitable > 0;
+  const hasValid       = gate.counts.valid > 0;
+  const hasUnresolved  = gate.counts.unresolved > 0;
 
   if (shouldFail && hasUnresolved && !(failOn === 'exploitable' ? hasExploitable : failOn === 'valid' ? hasValid : true)) {
     console.log(`\n[ubel-sast] Exiting non-zero: no finding met the --fail-on ${failOn} bar, but ${unresolvedFindings.length} finding(s) could not be resolved either way (see "Unverified / untraced findings" above).`);
@@ -287,6 +329,7 @@ async function writeMalwareReports(results, opts) {
 
   const meta = await collectMetadata({ ...opts, workingDir });
   meta.scan_type = 'malware';
+  meta.scan_options = scanOptionsFor(opts, 'malware');
 
   for (const chunk of results) {
     for (const f of (chunk.findings || [])) {
@@ -305,22 +348,28 @@ async function writeMalwareReports(results, opts) {
     results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
   );
 
+  const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-malware');
+
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // See writeAnalyzeReports() above — same rationale: json/html/sarif are
   // now bundled into one baseName.zip instead of three separate files, and
   // the "latest" copies stay as plain files.
   const bundleEntries = [];
 
-  const jsonPayload = JSON.stringify({ generated_at: meta.generated_at, meta, results }, null, 2);
+  const jsonPayload = JSON.stringify({
+    generated_at: meta.generated_at, meta,
+    ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
+    results,
+  }, null, 2);
   atomicWrite(latestJson, jsonPayload);
   bundleEntries.push({ name: 'report.json', data: jsonPayload });
-  console.log(`\n[ubel-malware] JSON  report : bundled in ${zipPath}`);
+  console.log(`\n[ubel-malware] JSON  report : ${latestJson}`);
 
   try {
-    const htmlReport = await generateSastHTMLReport(results, meta);
+    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
     atomicWrite(latestHtml, htmlReport);
     bundleEntries.push({ name: 'report.html', data: htmlReport });
-    console.log(`[ubel-malware] HTML  report : bundled in ${zipPath}`);
+    console.log(`[ubel-malware] HTML  report : ${latestHtml}`);
   } catch (e) {
     console.warn(`[ubel-malware] HTML report failed: ${e.message}`);
   }
@@ -330,7 +379,7 @@ async function writeMalwareReports(results, opts) {
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
     atomicWrite(latestSarif, sarifPayload);
     bundleEntries.push({ name: 'report.sarif.json', data: sarifPayload });
-    console.log(`[ubel-malware] SARIF report : bundled in ${zipPath}`);
+    console.log(`[ubel-malware] SARIF report : ${latestSarif}`);
   } catch (e) {
     console.warn(`[ubel-malware] SARIF report failed: ${e.message}`);
   }
@@ -348,13 +397,13 @@ async function writeMalwareReports(results, opts) {
     console.log('\n── 🚨 Confirmed malicious-code findings ─────────────────────────');
     for (const result of results) {
       for (const f of result.findings.filter(f => f.is_valid === true)) {
-        console.log(`\n  🚨 [${f.severity ? f.severity.toUpperCase() : f.confidence.toUpperCase()}] ${f.vuln_name}`);
+        console.log(`\n  🚨 [${f.severity ? upper(f.severity) : upper(f.confidence)}] ${f.vuln_name}`);
         console.log(`  Chunk : ${result.id}`);
         console.log(`  Lines : ${result.startLine}–${result.endLine}`);
         console.log(`  Issue : ${f.description}`);
-        console.log(`  Snip  : ${f.code_snippet.slice(0, 100)}`);
-        console.log(`  Fix   : ${f.fix.slice(0, 120)}`);
-        if (f.verification_reason) console.log(`  Reason: ${f.verification_reason.slice(0, 200)}`);
+        console.log(`  Snip  : ${clip(f.code_snippet, 100)}`);
+        console.log(`  Fix   : ${clip(f.fix, 120)}`);
+        if (f.verification_reason) console.log(`  Reason: ${clip(f.verification_reason, 200)}`);
       }
     }
   } else if (unresolved.length === 0) {
@@ -367,7 +416,7 @@ async function writeMalwareReports(results, opts) {
     console.log('\n── ⚠️  Unverified findings (NOT cleared, NOT confirmed) ──────────');
     for (const result of results) {
       for (const f of result.findings.filter(f => f.is_valid !== true && f.is_valid !== false && !f._parse_error)) {
-        console.log(`\n  ❓ [${f.confidence.toUpperCase()}] ${f.vuln_name}`);
+        console.log(`\n  ❓ [${upper(f.confidence)}] ${f.vuln_name}`);
         console.log(`  Chunk : ${result.id}`);
         console.log(`  Lines : ${result.startLine}–${result.endLine}`);
         console.log(`  Issue : ${f.description}`);
@@ -376,9 +425,7 @@ async function writeMalwareReports(results, opts) {
   }
 
   const failOn = opts.failOn || 'any';
-  const shouldFail = failOn === 'confirmed'
-    ? (confirmed.length > 0 || unresolved.length > 0)
-    : allFindings.length > 0;
+  const shouldFail = evaluateSastGate(results, { mode: 'malware', failOn }).shouldFail;
 
   return { zipPath, meta, shouldFail };
 }

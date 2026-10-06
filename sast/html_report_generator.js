@@ -1,9 +1,12 @@
 // sast_html_report.js — HTML report generator for ubel-sast results
 //
-// Input:  { results, meta }
+// Input:  { results, meta, extras }
 //   results — array from sast_results.json written by analyzeSast()
 //   meta    — { workingDir, model, provider, gitMetadata, osMetadata,
-//               generated_at, tool_version }
+//               generated_at, tool_version, scan_type, scan_options }
+//   extras  — { executiveSummary } the summary main.js already built for the
+//             JSON report (so both always match). `undefined` -> built here;
+//             `null` -> main.js tried and failed, so the tab says unavailable.
 //
 // Output: HTML string (caller writes to disk)
 
@@ -11,6 +14,7 @@ import { TOOL_NAME, TOOL_VERSION } from '../sca/info.js';
 import { getTailwindScript } from "../sca/tailwindcss.js";
 import { getChartJSScript } from "../sca/chartjs.js";
 import { getGoogleFontsScript } from "../sca/googlefonts.js";
+import { buildSastExecutiveSummary } from "./executive_summary.js";
 
 const SAST_TOOL = '@arcane-spark/ubel-sast';
 
@@ -241,6 +245,13 @@ function renderCweAndCompliance(f) {
 
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
 
+// True when the exploitability trace did not run (malware scans, --no-taint):
+// "0 exploitable" would then read as "checked, none found", so show n/a.
+function taintNotRun() {
+  const so = reportData.meta && reportData.meta.scan_options;
+  return !!(so && so.taint_trace === false);
+}
+
 function updateTabCounts() {
   const s = reportData.stats;
   document.getElementById('tab-findings').textContent  = 'Findings(' + s.totalFindings + ')';
@@ -248,6 +259,318 @@ function updateTabCounts() {
   const cs = reportData.meta && reportData.meta.compliance_summary;
   document.getElementById('tab-compliance').textContent = 'Compliance(' + (cs && cs.frameworks ? cs.frameworks.length : 0) + ')';
 }
+
+// ── EXECUTIVE SUMMARY ────────────────────────────────────────────────────────
+// Plain-language overview for non-technical readers. Everything shown comes
+// from reportData.executive_summary (built once in main.js and written to the
+// JSON report as-is), so this tab and the JSON can never disagree. Figures that
+// were not checked arrive as null and are shown as "n/a", never 0.
+//
+// Layout: page 1 (cover, verdict, top risks, what to do first, four numbers) is
+// meant to be readable on its own and to fit one printed page. Detail follows,
+// then an appendix (methodology, scope, glossary) that is collapsed on screen
+// and expanded when printing.
+
+function execEsc(x) {
+  return String(x == null ? '' : x)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderExecutiveSummary() {
+  const root = document.getElementById('executive-content');
+  if (!root) return;
+  const es = reportData.executive_summary;
+  if (!es) {
+    root.innerHTML = '<div class="glass p-6 rounded-xl text-sm text-neutral-500 italic">No executive summary is available for this report.</div>';
+    return;
+  }
+
+  const esc = execEsc;
+  const colors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3', none: '#4ade80', unknown: '#a3a3a3', not_assessed: '#a3a3a3' };
+  const col = function (k) { return colors[k] || '#a3a3a3'; };
+  const sectionTitle = function (t) { return '<h3 class="text-sm font-semibold mb-4 uppercase tracking-widest text-neutral-400">' + esc(t) + '</h3>'; };
+  const badge = function (key, label) {
+    return '<span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold whitespace-nowrap" style="color:' + col(key) + ';border-color:' + col(key) + '">' + esc(label) + '</span>';
+  };
+  const figure = function (f) {
+    const color = f.tone ? col(f.tone) : '';
+    const v = f.value == null ? 'n/a' : f.value;
+    return '<div class="glass p-5 rounded-xl"' + (color ? ' style="border-left:4px solid ' + color + '"' : '') + '>' +
+      '<p class="text-xs text-neutral-500 uppercase font-semibold mb-1">' + esc(f.label) + '</p>' +
+      '<p class="text-3xl font-bold"' + (color ? ' style="color:' + color + '"' : '') + '>' + esc(v) + '</p>' +
+      (f.sub ? '<p class="text-xs text-neutral-500 mt-1">' + esc(f.sub) + '</p>' : '') + '</div>';
+  };
+
+  const risk = es.overall_risk || {};
+  const bl = es.bottom_line || {};
+  const cover = es.cover || {};
+  const sc = es.scope || {};
+  const isMal = sc.scan_type === 'malware';
+  const confirmedLabel = isMal ? 'Confirmed malicious' : 'Confirmed exploitable';
+  const riskColor = col(risk.level);
+  let html = '';
+
+  // Toolbar (screen only)
+  html += '<div class="no-print flex justify-end"><button type="button" onclick="window.print()" ' +
+    'class="px-4 py-2 rounded-lg bg-neutral-800 border border-neutral-700 text-xs font-medium text-neutral-200 hover:bg-neutral-700 transition-colors">' +
+    'Print / save as PDF</button></div>';
+
+  // ── PAGE 1 ────────────────────────────────────────────────────────────────
+  const metaItems = [
+    ['Report ID', cover.report_id],
+    ['Date', cover.generated_at ? String(cover.generated_at).replace('T', ' ').slice(0, 16) + ' UTC' : null],
+    ['Repository', cover.repository],
+    ['Code version', cover.code_version],
+    ['Tool', cover.tool]
+  ].filter(function (m) { return m[1]; });
+  html += '<div class="glass p-5 rounded-xl">' +
+    '<p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest mb-1">' + esc(cover.title || 'Executive summary') + '</p>' +
+    '<h2 class="text-2xl font-bold mb-3 break-words">' + esc(cover.subject || 'Source code') + '</h2>' +
+    (metaItems.length ? '<div class="flex flex-wrap gap-x-8 gap-y-1 text-xs mb-3">' +
+      metaItems.map(function (m) {
+        return '<div class="min-w-0"><span class="text-neutral-500">' + esc(m[0]) + ': </span><span class="mono break-all text-neutral-300">' + esc(m[1]) + '</span></div>';
+      }).join('') + '</div>' : '') +
+    (cover.classification ? '<p class="text-[11px] text-neutral-500 uppercase tracking-wider">' + esc(cover.classification) + '</p>' : '') +
+  '</div>';
+
+  html += '<div class="glass p-6 md:p-8 rounded-xl" style="border-left:6px solid ' + riskColor + '">' +
+    '<div class="flex flex-wrap items-center justify-between gap-3 mb-3">' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">Overall security risk</p>' +
+      '<p class="text-4xl font-bold" style="color:' + riskColor + '">' + esc(bl.risk_label || risk.label || 'Unknown') + '</p></div>' +
+    '</div>' +
+    '<p class="text-lg leading-relaxed text-neutral-100 exec-headline">' + esc(bl.summary || es.headline) + '</p>' +
+    (es.verdict ?
+      '<div class="mt-4 pt-4 border-t border-neutral-800">' +
+        '<div class="flex flex-wrap items-center gap-3 mb-2">' + badge(es.verdict.status === 'pass' ? 'none' : 'high', es.verdict.label) + '</div>' +
+        '<p class="text-sm text-neutral-300 leading-relaxed">' + esc(es.verdict.statement) + '</p>' +
+        (es.verdict.technical_reason ? '<p class="text-xs text-neutral-500 mt-2 mono">' + esc(es.verdict.technical_reason) + '</p>' : '') +
+      '</div>' : '') +
+  '</div>';
+
+  const topRisks = bl.top_risks || [];
+  const doFirst = bl.do_first || [];
+  if (topRisks.length || doFirst.length) {
+    html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 exec-cols-2">';
+    html += '<div>' + sectionTitle('Top risks') + '<div class="space-y-3">' +
+      (topRisks.length ? topRisks.map(function (f, i) {
+        return '<div class="glass p-4 rounded-xl" style="border-left:4px solid ' + col(f.severity) + '">' +
+          '<h4 class="font-semibold text-sm mb-1">' + (i + 1) + '. ' + esc(f.title) + '</h4>' +
+          '<p class="text-xs text-neutral-400 leading-relaxed">' + esc(f.detail) + '</p></div>';
+      }).join('') : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No significant risks were found.</div>') +
+    '</div></div>';
+    html += '<div>' + sectionTitle('Do this first') + '<div class="space-y-3">' +
+      (doFirst.length ? doFirst.map(function (a, i) {
+        return '<div class="glass p-4 rounded-xl flex gap-3">' +
+          '<div class="w-7 h-7 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-xs font-bold">' + (i + 1) + '</div>' +
+          '<div class="min-w-0"><p class="text-sm font-semibold leading-snug mb-1">' + esc(a.action) + '</p>' +
+          '<div class="flex flex-wrap gap-2 items-center text-[10px] uppercase font-bold">' +
+            '<span class="px-2 py-0.5 rounded border border-neutral-600 text-neutral-400 whitespace-nowrap">' + esc(a.timeframe) + '</span>' +
+            (a.owner ? '<span class="text-neutral-500 normal-case font-medium text-xs">Suggested owner: ' + esc(a.owner) + '</span>' : '') +
+          '</div></div></div>';
+      }).join('') : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No urgent actions.</div>') +
+    '</div></div></div>';
+  }
+
+  if ((bl.figures || []).length) {
+    html += '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 exec-figs">' + bl.figures.map(figure).join('') + '</div>';
+  }
+  if (cover.statement) {
+    html += '<p class="text-[11px] text-neutral-500 italic">' + esc(cover.statement) + '</p>';
+  }
+
+  // ── DETAILS ───────────────────────────────────────────────────────────────
+  html += '<div class="exec-page-break pt-2"><p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest border-b border-neutral-800 pb-2">Details</p></div>';
+
+  if (risk.rationale || risk.business_impact) {
+    html += '<div>' + sectionTitle('Why this rating') + '<div class="glass p-5 rounded-xl space-y-3">' +
+      (risk.rationale ? '<p class="text-sm text-neutral-300"><span class="font-semibold">Reason: </span>' + esc(risk.rationale) + '</p>' : '') +
+      (risk.business_impact ? '<p class="text-sm text-neutral-400"><span class="font-semibold text-neutral-300">What it means: </span>' + esc(risk.business_impact) + '</p>' : '') +
+      (risk.basis ? '<p class="text-xs text-neutral-500 italic">' + esc(risk.basis) + '</p>' : '') +
+    '</div></div>';
+  }
+
+  html += '<div>' + sectionTitle('All key findings') + '<div class="space-y-3">' +
+    (es.key_findings || []).map(function (f) {
+      return '<div class="glass p-5 rounded-xl" style="border-left:4px solid ' + col(f.severity) + '">' +
+        '<h4 class="font-semibold text-sm mb-1">' + esc(f.title) + '</h4>' +
+        '<p class="text-sm text-neutral-300 leading-relaxed">' + esc(f.detail) + '</p></div>';
+    }).join('') + '</div></div>';
+
+  // How the AI's candidate findings were sorted
+  if ((es.glance_cards || []).length) {
+    html += '<div>' + sectionTitle('How the findings were sorted') +
+      (es.triage && es.triage.statement ? '<p class="text-xs text-neutral-500 italic mb-3">' + esc(es.triage.statement) + '</p>' : '') +
+      '<div class="grid grid-cols-2 lg:grid-cols-3 gap-4 exec-glance">' + es.glance_cards.map(figure).join('') + '</div></div>';
+  }
+
+  // What was scanned
+  const cov = es.scan_coverage || {};
+  if ((cov.pipeline || []).length) {
+    const stKey = function (s) { return s === 'done' ? 'none' : (s === 'partial' ? 'medium' : (s === 'skipped' ? 'high' : 'unknown')); };
+    html += '<div>' + sectionTitle('What was scanned') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Step</th><th>Status</th><th>Detail</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      cov.pipeline.map(function (p) {
+        return '<tr><td class="px-6 py-4 font-medium align-top">' + esc(p.stage) + '</td>' +
+          '<td class="py-4 align-top">' + badge(stKey(p.status), p.status_label) + '</td>' +
+          '<td class="py-4 pr-6 align-top text-xs text-neutral-400">' + esc(p.detail) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      ((cov.languages || []).length ?
+        '<div class="glass rounded-xl overflow-x-auto mt-4"><table class="w-full text-left text-sm">' +
+        '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+        '<th class="px-6 py-4">Language</th><th>Code units analyzed</th><th>Open issues</th></tr></thead>' +
+        '<tbody class="divide-y divide-neutral-800">' +
+        cov.languages.map(function (l) {
+          return '<tr><td class="px-6 py-3 mono text-xs">' + esc(l.language) + '</td><td class="py-3">' + esc(l.code_units) + '</td><td class="py-3">' + esc(l.open_issues) + '</td></tr>';
+        }).join('') + '</tbody></table></div>' : '') +
+      ((cov.scope_limits || []).length ? '<p class="text-xs text-neutral-500 italic mt-2">Scope limits for this run: ' + esc(cov.scope_limits.join('; ')) + '.</p>' : '') +
+    '</div>';
+  }
+
+  // Issues by area
+  const areas = es.risk_areas || [];
+  if (areas.length) {
+    html += '<div>' + sectionTitle('Issues by area') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Area</th><th>Open</th><th>' + esc(confirmedLabel) + '</th><th>Files</th><th>Priority</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      areas.map(function (t) {
+        return '<tr>' +
+          '<td class="px-6 py-4"><div class="font-medium">' + esc(t.title) + '</div><div class="text-xs text-neutral-500 mt-1 max-w-xl">' + esc(t.plain) + '</div></td>' +
+          '<td class="py-4 align-top">' + esc(t.issues) + '</td>' +
+          '<td class="py-4 align-top">' + esc(t.confirmed) + '</td>' +
+          '<td class="py-4 align-top">' + esc(t.files_affected) + '</td>' +
+          '<td class="py-4 pr-6 align-top">' + badge(t.priority, t.priority_label) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-[11px] text-neutral-500 italic mt-2">Priority is severity weighed by evidence (see Methodology): a finding not confirmed exploitable counts at most High.</p></div>';
+  }
+
+  // Issue types to fix first
+  const types = es.issues_to_fix_first || [];
+  if (types.length) {
+    html += '<div>' + sectionTitle('Issue types to fix first') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">Issue</th><th>Occurrences</th><th>Files</th><th>Status</th><th>Priority</th><th>What to do</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      types.map(function (c) {
+        return '<tr>' +
+          '<td class="px-6 py-4 font-medium align-top">' + esc(c.title) +
+            (c.reference ? '<div class="mono text-[10px] text-neutral-500 font-normal mt-1 break-all max-w-[16rem]">' + esc(c.reference) + '</div>' : '') + '</td>' +
+          '<td class="py-4 align-top">' + esc(c.occurrences) + '</td>' +
+          '<td class="py-4 align-top">' + esc(c.files_affected) + '</td>' +
+          '<td class="py-4 align-top text-xs text-neutral-400">' + esc(c.status) + '</td>' +
+          '<td class="py-4 align-top">' + badge(c.priority, c.priority_label) + '</td>' +
+          '<td class="py-4 pr-6 align-top text-neutral-300 text-xs">' + esc(c.action) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-[11px] text-neutral-500 italic mt-2">The identifier under each issue is its weakness number (CWE), for tickets and audit trails. Exact locations and fixes are in the Findings tab.</p></div>';
+  }
+
+  // Files to review first
+  const files = es.files_to_review_first || [];
+  if (files.length) {
+    html += '<div>' + sectionTitle('Files to review first') +
+      '<div class="glass rounded-xl overflow-x-auto"><table class="w-full text-left text-sm">' +
+      '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' +
+      '<th class="px-6 py-4">File</th><th>Language</th><th>Open</th><th>' + esc(confirmedLabel) + '</th><th>Priority</th></tr></thead>' +
+      '<tbody class="divide-y divide-neutral-800">' +
+      files.map(function (r) {
+        return '<tr>' +
+          '<td class="px-6 py-4 mono text-xs break-all">' + esc(r.file) + '</td>' +
+          '<td class="py-4 text-xs text-neutral-400">' + esc(r.language || '—') + '</td>' +
+          '<td class="py-4">' + esc(r.issues) + '</td>' +
+          '<td class="py-4">' + esc(r.confirmed) + '</td>' +
+          '<td class="py-4 pr-6">' + badge(r.priority, r.priority_label) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-[11px] text-neutral-500 italic mt-2">Ranks the files carrying the most serious and most numerous open issues. Findings dismissed as false alarms are not counted.</p></div>';
+  }
+
+  // All suggested actions
+  html += '<div>' + sectionTitle('All suggested actions') +
+    (es.recommended_actions_basis ? '<p class="text-xs text-neutral-500 italic mb-3">' + esc(es.recommended_actions_basis) + '</p>' : '') +
+    '<div class="space-y-3">' +
+    (es.recommended_actions || []).map(function (a) {
+      return '<div class="glass p-5 rounded-xl flex gap-4">' +
+        '<div class="w-8 h-8 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-sm font-bold">' + esc(a.priority) + '</div>' +
+        '<div class="min-w-0"><div class="flex flex-wrap items-center gap-2 mb-1"><h4 class="font-semibold text-sm">' + esc(a.action) + '</h4>' +
+        '<span class="px-2 py-0.5 rounded border border-neutral-600 text-[10px] uppercase font-bold text-neutral-400 whitespace-nowrap">' + esc(a.timeframe) + '</span></div>' +
+        '<p class="text-sm text-neutral-400 leading-relaxed">' + esc(a.why) + '</p>' +
+        (a.owner ? '<p class="text-xs text-neutral-500 mt-1">Suggested owner: ' + esc(a.owner) + '</p>' : '') + '</div></div>';
+    }).join('') + '</div></div>';
+
+  const co = es.compliance_overview;
+  if (co) {
+    html += '<div>' + sectionTitle('Compliance exposure') + '<div class="glass p-5 rounded-xl space-y-3">' +
+      '<p class="text-sm text-neutral-300 leading-relaxed">' + esc(co.statement) + '</p>' +
+      '<div class="flex flex-wrap gap-2">' +
+      (co.most_affected || []).map(function (f) {
+        return '<span class="px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs">' + esc(f.framework) + ' <span class="mono text-neutral-500">' + esc(f.findings) + (f.findings === 1 ? ' finding' : ' findings') + '</span></span>';
+      }).join('') + '</div>' +
+      '<p class="text-xs text-neutral-500 italic">' + esc(co.disclaimer) + ' Details are in the Compliance tab.</p></div></div>';
+  }
+
+  // ── APPENDIX ──────────────────────────────────────────────────────────────
+  const summaryCls = 'cursor-pointer px-5 py-4 text-sm font-semibold text-neutral-200';
+  html += '<div class="exec-page-break pt-2"><p class="text-xs text-neutral-500 uppercase font-semibold tracking-widest border-b border-neutral-800 pb-2">Appendix</p></div>';
+
+  const mt = es.methodology;
+  if (mt) {
+    html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">Methodology: how this report was produced</summary>' +
+      '<div class="px-5 pb-5 space-y-5">' +
+      '<ol class="space-y-3">' +
+      (mt.steps || []).map(function (st, i) {
+        return '<li class="flex gap-3"><span class="w-6 h-6 shrink-0 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-xs font-bold">' + (i + 1) + '</span>' +
+          '<div class="text-sm"><span class="font-semibold">' + esc(st.step) + '. </span><span class="text-neutral-400 leading-relaxed">' + esc(st.detail) + '</span></div></li>';
+      }).join('') + '</ol>' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-2">How the overall risk rating is decided</p>' +
+      '<table class="w-full text-left text-sm"><tbody class="divide-y divide-neutral-800">' +
+      (mt.rating_rules || []).map(function (r) {
+        return '<tr><td class="py-2 pr-4 font-semibold whitespace-nowrap align-top">' + esc(r.level) + '</td><td class="py-2 text-neutral-400">' + esc(r.rule) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="text-sm text-neutral-400 leading-relaxed"><span class="font-semibold text-neutral-300">Severity and priority. </span>' + esc(mt.severity_note) + '</p>' +
+      '<p class="text-sm text-neutral-400 leading-relaxed"><span class="font-semibold text-neutral-300">Prioritization. </span>' + esc(mt.prioritization) + '</p>' +
+      '<p class="text-sm text-neutral-400 leading-relaxed"><span class="font-semibold text-neutral-300">Timeframes and owners. </span>' + esc(mt.timeframes) + '</p>' +
+      '<div><p class="text-xs text-neutral-500 uppercase font-semibold mb-2">Limitations</p>' +
+      '<ul class="list-disc pl-5 space-y-1 text-sm text-neutral-400">' +
+      (mt.limitations || []).map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></div>' +
+    '</div></details>';
+  }
+
+  html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">About this report</summary>' +
+    '<div class="px-5 pb-5 space-y-4">' +
+    '<p class="text-sm text-neutral-300">' + esc(sc.description || '') + '</p>' +
+    (sc.discovery ? '<p class="text-sm text-neutral-400">' + esc(sc.discovery) + '</p>' : '') +
+    '<ul class="list-disc pl-5 space-y-1 text-xs text-neutral-400">' +
+      (es.notes || []).map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>' +
+    '<p class="text-xs text-neutral-500">For technical detail, use the other tabs of this report.</p>' +
+  '</div></details>';
+
+  html += '<details class="glass rounded-xl exec-appendix"><summary class="' + summaryCls + '">Plain-language glossary</summary>' +
+    '<dl class="px-5 pb-5 space-y-2 text-xs text-neutral-400">' +
+    (es.glossary || []).map(function (t) { return '<div><dt class="font-semibold text-neutral-300 inline">' + esc(t.term) + ': </dt><dd class="inline">' + esc(t.meaning) + '</dd></div>'; }).join('') +
+    '</dl></details>';
+
+  root.innerHTML = html;
+}
+
+// Printing: the appendix is collapsed on screen but must be open on paper.
+(function () {
+  let closedBeforePrint = [];
+  window.addEventListener('beforeprint', function () {
+    closedBeforePrint = [];
+    document.querySelectorAll('#executive-content details').forEach(function (d) {
+      if (!d.open) { closedBeforePrint.push(d); d.open = true; }
+    });
+  });
+  window.addEventListener('afterprint', function () {
+    closedBeforePrint.forEach(function (d) { d.open = false; });
+    closedBeforePrint = [];
+  });
+})();
 
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 
@@ -335,7 +658,7 @@ function renderDashboard() {
   const s = reportData.stats;
   document.getElementById('report-id').textContent = 'GENERATED_AT: ' + reportData.generated_at;
   document.getElementById('stat-findings').textContent    = s.totalFindings;
-  document.getElementById('stat-exploitable').textContent = s.exploitable;
+  document.getElementById('stat-exploitable').textContent = taintNotRun() ? 'n/a' : s.exploitable;
   document.getElementById('stat-valid').textContent       = s.verifiedValid;
   document.getElementById('stat-chunks').textContent      = s.chunksWithFindings + ' / ' + s.totalChunks;
 
@@ -716,7 +1039,7 @@ function renderStats() {
   const s = reportData.stats;
 
   document.getElementById('stats-total').textContent          = s.totalFindings;
-  document.getElementById('stats-exploitable').textContent    = s.exploitable;
+  document.getElementById('stats-exploitable').textContent    = taintNotRun() ? 'n/a' : s.exploitable;
   document.getElementById('stats-valid').textContent          = s.verifiedValid;
   document.getElementById('stats-fp').textContent             = s.verifiedFalsePositive;
   document.getElementById('stats-unverified').textContent     = s.unverified;
@@ -805,9 +1128,12 @@ function renderSystem() {
 // "how many distinct kinds of bug" with "how many places it showed up", so
 // these helpers recompute both from the underlying findings per control
 // instead of trusting one undifferentiated number.
+// fwName may be a bare family name ('OWASP Top 10'): the mapping's own names
+// carry a version, e.g. 'OWASP Top 10 (2021)', so an exact match alone left
+// every OWASP tile at 0.
 function hasComplianceControl(f, fwName, controlId) {
   return !!(f.compliance && f.compliance.frameworks &&
-    f.compliance.frameworks.some(x => x.name === fwName && x.controls.some(c => c.id === controlId)));
+    f.compliance.frameworks.some(x => (x.name === fwName || String(x.name).indexOf(fwName + ' (') === 0) && x.controls.some(c => c.id === controlId)));
 }
 
 function complianceMatchesFor(fwName, controlId) {
@@ -1014,6 +1340,7 @@ function init() {
   closeModal();
   updateTabCounts();
   renderDashboard();
+  try { renderExecutiveSummary(); } catch (e) { console.error('Executive summary render failed:', e); }
   renderFindings();
   renderInventory();
   renderStats();
@@ -1031,8 +1358,9 @@ init();
 
 // ─── main generator ──────────────────────────────────────────────────────────
 
-export async function generateSastHTMLReport(results, meta = {}) {
+export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
   const stats = buildStats(results);
+  const isMalware = meta.scan_type === 'malware';
 
   // Inventory: chunks stripped of code (no source in report)
   const inventory = results.map(chunk => ({
@@ -1066,10 +1394,26 @@ export async function generateSastHTMLReport(results, meta = {}) {
     })),
   }));
 
+  // The executive summary is built once by the caller and shared with the JSON
+  // report. Only built here when the caller did not pass one; never allowed to
+  // fail the report (the tab then says it is unavailable).
+  let executiveSummary = extras && extras.executiveSummary;
+  if (executiveSummary === undefined) {
+    try {
+      executiveSummary = buildSastExecutiveSummary(results, meta);
+    } catch (e) {
+      console.warn(`[ubel-sast] Executive summary failed: ${e.message}`);
+      executiveSummary = null;
+    }
+  }
+
   const reportPayload = {
     generated_at: meta.generated_at || new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
     stats,
+    executive_summary: executiveSummary || null,
     meta: {
+      scan_type:       meta.scan_type       || 'analyze',
+      scan_options:    meta.scan_options    || null,
       tool_version:    TOOL_VERSION,
       provider:        meta.provider        || null,
       model:           meta.model           || null,
@@ -1092,7 +1436,7 @@ export async function generateSastHTMLReport(results, meta = {}) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UBEL SAST — Security Report</title>
+  <title>${isMalware ? 'UBEL Malicious Code Scan — Security Report' : 'UBEL SAST — Security Report'}</title>
   <script>${await getTailwindScript()}</script>
     <script>${await getChartJSScript()}</script>
     <style>${await getGoogleFontsScript()}</style>
@@ -1116,6 +1460,51 @@ export async function generateSastHTMLReport(results, meta = {}) {
     .modal-overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%;
                      background: rgba(0,0,0,0.85); z-index:50; backdrop-filter: blur(4px); }
     .modal-content { max-height: 90vh; overflow-y: auto; }
+    /* Executive summary: print / save-as-PDF. Prints the summary only, on white;
+       page 1 is the one-page summary, details and appendix start on new pages. */
+    details > summary { list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before { content: "+"; display: inline-block; width: 1.2em; color: #737373; }
+    details[open] > summary::before { content: "-"; }
+    @media print {
+      @page { size: A4; margin: 12mm; }
+      html, body { background: #fff !important; color: #111 !important; font-size: 11px; }
+      header, nav, footer, .no-print, .modal-overlay { display: none !important; }
+      main { padding: 0 !important; max-width: none !important; }
+      main > section { display: none !important; }
+      main > #section-executive { display: block !important; }
+      #section-executive, #section-executive * { -webkit-print-color-adjust: exact; print-color-adjust: exact; box-shadow: none !important; backdrop-filter: none !important; }
+      #section-executive > div, #section-executive #executive-content > * { margin-top: 0; }
+      #executive-content { display: block !important; }
+      #executive-content > * + * { margin-top: 12px !important; }
+      #section-executive .glass { background: #fff !important; border-color: #d1d5db; break-inside: avoid; padding: 8px 12px !important; border-radius: 6px !important; }
+      #section-executive .glass[style*="border-left"] { border-top-color: #d1d5db; border-right-color: #d1d5db; border-bottom-color: #d1d5db; }
+      #section-executive [class*="text-neutral"], #section-executive [class*="text-white"] { color: #374151 !important; }
+      #section-executive .exec-headline, #section-executive h2, #section-executive h4 { color: #111 !important; }
+      #section-executive [class*="bg-neutral"] { background: #f3f4f6 !important; }
+      #section-executive [class*="border-neutral"] { border-color: #d1d5db !important; }
+      #section-executive [class*="divide-neutral"] > * { border-color: #e5e7eb !important; }
+      #section-executive .exec-page-break { break-before: page; }
+      #section-executive .exec-cols-2 { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+      #section-executive .exec-figs > *, #section-executive .exec-glance > *, #section-executive .exec-cols-2 > * { min-width: 0; overflow-wrap: anywhere; }
+      #section-executive .exec-figs { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 8px !important; }
+      #section-executive .exec-glance { display: grid !important; grid-template-columns: repeat(3, 1fr) !important; gap: 8px !important; }
+      #section-executive h2 { font-size: 18px !important; margin-bottom: 4px !important; }
+      #section-executive h3 { font-size: 10px !important; margin-bottom: 6px !important; break-after: avoid; }
+      #section-executive h4 { font-size: 11px !important; }
+      #section-executive .text-4xl { font-size: 28px !important; line-height: 1.1 !important; }
+      #section-executive .text-3xl { font-size: 20px !important; line-height: 1.1 !important; }
+      #section-executive .text-lg { font-size: 12.5px !important; line-height: 1.4 !important; }
+      #section-executive .text-sm { font-size: 10.5px !important; line-height: 1.4 !important; }
+      #section-executive .text-xs, #section-executive [class*="text-[11px]"] { font-size: 9px !important; line-height: 1.35 !important; }
+      #section-executive .space-y-3 > * + * { margin-top: 6px !important; }
+      #section-executive .space-y-8 > * + * { margin-top: 12px !important; }
+      #section-executive table { font-size: 9.5px; }
+      #section-executive td, #section-executive th { padding-top: 5px !important; padding-bottom: 5px !important; }
+      #section-executive tr { break-inside: avoid; }
+      #section-executive .exec-appendix { break-inside: auto; }
+      #section-executive .exec-appendix > summary::before { content: ""; }
+    }
   </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -1126,7 +1515,7 @@ export async function generateSastHTMLReport(results, meta = {}) {
       <div class="flex items-center gap-3">
         <div class="w-8 h-8 bg-red-600 rounded flex items-center justify-center font-bold text-white text-sm">S</div>
         <div>
-          <h1 class="text-lg font-semibold tracking-tight">SAST Security Report</h1>
+          <h1 class="text-lg font-semibold tracking-tight">${isMalware ? 'Malicious Code Scan Report' : 'SAST Security Report'}</h1>
           <p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ...</p>
         </div>
       </div>
@@ -1140,6 +1529,7 @@ export async function generateSastHTMLReport(results, meta = {}) {
   <nav class="border-b border-neutral-800 bg-neutral-900/30">
     <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
       <button onclick="switchTab('dashboard')"      id="tab-dashboard"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
+      <button onclick="switchTab('executive')"      id="tab-executive"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('findings')"       id="tab-findings"       class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
       <button onclick="switchTab('inventory')"      id="tab-inventory"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Chunk Inventory(0)</button>
       <button onclick="switchTab('stats')"          id="tab-stats"          class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
@@ -1191,6 +1581,11 @@ export async function generateSastHTMLReport(results, meta = {}) {
           <div class="h-56"><canvas id="classChart"></canvas></div>
         </div>
       </div>
+    </section>
+
+    <!-- Executive Summary (plain-language, for non-technical readers) -->
+    <section id="section-executive" class="hidden space-y-8">
+      <div id="executive-content" class="space-y-8"></div>
     </section>
 
     <!-- Findings -->
