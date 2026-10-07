@@ -1,4 +1,4 @@
-# UBEL — Node.js
+# UBEL — Unified Bill / Enforced Law (Node.js)
 
 **Software supply-chain and source-code security: dependency scanning, an install-time firewall, and AI-powered source-level scanning ( SAST ) .**
 
@@ -201,7 +201,7 @@ Every finding gets a `compliance` object (categories + per-framework control lis
 
 ## SAST — AI-Powered Static Analysis & Malicious Code Scanner
 
-Chunks your codebase into semantically-bounded units (15 language families — 12 source-code languages (including Dart/Flutter and Swift) plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 59-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
+Chunks your codebase into semantically-bounded units (15 language families — 12 source-code languages (including Dart/Flutter and Swift) plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 64-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
 
 ```bash
 # Vulnerability scan
@@ -536,8 +536,8 @@ below.
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ✅ | ❌ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
