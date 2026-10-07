@@ -17,6 +17,33 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 
 Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR and CIS Controls v8 (best-effort guidance, not a compliance assessment).
 
+## Capability matrix
+
+| Ecosystem | SCA | Firewall | SAST | Malware SAST | Reachability | License Compliance | Secrets |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Python (pip/uv/pipx/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
+| Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | ✅ | — |
+| Windows host | ✅ | ❌ | — | — | — | ✅ | — |
+| VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
+
+✅ = built and shipped · ⚠️ = partial, see that ecosystem's section in [DETAILS.md](./DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
+
+Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see [cloud/README.md](./cloud/README.md).
+
 ## Install
 
 ```bash
