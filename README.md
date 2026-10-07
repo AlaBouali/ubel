@@ -2,15 +2,15 @@
 
 **Software supply-chain and source-code security: dependency scanning, an install-time firewall, AI-powered SAST, cloud misconfiguration scanning and external attack surface scanning.**
 
-UBEL is a zero-dependency, source-available (internal-use-only; see [License](#license)) application security toolkit. This package (`@arcane-spark/ubel-node`) ships one CLI per job. Full details live in [DETAILS.md](./DETAILS.md) and the per-module READMEs.
+UBEL is a zero-dependency, source-available (internal-use-only; see [License](#license)) application security toolkit. This package (`@arcane-spark/ubel-node`) ships one CLI per job. Full details live in [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) and the per-module READMEs.
 
 ## Modules
 
 | Module | What it does | Docs |
 |---|---|---|
 | **SCA** | Resolves dependencies and scans them against OSV.dev and NVD in real time, with reachability analysis, KEV/EPSS exploit intelligence, license checks, CycloneDX SBOM and SARIF output. | [sca/README.md](./sca/README.md) |
-| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. | [DETAILS.md](./DETAILS.md#firewall--install-time-gate) |
-| **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [DETAILS.md](./DETAILS.md#secrets-detection) |
+| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. | [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
+| **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [sast/README.md](./sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [cloud/README.md](./cloud/README.md) |
 | **EASM** | Passive fingerprinting and misconfiguration checks of domains, hosts and ports you own. **Authorized use only.** | [easm/README.md](./easm/README.md) |
@@ -40,7 +40,7 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Windows host | ✅ | ❌ | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
 
-✅ = built and shipped · ⚠️ = partial, see that ecosystem's section in [DETAILS.md](./DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
+✅ = built and shipped · ⚠️ = partial, see that ecosystem's section in [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see [cloud/README.md](./cloud/README.md).
 
@@ -82,7 +82,7 @@ ubel-url staging.your-domain.example --fail-on high   # EASM, your own infrastru
 - **EASM:** exit `2` when `--fail-on` is met. It gates on vulnerabilities, infections **and web misconfigurations**; KEV/EPSS rules apply to vulnerabilities. `--fail-on none` disables the gate.
 - **Cloud:** governed by its own `--fail-on`.
 
-See [DETAILS.md](./DETAILS.md#cicd-integration) for GitHub Actions and Docker examples.
+See [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#cicd-integration) for GitHub Actions and Docker examples.
 
 ## Privacy
 
@@ -96,4 +96,4 @@ Source-available, **internal-use-only**. Using and modifying UBEL for your organ
 
 - Repository: https://github.com/AlaBouali/ubel
 - Issues: https://github.com/AlaBouali/ubel/issues
-- Full reference: [DETAILS.md](./DETAILS.md)
+- Full reference: [DETAILS.md](.https://github.com/AlaBouali/ubel/blob/main/DETAILS.md)
