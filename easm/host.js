@@ -94,8 +94,9 @@ Options:
                             reflect the full, unfiltered scan regardless of
                             this flag. One of: critical|high|medium|low|unknown
   --fail-on <sev|none|N:sev>
-                            Non-zero exit if a vulnerability at or above
-                            <sev> exists (default: critical). Infections
+                            Non-zero exit if a vulnerability or web
+                            misconfiguration at or above <sev> exists
+                            (default: critical). Infections
                             always count regardless of threshold. "none"
                             always exits 0. "N:sev" fails only once MORE
                             than N matches exist, e.g. "5:high".
@@ -439,7 +440,7 @@ async function main() {
 
   await writeEasmReports(reportPayload, args, { reportType: 'easm-host', cliLabel: '[ubel-host]' });
 
-  process.exitCode = failOnExitCode(scanResult.vulnerabilities, args.failOn, { blockKev: args.blockKev, epssThreshold: args.epssThreshold });
+  process.exitCode = failOnExitCode(scanResult.vulnerabilities, args.failOn, { blockKev: args.blockKev, epssThreshold: args.epssThreshold, misconfigurations: scanResult.misconfigurations?.findings });
 }
 
 export { main, parseArgs, USAGE_NOTICE };

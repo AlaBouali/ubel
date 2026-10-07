@@ -73,18 +73,29 @@ export function intelGateHits(vulnerabilities, { blockKev = true, epssThreshold 
   );
 }
 
-/** @returns {number} process exit code (0 or 2) for a resolved --fail-on gate plus the KEV/EPSS gate */
+/** Normalises misconfiguration findings to the {severity} shape the --fail-on
+ *  severity/threshold logic reads. Misconfigurations are never infections and
+ *  carry no KEV/EPSS data, so they only ever count toward the severity gate. */
+function misconfigGateItems(findings) {
+  return (Array.isArray(findings) ? findings : []).map((f) => ({ severity: f?.severity }));
+}
+
+/**
+ * @param {object[]} vulnerabilities
+ * @param {object} failOn  resolved parseFailOn() result
+ * @param {{blockKev?: boolean, epssThreshold?: number|string, misconfigurations?: object[]}} intel
+ *        `misconfigurations` is the raw findings array from scanMisconfigurations();
+ *        its findings count toward --fail-on exactly like vulnerabilities do.
+ * @returns {number} process exit code (0 or 2) for a resolved --fail-on gate plus the KEV/EPSS gate
+ */
 export function failOnExitCode(vulnerabilities, failOn, intel = {}) {
   if (failOn.mode === "none") return 0;
   if (intelGateHits(vulnerabilities, intel).length > 0) return 2;
-  if (failOn.mode === "threshold") {
-    const failRank = SEVERITY_RANK[failOn.severity];
-    const matchCount = vulnerabilities.filter((v) => (SEVERITY_RANK[vulnSeverityKey(v)] ?? 4) <= failRank).length;
-    return matchCount > failOn.count ? 2 : 0;
-  }
+  const gated = [...vulnerabilities, ...misconfigGateItems(intel.misconfigurations)];
   const failRank = SEVERITY_RANK[failOn.severity];
-  const shouldFail = vulnerabilities.some((v) => (SEVERITY_RANK[vulnSeverityKey(v)] ?? 4) <= failRank);
-  return shouldFail ? 2 : 0;
+  const matchCount = gated.filter((v) => (SEVERITY_RANK[vulnSeverityKey(v)] ?? 4) <= failRank).length;
+  if (failOn.mode === "threshold") return matchCount > failOn.count ? 2 : 0;
+  return matchCount > 0 ? 2 : 0;
 }
 
 function atomicWrite(filePath, content) {

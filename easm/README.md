@@ -232,7 +232,8 @@ dependency; if it's answering HTTP requests, it's running.
 - **Compliance framework mapping**, same shared engine as every other module
 - Automatic report generation: timestamped **JSON** + interactive **HTML**,
   plus `latest.*` convenience copies
-- `--fail-on` severity/count gate — same syntax as `ubel-cloud` — for CI use
+- `--fail-on` severity/count gate (vulnerabilities, infections and web
+  misconfigurations) — same syntax as `ubel-cloud` — for CI use
 - **Exploit intelligence** — every vulnerability is checked against the
   [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
   catalog and scored with [FIRST EPSS](https://www.first.org/epss/); by
@@ -349,7 +350,7 @@ ubel-url staging.internal:8443 --allow-private          # a lab/internal target 
 ubel-url example.com --concurrency 8                    # fingerprint up to 8 targets in parallel
 ubel-url example.com --working-dir /path/to/project     # reports written under <path>/.ubel/ instead of cwd
 ubel-url example.com --min-severity high                # only list high/critical vulnerabilities in the report
-ubel-url example.com --fail-on high                     # non-zero exit on high or critical (default: critical)
+ubel-url example.com --fail-on high                     # non-zero exit on a high or critical vulnerability/misconfiguration (default: critical)
 ubel-url example.com --fail-on 5:high                   # non-zero exit only once MORE than 5 high-or-above findings exist
 ubel-url example.com --fail-on none                     # always exit 0 (reports are still written)
 ubel-url example.com --epss-threshold 5%                # also fail on any EPSS score >= 5% (default: 10%)
@@ -537,18 +538,20 @@ silently looks "clean" just because its only known issue was filtered out
 of the vulnerability list.
 
 Exit code is `2` if the `--fail-on` condition is met (default: any
-vulnerability at `critical` severity or an infection; pass `--fail-on none`
+vulnerability or web misconfiguration at `critical` severity, or an infection; pass `--fail-on none`
 to always exit `0`, or `--fail-on <count>:<severity>` — e.g. `5:high` — to
 fail only once MORE than `<count>` matches at or above `<severity>` exist,
 for a CI gate that tolerates a known/accepted baseline), `0` otherwise, `1` on a fatal/unexpected error (including `ubel-domain` finding no hosts, `ubel-easm` finding no scannable IP for the domain, or a vulnerability lookup against OSV/NVD that can't be completed — a run never reports a clean result for a lookup it couldn't make). Independently of `--fail-on`'s severity bar, the exit code is also `2` if any
 reported vulnerability is in the CISA KEV catalog (`--block-kev`, default on)
 or has an EPSS score at or above `--epss-threshold` (default 10%), whatever its
 severity — see [Exploit intelligence](#exploit-intelligence-kev--epss);
-`--fail-on none` turns these off too. `--fail-on` gates only
-on **vulnerabilities** (and infections) — a scan that finds nothing but
-critical misconfigurations still exits `0`; misconfiguration severity isn't
-part of the exit-code gate today (see [Known
-limitations](#known-limitations--natural-next-steps)). `--list-only` (on
+`--fail-on none` turns these off too. `--fail-on` gates on
+**vulnerabilities, infections and web misconfigurations** together: a
+misconfiguration counts toward the severity bar and the `N:sev` count exactly
+like a vulnerability of the same severity, so a scan whose only finding is an
+exposed `.env` or `.git` exits `2` at the default bar. `--min-severity` filters
+the vulnerability list only; misconfigurations are always gated on their full,
+unfiltered set. KEV/EPSS apply to vulnerabilities only. `--list-only` (on
 `ubel-domain`, `ubel-host`, and `ubel-easm`) always exits `0` on success,
 independent of `--fail-on`, since it never reaches the vulnerability-lookup
 stage the gate evaluates.
@@ -1257,7 +1260,7 @@ supported path for CI and scripting alike.
 
 ## CI/CD Integration
 
-All four EASM CLIs exit non-zero on vulnerabilities that clear the
+All four EASM CLIs exit non-zero on vulnerabilities and web misconfigurations that clear the
 configured `--fail-on` bar (or that are in the CISA KEV catalog / at or above
 the EPSS threshold — on by default, see
 [Exploit intelligence](#exploit-intelligence-kev--epss)), making them native to any CI runner — **only
@@ -1393,12 +1396,6 @@ rather than every push.
   do feed the executive summary (rating, ranking, figures), but only for
   CVE-keyed advisories; when a feed was down the summary says its exploit data
   is incomplete rather than treating the gap as "not exploited".
-- `--fail-on` (and the KEV/EPSS gate) only gates on vulnerabilities/infections, not on
-  misconfiguration findings — a scan that turns up only critical
-  misconfigurations (an exposed `.git` directory, say) with no matching
-  vulnerability still exits `0`. The findings are still written to every
-  report regardless; there's just no CI gate on them yet, unlike
-  `ubel-cloud`'s misconfiguration checks.
 - The console summary (`printScanSummary`, what prints to the terminal at
   the end of a run) reports vulnerability and secrets counts but not
   misconfiguration counts — nothing about them appears in stdout today; the
