@@ -3558,11 +3558,17 @@ export class UbelEngineInstance {
     const CONDA_SPEC_RE     = /^[A-Za-z0-9_][A-Za-z0-9_.*+!<>=,~:[\]-]*$/;
     const CONDA_ARTIFACT_RE = /\.(conda|tar\.bz2)$/i;
 
+    // cargo specifiers: `name` or `name@requirement` only — no options, paths,
+    // URLs or whitespace, so nothing can add a --git/--path/--registry source.
+    const CARGO_SPEC_RE = /^[A-Za-z_][A-Za-z0-9_-]*(@[0-9A-Za-z.^~=<>*+!,-]+)?$/;
+
     if (args.length) {
       const bad = this.engine === "composer"
         ? args.filter(a => !COMPOSER_PKG_ARG_RE.test(a))
         : this.engine === "conda"
           ? args.filter(a => !CONDA_SPEC_RE.test(a) || CONDA_ARTIFACT_RE.test(a))
+        : this.engine === "cargo"
+          ? args.filter(a => !CARGO_SPEC_RE.test(a))
         : this.systemType === "npm"
           ? args.filter(a => !PKG_ARG_RE.test(a))
           : args.filter(a => !validatePkgArgsLoose(a));
@@ -3572,6 +3578,8 @@ export class UbelEngineInstance {
           ? "[!] Expected format: vendor/package or vendor/package:constraint"
           : this.engine === "conda"
             ? "[!] Expected format: a conda match spec such as numpy, numpy=1.26 or conda-forge::numpy>=1.26 (no options, paths or URLs)"
+          : this.engine === "cargo"
+            ? "[!] Expected format: a crate name, optionally with a version requirement: serde or serde@1.0 (no options, paths, URLs or git sources)"
           : this.systemType === "npm"
             ? "[!] Expected format: name, name@version, or @scope/name@version"
             : "[!] Expected format: a package name, optionally with a version/extras specifier");
@@ -3676,6 +3684,18 @@ export class UbelEngineInstance {
         } else {
           purls         = manager.getLinuxPackages();
           reportContent = { system_info: manager.getOsInfo() };
+        }
+      } else if (this.systemType === "cargo") {
+        // ── Rust (cargo) firewall ────────────────────────────────────────────
+        // The dry-run resolves in a scratch copy of the project, so `check`
+        // leaves the project untouched and there is nothing to revert (see
+        // cargo_runner.js).
+        if (needsRevert) {
+          purls         = manager.runDryRun(args, projectRoot); // sets manager.engineVersion internally
+          reportContent = manager.inventoryData;
+        } else {
+          purls         = await manager.getInstalled(projectRoot);
+          reportContent = {};
         }
       } else if (needsRevert) {
         purls         = await manager.runDryRun(this.engine, args, projectRoot);
@@ -4311,6 +4331,17 @@ export class UbelEngineInstance {
           process.exit(1);
         }
 
+      } else if (this.systemType === "cargo") {
+        // Writes the scanned Cargo.toml/Cargo.lock into the project, then
+        // `cargo fetch --locked`; restores the originals if the fetch fails.
+        try {
+          manager.runRealInstall(projectRoot);
+        } catch (err) {
+          if (!is_script) console.error("[!] Failed to install package(s):", err.message);
+          process.exit(1);
+        }
+        manager.cleanup();
+
       } else if (this.systemType === "linux") {
         // No lockfile/backup concept for apt/dnf either — a straight
         // `sudo <pm> install -y`, mirroring Linux_Manager.run_real_install.
@@ -4328,6 +4359,7 @@ export class UbelEngineInstance {
       return finalJson;
 
     } finally {
+      if (this.systemType === "cargo") manager.cleanup();
       if (this.systemType === "npm" && !this.wasSuccessfulScan && needsRevert) {
         const revertResult = manager.revert_lock_to_original(this.engine, projectRoot);
         if (!revertResult.reverted) {

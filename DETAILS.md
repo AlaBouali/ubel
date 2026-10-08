@@ -36,6 +36,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does |
 | `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions |
 | `ubel-conda` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, plus `init`. `check`/`install` resolve with `conda create --dry-run --json` against a scratch prefix that never exists (so `check` creates nothing), then a clean `install` runs `conda create`/`conda install --no-deps --file` with exact `channel::name==version=build` pins of precisely the scanned set into `./conda-env`. Only Python-distribution packages are matched against vulnerability data — see the Python section below |
+| `ubel-cargo` | SCA + Firewall | `health` = SCA scan of `Cargo.lock`; `check`/`install` = firewall gate on a dry-run resolved in a scratch copy of the project (`cargo add <crate>` if packages were given, then `cargo update --workspace`, both index-only), so `check` never touches the project. A clean `install` writes the scanned `Cargo.toml`/`Cargo.lock` into the project and runs `cargo fetch --locked`; a failed fetch restores the originals. No `init` mode. Only crates.io crates are scanned — see the Rust section below |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | SCA + Firewall | Same `health`/`check`/`install` split, one binary per native package manager (no auto-detection between them, same as npm/pnpm/bun). Reports and policy live under `~/.ubel/local` so routine use never needs `sudo` — only the real package-manager install does |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls |
@@ -52,7 +53,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-host` | EASM | Connect-scans every port in a range (default 1-30000) on one host, probes whatever accepts a connection for HTTP(S), then runs the same fingerprinting/vulnerability/misconfiguration scan `ubel-url` does against whatever answered — **authorized use only, against infrastructure you own** |
 | `ubel-easm` | EASM | Combines `ubel-domain`'s discovery with `ubel-host`'s port sweep — discovers a domain's subdomains, resolves them to distinct IPs, port-scans every IP, and fingerprints the merged IP:port targets plus the subdomains themselves by name — the most invasive EASM entry point; see the "Shared IPs" warning in `easm/README.md` — **authorized use only, against infrastructure you own** |
 
-`ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-conda` additionally needs the `conda` binary itself, found via `PATH`, then `$CONDA_EXE`, then conda's default install directories (`~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `/opt/conda`, …); it doesn't need a separate Python interpreter. `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` (to create their venv); Node.js itself can't provision one. `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`. `ubel-conda` additionally needs the `conda` binary itself, found via `PATH`, then `$CONDA_EXE`, then conda's default install directories (`~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `/opt/conda`, …); it doesn't need a separate Python interpreter. `ubel-cargo` additionally needs the `cargo` binary itself (found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`), and cargo ≥ 1.62 to add packages (`cargo add`). `ubel-composer` additionally needs the `composer` binary itself on `PATH`, same one-binary-per-tool requirement.
 
 Node.js `>=18.0.0` required.
 
@@ -82,7 +83,7 @@ The same block-before-you-touch-it pattern applies to `ubel-docker`: `install` m
 
 `ubel-composer` extends the same lockfile-backed pattern npm/pnpm/bun use to PHP: `composer require`/`update --no-install --no-scripts` (Composer's own equivalent of `--package-lock-only`) resolves the candidate tree and writes a candidate `composer.lock`/`composer.json` without touching `vendor/`, UBEL scans that candidate, and either proceeds via `composer install --no-scripts` or reverts both files from their on-disk backup — the same SHA-256 TOCTOU check and atomic revert as npm/pnpm/bun, just against Composer's own files. Unlike pip's dry-run below, this has no sdist-style caveat: resolving a Composer dependency graph never runs a package's own code, since build/lifecycle scripts only fire on a real `composer install`/`update`, which is exactly why `--no-scripts` covers both the dry-run and the real install.
 
-`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-conda` follows the same shape with a scratch-prefix dry-run: `conda create --dry-run --json` against a prefix that never exists resolves the full closure (so a fully-satisfied target still reports everything), UBEL scans it, and only then installs exactly the scanned builds (`--no-deps` plus exact pins, spec file SHA-256-checked immediately before conda runs). As with pip, there's no lockfile, so a blocked scan just means the real install never runs. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-conda` follows the same shape with a scratch-prefix dry-run: `conda create --dry-run --json` against a prefix that never exists resolves the full closure (so a fully-satisfied target still reports everything), UBEL scans it, and only then installs exactly the scanned builds (`--no-deps` plus exact pins, spec file SHA-256-checked immediately before conda runs). As with pip, there's no lockfile, so a blocked scan just means the real install never runs. `ubel-cargo` resolves in a scratch copy of the project instead of editing it, so there's nothing to revert and `check` leaves the tree untouched: only after a clean scan are the scanned `Cargo.toml`/`Cargo.lock` written into the project (SHA-256-checked, and re-checked against the project's own files in case they changed mid-scan) and fetched with `cargo fetch --locked`. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
 
 ```bash
 
@@ -123,6 +124,11 @@ ubel-conda check numpy=1.26
 ubel-conda install numpy=1.26
 ubel-conda install                     # no args → falls back to ./environment.yml, then ./environment.yaml
 
+# Rust: dry-run in a scratch copy of the project, then write the scanned manifest/lockfile and `cargo fetch --locked`
+ubel-cargo check serde@1
+ubel-cargo install serde@1
+ubel-cargo install                     # no args → scans the project's existing Cargo.toml/Cargo.lock
+
 # Python CLI tool: scan-gated install into an isolated venv + global shim
 ubel-pipx install black
 
@@ -132,7 +138,7 @@ ubel-apt install curl
 # (ubel-dnf / ubel-yum work the same way, against dnf/yum instead)
 ```
 
-Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-composer`/`ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only (npm/pnpm/bun/composer) — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
+Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-composer`/`ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-cargo`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only (npm/pnpm/bun/composer) — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-cargo`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
 
 **Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — including when a vulnerability lookup against OSV or NVD can't be completed (network error, rate limit, outage, or a malformed response). A failed or incomplete scan is never treated as a pass: for `install`, nothing is installed and the lockfile is restored from backup.
 
@@ -444,6 +450,11 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     command: conda
     args: install                     # scan-gated conda install, resolved from ./environment.yml
 
+- uses: AlaBouali/ubel@<commit-sha>    # needs the Rust toolchain on PATH (e.g. dtolnay/rust-toolchain)
+  with:
+    command: cargo
+    args: install                     # scan-gated: scans ./Cargo.lock, then `cargo fetch --locked`
+
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: composer
@@ -455,7 +466,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
 
 ### Calling the binaries directly
 
@@ -525,8 +536,9 @@ resolution with no (or, for pip/uv, no *typical*) side effects — today
 that's **npm, pnpm, bun, and Docker images** via a true lockfile-only
 dry-run, **PHP (Composer)** via the same lockfile-backed mechanism
 (`composer require`/`update --no-install --no-scripts`), plus **pip/uv/pipx/conda**
-(`pip install --dry-run` / `uv pip install --dry-run` / `conda create --dry-run --json`) and **Linux host
-packages** (`apt`/`dnf`/`yum`'s own native dry-run). Ruby, Rust, Go,
+(`pip install --dry-run` / `uv pip install --dry-run` / `conda create --dry-run --json`), **Rust (Cargo)**
+(`cargo add` + `cargo update --workspace` in a scratch copy of the project) and **Linux host
+packages** (`apt`/`dnf`/`yum`'s own native dry-run). Ruby, Go,
 Java/Kotlin, C#, and Windows remain SCA-covered but not firewall-covered
 below — their package managers genuinely have no dry-run-without-side-effects
 equivalent to gate against, which is a mechanical constraint of each
@@ -545,7 +557,7 @@ below.
 | Python (pip/uv/pipx/conda/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -726,7 +738,7 @@ as every other reachability-covered ecosystem.
 
 **SCA:** Resolves from `Gemfile.lock`.
 
-**Firewall:** Not available — same reasoning as Rust/Go/Java/.NET below: no
+**Firewall:** Not available — same reasoning as Go/Java/.NET below: no
 side-effect-free dry-run install path in Bundler for UBEL to hook into.
 
 **SAST / Malware SAST:** Full coverage, `.rb` chunking.
@@ -740,8 +752,36 @@ side-effect-free dry-run install path in Bundler for UBEL to hook into.
 **SCA:** Resolves from `Cargo.lock`, giving exact resolved versions rather
 than semver ranges from `Cargo.toml`.
 
-**Firewall:** Not available — `cargo add`/`cargo build` don't offer an
-equivalent gate point.
+**Firewall:** Available via `ubel-cargo`. Cargo separates resolution from
+building, which is what makes a gate possible: `cargo add` and
+`cargo update --workspace` resolve against the registry index only — they
+download no crate sources and never run `build.rs` or proc-macros. UBEL runs
+them in a **scratch copy of the project** (so `check` never modifies it and
+there's nothing to revert), scans the resulting `Cargo.lock`, and only on a
+clean scan writes the scanned `Cargo.toml` (when packages were added) and
+`Cargo.lock` into the project and runs `cargo fetch --locked` — `--locked`
+makes cargo fail rather than resolve anything that wasn't scanned. Both
+files' SHA-256 are recorded at scan time and re-checked before the install,
+and the project's own files are re-checked in case they changed while the
+scan ran; if the fetch fails, the originals are restored. With no arguments
+the scanned set is the project's current lockfile.
+
+Honest limits:
+- Only **crates.io** crates are matched against vulnerability data. Workspace
+  members and path dependencies are your own code and are left out; git
+  dependencies and alternative registries are listed in a warning but **not
+  scanned**. (Resolving a git dependency clones it — nothing from it runs.)
+- **Build scripts aren't gated.** `fetch` populates cargo's registry cache
+  only; `build.rs` and proc-macros execute later, at `cargo build`. The
+  guarantee is that only the scanned crate versions are fetched, not that
+  they're inert.
+- Run it from a standalone package or a workspace root — a member of a parent
+  workspace is refused. Path dependencies outside the project root can't
+  resolve in the scratch copy, so the dry-run fails (closed) with cargo's own
+  error.
+- Packages are `name` or `name@requirement` only — no options, git/path
+  sources or feature flags. `cargo install <binary-crate>` isn't covered.
+- `license` is `unknown` on `check`/`install`; there's no `init` mode.
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -1129,10 +1169,10 @@ not treated as an afterthought bolted onto the dependency scanner.
 To keep this document honest rather than aspirational:
 
 - Firewall/pre-install gating is **npm, pnpm, bun, Composer, Docker,
-  pip/uv/pipx, and Linux host packages (apt/dnf/yum) only** — not "every
+  pip/uv/pipx, conda, Cargo, and Linux host packages (apt/dnf/yum) only** — not "every
   package manager," because most package managers genuinely don't offer a
-  dry-run resolution UBEL can safely gate against. Ruby (Bundler), Rust
-  (Cargo), Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
+  dry-run resolution UBEL can safely gate against. Ruby (Bundler),
+  Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
   Windows host all remain without it for that reason — a hard mechanical
   constraint, not a roadmap gap. Swift (SwiftPM/Carthage) and Flutter/Dart
   (pub) are SCA-only as well, simply because no install gate has been built

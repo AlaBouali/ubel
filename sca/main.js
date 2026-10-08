@@ -5,10 +5,10 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | apt | dnf | yum
+ *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | cargo | apt | dnf | yum
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
- *     conda/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
+ *     conda/cargo/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
@@ -154,6 +154,7 @@
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
  *   pipx   — yes  (isolated per-tool venv via dryRunCli()/installCli(), not the shared project venv)
  *   conda  — yes  (`conda create --dry-run --json` against a scratch prefix; exact-pinned `--no-deps` real install)
+ *   cargo  — yes  (`cargo add` + `cargo update --workspace` in a scratch copy of the project; `cargo fetch --locked` real install)
  *   apt/dnf/yum — yes (native OS package-manager dry-run; each engine bound to exactly one manager)
  */
 
@@ -164,6 +165,7 @@ import { NodeManagerInstance }  from "./node_runner.js";
 import { PhpComposerScanner }   from "./php_runner.js";
 import { PypiManagerInstance }  from "./pypi_runner.js";
 import { CondaManagerInstance } from "./conda_runner.js";
+import { CargoManagerInstance } from "./cargo_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
@@ -327,6 +329,12 @@ function applyPolicyOverrides(eng, overrides) {
  * apt/dnf/yum) is actually in play.
  */
 function resolveManager(engine) {
+  if (engine === "cargo") {
+    // Own systemType bucket: the cargo firewall resolves in a scratch copy of
+    // the project (no lockfile backup/revert like npm, no venv like pypi) —
+    // see cargo_runner.js.
+    return { manager: new CargoManagerInstance(), systemType: "cargo" };
+  }
   if (engine === "conda") {
     // conda shares the "pypi" systemType bucket (engine.js's dry-run → scan →
     // gated-install branch for the Python family) but is its own manager
@@ -366,7 +374,7 @@ function resolveManager(engine) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"cargo"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
@@ -554,10 +562,10 @@ async function main(programmaticOptions) {
   // real-install-via-generated-requirements-file behavior as pip — only the
   // dry-run mechanism differs internally (see pypi_runner.js).
   // ════════════════════════════════════════════════════════════════════════════
-  if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine)) {
+  if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo") {
     const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown"];
     const scanScope =
-      (engine === "pip" || engine === "uv" || engine === "conda") ? "repository" :
+      (engine === "pip" || engine === "uv" || engine === "conda" || engine === "cargo") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
       "linux_machine"; // apt | dnf | yum
 
@@ -588,6 +596,13 @@ async function main(programmaticOptions) {
     console.log();
     console.log(`Policy location: ${eng.policyDir}`);
     console.log();
+
+    // cargo has no environment to provision, so `init` is rejected outright
+    // instead of silently falling back to a health scan.
+    if (engine === "cargo" && mode === "init") {
+      console.error("[!] ubel-cargo has no init mode — there is no environment to create. Use check | install | health.");
+      process.exit(1);
+    }
 
     const effectiveMode = PIP_LINUX_VALID_MODES.includes(mode) ? mode : "health";
     eng.checkMode = effectiveMode;

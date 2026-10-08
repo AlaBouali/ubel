@@ -3,12 +3,12 @@
 
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
+This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
 ---
 
 ## Features
 
-- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun/composer) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; conda via `conda create --dry-run --json` against a scratch prefix; apt/dnf/yum via each manager's own simulate/assume-no flag)
+- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun/composer) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; conda via `conda create --dry-run --json` against a scratch prefix; cargo via `cargo add` + `cargo update --workspace` in a scratch copy of the project; apt/dnf/yum via each manager's own simulate/assume-no flag)
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
@@ -18,7 +18,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
 - `health` mode — scan the current project's installed dependencies
-- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert; see [Firewall Mechanics](#firewall-mechanics))
+- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
@@ -52,6 +52,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
 | `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
 | `ubel-conda` | conda — same six modes as `ubel-pip`; `check`/`install` driven by `conda create --dry-run`; see note below and [Firewall Mechanics § conda](#conda) |
+| `ubel-cargo` | Cargo (Rust) — `health`/`check`/`install` plus `threshold`/`block-unknown` (no `init`); `check`/`install` resolve in a scratch copy of the project; see note below and [Firewall Mechanics § cargo](#cargo) |
 | `ubel-pipx` | pip, CLI-tool isolation mode — installs into a dedicated per-tool venv with a global shim, same idea as upstream `pipx`, now scan-gated |
 | `ubel-apt` | apt (Debian/Ubuntu) |
 | `ubel-dnf` | dnf (RHEL 8+, AlmaLinux, Rocky) |
@@ -72,6 +73,8 @@ After installation, the following entry-point binaries are available:
 >
 > **conda** shares `ubel-pip`'s six modes and its `check`/`install` shape, but resolves with `conda create --dry-run --json` against a scratch prefix (so `check` creates nothing) and installs the exact scanned builds with `--no-deps`. OSV has no conda ecosystem, so only conda packages that are Python distributions are matched against it (as PyPI packages) — see [Firewall Mechanics § conda](#conda) for exactly what that does and doesn't cover. It needs the `conda` binary itself on `PATH` (or via `$CONDA_EXE`, or in a default install location); `mamba`/`micromamba` aren't driven directly.
 >
+> **cargo** gates installs by resolving in a **scratch copy of the project** — `cargo add <crate>` (only if packages were given) then `cargo update --workspace`, both of which read the registry index only and never run build scripts — so `check` never modifies your tree. A clean `install` then writes the scanned `Cargo.toml`/`Cargo.lock` and runs `cargo fetch --locked`. Only crates.io crates are matched against vulnerability data; git and alternative-registry dependencies are listed in a warning but not scanned, and `build.rs`/proc-macros still run later at `cargo build`, outside the firewall — see [Firewall Mechanics § cargo](#cargo). It needs the `cargo` binary itself (found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`); there's no `init` mode.
+>
 > **apt / dnf / yum** are three separate binaries, each bound to exactly one native package manager — there's no auto-detection between them, the same one-binary-per-tool shape as `ubel-npm`/`ubel-pnpm`/`ubel-bun`. Running `ubel-dnf` on a host that only has `apt` fails with a clear "not found on PATH" error rather than silently falling back to a different manager.
 
 ---
@@ -83,6 +86,7 @@ After installation, the following entry-point binaries are available:
 - `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` — Node.js can't provision one itself, it only shells out to it to create/manage the venv
 - `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`
 - `ubel-conda` additionally needs the `conda` binary itself — found via `PATH`, then `$CONDA_EXE` (exported by `conda init`'s shell hook), then conda's default install directories (`~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `/opt/conda`, …). It doesn't need a Python interpreter on `PATH`
+- `ubel-cargo` additionally needs the `cargo` binary itself (Rust toolchain) — found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin` — and cargo ≥ 1.62 when packages are given (`cargo add`). It doesn't need a Python interpreter on `PATH`
 - `ubel-apt`/`ubel-dnf`/`ubel-yum` additionally need their specific package manager on `PATH` (each binary targets exactly one — no auto-detection between them) and, for `install` mode only, passwordless-or-prompted `sudo` access; `health`/`check` never need elevated privileges
 
 ---
@@ -122,6 +126,7 @@ ubel-yarn  health              # health only — check/install unsupported, see 
 ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown
 ubel-uv    <mode> [packages...]        # same six modes, same shape as ubel-pip
 ubel-conda <mode> [packages...]        # same six modes; check/install driven by conda
+ubel-cargo <mode> [crate[@req]...]     # health | check | install | threshold | block-unknown (no init)
 ubel-pipx  <mode> [package]
 
 ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
@@ -136,7 +141,7 @@ ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|fals
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes).
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same minus `init` (there's no environment to create); `ubel-cargo init` exits with an error rather than falling back to `health`.
 
 ---
 
@@ -275,6 +280,38 @@ Other differences worth knowing:
 - `environment.yml` fallback reads the flat `dependencies:` list only. A nested `- pip:` block is skipped (those packages are installed by pip, outside this firewall — scan them with `ubel-pip`) and `channels:` is ignored (conda's configured channels apply); both are reported when present.
 - `ubel-conda health` finds conda environments by their `conda-meta/` directory (including each environment under a conda base install's `envs/`) and inventories the Python packages inside them via the same `.dist-info`/`.egg-info` scan as `ubel-pip health`. Native conda packages aren't part of the `health` inventory.
 
+### cargo
+
+`ubel-cargo check` and `ubel-cargo install [crate[@req] ...]` resolve in a **scratch copy of the project**: UBEL copies it (minus `target/`, `.git/`, `node_modules/` and `.ubel/`) to a temp directory, runs `cargo add <specs>` there when packages were given, then `cargo update --workspace`. `--workspace` leaves every crate already in `Cargo.lock` where it is and only resolves what's missing, so the scanned set is your existing lockfile plus exactly what was added. Both commands read the registry index only — they download no crate sources and never run `build.rs` or proc-macros. UBEL scans the resulting `Cargo.lock`, then makes the same binary decision as the other engines:
+
+- **Clean** — the scanned `Cargo.toml` (only if packages were added) and `Cargo.lock` are written into the project, then `cargo fetch --locked` runs. If the fetch fails, the original files are put back.
+- **Violation** — nothing is written. The project was never modified, so there's nothing to revert; `check` never touches it either, even if the process is killed mid-scan.
+
+Why this is built the way it is:
+
+- **The scanned set is the fetched set.** `--locked` makes cargo fail instead of resolving anything that wasn't scanned. With no arguments the scanned set is the project's current `Cargo.lock` (generated in the copy if there isn't one).
+- **Integrity.** The SHA-256 of the scanned files is recorded and re-checked immediately before they're written, and the project's own `Cargo.toml`/`Cargo.lock` are re-checked too — if either changed while the scan ran, the install aborts and you re-run.
+- **`install` fetches; it doesn't build.** It leaves your project with the scanned manifest/lockfile and cargo's registry cache populated. `cargo build --locked` is still yours to run.
+- Specifiers are `name` or `name@requirement` only; options, paths, URLs, spaces and git/registry sources are rejected before cargo is invoked.
+
+```bash
+ubel-cargo check serde@1 tokio
+ubel-cargo install serde@1            # scan-gated; updates Cargo.toml/Cargo.lock, then cargo fetch --locked
+ubel-cargo install                    # no args → scans ./Cargo.toml + ./Cargo.lock, then cargo fetch --locked
+ubel-cargo health                     # SCA scan of Cargo.lock(s), unchanged from before
+```
+
+**What is and isn't scanned — read this before relying on it.** Only crates from crates.io are put in the inventory and matched against OSV (RustSec advisories). Workspace members and path dependencies are your own code and are left out. **Git dependencies and alternative registries are not scanned**: they're named in a warning on every run and the install is not blocked because of them. Resolving a git dependency clones the repository (nothing from it is executed).
+
+Other differences worth knowing:
+
+- **Build scripts aren't gated.** `cargo fetch` only populates the registry cache; `build.rs` and proc-macros execute later, at `cargo build`. What the firewall guarantees is that only the scanned crate versions are fetched — not that they're inert.
+- Run it from a standalone package or a workspace root. A member of a parent workspace is refused, because the copy would resolve against a different lockfile than cargo uses in place. Path dependencies outside the project root can't be resolved in the copy, so the dry-run fails (closed) with cargo's own error.
+- `license` is `unknown` on `check`/`install`; license classification only ever runs on `health` scans.
+- Dependency edges come from `Cargo.lock`, so `introduced_by`/`parents` are populated (unlike `ubel-uv`/`ubel-conda`).
+- `cargo install <binary-crate>` isn't covered — only a project's dependencies are gated.
+- Adding packages needs cargo ≥ 1.62 (`cargo add`).
+
 ### apt / dnf / yum
 
 Three separate binaries, one per native package manager, no auto-detection between them. Each invokes that manager's own simulate/dry-run flag to resolve what *would* be installed — including exact resolved versions — without installing anything:
@@ -300,6 +337,8 @@ ubel-apt install curl
 npm/pnpm/bun/composer-specific: npm/pnpm/bun are triggered with the flag `--ignore-scripts`; composer with `--no-scripts` (Composer's own name for the same opt-out) — every dry-run *and* real-install invocation across all four passes it. pip/apt/dnf/yum don't have an equivalent opt-out flag for this document to invoke, because their dry-run modes don't run install-time lifecycle scripts to begin with — apt/dnf/yum's simulate flags never execute package maintainer scripts, and pip's `--dry-run` doesn't run a package's own `post_install` hooks (the sdist-build caveat above is a distinct, narrower concern: build-backend code, not install-time scripts).
 
 conda is the one engine where the real install is *not* script-free: `conda create --dry-run` only solves and never links a package, but the real install runs each conda package's own pre/post-link scripts, and UBEL passes no flag to suppress them. What the conda firewall guarantees is that only the exact scanned builds are installed (exact pins plus `--no-deps`) — not that those packages' install-time scripts are inert.
+
+cargo's real install (`cargo fetch --locked`) is script-free too, but for a narrower reason: it only populates the registry cache, and `build.rs`/proc-macros run later at `cargo build`, which this firewall doesn't gate. See [§ cargo](#cargo).
 
 ### Lockfile backup and recovery
 
@@ -549,7 +588,7 @@ Every policy field that has a mode can also be passed as a flag on `health`, `ch
 | `--block-kev [true\|false]` | `block_kev` | `true` \| `false` (bare flag = `true`) | all |
 | `--epss-threshold <value>` | `epss_threshold` | a fraction in (0, 1] (`0.1`), a percentage (`10%`), or `none` | all |
 
-Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/conda/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
+Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/conda/cargo/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
 
 ```bash
 # Block only critical vulnerabilities for this run; saved policy untouched
@@ -993,6 +1032,8 @@ Specifiers containing shell metacharacters or other unsafe characters are reject
 
 **conda** — validated against its own, stricter pattern, because `ubel-conda` allows `:` (for `channel::name`), which the loose pattern above would turn into a way to pass a URL. A specifier must start with a letter, digit or underscore (so no option-shaped arguments like `-c` or `--file`) and may then contain only letters, digits and `. _ - + * ! < > = , ~ : [ ]` — no `/`, `\`, spaces or quotes, so no paths or URLs — and must not end in `.conda` or `.tar.bz2` (conda installs those from disk, bypassing the channel resolution UBEL scans). `numpy`, `numpy=1.26`, `python>=3.10,<3.13` and `conda-forge::scipy` are accepted.
 
+**cargo** — validated against a strict `name` or `name@requirement` pattern: the name must start with a letter or underscore (so no option-shaped arguments like `--git`), and the optional requirement after `@` may contain only letters, digits and `. ^ ~ = < > * + ! , -` — no spaces, `/`, `:` or quotes, so no paths, URLs or sources. `serde`, `serde@1.0` and `tokio@^1.35` are accepted.
+
 Either way, a rejected specifier exits non-zero before any filesystem or network operation occurs.
 
 ---
@@ -1006,7 +1047,7 @@ import { SCA_scan } from "@arcane-spark/ubel-node/sca";
 
 const report = await SCA_scan({
   projectRoot : "/abs/path/to/project",
-  engine      : "npm",   // npm | pnpm | bun | yarn | composer | docker | pip | uv | pipx | conda | apt | dnf | yum
+  engine      : "npm",   // npm | pnpm | bun | yarn | composer | docker | pip | uv | pipx | conda | cargo | apt | dnf | yum
   mode        : "health",
   is_script   : true,
   save_reports: true,
@@ -1050,7 +1091,7 @@ Every scan writes two files to a timestamped path and overwrites the `latest*` c
     <ecosystem>_<mode>_<engine>__<timestamp>.zip
 ```
 
-`<ecosystem>` is `npm` for npm/pnpm/bun/yarn/composer, `pypi` for pip/uv/pipx/conda, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `composer`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+`<ecosystem>` is `npm` for npm/pnpm/bun/yarn/composer, `pypi` for pip/uv/pipx/conda, `cargo` for cargo, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `composer`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
 The HTML report is fully self-contained (no server required) and includes:
 
@@ -1281,6 +1322,12 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
     version: 0.21.2
     args: install                     # scan-gated; resolves from ./environment.yml, installs the exact scanned builds
 
+- uses: AlaBouali/ubel@<commit-sha>    # needs the Rust toolchain on PATH (e.g. dtolnay/rust-toolchain)
+  with:
+    command: cargo
+    version: 0.21.2
+    args: install                     # scan-gated; scans ./Cargo.lock, then cargo fetch --locked
+
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: apt                      # dnf/yum work the same way, as their own `command` values
@@ -1288,7 +1335,7 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `apt`, `dnf`, `yum`.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`.
 
 **Calling the binaries directly** (self-hosted runners, non-GitHub CI, Dockerfiles):
 
@@ -1373,6 +1420,11 @@ ubel-uv install requests==2.31.0
 ubel-conda check numpy=1.26
 ubel-conda install numpy=1.26
 ubel-conda install                        # no args → ./environment.yml
+
+# Rust: dry-run in a scratch copy of the project, then write the scanned manifest/lockfile and `cargo fetch --locked`
+ubel-cargo check serde@1
+ubel-cargo install serde@1
+ubel-cargo install                        # no args → scans ./Cargo.lock
 
 # Python CLI tool, installed into an isolated venv + global shim
 ubel-pipx install black

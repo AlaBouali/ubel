@@ -9,7 +9,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | Module | What it does | Docs |
 | --- | --- | --- |
 | **SCA** | Resolves dependencies and scans them against OSV.dev and NVD in real time, with reachability analysis, KEV/EPSS exploit intelligence, license checks, CycloneDX SBOM and SARIF output. | [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) |
-| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`conda`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
+| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`conda`/`cargo`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
@@ -26,7 +26,7 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Python (pip/uv/pipx/conda/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Rust (Cargo) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -42,6 +42,8 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer.
 
+cargo caveat: only crates.io crates are scanned — git and alternative-registry dependencies are listed in a warning but not matched, and `build.rs`/proc-macros still run at `cargo build`, outside the firewall.
+
 conda caveat: only conda packages that are Python distributions are matched against vulnerability data (OSV has no conda ecosystem); native packages such as `openssl` are inventoried but stay `undetermined`. See the [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
@@ -52,13 +54,14 @@ Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't 
 npm install -g @arcane-spark/ubel-node
 ```
 
-Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PATH`; `ubel-uv`, `ubel-conda` and `ubel-composer` need their own binaries.
+Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PATH`; `ubel-uv`, `ubel-conda`, `ubel-cargo` and `ubel-composer` need their own binaries (`ubel-cargo` needs the Rust toolchain).
 
 | Binary | Purpose |
 | --- | --- |
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` / `ubel-yarn` | SCA (`health`) and firewall (`check` / `install`) for JS projects |
 | `ubel-composer` | Same, for PHP |
 | `ubel-pip` / `ubel-uv` / `ubel-pipx` / `ubel-conda` | Same, for Python (`ubel-conda`: `conda create --dry-run --json` against a scratch prefix, then an exact-pinned `--no-deps` install) |
+| `ubel-cargo` | Same, for Rust: `cargo add` + `cargo update --workspace` resolved in a scratch copy of the project, then `cargo fetch --locked` of the scanned lockfile |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | Same, for Linux packages |
 | `ubel-docker` | Scan or gate a container image |
 | `ubel-secrets` / `ubel-license` | Standalone secrets / license scans |
