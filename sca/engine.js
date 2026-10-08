@@ -3916,6 +3916,21 @@ export class UbelEngineInstance {
 
       setInventoryState(infectedPurls, vulnerablePurls, inventory);
 
+      // Items whose state is still "undetermined" after setInventoryState():
+      // empty-version packages, plus pkg:conda/ components, which are never
+      // matched against any database. Counting by state (rather than only by
+      // empty version) keeps the unmatched conda packages out of the "safe"
+      // total, consistent with their per-item state.
+      const undeterminedStateCount = inventory.filter(c => c.state === "undetermined").length;
+      const unmatchedCondaCount    = inventory.filter(c => c.id.startsWith("pkg:conda/")).length;
+      if (unmatchedCondaCount > 0) {
+        console.warn(
+          `[!] ${unmatchedCondaCount} conda package(s) are not Python distributions and were NOT matched against any ` +
+          `vulnerability database (OSV has no conda ecosystem); they are reported as "undetermined", not "safe".`
+        );
+        console.warn();
+      }
+
       tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy);
       const policyViolations = get_policy_violations(vulnerabilities);
 
@@ -4008,8 +4023,8 @@ export class UbelEngineInstance {
         inventory_stats: {
           infected:      infectedPurls.size,
           vulnerable:    vulnerablePurls.size,
-          safe:          Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size - undeterminedCount),
-          undetermined:  undeterminedCount,
+          safe:          Math.max(0, inventory.length - infectedPurls.size - vulnerablePurls.size - undeterminedStateCount),
+          undetermined:  undeterminedStateCount,
         },
         total_vulnerabilities: vulnerabilities.length,
         vulnerabilities_stats: {

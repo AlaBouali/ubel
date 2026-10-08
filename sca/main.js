@@ -73,6 +73,7 @@
  *   auto-detection between them, same one-binary-per-tool shape as
  *   npm/pnpm/bun):
  *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown> [packages...]
+ *     node src/main.js cargo   <health|check|install|threshold|block-unknown> [crate[@req]...]   (no init)
  *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown> <package>
  *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]
  *

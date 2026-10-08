@@ -94,54 +94,233 @@ export class RustCargoScanner {
   }
 
   // ─────────────────────────────
-  // Read [dependencies] / [dev-dependencies] / [build-dependencies]
-  // from a Cargo.toml file.
-  // Returns { prod: Set<string>, dev: Set<string>, build: Set<string> }
-  // (all lowercase crate names)
+  // Minimal TOML helpers for Cargo.toml scope detection.
+  // Not a full TOML parser: statements are `key = value` pairs (a value may
+  // span several lines while any [ { is still open) and `[section]` headers.
+  // Strings are tracked so a `#`, bracket or dot inside quotes is never
+  // mistaken for syntax.
+  // ─────────────────────────────
+
+  // Drop a trailing `# comment`, ignoring any `#` inside a string.
+  _stripTomlComment(line) {
+    let quote = null;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (quote) {
+        if (ch === "\\" && quote === '"') i++;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "#") {
+        return line.slice(0, i);
+      }
+    }
+    return line;
+  }
+
+  // Net change in [ { nesting for a line, ignoring brackets inside strings.
+  _tomlDepthDelta(line) {
+    let quote = null, delta = 0;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (quote) {
+        if (ch === "\\" && quote === '"') i++;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "[" || ch === "{") {
+        delta++;
+      } else if (ch === "]" || ch === "}") {
+        delta--;
+      }
+    }
+    return delta;
+  }
+
+  // Split a dotted table name (`target.'cfg(unix)'.dev-dependencies.foo`) on
+  // the dots that are outside quotes; quotes are removed from each segment.
+  _splitTomlPath(header) {
+    const parts = [];
+    let cur = "", quote = null;
+    for (const ch of header) {
+      if (quote) {
+        if (ch === quote) quote = null; else cur += ch;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === ".") {
+        parts.push(cur.trim()); cur = "";
+      } else {
+        cur += ch;
+      }
+    }
+    parts.push(cur.trim());
+    return parts;
+  }
+
+  // Yield { header } for each [section] and { key, value } for each
+  // key = value statement (multi-line values joined into one string).
+  _tomlStatements(content) {
+    const out = [];
+    let buf = "", depth = 0;
+    for (const raw of content.split(/\r?\n/)) {
+      const line = this._stripTomlComment(raw).trim();
+      if (!line && depth === 0) continue;
+
+      if (depth === 0) {
+        const sec = line.match(/^\[\[?\s*([^\[\]]+?)\s*\]\]?$/);
+        if (sec) { out.push({ header: sec[1] }); continue; }
+        buf = line;
+      } else {
+        buf += " " + line;
+      }
+      depth += this._tomlDepthDelta(line);
+      if (depth > 0) continue;
+      depth = 0;
+
+      const kv = buf.match(/^("[^"]+"|'[^']+'|[A-Za-z0-9_.\- ]+?)\s*=\s*([\s\S]*)$/);
+      if (kv) out.push({ key: kv[1].replace(/^["']|["']$/g, "").trim(), value: kv[2] });
+      buf = "";
+    }
+    return out;
+  }
+
+  // ─────────────────────────────
+  // Read [dependencies] / [dev-dependencies] / [build-dependencies] from one
+  // Cargo.toml. Returns { prod: Set<string>, dev: Set<string>, build: Set<string> }
+  // (lowercase crate names, `-` normalised to `_`).
+  //
+  // Handles: inline and dotted forms (`foo = "1"`, `foo.version = "1"`),
+  // table form (`[dev-dependencies.foo]`), target-scoped sections
+  // (`[target.'cfg(unix)'.dependencies]`), values spanning several lines, and
+  // renames (`alias = { package = "real-name" }` is recorded as `real_name`).
+  // `[workspace.dependencies]` is only a declaration list — what a member
+  // actually uses is declared in its own manifest — so it is skipped.
   // ─────────────────────────────
   _readCargoTomlDeps(tomlPath) {
-    const prod  = new Set();
-    const dev   = new Set();
-    const build = new Set();
+    const sets = { prod: new Set(), dev: new Set(), build: new Set() };
 
     let content;
     try {
       content = fs.readFileSync(tomlPath, "utf8");
     } catch {
-      return { prod, dev, build };
+      return sets;
     }
 
-    // We do minimal section-aware line scanning (no full TOML parser needed).
-    let section = "";
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
+    const norm = (n) => n.toLowerCase().replace(/-/g, "_");
+    const KINDS = {
+      "dependencies": "prod",       "dev-dependencies": "dev",       "build-dependencies": "build",
+      "dev_dependencies": "dev",    "build_dependencies": "build",
+    };
+    const packageRename = (value) => {
+      const m = value.match(/\bpackage\s*=\s*(?:"([^"]+)"|'([^']+)')/);
+      return m ? (m[1] ?? m[2]) : null;
+    };
 
-      // Section header
-      const secMatch = trimmed.match(/^\[([^\]]+)\]/);
-      if (secMatch) {
-        section = secMatch[1].trim();
+    let mode  = null;   // null | { kind, table: null | { name } }
+    const flush = () => {
+      if (mode?.table) sets[mode.kind].add(norm(mode.table.name));
+      mode = null;
+    };
+
+    for (const st of this._tomlStatements(content)) {
+      if (st.header !== undefined) {
+        flush();
+        const segs = this._splitTomlPath(st.header);
+        if (segs[0] === "workspace") continue;
+        const idx = segs.findIndex(s => KINDS[s]);
+        if (idx === -1) continue;
+        const kind = KINDS[segs[idx]];
+        if (idx === segs.length - 1)      mode = { kind, table: null };                          // [dependencies]
+        else if (idx === segs.length - 2) mode = { kind, table: { name: segs[idx + 1] } };       // [dependencies.foo]
         continue;
       }
 
-      // Key = value lines inside dependency sections
-      if (
-        section === "dependencies"       ||
-        section === "dev-dependencies"   ||
-        section === "build-dependencies" ||
-        // target-scoped: [target.'cfg(...)'.dependencies]
-        section.endsWith(".dependencies")
-      ) {
-        const kvMatch = trimmed.match(/^([A-Za-z0-9_-]+)\s*[=.]/);
-        if (kvMatch) {
-          const name = kvMatch[1].toLowerCase().replace(/-/g, "_"); // Cargo normalises - → _
-          if (section === "dev-dependencies") dev.add(name);
-          else if (section === "build-dependencies") build.add(name);
-          else prod.add(name);
+      if (!mode) continue;
+
+      if (mode.table) {
+        // Body of [dependencies.foo]: only `package = "..."` matters.
+        if (st.key === "package") {
+          const m = st.value.match(/^(?:"([^"]+)"|'([^']+)')/);
+          if (m) mode.table.name = m[1] ?? m[2];
         }
+        continue;
       }
+
+      // key = value / dotted key inside a dependencies section.
+      const crate = st.key.split(".")[0].trim();
+      if (!/^[A-Za-z0-9_-]+$/.test(crate)) continue;
+      const real = st.key.includes(".") ? null : packageRename(st.value);
+      sets[mode.kind].add(norm(real ?? crate));
+    }
+    flush();
+
+    return sets;
+  }
+
+  // ─────────────────────────────
+  // Workspace member manifests (absolute paths) declared by the root
+  // Cargo.toml's `[workspace] members = [...]` minus `exclude`. Supports
+  // literal paths and `*` / `?` wildcards within a path segment. Returns []
+  // when the root isn't a workspace.
+  // ─────────────────────────────
+  _workspaceMemberManifests(projectRoot) {
+    let content;
+    try {
+      content = fs.readFileSync(path.join(projectRoot, "Cargo.toml"), "utf8");
+    } catch {
+      return [];
     }
 
-    return { prod, dev, build };
+    let inWorkspace = false;
+    const lists = { members: [], exclude: [] };
+    for (const st of this._tomlStatements(content)) {
+      if (st.header !== undefined) { inWorkspace = st.header.trim() === "workspace"; continue; }
+      if (inWorkspace && (st.key === "members" || st.key === "exclude")) {
+        for (const m of st.value.matchAll(/"([^"]+)"|'([^']+)'/g)) lists[st.key].push(m[1] ?? m[2]);
+      }
+    }
+    if (!lists.members.length) return [];
+
+    const expand = (pattern) => {
+      let dirs = [path.resolve(projectRoot)];
+      for (const seg of pattern.split("/").filter(s => s && s !== ".")) {
+        const next = [];
+        for (const d of dirs) {
+          if (/[*?]/.test(seg)) {
+            const re = new RegExp(
+              "^" + seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$"
+            );
+            let ents;
+            try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+            for (const e of ents) if (e.isDirectory() && re.test(e.name)) next.push(path.join(d, e.name));
+          } else {
+            next.push(path.join(d, seg));
+          }
+        }
+        dirs = next;
+      }
+      return dirs;
+    };
+
+    const excluded = new Set(lists.exclude.flatMap(expand).map(d => path.resolve(d)));
+    const manifests = [];
+    for (const dir of lists.members.flatMap(expand)) {
+      const abs = path.resolve(dir);
+      if (excluded.has(abs)) continue;
+      const manifest = path.join(abs, "Cargo.toml");
+      if (fs.existsSync(manifest) && !manifests.includes(manifest)) manifests.push(manifest);
+    }
+    return manifests;
+  }
+
+  // Root manifest plus every workspace member manifest, merged.
+  _readProjectDeps(projectRoot) {
+    const merged = this._readCargoTomlDeps(path.join(projectRoot, "Cargo.toml"));
+    for (const manifest of this._workspaceMemberManifests(projectRoot)) {
+      const m = this._readCargoTomlDeps(manifest);
+      for (const k of ["prod", "dev", "build"]) for (const n of m[k]) merged[k].add(n);
+    }
+    return merged;
   }
 
   // ─────────────────────────────
@@ -224,9 +403,7 @@ export class RustCargoScanner {
     }
 
     for (const [projectRoot, comps] of projectGroups.entries()) {
-      const { prod, dev, build } = this._readCargoTomlDeps(
-        path.join(projectRoot, "Cargo.toml")
-      );
+      const { prod, dev, build } = this._readProjectDeps(projectRoot);
 
       const propagate = (names, scope) => {
         const queue = [];

@@ -44,7 +44,7 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 
 cargo caveat: only crates.io crates are scanned — git and alternative-registry dependencies are listed in a warning but not matched, and `build.rs`/proc-macros still run at `cargo build`, outside the firewall.
 
-conda caveat: only conda packages that are Python distributions are matched against vulnerability data (OSV has no conda ecosystem); native packages such as `openssl` are inventoried but stay `undetermined`. See the [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md).
+conda caveat: only conda packages that are Python distributions are matched against vulnerability data (OSV has no conda ecosystem); native packages such as `openssl` are inventoried but stay `undetermined` (they're not counted as `safe`, and each scan prints a warning with how many were left unmatched). See the [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
 

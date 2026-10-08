@@ -694,7 +694,7 @@ gaps in UBEL's own implementation:
 **conda firewall (`ubel-conda`):** `check`/`install` resolve with `conda create --dry-run --json` against a scratch prefix that never exists — conda fetches repodata and runs its solver but downloads and links nothing, and `check` leaves no environment behind. Unlike pip/uv, the dry-run therefore always reports the full resolved closure. On a clean scan, UBEL writes the resolved set to `.ubel/dependencies/conda-specs.txt` as exact `channel::name==version=build` pins, records its SHA-256, re-checks it immediately before conda runs, and installs with `conda create --no-deps --no-default-packages --file` into `./conda-env` (or `conda install --no-deps --file` if that environment already exists; `create` is never run against an existing environment because `conda create --yes` removes one first). A blocked scan never runs the real install; there's no lockfile to revert. Channels come from conda's own configuration — option-shaped arguments, paths, URLs and bare package-file names are rejected before conda is invoked. With no arguments, `check`/`install` read the flat `dependencies:` list of `./environment.yml` / `./environment.yaml` (a nested `- pip:` block is skipped — scan those with `ubel-pip` — and `channels:` is ignored). `ubel-conda init` creates an empty `./conda-env`; `ubel-conda health` inventories the Python packages inside conda environments (found by `conda-meta/`, including each environment under a base install's `envs/`).
 
 Honesty notes specific to conda:
-- OSV has no conda ecosystem. Packages whose build string carries conda's `py` marker are reported as `pkg:pypi/…` and matched against PyPI advisories (a small built-in map handles names that differ, e.g. `pytorch`→`torch`; an unmapped differing name is a missed match, never a wrong one). Everything else (`openssl`, `libxml2`, `python` itself, …) is inventoried as `pkg:conda/…`, is **not** matched against any database, and stays `undetermined` rather than `safe`.
+- OSV has no conda ecosystem. Packages whose build string carries conda's `py` marker are reported as `pkg:pypi/…` and matched against PyPI advisories (a small built-in map handles names that differ, e.g. `pytorch`→`torch`; an unmapped differing name is a missed match, never a wrong one). Everything else (`openssl`, `libxml2`, `python` itself, …) is inventoried as `pkg:conda/…`, is **not** matched against any database, and stays `undetermined` rather than `safe`. The summary counts (`inventory_stats`) put these in `undetermined`, not `safe`, and each conda scan with such packages prints a warning with their number.
 - The dry-run JSON carries no dependency edges, so every component is its own root, and `license` is `unknown` on `check`/`install`. No `requirements.txt`/`pyproject.toml`/`environment.yml` sync happens after install.
 - conda is the one engine whose real install isn't script-free: conda runs each package's own pre/post-link scripts on install and UBEL has no flag to suppress them. The firewall guarantees only that exactly the scanned builds are installed.
 
@@ -782,6 +782,11 @@ Honest limits:
 - Packages are `name` or `name@requirement` only — no options, git/path
   sources or feature flags. `cargo install <binary-crate>` isn't covered.
 - `license` is `unknown` on `check`/`install`; there's no `init` mode.
+- Scopes (`prod`/`dev`/`build`) are read from `Cargo.toml` — `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` in inline,
+  dotted and table form, target-specific sections and renamed crates — across the root manifest and every workspace member in
+  `[workspace] members` (minus `exclude`; `*`/`?` wildcards per path segment, not `**`), then propagated along `Cargo.lock`
+  edges. `[workspace.dependencies]` is skipped (it only declares versions). It's a minimal TOML reader, not a full parser: anything
+  it can't attribute defaults to `prod`, so odd layouts err towards "production" rather than hiding a dependency.
 
 **SAST / Malware SAST:** Full coverage.
 
