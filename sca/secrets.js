@@ -20,7 +20,8 @@
  *   secrets_git.js  — git history scanning and staged-changes scanning (reuses scanText)
  *   secrets_cli.js  — extra `ubel-secrets` flags: --history, --staged,
  *                     --install-hook / --uninstall-hook, --write-baseline
- *   secrets_hook.js — install / remove the git pre-commit hook
+ *   precommit_hook.js — the single git pre-commit hook (secrets + dependency scan);
+ *                     secrets_hook.js / sca_hook.js are thin installers over it
  *
  * None of these modules edit .gitignore / .dockerignore; main.js does that
  * once, before anything runs (see ignore_files.js).
@@ -87,15 +88,18 @@ const SOFT_IGNORED_DIRS = {
 //    in this set (images, archives, binaries, etc.) is skipped outright,
 //    except for the key-file sniffing described below.
 const TEXT_EXTENSIONS = new Set([
-  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-  ".json", ".yml", ".yaml",
-  ".ini", ".conf", ".config", ".cfg",
-  ".py", ".rb", ".go", ".java", ".php", ".c", ".h", ".cpp", ".hpp",
-  ".cs", ".rs", ".kt", ".swift",
-  ".sh", ".bash", ".zsh", ".ps1",
-  ".xml", ".html", ".htm", //".css", ".scss",
-  ".sql", ".md", ".txt", ".toml", ".properties", ".gradle",
-  ".tf", ".tfvars",
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte", ".astro",
+  ".json", ".json5", ".jsonc", ".ipynb", ".yml", ".yaml",
+  ".ini", ".conf", ".config", ".cfg", ".env", ".plist",
+  ".py", ".rb", ".go", ".java", ".php", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh",
+  ".cs", ".rs", ".kt", ".kts", ".swift", ".dart", ".scala", ".sc", ".groovy",
+  ".lua", ".pl", ".pm", ".r", ".ex", ".exs", ".erl", ".hs", ".clj", ".fs", ".vb", ".zig", ".nix",
+  ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
+  ".xml", ".html", ".htm", ".ejs", ".erb", ".hbs", ".twig", ".jsp", ".asp", ".aspx", ".cshtml", ".razor", //".css", ".scss",
+  ".sql", ".md", ".mdx", ".rst", ".adoc", ".txt", ".toml", ".properties", ".gradle",
+  ".csv", ".tsv", ".log",
+  ".tf", ".tfvars", ".tfstate", ".hcl", ".dockerfile",
+  ".graphql", ".proto", ".tpl", ".tmpl", ".j2",
   ".pem", ".key",
 ]);
 
@@ -104,7 +108,15 @@ const NAMED_FILE_ALLOW = new Set([
   "Dockerfile", "Makefile", ".npmrc", ".netrc", ".htpasswd", ".pgpass",
   "settings.xml", "settings-security.xml", // path-scoped Maven rules target these
   ".git-credentials", ".pypirc", ".dockercfg", ".s3cfg", "credentials",
+  "Jenkinsfile", "Procfile", "Containerfile", "Vagrantfile", "Gemfile", "Rakefile",
+  "Brewfile", "Justfile", "Tiltfile", "Fastfile", "Appfile",
+  ".yarnrc", ".gemrc", ".boto", ".terraformrc", "terraform.rc",
+  ".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile",
 ]);
+
+// Well-known extension-less build files that also come with a suffix
+// (`Dockerfile.prod`, `Jenkinsfile.release`, `Procfile.dev`, `Dockerfile-ci`).
+const NAMED_FILE_PATTERN = /^(?:Dockerfile|Containerfile|Jenkinsfile|Procfile|Vagrantfile|Makefile|Gemfile|Rakefile)(?:[._-].*)?$/i;
 
 // SSH private keys have no extension (`id_rsa`) or a backup suffix
 // (`id_rsa.bak`, `id_ed25519-old`). Always scan them.
@@ -797,7 +809,7 @@ export function classifyPath(relPath, { includeEnvFiles = false } = {}) {
   //    committed), but scanned in container-image scans, where a baked-in
   //    .env is a real leak that ships with the image. ──
   if (base.startsWith(".env")) return includeEnvFiles ? "scan" : "skip";
-  if (NAMED_FILE_ALLOW.has(base) || KEY_FILE_NAME.test(base)) return "scan";
+  if (NAMED_FILE_ALLOW.has(base) || KEY_FILE_NAME.test(base) || NAMED_FILE_PATTERN.test(base)) return "scan";
   const ext = path.posix.extname(base).toLowerCase();
   if (TEXT_EXTENSIONS.has(ext)) return "scan";
   if (ext === "" || SNIFF_EXTENSIONS.has(ext)) return "sniff";
@@ -826,6 +838,85 @@ export function classifyForScan(relPath, { includeEnvFiles = false, ignore = EMP
   if (cls === "skip") return "skip";
   if (isPathAllowed(relPath, ignore.unallow)) return "skip";
   return cls;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Staged-file classification (pre-commit)
+//
+// The tree-walk rules above exist to keep a whole-repository scan fast and
+// quiet: skip build output, skip tests/docs/vendored code, only open file types
+// we recognise. None of that is safe for a file somebody is explicitly staging
+// for commit — a token in `dist/`, `tests/fixtures/`, `docs/*.md`, a notebook,
+// a `Jenkinsfile` or a `.tfstate` is just as leaked once committed. So staged
+// files use an inclusive classifier:
+//
+//   scan everything, EXCEPT
+//     - VCS metadata and our own report dir (never walked)
+//     - installed-dependency trees (node_modules, site-packages, virtualenvs ...)
+//     - machine-generated lockfiles (hash/integrity noise)
+//     - file types that are binary by definition
+//     - what the user excluded in .ubelignore (globs, exclude-dir:)
+//
+// Everything the tree scan skips by default — build/, out/, dist/, vendor/,
+// coverage/, test and example paths, markdown, locale dirs — is scanned.
+// `include-dir:` / `exclude-dir:` / `unallow:` in .ubelignore still apply.
+// Content-level allow-rules (placeholders such as "example", ${VAR}, process.env)
+// are applied by scanText() regardless of path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STAGED_SKIPPED_DIRS = new Set([
+  "node_modules", "bower_components", ".pnpm-store", ".yarn",
+  "site-packages", "__pycache__", ".venv", "venv",
+]);
+
+const STAGED_LOCKFILE_NAMES = new Set([
+  "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+  "composer.lock", "Gemfile.lock", "Pipfile.lock", "poetry.lock", "uv.lock", "pdm.lock",
+  "Cargo.lock", "go.sum", "pubspec.lock", "Podfile.lock", "Package.resolved", "Cartfile.resolved",
+  "packages.lock.json", "gradle.lockfile", "flake.lock", "conda-lock.yml",
+]);
+
+// Extensions that are binary (or opaque generated data) by definition. git
+// already emits no hunks for content it detects as binary; this just avoids
+// streaming a text-looking blob (svg, source maps) through the rule engine.
+const STAGED_BINARY_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tif", ".tiff", ".psd", ".heic", ".avif", ".svg",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  ".mp3", ".mp4", ".m4a", ".mov", ".avi", ".mkv", ".webm", ".wav", ".flac", ".ogg",
+  ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar", ".war", ".ear", ".whl", ".egg",
+  ".class", ".pyc", ".pyo", ".so", ".dll", ".dylib", ".exe", ".o", ".a", ".lib", ".wasm",
+  ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  ".map",
+]);
+
+// Builtin path allow-rules that still make sense for staged files: metadata
+// directories and the lockfile list. Everything else (tests, examples, vendor,
+// markdown, locales, container-image system dirs) is NOT honoured here.
+const STAGED_PATH_ALLOW_IDS = new Set(["dist-info", "lockfiles"]);
+
+/** True if a directory component of relPath is never scanned for staged files. */
+export function stagedPathInSkippedDir(relPath, ignore = EMPTY_IGNORE) {
+  const dirs = relPath.split("/").slice(0, -1);
+  return dirs.some(name => {
+    if (ALWAYS_SKIPPED_DIRS.has(name)) return true;
+    if (ignore.ignoreDirs.has(name)) return true;
+    if (ignore.includeDirs.has(name)) return false;
+    return STAGED_SKIPPED_DIRS.has(name);
+  });
+}
+
+/**
+ * Path-level decision for a file in the index. Returns "scan" | "skip" —
+ * never "sniff": an unknown file type is read, not guessed at.
+ */
+export function classifyStaged(relPath, { ignore = EMPTY_IGNORE } = {}) {
+  if (stagedPathInSkippedDir(relPath, ignore)) return "skip";
+  if (ignore.isPathIgnored(relPath, false)) return "skip";
+  const base = path.posix.basename(relPath);
+  if (!ignore.unallow.has("lockfiles") && (STAGED_LOCKFILE_NAMES.has(base) || /\.lock$/i.test(base))) return "skip";
+  if (STAGED_BINARY_EXTENSIONS.has(path.posix.extname(base).toLowerCase())) return "skip";
+  if (isPathAllowed(relPath, ignore.unallow, STAGED_PATH_ALLOW_IDS)) return "skip";
+  return "scan";
 }
 
 function sniffLooksLikeKey(fullPath) {
@@ -908,8 +999,9 @@ function keywordHit(line, lowerLine, keywords, caseInsensitive) {
   return false;
 }
 
-export function isPathAllowed(relPath, unallow = EMPTY_IGNORE.unallow) {
+export function isPathAllowed(relPath, unallow = EMPTY_IGNORE.unallow, onlyIds = null) {
   for (const rule of builtinAllowRules) {
+    if (onlyIds && !onlyIds.has(rule.id)) continue;
     if (unallow.has(rule.id)) continue;
     if (rule.path && rule.path.test(relPath)) return rule;
   }

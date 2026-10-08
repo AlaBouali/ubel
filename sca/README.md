@@ -19,7 +19,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
 - `health` mode — scan the current project's installed dependencies
-- **Pre-commit hook** — `install-hook` / `uninstall-hook` modes wire up a git pre-commit hook that runs a dependency scan (`<engine> health`, no OS scan) whenever a commit stages a manifest or lockfile, so a bad dependency change is blocked at `git commit` time rather than after it lands (see [Pre-commit Hook](#pre-commit-hook))
+- **Pre-commit hook** — `install-hook` / `uninstall-hook` modes wire up the single ubel git pre-commit hook: a secrets scan of the staged changes on every commit, plus a dependency scan (`<engine> health`, no OS scan) whenever a commit stages a manifest or lockfile, so a bad change is blocked at `git commit` time rather than after it lands (see [Pre-commit Hook](#pre-commit-hook))
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
@@ -99,7 +99,9 @@ After installation, the following entry-point binaries are available:
 |---|---|---|
 | `UBEL_OSV_ENDPOINT` | `https://api.osv.dev` | Overrides the OSV API base used for live vulnerability queries. `/v1/querybatch` and `/v1/vulns/{id}` are appended to whatever base is set, so a mirror must expose the same path shape as the public API. A trailing slash is stripped automatically. |
 | `UBEL_NVD_ENDPOINT` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | Overrides the NVD CVE API endpoint used for host/platform CPE lookups (`?cpeName=...` is appended as a query string). A trailing slash is stripped automatically. |
-| `UBEL_HOOK_STRICT` | unset | When set to `1`, the pre-commit hook **blocks the commit** if the ubel binary cannot be found on `PATH`, instead of warning and letting it through. Useful in locked-down environments where a "tool missing" state should fail closed. |
+| `UBEL_HOOK_STRICT` | unset | When set to `1`, the pre-commit hook **blocks the commit** if a ubel binary cannot be found on `PATH`, instead of warning and letting it through; it also turns the "staged file larger than the scan cap" warning into a failed scan. Useful in locked-down environments where a "tool missing" state should fail closed. |
+| `UBEL_HOOK_SCA` | `auto` | When the pre-commit hook runs its dependency scan: `auto` = when a manifest/lockfile is staged, `always` = on every commit, `off` = never. The secrets scan is not affected. |
+| `UBEL_STAGED_MAX_FILE_MB` | `128` | Per-file cap, in MB of added content, for `ubel-secrets --staged`. Past it the scan of that file stops and a warning is printed (nothing is dropped silently below it). |
 
 Both `UBEL_OSV_ENDPOINT` and `UBEL_NVD_ENDPOINT` are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
@@ -137,7 +139,7 @@ ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
 
 # Pre-commit hook (any engine except docker and apt/dnf/yum):
-ubel-npm   install-hook [--force]      # install the dependency-scan pre-commit hook
+ubel-npm   install-hook [--force]      # install the pre-commit hook (secrets scan + dependency scan)
 ubel-npm   uninstall-hook              # remove it
 ubel-pip   install-hook                # works on pip/pipx/uv/conda/cargo/composer/yarn too
 
@@ -155,10 +157,17 @@ Package arguments are optional for `check`/`install` on every engine, but what "
 
 ## Pre-commit Hook
 
-`ubel-<engine> install-hook` writes a git pre-commit hook into the current repository's hooks directory (respecting `core.hooksPath` and worktrees). The hook runs `<engine> health` — a **dependency scan only**, never the OS scanner — and blocks the commit on a non-zero exit (policy violation, or a failed scan). `ubel-<engine> uninstall-hook` removes it again.
+`ubel-<engine> install-hook` writes **the** ubel git pre-commit hook into the current repository's hooks directory (respecting `core.hooksPath` and worktrees). It is one script that runs two scans:
+
+1. **Secrets** — `ubel-secrets --staged`, on **every** commit.
+2. **Dependencies** — `<engine> health` — a **dependency scan only**, never the OS scanner — when a manifest or lockfile is staged.
+
+It blocks the commit on a non-zero exit from either. `ubel-<engine> uninstall-hook` (or `ubel-secrets --uninstall-hook`) removes it again.
+
+`ubel-secrets --install-hook` writes the same hook. Each installer sets its own step and keeps the other's, so you can run both, in either order, **without `--force`** — you end up with one hook that has both steps. (The secrets step is always present; the dependency step exists once an engine has run `install-hook`.)
 
 ```bash
-# Install a dependency-scan pre-commit hook (default refusal if a hook already exists)
+# Install the pre-commit hook (refuses if someone else's hook already exists)
 ubel-npm install-hook
 
 # Chain to an existing hook instead of refusing
@@ -178,27 +187,23 @@ ubel-cargo install-hook
 ### What the hook does — and, importantly, what it doesn't
 
 - **Dependency scan only, no OS scan.** The hook runs `<engine> health`, whose CLI path forces `scan_os: false`. It never touches the host's package database.
-- **Runs only when a dependency file is staged.** Before invoking the scanner, the hook checks `git diff --cached --name-only` for any of a fixed set of manifest/lockfile names anywhere in the tree (`package.json`, `package-lock.json`, `pnpm-lock.yaml`, `bun.lockb?`, `yarn.lock`, `composer.json`/`.lock`, `requirements.txt`, `pyproject.toml`, `Pipfile(.lock)?`, `setup.py`, `setup.cfg`, `Cargo.toml`/`.lock`, `go.mod`/`.sum`, `pom.xml`, `build.gradle(.kts)?`, `Gemfile(.lock)?`, `Package.resolved`, `Cartfile.resolved`, `pubspec.yaml`/`.lock`, `environment.yml`/`.yaml`). A commit that only touches a README exits `0` without scanning.
+- **The secrets step runs on every commit; the dependency step runs when a dependency file is staged.** Before invoking the dependency scanner, the hook lists the staged paths (`git -c core.quotepath=off diff --cached --name-only -z`, so paths with non-ASCII characters match) and looks for a manifest/lockfile anywhere in the tree: `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `bun.lock(b)`, `yarn.lock`, `composer.json`/`.lock`, `requirements*.txt`/`.in` (including `requirements_dev.txt` and anything under `requirements/`), `constraints*.txt`, `pyproject.toml`, `Pipfile(.lock)`, `setup.py`/`.cfg`, `poetry.lock`, `uv.lock`, `pdm.lock`, `conda-lock.yml`, `environment.yml`/`.yaml`, `Cargo.toml`/`.lock`, `go.mod`/`.sum`/`.work`, `pom.xml`, `build.gradle(.kts)`, `gradle.lockfile`, `libs.versions.toml`, `Gemfile(.lock)`, `Package.swift`/`.resolved`, `Cartfile(.resolved)`, `Podfile(.lock)`, `pubspec.yaml`/`.lock`, `packages.config`, `packages.lock.json`, `Directory.Packages.props`, `*.csproj`. A commit that only touches a README runs the secrets scan and skips the dependency scan. Override with `UBEL_HOOK_SCA=always` (scan on every commit) or `UBEL_HOOK_SCA=off`; the default is `auto`.
+- **Exit codes are told apart.** A dependency policy violation (exit `1`) prints "dependency policy violation"; a scan that did not complete — OSV unreachable, a crash — exits `2` and prints "scan did not complete". Both block the commit.
 - **No lockfile mutation.** It's a `health` scan, not a `check` scan — nothing is dry-run, no lockfile is written or reverted. A broken scan can never leave the working tree half-mutated.
 - **`health` scans the *installed* dependency graph**, so it catches what's currently on disk. If you've staged a `package.json` change but haven't yet run `install`, the new (potentially vulnerable) dependency won't be in the installed tree yet — the hook still runs, but it's scanning the previous state. For the fully accurate check of the *staged* dependency graph, run `ubel-<engine> check` yourself or in CI.
-- **Chainable.** `--force` moves an existing foreign pre-commit hook to `pre-commit.local` and runs it *after* a clean dependency scan. `uninstall-hook` moves it back.
-- **Portable installs.** If the hooks directory is a committed `.githooks/` or husky-style path outside the git dir, the hook is written without any machine-specific absolute paths — it just finds `ubel-<engine>` on `PATH`, so it's safe to commit and share. Everyone on the team then needs it installed.
-- **Fail-open for "tool missing", fail-closed for "tool failing".** If the ubel binary can't be found, the hook warns loudly on stderr and lets the commit through — set `UBEL_HOOK_STRICT=1` to block instead. If the binary runs and exits non-zero, the commit is always blocked: a broken scan must not look like a clean one.
+- **Chainable.** `--force` moves an existing foreign pre-commit hook to `pre-commit.local` and runs it *after* both scans pass. `uninstall-hook` moves it back. The hook never chains to itself.
+- **Portable installs.** If the hooks directory is a committed `.githooks/` or husky-style path outside the git dir, the hook is written without any machine-specific absolute paths — it just finds `ubel-secrets` and `ubel-<engine>` on `PATH`, so it's safe to commit and share. Everyone on the team then needs it installed.
+- **Fail-open for "tool missing", fail-closed for "tool failing".** If a ubel binary can't be found, the hook warns loudly on stderr and lets the commit through — set `UBEL_HOOK_STRICT=1` to block instead. If the binary runs and exits non-zero, the commit is always blocked: a broken scan must not look like a clean one.
 - **Bypass once with `git commit --no-verify`.** Hooks are client-side, so this is also a reason to run the same scan in CI (see [CI/CD Integration](#cicd-integration)).
 
-### Coexistence with the secrets pre-commit hook
+### Upgrading from the two-hook layout
 
-`ubel-secrets --install-hook` installs a **separate** pre-commit hook that runs `ubel-secrets --staged`. The two hooks don't share a file: whichever ran last will see the other's hook file and, without `--force`, refuse. To run both on every commit:
-
-- Install one of them normally, then run the other with `--force`. The `--force` install moves the first hook to `pre-commit.local` and chains to it after its own scan passes.
-- Or add both scans to your own pre-commit script manually (e.g. `ubel-secrets --staged && ubel-npm health`).
-
-Both hooks use the same `pre-commit.local` chaining slot; only one foreign hook can be chained at a time.
+Earlier versions installed the secrets hook and the dependency hook as two separate scripts that had to be combined with `--force`. That combination was broken: both scripts chained to `pre-commit.local`, which — once a hook had been moved there — is the script itself, so a manifest commit looped forever, and the dependency script exited before reaching the chain when no manifest was staged, so the secrets hook never ran on most commits. If you have that layout, run `ubel-secrets --install-hook` or `ubel-<engine> install-hook` again: both old scripts (including the one at `pre-commit.local`) are merged into the single hook and the stale `pre-commit.local` is removed. A foreign hook of your own is never touched without `--force`.
 
 ### Files the hook writes
 
 - The hook itself, at `<hooks-dir>/pre-commit`.
-- A chained foreign hook, at `<hooks-dir>/pre-commit.local` (only when `--force` was used).
+- A chained foreign hook, at `<hooks-dir>/pre-commit.local` (only when `--force` was used and there was a foreign hook).
 - Nothing else. Reports still go to the usual `<project>/.ubel/local/reports/...` path when the hook actually runs a scan that produces one.
 
 ---
@@ -571,10 +576,10 @@ ubel-pip init
 
 ### `install-hook` / `uninstall-hook`
 
-Install / remove the git pre-commit hook that runs `<engine> health` — a **dependency scan only**, no OS scan — whenever a commit stages a package manifest or lockfile. See [Pre-commit Hook](#pre-commit-hook) above for the full behavior, chaining rules, and file patterns.
+Install / remove the single ubel git pre-commit hook: a secrets scan on every commit, plus `<engine> health` — a **dependency scan only**, no OS scan — whenever a commit stages a package manifest or lockfile. See [Pre-commit Hook](#pre-commit-hook) above for the full behavior, chaining rules, and file patterns.
 
 ```bash
-ubel-npm install-hook              # install the dependency-scan pre-commit hook
+ubel-npm install-hook              # install the pre-commit hook (secrets + dependency scan)
 ubel-npm install-hook --force      # chain to an existing foreign hook
 ubel-npm uninstall-hook            # remove it again
 ```
@@ -989,15 +994,19 @@ A secret in history is compromised even if it is no longer in the tree: **rotate
 ### Pre-commit hook (staged changes)
 
 ```bash
-ubel-secrets --install-hook            # install .git/hooks/pre-commit
-ubel-secrets --install-hook --force    # keep an existing hook and chain to it
+ubel-secrets --install-hook            # install .git/hooks/pre-commit (the single ubel hook)
+ubel-secrets --install-hook --force    # keep an existing foreign hook and chain to it
 ubel-secrets --uninstall-hook          # remove it again
 ubel-secrets --staged                  # what the hook runs; also usable on its own
 ```
 
-`--staged` scans what is in the **index** (staged vs `HEAD`), not the working tree: unstaged edits are ignored, and a secret you staged but then deleted from the file on disk is still caught. It works before the first commit (it diffs against the empty tree) and uses rename detection, so moving a file never re-flags secrets it already had. A staged `.env` is about to be committed, so `.env*` files are always scanned here. A clean staged scan prints nothing — it runs on every commit.
+`--staged` scans what is in the **index** (staged vs `HEAD`), not the working tree: unstaged edits are ignored, and a secret you staged but then deleted from the file on disk is still caught. It works before the first commit (it diffs against the empty tree) and uses rename detection, so moving a file never re-flags secrets it already had. A clean staged scan prints nothing — it runs on every commit.
 
-The hook is a small POSIX `sh` script that runs `ubel-secrets --staged` and blocks the commit on a non-zero exit (`1` = findings, `2` = the scan itself failed).
+**What a staged scan covers.** The skip lists of a whole-tree scan (above) exist to keep that scan fast and quiet; they are not applied to a file somebody is explicitly staging. Staged files are scanned wherever they live and whatever they are called — including `build/`, `out/`, `dist/`, `vendor/`, `coverage/`, test and example paths, `docs/*.md`, notebooks, `Jenkinsfile`, `Procfile`, `.tfstate`, `.env*`, and files git's attributes mark `-diff`/`binary` (they are diffed as text). Only these are skipped: installed-dependency trees (`node_modules`, `site-packages`, virtualenvs), machine-generated lockfiles, files that are binary (a NUL byte in the first 8000 bytes, or an image/archive/font/media extension), and what you exclude in `.ubelignore` (path globs, `exclude-dir:`). `include-dir:` and `unallow:` still apply. Placeholder-looking values (`example`, `${VAR}`, `process.env.X`) are still ignored by the content rules.
+
+**Large additions are never dropped.** An added block is scanned in slices (each slice re-scans the tail of the previous one, so a multi-line key straddling a boundary is still found), and a single huge line is split with an overlap. Only a file adding more than 128 MB in one diff is cut short; that is reported as a warning (`[!] <path>: more than 128 MB added - only the first 128 MB was scanned`, and `incomplete: true` in `--json`), and with `UBEL_HOOK_STRICT=1` it fails the scan (exit `2`) instead. Change the cap with `UBEL_STAGED_MAX_FILE_MB`. `--history` uses the same slicing.
+
+The hook is the single ubel pre-commit hook (see [Pre-commit Hook](#pre-commit-hook)): a small POSIX `sh` script that runs `ubel-secrets --staged` on every commit — and, if you also ran `ubel-<engine> install-hook`, the dependency scan too — and blocks the commit on a non-zero exit (`1` = findings, `2` = the scan itself failed).
 
 - **Idempotent** — re-installing replaces UBEL's own hook (recognised by a marker comment).
 - **Never clobbers someone else's hook.** Without `--force` it refuses. With `--force` the existing hook is moved to `pre-commit.local` and still runs after a clean secrets scan; `--uninstall-hook` moves it back. It refuses to remove a hook it did not install.
@@ -1007,7 +1016,7 @@ The hook is a small POSIX `sh` script that runs `ubel-secrets --staged` and bloc
 
 Skip once with `git commit --no-verify`. Hooks are client-side and local, so also run `ubel-secrets --history` in CI.
 
-See also the separate [dependency-scan pre-commit hook](#pre-commit-hook) (`ubel-<engine> install-hook`) — same chaining slot, so installing both requires `--force` on the second.
+To add the dependency scan to the same hook, run `ubel-<engine> install-hook` (see [Pre-commit Hook](#pre-commit-hook)); neither order needs `--force`.
 
 ### Baselining
 

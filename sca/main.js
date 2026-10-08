@@ -47,12 +47,15 @@
  *     node src/main.js <engine> install-hook [--force]
  *     node src/main.js <engine> uninstall-hook
  *
- *     install-hook writes a git pre-commit hook that runs `<engine> health`
- *     — a dependency scan only (scan_os stays false, full_stack per engine
- *     defaults), never the OS scanner — whenever a commit stages a package
- *     manifest or lockfile. uninstall-hook removes it again. `--force` moves
- *     an existing foreign hook to pre-commit.local instead of refusing, and
- *     chains to it after the dependency scan passes.
+ *     install-hook writes THE ubel git pre-commit hook (one hook, shared with
+ *     `ubel-secrets --install-hook`; see precommit_hook.js). On every commit it
+ *     runs `ubel-secrets --staged`, and whenever a commit stages a package
+ *     manifest or lockfile it also runs `<engine> health` — a dependency scan
+ *     only (scan_os stays false, full_stack per engine defaults), never the OS
+ *     scanner. Installing from either side keeps the other's step, in any
+ *     order. uninstall-hook removes the hook. `--force` moves an existing
+ *     foreign hook to pre-commit.local instead of refusing, and chains to it
+ *     after the scans pass.
  *
  *     Bypass once with `git commit --no-verify`. Set UBEL_HOOK_STRICT=1 to make
  *     a missing ubel binary block the commit instead of warning and continuing.
@@ -104,10 +107,10 @@
  *     init` — ported as-is from the Python original's unconditional
  *     behavior, not something reconsidered here.
  *
- *     `install-hook`/`uninstall-hook` install the git pre-commit hook that
- *     runs `<engine> health` (dependency scan, no OS scan) on commits that
- *     stage a manifest or lockfile. Not supported on apt/dnf/yum, which
- *     scan the host, not a repo.
+ *     `install-hook`/`uninstall-hook` install the single ubel git pre-commit
+ *     hook: secrets scan on every commit, plus `<engine> health` (dependency
+ *     scan, no OS scan) on commits that stage a manifest or lockfile. Not
+ *     supported on apt/dnf/yum, which scan the host, not a repo.
  *
  *     pip/uv check/install with no package args fall back to
  *     ./requirements.txt, then ./pyproject.toml's [project] dependencies
@@ -486,8 +489,9 @@ async function handleHookMode(engine, mode, extraArgs) {
         binName,
       });
       console.log(`${r.replaced ? "Updated" : "Installed"} pre-commit hook: ${r.hookFile}`);
+      if (r.migrated) console.log("Merged an older ubel hook (pre-commit.local) into this one and removed it.");
       if (r.chained) {
-        console.log(`Your existing hook was moved to ${r.localFile}; it still runs after the dependency scan.`);
+        console.log(`Your existing hook was moved to ${r.localFile}; it still runs after the ubel scans.`);
       }
       if (r.portable) {
         console.log(
@@ -496,8 +500,9 @@ async function handleHookMode(engine, mode, extraArgs) {
         );
       }
       console.log();
-      console.log(`The hook runs \`${binName} health\` (dependency scan only — no OS scan) whenever a commit`);
-      console.log("stages a package manifest or lockfile.");
+      console.log("One hook, two scans. On every commit it runs `ubel-secrets --staged`; whenever a commit");
+      console.log(`stages a package manifest or lockfile it also runs \`${binName} health\` (dependency scan only — no OS scan).`);
+      console.log("UBEL_HOOK_SCA=always|off overrides when the dependency scan runs.");
       console.log("Skip once with `git commit --no-verify`; hooks are local, so also run the scan in CI.");
     } else {
       const r = await uninstallScaHook(resolvedRoot);
@@ -878,7 +883,7 @@ async function main(programmaticOptions) {
       }
       console.error("[!] Scan failed:", err.message);
       if (process.env.DEBUG) console.error(err.stack);
-      process.exit(1);
+      process.exit(2); // 1 = policy violation, 2 = the scan did not complete (the pre-commit hook relies on this)
     }
     return;
   }
@@ -1005,7 +1010,7 @@ async function main(programmaticOptions) {
     }
     console.error("[!] Scan failed:", err.message);
     if (process.env.DEBUG) console.error(err.stack);
-    process.exit(1);
+    process.exit(2); // 1 = policy violation, 2 = the scan did not complete (the pre-commit hook relies on this)
   }
 }
 

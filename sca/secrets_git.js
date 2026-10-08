@@ -15,6 +15,13 @@
  * some commit, so it is found; unchanged code is never rescanned. Contiguous added lines are scanned
  * together, so multi-line PEM blocks are caught.
  *
+ * Large additions are never dropped: a hunk is scanned in slices of about
+ * SLICE_BYTES (each slice re-scans the tail of the previous one, so a multi-line
+ * key straddling a boundary is still found), and a single huge line is split
+ * with an overlap. Only a file adding more than MAX_FILE_ADDED_BYTES in one
+ * diff is cut short, and that is reported as a warning (result.warnings /
+ * result.incomplete) rather than silently ignored.
+ *
  * Only `git` is used (no libraries), via spawn()/execFile() with argument
  * arrays — never through a shell. Nothing is written to disk.
  *
@@ -25,9 +32,20 @@
 import { spawn, execFile } from "node:child_process";
 import readline from "node:readline";
 import path from "node:path";
-import { scanText, classifyForScan, loadIgnoreConfig } from "./secrets.js";
+import { scanText, classifyForScan, classifyStaged, loadIgnoreConfig } from "./secrets.js";
 
-const MAX_HUNK_BYTES = 5 * 1024 * 1024; // same cap as a whole file in a tree scan
+const MB = 1024 * 1024;
+const BINARY_SNIFF_BYTES = 8000;
+const SLICE_BYTES = 1 * MB;            // scan a long run of added lines in slices of about this size
+const SLICE_OVERLAP_BYTES = 64 * 1024; // tail carried into the next slice (a PEM key is a few KB)
+const MAX_LINE_CHARS = 1 * MB;         // one line longer than this is split into overlapping pieces
+const LINE_OVERLAP_CHARS = 16 * 1024;  // tokens are far shorter than this
+// Hard stop per file per diff, so a multi-GB blob cannot stall `git commit`.
+// Anything past it is reported, not hidden. Override: UBEL_STAGED_MAX_FILE_MB.
+const MAX_FILE_ADDED_BYTES = (() => {
+  const mb = Number(process.env.UBEL_STAGED_MAX_FILE_MB);
+  return (Number.isFinite(mb) && mb > 0 ? mb : 128) * MB;
+})();
 const PEM_PRIVATE_HEADER = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY/;
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
@@ -91,18 +109,29 @@ function parseDiffPath(raw) {
 
 /**
  * Turn a `git log -p` / `git diff` stream (produced with -U0 --no-prefix and a
- * leading \x01 commit marker line per commit) into hunks of added lines:
+ * leading \x01 commit marker line per commit) into slices of added lines:
  *   { commit, path, startLine, lines[] }
+ * Added lines are contiguous within a hunk, so line numbers are startLine + index.
+ * Nothing is dropped for size: see the header comment for how big hunks are cut.
+ *
+ * @param {AsyncIterable<string>} rl
+ * @param {{onCommit?: (c: object) => void, onSkip?: (info: object) => void}} [hooks]
  */
-async function* parseDiff(rl, onCommit) {
+async function* parseDiff(rl, { onCommit, onSkip } = {}) {
   let commit = null;
   let filePath = null;
   let inHeader = false;
-  let hunk = null;
+  let hunk = null;       // { commit, path, startLine, lines, bytes, fresh }
+  let fileBytes = 0;     // added bytes seen for the current file in this diff
+  let fileCapped = false;
+  let fileBinary = false; // staged scans diff with --text; real binaries are recognised here
+
+  const out = (h) => ({ commit: h.commit, path: h.path, startLine: h.startLine, lines: h.lines });
+  // `fresh` counts lines not yet handed out, so a carried-over overlap is never emitted on its own.
   const take = () => {
     const h = hunk;
     hunk = null;
-    return h && h.lines.length && !h.tooBig ? h : null;
+    return h && h.fresh > 0 ? out(h) : null;
   };
 
   for await (const raw of rl) {
@@ -119,6 +148,9 @@ async function* parseDiff(rl, onCommit) {
       const h = take(); if (h) yield h;
       filePath = null;
       inHeader = true;
+      fileBytes = 0;
+      fileCapped = false;
+      fileBinary = false;
       continue;
     }
     if (inHeader) {
@@ -130,19 +162,62 @@ async function* parseDiff(rl, onCommit) {
     if (raw.startsWith("@@")) {
       const h = take(); if (h) yield h;
       const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-      if (m && filePath) hunk = { commit, path: filePath, startLine: Number(m[1]), lines: [], bytes: 0, tooBig: false };
+      if (m && filePath && !fileCapped && !fileBinary) hunk = { commit, path: filePath, startLine: Number(m[1]), lines: [], bytes: 0, fresh: 0 };
       continue;
     }
-    if (hunk && raw.charCodeAt(0) === 43 /* "+" */) {
-      if (hunk.bytes > MAX_HUNK_BYTES) { hunk.tooBig = true; continue; }
-      hunk.lines.push(raw.slice(1).replace(/\r$/, ""));
-      hunk.bytes += raw.length;
+    if (!hunk || raw.charCodeAt(0) !== 43 /* "+" */) continue;
+
+    const text = raw.slice(1).replace(/\r$/, "");
+    // Same test git uses for "binary": a NUL byte in the first 8000 bytes of content.
+    if (fileBytes < BINARY_SNIFF_BYTES && text.slice(0, BINARY_SNIFF_BYTES - fileBytes).includes("\0")) {
+      fileBinary = true;
+      hunk = null;
+      continue;
+    }
+    fileBytes += text.length + 1;
+    if (fileBytes > MAX_FILE_ADDED_BYTES) {
+      // Scan what was collected, then stop reading this file and say so.
+      fileCapped = true;
+      onSkip?.({ commit, path: hunk.path, limit: MAX_FILE_ADDED_BYTES });
+      const h = take(); if (h) yield h;
+      continue;
+    }
+
+    if (text.length > MAX_LINE_CHARS) {
+      // One enormous line (minified bundle, data blob): flush what precedes it,
+      // then scan it in overlapping pieces. Pieces share the line number.
+      const lineNo = hunk.startLine + hunk.lines.length;
+      if (hunk.fresh > 0) yield out(hunk);
+      const step = MAX_LINE_CHARS - LINE_OVERLAP_CHARS;
+      for (let i = 0; i < text.length; i += step) {
+        yield { commit: hunk.commit, path: hunk.path, startLine: lineNo, lines: [text.slice(i, i + MAX_LINE_CHARS)] };
+        if (i + MAX_LINE_CHARS >= text.length) break;
+      }
+      hunk = { commit: hunk.commit, path: hunk.path, startLine: lineNo + 1, lines: [], bytes: 0, fresh: 0 };
+      continue;
+    }
+
+    hunk.lines.push(text);
+    hunk.bytes += text.length + 1;
+    hunk.fresh++;
+    if (hunk.bytes >= SLICE_BYTES) {
+      yield out(hunk);
+      // Keep the tail of this slice as the head of the next one.
+      let keep = 0, kept = 0;
+      for (let i = hunk.lines.length - 1; i > 0 && kept < SLICE_OVERLAP_BYTES; i--) {
+        kept += hunk.lines[i].length + 1;
+        keep++;
+      }
+      hunk.startLine += hunk.lines.length - keep;
+      hunk.lines = hunk.lines.slice(hunk.lines.length - keep);
+      hunk.bytes = kept;
+      hunk.fresh = 0;
     }
   }
   const h = take(); if (h) yield h;
 }
 
-async function scanHunks(hunks, { ignore, includeEnvFiles }) {
+async function scanHunks(hunks, { ignore, classify }) {
   const findings = [];
   const seen = new Set();
   const classCache = new Map();
@@ -150,7 +225,7 @@ async function scanHunks(hunks, { ignore, includeEnvFiles }) {
   for await (const h of hunks) {
     let cls = classCache.get(h.path);
     if (cls === undefined) {
-      cls = classifyForScan(h.path, { includeEnvFiles, ignore });
+      cls = classify(h.path);
       classCache.set(h.path, cls);
     }
     if (cls === "skip") continue;
@@ -172,6 +247,11 @@ async function scanHunks(hunks, { ignore, includeEnvFiles }) {
   return findings;
 }
 
+function oversizeWarning({ path: p, limit }) {
+  return `${p}: more than ${Math.round(limit / MB)} MB added - only the first ${Math.round(limit / MB)} MB was scanned ` +
+         "(raise UBEL_STAGED_MAX_FILE_MB to scan more).";
+}
+
 const BASE_ARGS = [
   "-c", "core.quotepath=off",
 ];
@@ -183,7 +263,13 @@ const DIFF_ARGS = [
 
 // Staged scans want rename detection (-M): a renamed file's pre-existing
 // content is not "added", so moving a file never re-flags secrets it already had.
-const STAGED_DIFF_ARGS = [...DIFF_ARGS.filter(a => a !== "--no-renames"), "-M"];
+//
+// --text: scan every staged file as text. Without it, git emits NO hunks for a
+// file its attributes mark as binary or -diff (`*.min.js -diff`, `*.svg binary`,
+// `package-lock.json -diff` are all common), and a token in such a file would
+// pass the hook unseen. True binaries are then dropped by parseDiff (NUL sniff)
+// and classifyStaged (extension), exactly as git itself would have done.
+const STAGED_DIFF_ARGS = [...DIFF_ARGS.filter(a => a !== "--no-renames"), "-M", "--text"];
 
 // ── public API ──────────────────────────────────────────────────────────────
 
@@ -239,12 +325,17 @@ export async function scanGitHistory(projectRoot, options = {}) {
     ...limits, ...revs, "--",
   ];
   const { rl, exited } = streamGit(args, root);
-  const findings = await scanHunks(parseDiff(rl, () => { commitsScanned++; }), { ignore, includeEnvFiles });
+  const skipped = [];
+  const findings = await scanHunks(
+    parseDiff(rl, { onCommit: () => { commitsScanned++; }, onSkip: (i) => skipped.push(i) }),
+    { ignore, classify: (p) => classifyForScan(p, { includeEnvFiles, ignore }) });
   await exited;
+  for (const i of skipped) warnings.push(oversizeWarning(i));
 
   return {
     findings, count: findings.length, commitsScanned, shallow, warnings,
     projectRoot: root, suppressed: ignore.suppressed,
+    incomplete: skipped.length > 0, skipped,
   };
 }
 
@@ -257,20 +348,29 @@ export async function scanGitHistory(projectRoot, options = {}) {
  *
  * @param {string} projectRoot
  * @param {object} [options]
- * @param {boolean} [options.includeEnvFiles=true]  A staged .env IS about to be committed.
  * @param {IgnoreConfig|object} [options.ignore]   Pre-built IgnoreConfig, or loadIgnoreConfig options.
- * @returns {Promise<{findings: object[], count: number, projectRoot: string, suppressed: number}>}
+ *   (Staged .env files are always scanned; see classifyStaged in secrets.js for what else is.)
+ * @returns {Promise<{findings: object[], count: number, projectRoot: string, suppressed: number,
+ *   warnings: string[], incomplete: boolean, skipped: object[]}>}
  */
 export async function scanStaged(projectRoot, options = {}) {
   const root = path.resolve(projectRoot || process.cwd());
-  const { includeEnvFiles = true } = options;
   const ignore = loadIgnoreConfig(root, options);
 
   await assertRepo(root);
   const args = [...BASE_ARGS, "diff", "--cached", ...STAGED_DIFF_ARGS, "--"];
   const { rl, exited } = streamGit(args, root);
-  const findings = await scanHunks(parseDiff(rl), { ignore, includeEnvFiles });
+  const skipped = [];
+  // Staged files use the inclusive classifier (classifyStaged): a file being
+  // committed is scanned wherever it lives and whatever it is called.
+  const findings = await scanHunks(
+    parseDiff(rl, { onSkip: (i) => skipped.push(i) }),
+    { ignore, classify: (p) => classifyStaged(p, { ignore }) });
   await exited;
 
-  return { findings, count: findings.length, projectRoot: root, suppressed: ignore.suppressed };
+  const warnings = skipped.map(oversizeWarning);
+  return {
+    findings, count: findings.length, projectRoot: root, suppressed: ignore.suppressed,
+    warnings, incomplete: skipped.length > 0, skipped,
+  };
 }

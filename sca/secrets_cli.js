@@ -3,8 +3,10 @@
  *
  *   ubel-secrets [path] --history [--rev=<range>] [--since=<date>] [--max-commits=<n>]
  *   ubel-secrets [path] --staged                 scan what is staged for commit
- *   ubel-secrets [path] --install-hook [--force] install the git pre-commit hook
- *   ubel-secrets [path] --uninstall-hook         remove it again
+ *   ubel-secrets [path] --install-hook [--force] install the git pre-commit hook (the one ubel hook:
+ *                                                secrets scan on every commit, plus the dependency
+ *                                                scan if `ubel-<engine> install-hook` added it)
+ *   ubel-secrets [path] --uninstall-hook         remove that hook again
  *   ubel-secrets [path] --write-baseline         accept current findings (also works with --staged/--history)
  *
  * Shared options: --include-dir=<name>  --exclude-dir=<name>  --unallow=<id>
@@ -25,6 +27,11 @@ import path from "node:path";
 import { scanSecrets } from "./secrets.js";
 import { scanStaged } from "./secrets_git.js";
 import { installHook, uninstallHook } from "./secrets_hook.js";
+
+// A scan that could not cover everything it was given (e.g. a file larger than
+// the per-file cap) is reported as a warning; with UBEL_HOOK_STRICT=1 it fails
+// the scan (exit 2) instead, so the commit is blocked.
+const strictMode = () => process.env.UBEL_HOOK_STRICT === "1";
 
 // The shared options are listed too: on their own they used to fall through to
 // the full pipeline scan, which ignores them — so `--include-dir=packages`
@@ -118,11 +125,15 @@ export async function handleSecretsCli(argv) {
     if (opts.installHook) {
       const r = await installHook(root, { force: opts.force });
       console.log(`${r.replaced ? "Updated" : "Installed"} pre-commit hook: ${r.hookFile}`);
-      if (r.chained) console.log(`Your existing hook was moved to ${r.localFile}; it still runs after the secrets scan.`);
+      if (r.migrated) console.log("Merged an older ubel hook (pre-commit.local) into this one and removed it.");
+      if (r.chained) console.log(`Your existing hook was moved to ${r.localFile}; it still runs after the ubel scans.`);
       if (r.portable) {
         console.log("This hooks directory is outside .git (core.hooksPath), so the hook finds `ubel-secrets` on PATH\n" +
                     "instead of embedding this machine's paths. Every contributor needs it installed.");
       }
+      console.log("\nThe hook runs `ubel-secrets --staged` on every commit" +
+                  (r.sca ? `, and \`${r.sca} health\` (dependency scan) when a manifest or lockfile is staged.`
+                         : ".\nAdd the dependency scan to the same hook with `ubel-<engine> install-hook` (e.g. ubel-npm)."));
       console.log("Skip once with `git commit --no-verify`; hooks are local, so also run --history in CI.");
       process.exitCode = 0;
       return true;
@@ -161,6 +172,11 @@ export async function handleSecretsCli(argv) {
       console.log = realLog;
     }
 
+    // Incomplete coverage is never silent. (--staged runs on every commit, so
+    // clean output stays quiet, but a warning always prints.)
+    const incomplete = Array.isArray(result.warnings) && result.warnings.length > 0 && result.incomplete === true;
+    if (!opts.json) for (const w of result.warnings ?? []) if (!result.history) console.error(`[!] ${w}`);
+
     if (opts.writeBaseline) {
       const { file, added } = appendBaseline(root, result.findings, opts.ignoreFile);
       log(`Baselined ${added} finding(s) into ${file}. Review the diff before committing it.`);
@@ -188,7 +204,11 @@ export async function handleSecretsCli(argv) {
         }
       }
     }
-    process.exitCode = result.count > 0 ? 1 : 0;
+    if (result.count > 0) process.exitCode = 1;
+    else if (incomplete && strictMode()) {
+      console.error("[!] ubel-secrets: scan was incomplete and UBEL_HOOK_STRICT=1 is set; treating as a failed scan.");
+      process.exitCode = 2;
+    } else process.exitCode = 0;
   } catch (err) {
     console.error(`[!] ubel-secrets: ${err.message}`);
     if (process.env.DEBUG) console.error(err.stack);

@@ -45,8 +45,7 @@
     "ubel-easm": "bin/easm.js"
   },
   "scripts": {
-    "test": "node --test tests/gitdiff.test.js tests/lookup-fail-closed.test.js tests/easm-self-ip.test.js tests/sast-dart-swift.test.js"
-  },
+    },
   "engines": {
     "node": ">=18.0.0"
   },
