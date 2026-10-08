@@ -49,8 +49,8 @@
  *
  *     install-hook writes THE ubel git pre-commit hook (one hook, shared with
  *     `ubel-secrets --install-hook`; see precommit_hook.js). On every commit it
- *     runs `ubel-secrets --staged`, and whenever a commit stages a package
- *     manifest or lockfile it also runs `<engine> health` — a dependency scan
+ *     runs `ubel-secrets --staged` and `<engine> health` (UBEL_HOOK_SCA=auto
+ *     limits the latter to commits staging a package manifest or lockfile) — a dependency scan
  *     only (scan_os stays false, full_stack per engine defaults), never the OS
  *     scanner. Installing from either side keeps the other's step, in any
  *     order. uninstall-hook removes the hook. `--force` moves an existing
@@ -109,7 +109,7 @@
  *
  *     `install-hook`/`uninstall-hook` install the single ubel git pre-commit
  *     hook: secrets scan on every commit, plus `<engine> health` (dependency
- *     scan, no OS scan) on commits that stage a manifest or lockfile. Not
+ *     scan, no OS scan) on every commit. Not
  *     supported on apt/dnf/yum, which scan the host, not a repo.
  *
  *     pip/uv check/install with no package args fall back to
@@ -500,9 +500,9 @@ async function handleHookMode(engine, mode, extraArgs) {
         );
       }
       console.log();
-      console.log("One hook, two scans. On every commit it runs `ubel-secrets --staged`; whenever a commit");
-      console.log(`stages a package manifest or lockfile it also runs \`${binName} health\` (dependency scan only — no OS scan).`);
-      console.log("UBEL_HOOK_SCA=always|off overrides when the dependency scan runs.");
+      console.log("One hook, two scans. On every commit it runs `ubel-secrets --staged` and");
+      console.log(`\`${binName} health\` (dependency scan only — no OS scan).`);
+      console.log("UBEL_HOOK_SCA=auto|off limits it to commits staging a manifest/lockfile, or disables it.");
       console.log("Skip once with `git commit --no-verify`; hooks are local, so also run the scan in CI.");
     } else {
       const r = await uninstallScaHook(resolvedRoot);

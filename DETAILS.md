@@ -85,9 +85,9 @@ ubel-npm uninstall-hook                  # remove it again
 #          ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-cargo
 ```
 
-The hook runs `<engine> health` — a **dependency scan only**, no OS scan — whenever a commit stages a package manifest or lockfile (a fixed pattern set covering npm/pnpm/bun/yarn/Composer/pip/uv/conda/Cargo/Go/Maven/Gradle/Bundler/SwiftPM/Carthage/pub manifests and lockfiles anywhere in the tree). Commits that don't touch a dependency file exit `0` without scanning. It does not run `check`, so no lockfile is written or reverted — a `health` scan is read-only against the installed graph, and a broken scan can never leave the working tree half-mutated.
+The hook runs `<engine> health` — a **dependency scan only**, no OS scan — on every commit, right after the secrets scan (it is the same single hook as `ubel-secrets --install-hook`). Set `UBEL_HOOK_SCA=auto` to run it only when a commit stages a package manifest or lockfile (a fixed pattern set covering npm/pnpm/bun/yarn/Composer/pip/uv/conda/Cargo/Go/Maven/Gradle/Bundler/SwiftPM/Carthage/pub manifests and lockfiles anywhere in the tree), or `UBEL_HOOK_SCA=off` to skip it. It does not run `check`, so no lockfile is written or reverted — a `health` scan is read-only against the installed graph, and a broken scan can never leave the working tree half-mutated.
 
-- **Chainable.** `--force` moves an existing foreign pre-commit hook to `pre-commit.local` and runs it after a clean dependency scan. `uninstall-hook` moves it back. Same chaining slot as `ubel-secrets --install-hook` — the two hooks can coexist, but whichever ran last will see the other and (without `--force`) refuse.
+- **Chainable.** `--force` moves an existing foreign pre-commit hook to `pre-commit.local` and runs it after a clean dependency scan. `uninstall-hook` moves it back. There is **one** hook shared with `ubel-secrets --install-hook`: install either or both, in any order, without `--force`, and you get a single hook with both steps (it never chains to itself).
 - **Portable.** If the hooks directory is a committed `.githooks/` or husky-style path outside the git dir, the hook is written without any machine-specific absolute paths — it finds `ubel-<engine>` on `PATH`, so it's safe to commit and share.
 - **Fail-open for "tool missing", fail-closed for "tool failing".** If the binary can't be found, the hook warns loudly and lets the commit through; set `UBEL_HOOK_STRICT=1` to block instead. If the binary runs and exits non-zero, the commit is always blocked.
 - **Client-side only.** Skip once with `git commit --no-verify`. Also run `<engine> check` (or `health`) in CI — see [CI/CD Integration](#cicd-integration).
@@ -216,7 +216,7 @@ ubel-secrets --write-baseline
 
 Exit codes: `0` clean, `1` findings, `2` error. A secret found in history is compromised even if deleted — rotate it. The pre-commit hook blocks the commit on findings or on a failed scan; if `ubel-secrets` can't be found it warns and lets the commit through (`UBEL_HOOK_STRICT=1` blocks instead). Hooks are local and skippable with `--no-verify`, so also run `--history` in CI.
 
-**Separately**, every SCA binary supports `install-hook` / `uninstall-hook` to install a **dependency-scanning** pre-commit hook that runs `<engine> health` (no OS scan) whenever a manifest/lockfile is staged. Same chaining slot — see [SCA § Pre-commit hook](#pre-commit-hook-dependency-scanning).
+Every SCA binary's `install-hook` / `uninstall-hook` manages the **same single hook**, adding a dependency scan (`<engine> health`, no OS scan) to the secrets scan on every commit — see [SCA § Pre-commit hook](#pre-commit-hook-dependency-scanning).
 
 Before anything runs, the entry point (`main.js`, not the scanners) makes sure `.gitignore` and `.dockerignore` in the working directory ignore `.ubel/` and `.ubelignore`, creating the files if needed — idempotent, append-only, and it respects an explicit `!.ubelignore`. Opt out with `UBEL_NO_IGNORE_FILES=1`.
 
@@ -560,7 +560,7 @@ RUN ubel-sast --fail-on valid .
 
 ### Pre-commit hook vs. CI
 
-Every SCA binary can install a dependency-scanning git pre-commit hook with `ubel-<engine> install-hook`. It's a client-side convenience — skippable with `git commit --no-verify`, and only present on a clone where the developer actually ran `install-hook`. Treat it as a fast local gate, not a replacement for the CI scans above; keep `ubel-<engine> check` (or `health`) in the pipeline so nothing reaches a shared branch unscanned.
+Every SCA binary can add a dependency scan to the single ubel git pre-commit hook with `ubel-<engine> install-hook`. It's a client-side convenience — skippable with `git commit --no-verify`, and only present on a clone where the developer actually ran `install-hook`. Treat it as a fast local gate, not a replacement for the CI scans above; keep `ubel-<engine> check` (or `health`) in the pipeline so nothing reaches a shared branch unscanned.
 
 ---
 # UBEL — Capability Reference by Ecosystem, Language, and OS
@@ -621,7 +621,7 @@ below.
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
-> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — when a commit stages a manifest/lockfile. Since it's gated on `health` support, its coverage matches the SCA column except where the engine's CLI doesn't yet expose the mode (Go/Maven/NuGet/Ruby/Swift/pub are read via full-stack `health` only — there's no per-engine binary yet to attach `install-hook` to). The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
+> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where the engine's CLI doesn't yet expose the mode (Go/Maven/NuGet/Ruby/Swift/pub are read via full-stack `health` only — there's no per-engine binary yet to attach `install-hook` to). The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
@@ -1220,24 +1220,26 @@ found, reported once at the oldest commit that introduced it) and over the
 unstaged edits are ignored and a staged `.env` is always scanned). The git
 work uses only the `git` binary, via argument arrays and never a shell.
 
-### Dependency-scanning pre-commit hook — separate hook, separate feature
+### Dependency-scanning pre-commit hook — one hook, two scans
 
-Alongside the secrets pre-commit hook, every SCA binary can install a
-git pre-commit hook that runs `<engine> health` — a dependency scan
-(no OS scan) — whenever a commit stages a package manifest or lockfile.
+Every SCA binary can add a dependency scan to the single ubel git
+pre-commit hook. On every commit the hook runs `ubel-secrets --staged`,
+then `<engine> health` — a dependency scan (no OS scan).
 
-- **Same mechanics** as the secrets hook: idempotent re-install,
-  `--force` chaining, `core.hooksPath` / worktree support, portable
-  installs to committed hooks directories, `UBEL_HOOK_STRICT=1` to fail
-  closed on "tool missing", `git commit --no-verify` to bypass.
-- **Same chaining slot** — both hooks share `pre-commit.local`, so
-  installing both requires `--force` on the second one. Whichever runs
-  last chains to the other.
+- **One hook.** `ubel-secrets --install-hook` and `ubel-<engine>
+  install-hook` write the same script; each sets its own step and keeps
+  the other's, so both can be installed in either order without `--force`.
+  Idempotent re-install, `--force` chaining of a foreign hook,
+  `core.hooksPath` / worktree support, portable installs to committed
+  hooks directories, `UBEL_HOOK_STRICT=1` to fail closed on "tool
+  missing", and `git commit --no-verify` all apply. The hook never
+  chains to itself.
 - **Different scope** — this hook scans the repo's *installed dependencies*
   (health mode), never the host OS. It's a `health` scan, not a `check`
   scan, so no lockfile is written or reverted and a broken scan cannot
-  leave the working tree half-mutated. A commit that only touches a
-  README exits 0 without scanning.
+  leave the working tree half-mutated. It runs on every commit by default;
+  `UBEL_HOOK_SCA=auto` restricts it to commits that stage a manifest or
+  lockfile, and `UBEL_HOOK_SCA=off` disables it.
 - **Engine coverage** — install-hook exists on every SCA binary except
   `ubel-docker` (no repo checkout) and `ubel-apt`/`ubel-dnf`/`ubel-yum`
   (they scan the host, not a repo). Ecosystems that are only reachable

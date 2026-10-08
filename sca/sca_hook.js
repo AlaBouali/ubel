@@ -6,7 +6,8 @@
  * There is ONE ubel pre-commit hook (see precommit_hook.js): it runs
  * `ubel-secrets --staged` on every commit, and `<engine> health` (dependency
  * scan only — scan_os is off by construction, and `health` never writes or
- * reverts a lockfile) when a dependency manifest/lockfile is staged.
+ * reverts a lockfile) on every commit (UBEL_HOOK_SCA=auto: only when a
+ * dependency manifest/lockfile is staged).
  * Installing from here sets the dependency step and keeps the secrets step, so
  * this and secrets_hook.js can be run in either order without --force and
  * without chaining into each other.

@@ -132,7 +132,7 @@ export async function handleSecretsCli(argv) {
                     "instead of embedding this machine's paths. Every contributor needs it installed.");
       }
       console.log("\nThe hook runs `ubel-secrets --staged` on every commit" +
-                  (r.sca ? `, and \`${r.sca} health\` (dependency scan) when a manifest or lockfile is staged.`
+                  (r.sca ? `, and \`${r.sca} health\` (dependency scan) on every commit too.`
                          : ".\nAdd the dependency scan to the same hook with `ubel-<engine> install-hook` (e.g. ubel-npm)."));
       console.log("Skip once with `git commit --no-verify`; hooks are local, so also run --history in CI.");
       process.exitCode = 0;

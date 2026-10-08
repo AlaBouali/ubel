@@ -15,8 +15,10 @@
  *
  * What the hook does, on EVERY commit:
  *   1. secrets      `ubel-secrets --staged`   always (it reads the index)
- *   2. dependency   `<engine> health`         when a dependency manifest/lockfile
- *                                             is staged (UBEL_HOOK_SCA=always|off|auto)
+ *   2. dependency   `<engine> health`         always, once an engine has installed
+ *                                             it (UBEL_HOOK_SCA=always|auto|off;
+ *                                             `auto` = only when a manifest/lockfile
+ *                                             is staged)
  * then chains to a foreign pre-commit hook that --force moved aside.
  *
  * Who installs it: `ubel-secrets --install-hook` and `ubel-<engine> install-hook`
@@ -86,7 +88,8 @@ function defaultSecretsBin() {
 // ── dependency-step trigger ──────────────────────────────────────────────────
 
 /**
- * Files whose staged presence makes the dependency step run (in "auto" mode).
+ * Files whose staged presence makes the dependency step run (only in "auto" mode;
+ * the default, "always", runs it on every commit).
  * Extended regex (grep -E), matched against each staged path anywhere in the
  * tree, so monorepo sub-package manifests count too.
  */
@@ -128,11 +131,11 @@ ${CONFIG_PREFIX}${config}
 #
 # One hook, on every commit:
 #   1. secrets     ubel-secrets --staged   (always; scans exactly what is staged)
-#   2. dependency  <engine> health         (when a dependency manifest or lockfile is staged)
+#   2. dependency  <engine> health         (every commit; UBEL_HOOK_SCA=auto limits it to commits staging a manifest/lockfile)
 # Skip once with: git commit --no-verify
 #
 #   UBEL_HOOK_STRICT=1             block when a scanner binary is missing (default: warn, continue)
-#   UBEL_HOOK_SCA=auto|always|off  when to run the dependency step (default: auto = manifest staged)
+#   UBEL_HOOK_SCA=always|auto|off  when to run the dependency step (default: always = every commit)
 
 UBEL_SECRETS_NODE=${shq(secrets.node)}
 UBEL_SECRETS_BIN=${shq(secrets.bin)}
@@ -171,13 +174,13 @@ if [ "$status" -ne 0 ]; then
   exit "$status"
 fi
 
-# ── 2. dependency scan: when a manifest/lockfile is staged ───────────────────
+# ── 2. dependency scan: every commit (UBEL_HOOK_SCA=auto: only when a manifest/lockfile is staged) ──
 if [ -n "$UBEL_SCA_NAME" ]; then
-  run_sca=0
+  run_sca=1
   case "$UBEL_HOOK_SCA" in
-    off) ;;
-    always) run_sca=1 ;;
-    *)
+    off) run_sca=0 ;;
+    auto)
+      run_sca=0
       # -z + quotepath=off: exact paths, so a manifest in a non-ASCII directory still matches.
       if git -c core.quotepath=off diff --cached --name-only -z --diff-filter=ACMRT 2>/dev/null \\
            | tr '\\0' '\\n' | LC_ALL=C grep -Eq '${DEP_FILES_PATTERN}'; then
