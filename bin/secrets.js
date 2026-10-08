@@ -1,9 +1,21 @@
 #!/usr/bin/env node
 
 import { SCA_scan } from "../sca/main.js";
+import { handleSecretsCli } from "../sca/secrets_cli.js";
 
 async function run() {
-  const [, , targetPath] = process.argv;
+  const args = process.argv.slice(2);
+
+  // --history / --write-baseline (and their options) are handled by
+  // secrets_cli.js: it prints its own results and sets process.exitCode
+  // (0 clean, 1 findings, 2 error). Anything else falls through to the
+  // full secrets-only scan below, unchanged.
+  if (await handleSecretsCli(args)) {
+    process.exit(process.exitCode ?? 0);
+  }
+
+  // First non-flag argument is the target path (so `ubel-secrets --foo /repo` works).
+  const targetPath = args.find(a => !a.startsWith("-"));
 
   try {
     const result = await SCA_scan({

@@ -6,9 +6,13 @@
  *   node src/main.js <engine> <mode> [...extra_args]
  *
  *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | cargo | apt | dnf | yum
- *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
+ *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown | install-hook | uninstall-hook
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
  *     conda/cargo/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
+ *     install-hook / uninstall-hook install/remove the git pre-commit hook that
+ *     runs `<engine> health` (dependency scan only — no OS scan) on every
+ *     commit that stages a dependency manifest/lockfile. Supported on every
+ *     engine except docker and apt/dnf/yum.
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
@@ -38,6 +42,20 @@
  *       file is snapshotted and restored on exit, so the persisted policy is
  *       identical before and after. e.g.
  *         node src/main.js npm check --threshold critical lodash
+ *
+ *   install-hook / uninstall-hook (any engine except docker and apt/dnf/yum):
+ *     node src/main.js <engine> install-hook [--force]
+ *     node src/main.js <engine> uninstall-hook
+ *
+ *     install-hook writes a git pre-commit hook that runs `<engine> health`
+ *     — a dependency scan only (scan_os stays false, full_stack per engine
+ *     defaults), never the OS scanner — whenever a commit stages a package
+ *     manifest or lockfile. uninstall-hook removes it again. `--force` moves
+ *     an existing foreign hook to pre-commit.local instead of refusing, and
+ *     chains to it after the dependency scan passes.
+ *
+ *     Bypass once with `git commit --no-verify`. Set UBEL_HOOK_STRICT=1 to make
+ *     a missing ubel binary block the commit instead of warning and continuing.
  *
  *   Docker mode (`docker` engine supports `health`, `check`, and `install`):
  *     node src/main.js docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
@@ -72,10 +90,10 @@
  *   ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-apt, ubel-dnf, ubel-yum; no
  *   auto-detection between them, same one-binary-per-tool shape as
  *   npm/pnpm/bun):
- *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown> [packages...]
- *     node src/main.js cargo   <health|check|install|threshold|block-unknown> [crate[@req]...]   (no init)
- *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown> <package>
- *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]
+ *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> [packages...]
+ *     node src/main.js cargo   <health|check|install|threshold|block-unknown|install-hook|uninstall-hook> [crate[@req]...]   (no init)
+ *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> <package>
+ *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]                       (no hook modes)
  *
  *     `init` provisions a venv regardless of which of these six engines
  *     it's called on (mirrors __main__.py's _run_mode(), which does the
@@ -85,6 +103,11 @@
  *     getting created even for `ubel-apt init`/`ubel-dnf init`/`ubel-yum
  *     init` — ported as-is from the Python original's unconditional
  *     behavior, not something reconsidered here.
+ *
+ *     `install-hook`/`uninstall-hook` install the git pre-commit hook that
+ *     runs `<engine> health` (dependency scan, no OS scan) on commits that
+ *     stage a manifest or lockfile. Not supported on apt/dnf/yum, which
+ *     scan the host, not a repo.
  *
  *     pip/uv check/install with no package args fall back to
  *     ./requirements.txt, then ./pyproject.toml's [project] dependencies
@@ -115,10 +138,32 @@
  *     `create` against an existing env). With no package args it falls back to
  *     ./environment.yml / ./environment.yaml; `init` creates an empty env there.
  *
- *     apt/dnf/yum write reports/policy under $HOME (~/.ubel/local/...)
- *     rather than the project-relative default, so invoking them never
- *     requires sudo — only the real `apt/dnf/yum install` itself is
- *     escalated, and only for `install` mode.
+ *     apt/dnf/yum write reports/policy under $HOME (~/.ubel/local/...) rather
+ *     than the project-relative default, so invoking them never requires sudo —
+ *     only the real `apt/dnf/yum install` itself is escalated, and only for
+ *     `install` mode.
+ *
+ * ── Ubel's own files stay out of git and docker contexts ─────────────────────
+ *   Before anything else runs — policy init, dry-runs, report writes, docker
+ *   extraction — main.js makes sure `.gitignore` and `.dockerignore` in the
+ *   working directory ignore `.ubel/` and `.ubelignore` (creating either file
+ *   if missing). This lives HERE, at the entry point, and nowhere in the
+ *   scanners: secrets.js / secrets_cli.js / secrets_git.js / secrets_hook.js
+ *   never touch those files. See ignore_files.js for the exact rules
+ *   (idempotent, append-only, honours `!.ubelignore`, never throws).
+ *
+ *     CLI           the cwd, for every engine except apt/dnf/yum — those keep
+ *                   their reports and policy under $HOME/.ubel, not in the
+ *                   project. docker is covered: its `.ubel/<uuid>` scratch
+ *                   space is created in the cwd.
+ *     programmatic  `projectRoot`, except for docker (projectRoot is the
+ *                   extracted image rootfs — dockerScan() ensures the cwd
+ *                   instead) and the `container-image` / `developer_platform`
+ *                   scopes (the latter targets $HOME).
+ *     ubel-secrets  ensureUbelIgnoreFilesForSecrets(argv), exported below, is
+ *                   meant to be called by bin/secrets.js BEFORE
+ *                   handleSecretsCli(): that path never reaches main().
+ *   Opt out with UBEL_NO_IGNORE_FILES=1.
  *
  * ── Programmatic usage (agent, platform, VS Code extension) ──────────────────
  *   import { main, dockerScan } from "./main.js";
@@ -171,6 +216,8 @@ import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
+import { ensureUbelIgnoreEntries } from "./ignore_files.js";
+import { installHook as installScaHook, uninstallHook as uninstallScaHook } from "./sca_hook.js";
 
 import fs from 'node:fs/promises';
 import { readFileSync, writeFileSync } from "node:fs";
@@ -184,7 +231,47 @@ async function createTargetPath(dirPath) {
   }
 }
 
-const VALID_MODES      = ["check", "install", "health", "init", "threshold", "block-unknown", "license-risk", "license-block-unknown"];
+// ── .gitignore / .dockerignore guard ──────────────────────────────────────────
+// Scopes whose projectRoot is NOT a directory that holds (or should hold) a
+// `.ubel/` of its own: an extracted image rootfs, and the developer's $HOME.
+const NO_IGNORE_FILE_SCOPES = new Set(["container-image", "developer_platform"]);
+
+/**
+ * Make sure `.gitignore` and `.dockerignore` in `dir` ignore `.ubel/` and
+ * `.ubelignore`. Called once, first thing, by every entry point in this file.
+ * Never throws; cached per directory per process (see ignore_files.js).
+ *
+ * @param {string} dir
+ * @param {{notify?: boolean}} [opts]  notify: print one stderr line per changed file.
+ */
+export function ensureUbelIgnoreFiles(dir, { notify = false } = {}) {
+  return ensureUbelIgnoreEntries(dir, { notify });
+}
+
+/**
+ * Same guard for the `ubel-secrets` CLI, whose extra flags (--history,
+ * --staged, --install-hook, ...) are handled by handleSecretsCli() without
+ * ever reaching main(). bin/secrets.js should call this with process.argv.slice(2)
+ * before handleSecretsCli(argv).
+ *
+ * Skipped for `--staged` (runs inside `git commit`; mutating the tree there
+ * would be surprising — --install-hook already did it) and `--uninstall-hook`.
+ * `--json` keeps stderr quiet.
+ *
+ * @param {string[]} [argv=process.argv.slice(2)]
+ */
+export function ensureUbelIgnoreFilesForSecrets(argv = process.argv.slice(2)) {
+  const flags = new Set(argv.filter(a => a.startsWith("-")).map(a => a.split("=")[0]));
+  if (flags.has("--staged") || flags.has("--uninstall-hook")) return null;
+  const target = argv.find(a => !a.startsWith("-")) || process.cwd();
+  return ensureUbelIgnoreFiles(target, { notify: !flags.has("--json") });
+}
+
+const VALID_MODES      = [
+  "check", "install", "health", "init",
+  "threshold", "block-unknown", "license-risk", "license-block-unknown",
+  "install-hook", "uninstall-hook",
+];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
 const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 
@@ -202,6 +289,16 @@ const PYPI_ENGINES  = new Set(["pip", "pipx", "uv", "conda"]);
 // manager — no auto-detection across the three, same as ubel-npm never
 // guesses whether you meant pnpm.
 const LINUX_ENGINES = new Set(["apt", "dnf", "yum"]);
+
+// Engines that can install a git pre-commit hook. Excludes docker (no repo
+// checkout to scan) and apt/dnf/yum (they scan the host, not a repo). The
+// hook runs `<engine> health`, which for all of these is a dependency scan
+// with scan_os forced off — never the OS scanner.
+const HOOK_ENGINES = new Set([
+  "npm", "pnpm", "bun", "yarn", "composer",
+  "pip", "pipx", "uv", "conda",
+  "cargo",
+]);
 
 // ── Per-run policy flags ──────────────────────────────────────────────────────
 // `--threshold high`, `--block-unknown`, etc. override a policy field for the
@@ -366,6 +463,57 @@ function resolveManager(engine) {
 }
 
 /**
+ * Handle `install-hook` / `uninstall-hook`. Installs / removes a git
+ * pre-commit hook that runs `<engine> health` — a dependency scan only,
+ * never the OS scanner (the health-mode CLI path forces scan_os: false).
+ * Exits the process.
+ *
+ * @param {string}   engine
+ * @param {"install-hook"|"uninstall-hook"} mode
+ * @param {string[]} extraArgs
+ */
+async function handleHookMode(engine, mode, extraArgs) {
+  const resolvedRoot = path.resolve(process.cwd());
+  const binName      = `ubel-${engine}`;
+
+  try {
+    if (mode === "install-hook") {
+      const force = extraArgs.includes("--force");
+      const r = await installScaHook(resolvedRoot, {
+        force,
+        binPath: process.argv[1],
+        nodePath: process.execPath,
+        binName,
+      });
+      console.log(`${r.replaced ? "Updated" : "Installed"} pre-commit hook: ${r.hookFile}`);
+      if (r.chained) {
+        console.log(`Your existing hook was moved to ${r.localFile}; it still runs after the dependency scan.`);
+      }
+      if (r.portable) {
+        console.log(
+          `This hooks directory is outside .git (core.hooksPath), so the hook finds \`${binName}\` on PATH\n` +
+          "instead of embedding this machine's paths. Every contributor needs it installed."
+        );
+      }
+      console.log();
+      console.log(`The hook runs \`${binName} health\` (dependency scan only — no OS scan) whenever a commit`);
+      console.log("stages a package manifest or lockfile.");
+      console.log("Skip once with `git commit --no-verify`; hooks are local, so also run the scan in CI.");
+    } else {
+      const r = await uninstallScaHook(resolvedRoot);
+      console.log(r.removed
+        ? `Removed ${r.hookFile}${r.restored ? " and restored your previous hook." : "."}`
+        : `No pre-commit hook at ${r.hookFile}; nothing to remove.`);
+    }
+  } catch (err) {
+    console.error(`[!] ${err.message}`);
+    if (process.env.DEBUG) console.error(err.stack);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+/**
  * main() — unified entry point for CLI callers AND programmatic callers.
  *
  * A fresh NodeManagerInstance + UbelEngineInstance is constructed for every
@@ -433,6 +581,13 @@ async function main(programmaticOptions) {
       : path.resolve(process.cwd());
 
     await createTargetPath(resolvedRoot)
+
+    // Before the manager/engine are even built: keep .ubel/ and .ubelignore out
+    // of git and docker contexts. docker's projectRoot is the extracted rootfs —
+    // dockerScan() has already handled the cwd that actually holds .ubel/<uuid>.
+    if (engine !== "docker" && !NO_IGNORE_FILE_SCOPES.has(scan_scope)) {
+      ensureUbelIgnoreFiles(resolvedRoot);
+    }
 
     // Construct fresh, isolated instances for this invocation.
     const { manager, systemType } = resolveManager(engine);
@@ -502,6 +657,32 @@ async function main(programmaticOptions) {
   if (!engine) {
     console.error("Usage: ubel-<engine> <mode> [args...]");
     process.exit(1);
+  }
+
+  // Before anything else — policy init, dry-runs, report writes, docker
+  // extraction: keep .ubel/ and .ubelignore out of git and docker contexts.
+  // apt/dnf/yum are the exception: their reports and policy live under
+  // $HOME/.ubel/local, so the cwd gets no .ubel/ from them. docker is NOT an
+  // exception — its `.ubel/<uuid>` scratch space is created in the cwd.
+  if (!LINUX_ENGINES.has(engine)) {
+    ensureUbelIgnoreFiles(process.cwd(), { notify: true });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // install-hook / uninstall-hook — git pre-commit hook for dependency scanning
+  // Handled before the engine-specific branches below, since the hook runs
+  // `<engine> health` (a dependency scan only — scan_os stays off) regardless
+  // of which ecosystem the engine belongs to. Not applicable to docker (no
+  // repo checkout) or apt/dnf/yum (they scan the host, not a repo).
+  // ════════════════════════════════════════════════════════════════════════════
+  if (mode === "install-hook" || mode === "uninstall-hook") {
+    if (!HOOK_ENGINES.has(engine)) {
+      console.error(`[!] ${mode} is not supported for the '${engine}' engine.`);
+      console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo");
+      process.exit(1);
+    }
+    await handleHookMode(engine, mode, extraArgs);
+    return;
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -875,6 +1056,12 @@ export async function scan_project(projectRoot, options = {}) {
  */
 export async function dockerScan({ image, pull = true, keep = false, mode = "health", ...rest }) {
   if (!image) throw new Error("dockerScan requires an `image` reference");
+
+  // The extracted rootfs lives at <cwd>/.ubel/<uuid> (see DockerImageScanner),
+  // so it is the cwd — not the rootfs main() is pointed at — that needs the
+  // ignore entries, and they must exist before anything is pulled or extracted.
+  // No-op when the CLI branch already did it (cached per directory).
+  ensureUbelIgnoreFiles(process.cwd());
 
   const scanner = new DockerImageScanner(image);
   let report;

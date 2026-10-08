@@ -4108,9 +4108,14 @@ export class UbelEngineInstance {
       try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
-      if (scan_secrets=== true || (this.checkMode === "health" && scan_scope !== "developer_platform")) {
+      // Health mode only, and only when not switched off: `scan_secrets: false`
+      // is honoured (ubel-license relies on it), and the `license` scope never
+      // scans for secrets regardless of what a caller passes.
+      if (this.checkMode === "health" && scan_secrets === true && scan_scope !== "license") {
         try {
-          const secretsResult = await scanSecrets(projectRoot);
+          // .env* files are skipped in repository scans but scanned in
+          // container-image scans, where a baked-in .env ships with the image.
+          const secretsResult = await scanSecrets(projectRoot, { includeEnvFiles: scan_scope === "container-image" });
           const bySeverity = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
           for (const f of secretsResult.findings) {
             const key = (f.severity || "unknown").toLowerCase();

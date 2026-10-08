@@ -4,6 +4,7 @@
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
 This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
+
 ---
 
 ## Features
@@ -18,6 +19,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `check` mode — dry-run resolution and scan with no side effects
 - `install` mode — scan-gate before installation; blocks if policy violated
 - `health` mode — scan the current project's installed dependencies
+- **Pre-commit hook** — `install-hook` / `uninstall-hook` modes wire up a git pre-commit hook that runs a dependency scan (`<engine> health`, no OS scan) whenever a commit stages a manifest or lockfile, so a bad dependency change is blocked at `git commit` time rather than after it lands (see [Pre-commit Hook](#pre-commit-hook))
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
@@ -26,7 +28,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
 - **Reachability analysis** — each vulnerability is annotated with a heuristic reachability assessment derived from package type, scope, dependency depth, attack vector, and import-scan confirmation for the ecosystems listed under [Import scan coverage](#import-scan-coverage) (see [Reachability Analysis](#reachability-analysis))
-- **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every scan by default and runnable standalone via `ubel-secrets`
+- **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every `health`-mode scan by default (never in `check`/`install`) and runnable standalone via `ubel-secrets`
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
 - **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer minor/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
@@ -65,7 +67,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-license` | standalone inventory + license-compliance scan, no OSV/NVD or secrets — see [License Compliance](#license-compliance) |
 
 
-> **yarn** does not support a lockfile-only dry-run — this is yarn's own CLI design, not a gap in UBEL's implementation: `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing.
+> **yarn** does not support a lockfile-only dry-run — this is yarn's own CLI design, not a gap in UBEL's implementation: `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing. **yarn does support the pre-commit hook** (`ubel-yarn install-hook`) since the hook only needs a `health` scan, which yarn does support.
 >
 > **composer** gets the same lockfile-backed firewall treatment as npm/pnpm/bun — see [Firewall Mechanics § composer](#composer) — via `composer require`/`update --no-install --no-scripts`, Composer's own equivalent of `--package-lock-only`. It needs the `composer` binary itself on `PATH`, separate from PHP — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`.
 >
@@ -97,8 +99,9 @@ After installation, the following entry-point binaries are available:
 |---|---|---|
 | `UBEL_OSV_ENDPOINT` | `https://api.osv.dev` | Overrides the OSV API base used for live vulnerability queries. `/v1/querybatch` and `/v1/vulns/{id}` are appended to whatever base is set, so a mirror must expose the same path shape as the public API. A trailing slash is stripped automatically. |
 | `UBEL_NVD_ENDPOINT` | `https://services.nvd.nist.gov/rest/json/cves/2.0` | Overrides the NVD CVE API endpoint used for host/platform CPE lookups (`?cpeName=...` is appended as a query string). A trailing slash is stripped automatically. |
+| `UBEL_HOOK_STRICT` | unset | When set to `1`, the pre-commit hook **blocks the commit** if the ubel binary cannot be found on `PATH`, instead of warning and letting it through. Useful in locked-down environments where a "tool missing" state should fail closed. |
 
-Both are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
+Both `UBEL_OSV_ENDPOINT` and `UBEL_NVD_ENDPOINT` are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
 If a configured endpoint (or the public API) is unreachable, rate-limited, or returns an error or a malformed response, the scan **fails** (non-zero exit) instead of reporting a clean result — an air-gapped or mirrored deployment therefore needs a mirror that is actually reachable and complete.
 
@@ -133,6 +136,11 @@ ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
 ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
 
+# Pre-commit hook (any engine except docker and apt/dnf/yum):
+ubel-npm   install-hook [--force]      # install the dependency-scan pre-commit hook
+ubel-npm   uninstall-hook              # remove it
+ubel-pip   install-hook                # works on pip/pipx/uv/conda/cargo/composer/yarn too
+
 # Any of the above, on health | check | install — one-off policy overrides, nothing saved:
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
                                [--license-risk <level>] [--license-block-unknown [true|false]]
@@ -141,7 +149,57 @@ ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|fals
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same minus `init` (there's no environment to create); `ubel-cargo init` exits with an error rather than falling back to `health`.
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same minus `init` (there's no environment to create); `ubel-cargo init` exits with an error rather than falling back to `health`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
+
+---
+
+## Pre-commit Hook
+
+`ubel-<engine> install-hook` writes a git pre-commit hook into the current repository's hooks directory (respecting `core.hooksPath` and worktrees). The hook runs `<engine> health` — a **dependency scan only**, never the OS scanner — and blocks the commit on a non-zero exit (policy violation, or a failed scan). `ubel-<engine> uninstall-hook` removes it again.
+
+```bash
+# Install a dependency-scan pre-commit hook (default refusal if a hook already exists)
+ubel-npm install-hook
+
+# Chain to an existing hook instead of refusing
+ubel-npm install-hook --force
+
+# Remove it again
+ubel-npm uninstall-hook
+
+# Same, from any supported engine
+ubel-pnpm install-hook
+ubel-composer install-hook
+ubel-pip install-hook
+ubel-uv install-hook
+ubel-cargo install-hook
+```
+
+### What the hook does — and, importantly, what it doesn't
+
+- **Dependency scan only, no OS scan.** The hook runs `<engine> health`, whose CLI path forces `scan_os: false`. It never touches the host's package database.
+- **Runs only when a dependency file is staged.** Before invoking the scanner, the hook checks `git diff --cached --name-only` for any of a fixed set of manifest/lockfile names anywhere in the tree (`package.json`, `package-lock.json`, `pnpm-lock.yaml`, `bun.lockb?`, `yarn.lock`, `composer.json`/`.lock`, `requirements.txt`, `pyproject.toml`, `Pipfile(.lock)?`, `setup.py`, `setup.cfg`, `Cargo.toml`/`.lock`, `go.mod`/`.sum`, `pom.xml`, `build.gradle(.kts)?`, `Gemfile(.lock)?`, `Package.resolved`, `Cartfile.resolved`, `pubspec.yaml`/`.lock`, `environment.yml`/`.yaml`). A commit that only touches a README exits `0` without scanning.
+- **No lockfile mutation.** It's a `health` scan, not a `check` scan — nothing is dry-run, no lockfile is written or reverted. A broken scan can never leave the working tree half-mutated.
+- **`health` scans the *installed* dependency graph**, so it catches what's currently on disk. If you've staged a `package.json` change but haven't yet run `install`, the new (potentially vulnerable) dependency won't be in the installed tree yet — the hook still runs, but it's scanning the previous state. For the fully accurate check of the *staged* dependency graph, run `ubel-<engine> check` yourself or in CI.
+- **Chainable.** `--force` moves an existing foreign pre-commit hook to `pre-commit.local` and runs it *after* a clean dependency scan. `uninstall-hook` moves it back.
+- **Portable installs.** If the hooks directory is a committed `.githooks/` or husky-style path outside the git dir, the hook is written without any machine-specific absolute paths — it just finds `ubel-<engine>` on `PATH`, so it's safe to commit and share. Everyone on the team then needs it installed.
+- **Fail-open for "tool missing", fail-closed for "tool failing".** If the ubel binary can't be found, the hook warns loudly on stderr and lets the commit through — set `UBEL_HOOK_STRICT=1` to block instead. If the binary runs and exits non-zero, the commit is always blocked: a broken scan must not look like a clean one.
+- **Bypass once with `git commit --no-verify`.** Hooks are client-side, so this is also a reason to run the same scan in CI (see [CI/CD Integration](#cicd-integration)).
+
+### Coexistence with the secrets pre-commit hook
+
+`ubel-secrets --install-hook` installs a **separate** pre-commit hook that runs `ubel-secrets --staged`. The two hooks don't share a file: whichever ran last will see the other's hook file and, without `--force`, refuse. To run both on every commit:
+
+- Install one of them normally, then run the other with `--force`. The `--force` install moves the first hook to `pre-commit.local` and chains to it after its own scan passes.
+- Or add both scans to your own pre-commit script manually (e.g. `ubel-secrets --staged && ubel-npm health`).
+
+Both hooks use the same `pre-commit.local` chaining slot; only one foreign hook can be chained at a time.
+
+### Files the hook writes
+
+- The hook itself, at `<hooks-dir>/pre-commit`.
+- A chained foreign hook, at `<hooks-dir>/pre-commit.local` (only when `--force` was used).
+- Nothing else. Reports still go to the usual `<project>/.ubel/local/reports/...` path when the hook actually runs a scan that produces one.
 
 ---
 
@@ -379,6 +437,8 @@ This protection also extends to the backup manifest files created earlier before
 
 Scans the current project's installed dependency graph without running any install. For npm/pnpm/bun/yarn/composer this reads the existing lockfile directly (`composer.lock` for composer); `ubel-pip` walks the target venv directly instead (see [Full-stack monorepo scanning](#full-stack-monorepo-scanning) below); `ubel-apt`/`ubel-dnf`/`ubel-yum` read the host's own package database. All of them submit the resolved packages to OSV.dev and NVD's APIs (or your configured mirrors — see [Environment Variables](#environment-variables)).
 
+This is also the mode the [pre-commit hook](#pre-commit-hook) runs — dependency scan only, no OS scan.
+
 ```bash
 ubel-npm health
 ubel-pnpm health
@@ -506,6 +566,20 @@ ubel-pip init
 ```
 
 `ubel-conda init` creates an empty conda environment at `<projectRoot>/conda-env` with `conda create --yes --prefix`, and does nothing if one is already there. It's never required — `ubel-conda check` creates nothing and `install` creates the environment when it needs it — it just provisions ahead of time.
+
+---
+
+### `install-hook` / `uninstall-hook`
+
+Install / remove the git pre-commit hook that runs `<engine> health` — a **dependency scan only**, no OS scan — whenever a commit stages a package manifest or lockfile. See [Pre-commit Hook](#pre-commit-hook) above for the full behavior, chaining rules, and file patterns.
+
+```bash
+ubel-npm install-hook              # install the dependency-scan pre-commit hook
+ubel-npm install-hook --force      # chain to an existing foreign hook
+ubel-npm uninstall-hook            # remove it again
+```
+
+Supported on every engine except `docker` (no repo checkout) and `apt`/`dnf`/`yum` (they scan the host, not a repo).
 
 ---
 
@@ -824,15 +898,19 @@ Each vulnerability record in the enriched report includes a `reachability` objec
 
 ## Secrets Detection
 
-Every scan includes a secrets pass by default (`scan_secrets: true`), and it's also reachable standalone via `ubel-secrets`, which runs a secrets-only pass with no dependency resolution and no LLM calls:
+Every `health`-mode scan includes a secrets pass by default (`scan_secrets: true`); `check` and `install` never run one, whatever `scan_secrets` is set to. (`ubel-docker` is the one place this looks different from the CLI: all three of its modes run the same `health`-mode pipeline on the extracted image, so image scans always include secrets.) It's also reachable standalone via `ubel-secrets`, which runs a secrets-only pass with no dependency resolution and no LLM calls:
 
 ```bash
 ubel-secrets /path/to/project
 ```
 
+`ubel-secrets` also scans git history, scans exactly what is staged for commit, installs a git pre-commit hook, and baselines existing findings — see [Git history](#git-history), [Pre-commit hook](#pre-commit-hook-staged-changes), [Baselining](#baselining) and the [flag reference](#ubel-secrets-flag-reference). Run with none of those flags, it is the plain secrets-only pipeline scan above.
+
+`ubel-license` never runs a secrets pass: `scan_secrets` is forced off, and the `license` scope skips secrets regardless of what a caller passes.
+
 ### Ruleset
 
-The builtin ruleset (`sca/vendor/trivy/rules.js`, `sca/vendor/trivy/allow-rules.js`) is ported from [Trivy's](https://github.com/aquasecurity/trivy) built-in secret scanner (`pkg/fanal/secret/builtin-rules.go`), Apache-2.0, with full attribution in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE) and [`LICENSE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/LICENSE). It's kept in sync with Trivy's own upstream additions.
+The builtin ruleset (`sca/vendor/trivy/rules.js`, `sca/vendor/trivy/allow-rules.js`) is ported from [Trivy's](https://github.com/aquasecurity/trivy) built-in secret scanner (`pkg/fanal/secret/builtin-rules.go`), Apache-2.0, with full attribution in [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE) and [`LICENSE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/LICENSE). It's a generated snapshot of Trivy's ruleset, regenerated from upstream when that ruleset changes — not a live mirror.
 
 On top of the ported set, `sca/secrets.js` defines an `extraRules` array covering credential types not present in Trivy's current builtin rules, including:
 
@@ -841,11 +919,141 @@ On top of the ported set, `sca/secrets.js` defines an `extraRules` array coverin
 - Anthropic and OpenRouter API keys
 - Firebase server tokens
 - Amazon MWS auth tokens
-- Square OAuth secrets and access tokens, Braintree access tokens
-- Stripe restricted keys (`rk_live_` / `rk_test_`) — Trivy covers publishable/secret keys but not this format
-- Twilio Account SIDs and App SIDs (Trivy covers the API-key format only)
-- Credentials embedded in a git remote URL (`https://user:token@host/...`) — a different injection vector from the token-format-specific rules above
-- Generic high-entropy and key-value fallback rules for unknown vendors
+- Square OAuth secrets and access tokens, Braintree access tokens. A Square `EAAA…` token must be a standalone string with enough entropy: it is not reported when it sits inside a longer base64/base64url run (inlined wasm, data URIs), which the unbounded upstream pattern flagged dozens of times per file
+- Stripe live restricted keys (`rk_live_`) — Trivy covers publishable/secret keys but not this format. This extra rule deliberately skips test-mode keys (`rk_test_`), which can only reach test-mode data
+- Credentials embedded in a git remote URL (`https://user:token@host/...`) — a different injection vector from the token-format-specific rules above. Covers GitHub, GitLab, Bitbucket, Azure DevOps, Codeberg, Gitea, Gitee and SourceHut, self-hosted instances whose hostname starts with `git`, `gitlab`, `bitbucket`, `gitea`, `gogs` or `forgejo`, and any other host when the URL is a `.git` remote. Placeholder passwords (`password`, `token`, `xxxx`, …) and `${VAR}` references are ignored
+- Database and broker connection strings with an embedded password — three forms, all reporting the password only:
+  - **URL**: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `mongodb://` / `mongodb+srv://`, `redis://` / `rediss://` (including the empty-user `redis://:pass@host`), `amqp://` / `amqps://`, `mssql://`, `sqlserver://`, `cockroachdb://`, `clickhouse://`, `neo4j://`, `bolt://`, and SQLAlchemy-style `postgresql+psycopg2://` (rule `database-url-credentials`)
+  - **Key/value**: ADO.NET, ODBC and libpq strings such as `Server=…;Database=…;Password=…` or `host=… password=…`; a host/database key must appear earlier on the same line, so a bare `password=` is left to the generic rule (rule `database-connection-string-password`)
+  - **JDBC**: `jdbc:mysql://host/db?user=u&password=…`, `jdbc:sqlserver://host;…;password=…` (rule `jdbc-url-password`)
+
+  Not reported: placeholders and templates (`${DB_PASS}`, `$DB_PASS`, `<password>`, `{0}`, `%PWD%`, `@param`, `%s`, `changeme`, `YOUR_PASSWORD`, `xxxx`, …), `user:user` pairs such as `guest:guest`, default passwords (`postgres`, `root`, `admin`, `test`, …) against `localhost`, `127.0.0.1`, `host.docker.internal` or a bare docker-compose service name, and hosts containing `example`. The same default password against a real hostname *is* reported. Switch a rule off with `rule:<id>` in `.ubelignore`; the per-rule allow-lists are part of the rule, not builtin allow-rules, so `unallow:` does not affect them
+- Generic high-entropy fallback for unknown vendors — a vendor-style prefix (`sk-`, `pk_`, `xox*`, `api_`, `key_`, `token_`) followed by 32+ characters, where the part after the prefix must also clear a Shannon-entropy check (at least 4.0 bits per character, or 3.0 for hex-only values), so repeated runs and plain snake_case identifiers aren't reported
+- Generic key-value fallback — `password`/`secret`/`token`/`api_key`/`private_key` assigned a 32+ character value; there is no entropy check here, the key name is the signal
+
+Twilio SIDs are intentionally not detected: the `AC…`/`AP…` + 32-character pattern has no checksum or distinguishing context and produced far too much noise.
+
+`.env*` files are skipped in repository scans (they aren't meant to be committed) but scanned in Docker image scans, where a baked-in `.env` ships with the image. The global allow-rules still apply, so a file such as `.env.example` is skipped either way.
+
+### What gets scanned
+
+- **Every match on every line** is reported, not just the first per rule; overlapping matches collapse to one finding (a specific rule beats a generic one).
+- **Private keys**: PEM blocks are matched across lines (finding points at the `BEGIN` line and carries `end_line`), including encrypted/legacy PEM and PGP blocks with `Proc-Type`/`DEK-Info`/`Version` headers. Extensionless key files are opened too: `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519` (and `id_rsa.bak`-style variants) are always scanned, and files with no extension or a backup-style one (`.bak`, `.old`, `.orig`, `.p8`, `.ppk`, `.asc` …) are scanned if they start with a PEM private-key header.
+- **Skipped directories**: dependency trees, build output and caches are skipped (`node_modules`, `vendor`, `target`, `dist`, `build`, `out`, virtualenvs, …). `packages`, `bin`, `obj` and `env` are ambiguous names, so they are skipped only when the layout says they hold generated content — a NuGet `packages/` (next to a `.sln`, or containing `repositories.config`), a .NET `bin/`/`obj/` (next to a `.sln`/`.csproj`), a Python venv (`pyvenv.cfg`). A monorepo's `packages/*` and a Node `bin/` are scanned. Any default-skipped directory can be re-included (below). The exceptions are VCS metadata (`.git`, `.svn`, `.hg`) and UBEL's own `.ubel/` directory: those are never walked and cannot be re-included.
+
+### Suppressing findings
+
+Put a `.ubelignore` file at the scan root (or pass `ignoreFile` / `ignorePatterns`). One entry per line; `#` starts a comment.
+
+```gitignore
+docs/generated/                 # skip a directory
+*.snap                          # skip files by glob, at any depth
+/fixtures/keys/*.pem            # leading "/" anchors to the scan root
+src/seed.js rule:generic-key-value-credential   # suppress one rule (comma list ok) on matching paths
+rule:generic-fallback           # disable a rule everywhere
+fingerprint:3f9a1c0be27d4a55    # accept one specific finding
+include-dir:dist                # scan a directory that is skipped by default
+exclude-dir:generated           # skip a directory name wherever it appears
+unallow:tests                   # switch off a builtin allow-rule (e.g. scan test paths)
+```
+
+Or mark the line in the source, in any comment syntax:
+
+```js
+const k = "..."; // ubel:ignore
+const k = "..."; // ubel:ignore[aws-access-key-id]
+// ubel:ignore-next-line
+```
+
+Every finding carries a `fingerprint` — a hash of rule id, path and the secret, stable across line moves and never containing the secret itself. `ubel-secrets <path> --write-baseline` appends the current findings' fingerprints to `.ubelignore` so you can adopt the scanner on an existing codebase and only be told about *new* secrets. Review that diff before committing it. The scan result also reports `suppressed` (how many findings the ignore rules dropped).
+
+Note the builtin allow-list still skips paths containing `test`/`example` and secrets whose text contains "example"; `unallow:tests` / `unallow:examples` turn those off.
+
+### Git history
+
+```bash
+ubel-secrets /path/to/repo --history
+ubel-secrets --history --rev=origin/main..HEAD     # only a branch's new commits
+ubel-secrets --history --since=2025-01-01 --max-commits=500
+ubel-secrets --history --json
+```
+
+Most leaked secrets are in commits, not in today's tree. `--history` runs the normal working-tree scan **and** a history scan in one pass: it streams `git log -p` and scans the lines each commit **added**, so a secret committed and later deleted is still found. Contiguous added lines are scanned together, so multi-line PEM blocks are caught. Only `git` is used (via argument arrays, never a shell) and nothing is written to disk.
+
+Results use the same rules, allow-lists, entropy gates and `.ubelignore` as a tree scan. Each history finding adds `commit`, `commit_date` and `author`, and the oldest commit that introduced a given (rule, path, secret) is the one reported — later re-additions (reverts, cherry-picks, merges of the same content) are not repeated. A secret still in the tree is annotated with its introducing commit (`in_history`); one that has since been deleted is listed as `history_only`. The text output shows `[<commit> <date>, history only]` next to each such finding. `.env*` files are scanned in history (if one is in history, it was committed).
+
+`--rev` selects what to walk (default: all refs) and may be repeated; a value starting with `-` is rejected. `--since` takes any date git accepts, and `--max-commits` must be a positive integer.
+
+A secret in history is compromised even if it is no longer in the tree: **rotate it** — rewriting history alone is not enough. In a shallow clone (CI's default `fetch-depth: 1`) older commits do not exist, and the result carries a `shallow` warning (`history.warnings`); fetch full history first (`git fetch --unshallow`, or `fetch-depth: 0` in GitHub Actions). The result's `history` object reports `commits_scanned`, `shallow`, `warnings` and `history_only_findings`.
+
+### Pre-commit hook (staged changes)
+
+```bash
+ubel-secrets --install-hook            # install .git/hooks/pre-commit
+ubel-secrets --install-hook --force    # keep an existing hook and chain to it
+ubel-secrets --uninstall-hook          # remove it again
+ubel-secrets --staged                  # what the hook runs; also usable on its own
+```
+
+`--staged` scans what is in the **index** (staged vs `HEAD`), not the working tree: unstaged edits are ignored, and a secret you staged but then deleted from the file on disk is still caught. It works before the first commit (it diffs against the empty tree) and uses rename detection, so moving a file never re-flags secrets it already had. A staged `.env` is about to be committed, so `.env*` files are always scanned here. A clean staged scan prints nothing — it runs on every commit.
+
+The hook is a small POSIX `sh` script that runs `ubel-secrets --staged` and blocks the commit on a non-zero exit (`1` = findings, `2` = the scan itself failed).
+
+- **Idempotent** — re-installing replaces UBEL's own hook (recognised by a marker comment).
+- **Never clobbers someone else's hook.** Without `--force` it refuses. With `--force` the existing hook is moved to `pre-commit.local` and still runs after a clean secrets scan; `--uninstall-hook` moves it back. It refuses to remove a hook it did not install.
+- **Respects `core.hooksPath` and git worktrees** — the hooks directory comes from `git rev-parse --git-path hooks`.
+- **Shareable.** If the hooks directory lives outside the git dir (a committed `.githooks/`, husky-style), the script embeds no machine-specific paths and finds `ubel-secrets` on `PATH`, so every contributor needs it installed. Otherwise it embeds the absolute paths of the `node` binary and CLI script that installed it.
+- **Tool missing vs. tool failing.** If `ubel-secrets` cannot be found, the hook warns loudly that the staged changes were **not** scanned and lets the commit through; set `UBEL_HOOK_STRICT=1` to block instead. If the tool runs and fails, the commit is blocked — a broken scan must not look like a clean one.
+
+Skip once with `git commit --no-verify`. Hooks are client-side and local, so also run `ubel-secrets --history` in CI.
+
+See also the separate [dependency-scan pre-commit hook](#pre-commit-hook) (`ubel-<engine> install-hook`) — same chaining slot, so installing both requires `--force` on the second.
+
+### Baselining
+
+```bash
+ubel-secrets --write-baseline              # accept the current tree's findings
+ubel-secrets --history --write-baseline    # ...including history findings
+ubel-secrets --staged --write-baseline     # ...or the staged ones
+```
+
+Baselining adopts the scanner on an existing codebase: it appends `fingerprint:<hex>  # <rule> <path>:<line>` entries to `.ubelignore` (or the file given by `--ignore-file`) under a dated `# baseline` header, skipping fingerprints already present, so you are only told about *new* secrets afterwards. It prints how many findings it baselined and exits `0` — accepting the current state is a success. Review the diff before committing it, and rotate anything that was real.
+
+### `ubel-secrets` flag reference
+
+| Flag | Meaning |
+|---|---|
+| `[path]` | Directory to scan (default: the current directory) |
+| `--history` | Scan the working tree and git history |
+| `--rev=<range>` | With `--history`: revisions/ranges to walk (repeatable; default: all refs) |
+| `--since=<date>` | With `--history`: only commits after this date |
+| `--max-commits=<n>` | With `--history`: only the `n` most recent commits |
+| `--staged` | Scan only what is staged for commit (cannot be combined with `--history`) |
+| `--install-hook` / `--uninstall-hook` | Install / remove the pre-commit hook (cannot be combined with a scan option; mutually exclusive) |
+| `--force` | With `--install-hook`: move an existing foreign hook aside and chain to it |
+| `--write-baseline` | Append the current findings' fingerprints to `.ubelignore` instead of reporting them |
+| `--include-env` | Also scan `.env*` files in a working-tree scan |
+| `--include-dir=<name>` | Scan a directory that is skipped by default (repeatable) |
+| `--exclude-dir=<name>` | Skip a directory name wherever it appears (repeatable) |
+| `--unallow=<id>` | Switch off a builtin allow-rule, e.g. `tests`, `examples` (repeatable) |
+| `--ignore-file=<path>` | Use this ignore file instead of `<root>/.ubelignore` |
+| `--json` | Print the result object as JSON on stdout; progress output is silenced |
+
+The shared options (`--include-dir`, `--exclude-dir`, `--unallow`, `--ignore-file`, `--include-env`) are also honoured on their own — they select this scan path rather than being silently ignored by the full pipeline scan. Unknown flags and a second positional argument are errors. Exit codes: `0` clean (or baselined, hook installed/removed), `1` findings, `2` error.
+
+### Keeping UBEL's own files out of git and Docker
+
+UBEL writes `.ubel/` (reports, policy, extracted images, dependency scratch space) and, for suppressions, `.ubelignore` into your project. Before anything else runs, the entry point (`main.js`) makes sure `.gitignore` **and** `.dockerignore` in the working directory ignore both, creating either file if it does not exist. This is done by the entry point only — the secrets scanner, CLI, git and hook modules never edit those files.
+
+- **Idempotent.** An entry counts as covered if any equivalent pattern is present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
+- **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
+- **Opt-out respected.** A negation such as `!.ubelignore` means you want that entry tracked, so it is not re-added — this is how you commit a shared baseline while everything else stays ignored.
+- **Never fails a scan.** A read-only checkout or a permissions problem is swallowed (with `DEBUG` set, it is logged).
+- **Once per directory per process.** Changed files are announced with one `[ubel] Created|Updated …` line on stderr (CLI only; not with `--json`).
+- **Where it applies.** The working directory for every CLI engine except `ubel-apt`/`ubel-dnf`/`ubel-yum` (their reports and policy live under `~/.ubel`, not the project); for `ubel-docker`, the working directory, where its `.ubel/<uuid>` scratch space is created — never the extracted image rootfs. Programmatically, `projectRoot`, except for `docker` and the `container-image` and `developer_platform` (home directory) scopes. `ubel-secrets --staged` and `--uninstall-hook` skip it: they run inside `git commit`, where mutating the tree would be surprising (`--install-hook` already did it).
+- **Kill switch:** `UBEL_NO_IGNORE_FILES=1`.
+
+`ubel-secrets` runs its extra flags without ever reaching the main scan engine, so its `bin/secrets.js` wrapper calls the exported `ensureUbelIgnoreFilesForSecrets(argv)` from `main.js` before dispatching.
 
 ### Output
 
@@ -1075,6 +1283,8 @@ const report = await SCA_scan({
 They're accepted and simply ignored for every other `engine` value — no need to omit them conditionally.
 
 When called this way, the banner and interactive console output are suppressed. The return value is the same machine-readable report object written to disk.
+
+The pre-commit hook installer is not exposed programmatically; use the CLI (`ubel-<engine> install-hook` / `uninstall-hook`) if you need to wire it up.
 
 ---
 
@@ -1374,6 +1584,10 @@ RUN ubel-composer install
 RUN ubel-apt install curl
 ```
 
+### Pre-commit hook vs. CI
+
+The pre-commit hook (`ubel-<engine> install-hook`) is a client-side convenience — it's skippable with `git commit --no-verify` and doesn't exist on a fresh clone for a contributor who hasn't run `install-hook`. That's fine for a fast local gate, but treat it as a supplement, not a substitute, for a real CI scan: keep running `ubel-<engine> check` (or `health`) in the pipeline so nothing reaches a shared branch without a scan.
+
 ---
 
 ## Quick-start examples
@@ -1399,9 +1613,14 @@ ubel-npm health
 # Scan the installed project dependencies
 ubel-npm health
 
+# Install a pre-commit hook that runs a dependency scan on every commit
+# that stages a manifest/lockfile
+ubel-npm install-hook
+
 # Same workflows with pnpm and bun
 ubel-pnpm install react react-dom
 ubel-bun check
+ubel-pnpm install-hook
 
 # PHP: dry-run scan, then a scan-gated real install
 ubel-composer check monolog/monolog
@@ -1412,6 +1631,7 @@ ubel-composer install                     # no args → resolves from the existi
 ubel-pip check requests==2.31.0
 ubel-pip install requests==2.31.0
 ubel-pip install                          # no args → falls back to ./requirements.txt, then ./pyproject.toml
+ubel-pip install-hook                     # dependency-scan pre-commit hook
 
 # Same, driven by uv instead of pip — same fallback, same generated-file install
 ubel-uv check requests==2.31.0
