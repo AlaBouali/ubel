@@ -5,10 +5,10 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | apt | dnf | yum
+ *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | apt | dnf | yum
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
- *     apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
+ *     conda/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
  *
  *   Policy configuration modes:
  *     threshold <level>          — set severity_threshold (low|medium|high|critical|none)
@@ -68,11 +68,11 @@
  *     image to remove. Compressed tarballs (.tar.gz/.tgz) aren't supported
  *     — decompress first.
  *
- *   Pip/pipx/uv/apt/dnf/yum mode (each gets its own dedicated bin/*.js —
- *   ubel-pip, ubel-pipx, ubel-uv, ubel-apt, ubel-dnf, ubel-yum; no
+ *   Pip/pipx/uv/conda/apt/dnf/yum mode (each gets its own dedicated bin/*.js —
+ *   ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-apt, ubel-dnf, ubel-yum; no
  *   auto-detection between them, same one-binary-per-tool shape as
  *   npm/pnpm/bun):
- *     node src/main.js <pip|uv> <health|check|install|init|threshold|block-unknown> [packages...]
+ *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown> [packages...]
  *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown> <package>
  *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]
  *
@@ -106,6 +106,13 @@
  *     runRealInstall() path pip and uv use. No "uvx" equivalent is
  *     implemented — pipx always uses the pip-based isolation methods
  *     regardless of what else is installed.
+ *
+ *     conda (conda_runner.js) — `check`/`install` resolve with `conda create
+ *     --dry-run --json` against a scratch prefix that never exists, so `check`
+ *     creates nothing. A clean `install` then runs `conda create|install
+ *     --no-deps --file <exact-pinned specs>` into <projectRoot>/conda-env (never
+ *     `create` against an existing env). With no package args it falls back to
+ *     ./environment.yml / ./environment.yaml; `init` creates an empty env there.
  *
  *     apt/dnf/yum write reports/policy under $HOME (~/.ubel/local/...)
  *     rather than the project-relative default, so invoking them never
@@ -146,6 +153,7 @@
  *   pip    — yes  (`pip install --dry-run --report`; real install syncs requirements.txt/pyproject.toml after)
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
  *   pipx   — yes  (isolated per-tool venv via dryRunCli()/installCli(), not the shared project venv)
+ *   conda  — yes  (`conda create --dry-run --json` against a scratch prefix; exact-pinned `--no-deps` real install)
  *   apt/dnf/yum — yes (native OS package-manager dry-run; each engine bound to exactly one manager)
  */
 
@@ -155,6 +163,7 @@ import { UbelEngineInstance, PolicyViolationError } from "./engine.js";
 import { NodeManagerInstance }  from "./node_runner.js";
 import { PhpComposerScanner }   from "./php_runner.js";
 import { PypiManagerInstance }  from "./pypi_runner.js";
+import { CondaManagerInstance } from "./conda_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
@@ -185,7 +194,7 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun", "composer"]);
 // branch below (mirroring __main__.py's _run_mode), not through the
 // npm-family path, so they're intentionally NOT added to
 // CHECK_INSTALL_ENGINES above.
-const PYPI_ENGINES  = new Set(["pip", "pipx", "uv"]);
+const PYPI_ENGINES  = new Set(["pip", "pipx", "uv", "conda"]);
 // Each of ubel-apt/ubel-dnf/ubel-yum targets exactly one native package
 // manager — no auto-detection across the three, same as ubel-npm never
 // guesses whether you meant pnpm.
@@ -318,6 +327,13 @@ function applyPolicyOverrides(eng, overrides) {
  * apt/dnf/yum) is actually in play.
  */
 function resolveManager(engine) {
+  if (engine === "conda") {
+    // conda shares the "pypi" systemType bucket (engine.js's dry-run → scan →
+    // gated-install branch for the Python family) but is its own manager
+    // class — see conda_runner.js for why it isn't another PypiManagerInstance
+    // installer mode.
+    return { manager: new CondaManagerInstance(), systemType: "pypi" };
+  }
   if (PYPI_ENGINES.has(engine)) {
     // pipx has no "uvx" equivalent implemented here — its CLI-isolation
     // methods (dryRunCli/installCli) are pip-only regardless of engine, so
@@ -350,16 +366,16 @@ function resolveManager(engine) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
  * @param {boolean} [programmaticOptions.scan_os=false]
  * @param {boolean} [programmaticOptions.full_stack=false]
  * @param {boolean} [programmaticOptions.scan_node=true]
- * @param {string}  [programmaticOptions.venvDir]              engine:"pip"|"uv"|"pipx" only — overrides the default
- *   `<projectRoot>/venv` used for check/install dry-run and real install (engine.js's systemType==="pypi"
- *   branch). Also read by `init` mode for ANY of pip/pipx/uv/apt/dnf/yum (see the CLI usage note above) —
+ * @param {string}  [programmaticOptions.venvDir]              engine:"pip"|"uv"|"pipx"|"conda" only — overrides the default
+ *   `<projectRoot>/venv` (`<projectRoot>/conda-env` for conda) used for check/install dry-run and real install
+ *   (engine.js's systemType==="pypi" branch). Also read by `init` mode for ANY of pip/pipx/uv/apt/dnf/yum (see the CLI usage note above) —
  *   though only pip/uv/pipx's `init` actually provisions a Python venv there.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
@@ -541,7 +557,7 @@ async function main(programmaticOptions) {
   if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine)) {
     const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown"];
     const scanScope =
-      (engine === "pip" || engine === "uv") ? "repository" :
+      (engine === "pip" || engine === "uv" || engine === "conda") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
       "linux_machine"; // apt | dnf | yum
 
@@ -581,8 +597,10 @@ async function main(programmaticOptions) {
     //    uv gets its own project bootstrap (`uv init` + `uv venv`); every
     //    other pypi/linux-family engine still gets the stdlib venv. ──
     if (effectiveMode === "init") {
-      const venvDir = eng.venvDir || path.join(resolvedRoot, "venv");
-      if (engine === "uv") {
+      const venvDir = eng.venvDir || path.join(resolvedRoot, engine === "conda" ? "conda-env" : "venv");
+      if (engine === "conda") {
+        new CondaManagerInstance().initCondaEnv(venvDir);
+      } else if (engine === "uv") {
         new PypiManagerInstance("uv").initUvVenv(venvDir);
       } else {
         new PypiManagerInstance().initVenv(venvDir);
@@ -629,10 +647,12 @@ async function main(programmaticOptions) {
     // then ./pyproject.toml's [project] dependencies (manager owns both —
     // see resolveDefaultPackages() in pypi_runner.js; it's installer-
     // agnostic, so this works identically for pip and uv).
-    if (!pkgArgs.length && (engine === "pip" || engine === "uv") && (effectiveMode === "check" || effectiveMode === "install")) {
+    if (!pkgArgs.length && (engine === "pip" || engine === "uv" || engine === "conda") && (effectiveMode === "check" || effectiveMode === "install")) {
       const resolved = manager.resolveDefaultPackages(resolvedRoot);
       if (!resolved) {
-        console.error("[!] No package arguments, and no requirements.txt or pyproject.toml found.");
+        console.error(engine === "conda"
+          ? "[!] No package arguments, and no environment.yml or environment.yaml found."
+          : "[!] No package arguments, and no requirements.txt or pyproject.toml found.");
         process.exit(1);
       }
       pkgArgs = resolved;

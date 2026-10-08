@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, apt, dnf, yum'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, composer, apt, dnf, yum'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -50,6 +50,12 @@ runs:
     # `uv` needs BOTH a `python3`/`python` interpreter (same as above, to
     # create the venv) AND the `uv` binary itself on PATH — neither is
     # provisioned by `setup-node`; use `astral-sh/setup-uv` for the latter.
+    #
+    # `conda` needs the `conda` binary itself, which `setup-node` doesn't
+    # provision (and which isn't guaranteed to be on PATH on a runner image):
+    # add a preceding step such as `conda-incubator/setup-miniconda`, or make
+    # sure conda is on PATH / `CONDA_EXE` is exported. No separate Python
+    # interpreter is needed on the runner for this command.
     #
     # `apt`/`dnf`/`yum` are three separate commands, each bound to exactly
     # one native package manager — same one-binary-per-tool shape as
@@ -120,10 +126,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|composer|apt|dnf|yum)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|composer|apt|dnf|yum)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, composer, apt, dnf, yum"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, composer, apt, dnf, yum"
             exit 1
             ;;
         esac

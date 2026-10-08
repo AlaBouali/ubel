@@ -23,7 +23,10 @@ export class PythonVenvScanner {
     return (
       fs.existsSync(path.join(dir, "pyvenv.cfg")) ||
       fs.existsSync(path.join(dir, "bin", "activate")) ||
-      fs.existsSync(path.join(dir, "Scripts", "activate")) //||
+      fs.existsSync(path.join(dir, "Scripts", "activate")) ||
+      // conda prefix: no pyvenv.cfg and no bin/activate inside the env itself
+      // (activation lives in the base install), but conda-meta/ is always there.
+      fs.existsSync(path.join(dir, "conda-meta")) //||
       //fs.existsSync(path.join(dir, "Lib", "distutils")) ||
       //fs.existsSync(path.join(dir, "lib")) ||
       //fs.existsSync(path.join(dir, "Lib"))
@@ -407,6 +410,14 @@ export class PythonVenvScanner {
           if (!visited.has(key)) {
             visited.add(key);
             raw.push(...this._scanVenv(full));
+          }
+          // A conda base install keeps its named environments in <base>/envs/*,
+          // each its own prefix. Treating the base as a leaf (like a venv) would
+          // skip them, so descend into envs/ only — and nothing else — which
+          // also keeps the package cache (<base>/pkgs/*) out of the scan.
+          const envsDir = path.join(full, "envs");
+          if (fs.existsSync(path.join(full, "conda-meta")) && fs.existsSync(envsDir)) {
+            walk(envsDir);
           }
           continue;
         }

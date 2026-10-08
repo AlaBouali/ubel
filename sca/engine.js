@@ -2257,6 +2257,7 @@ export function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:cargo/"))        return "rust";
   if (purl.startsWith("pkg:composer/"))       return "php";
   if (purl.startsWith("pkg:pypi/"))         return "python";
+  if (purl.startsWith("pkg:conda/"))        return "conda";
   if (purl.startsWith("pkg:swift/"))        return "swift";
   if (purl.startsWith("pkg:pub/"))          return "dart";
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
@@ -2719,7 +2720,10 @@ export async function submitToNvd(inventory, opts = {}) {
 
 // ── OSV querying ──────────────────────────────────────────────────────────────
 export async function submitToOsv(purlsList) {
-  purlsList = purlsList.filter(p => p.startsWith("pkg:"));
+  // pkg:conda/ is excluded: OSV has no conda ecosystem, and a purl type it
+  // can't map risks failing the whole batch (any non-200 fails the scan).
+  // Python conda packages are emitted as pkg:pypi/ by conda_runner.js instead.
+  purlsList = purlsList.filter(p => p.startsWith("pkg:") && !p.startsWith("pkg:conda/"));
   if (!purlsList.length) return [];
 
   const PAGE = 800;
@@ -2927,6 +2931,9 @@ function matchDependenciesWithInventory(inventory) {
 
 function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   for (const item of inventory) {
+    // pkg:conda/ components are never matched against any database (see
+    // submitToOsv) — leave them "undetermined" instead of claiming "safe".
+    if (item.id.startsWith("pkg:conda/")) continue;
     if (item.version !== ""){
     if (infectedPurls.has(item.id))   item.state = "infected";
     else if (vulnerablePurls.has(item.id)) item.state = "vulnerable";
@@ -3541,9 +3548,21 @@ export class UbelEngineInstance {
       return /^[a-z0-9]+$/i.test(stripped);
     };
 
+    // conda match specs (`numpy`, `numpy=1.26`, `conda-forge::numpy>=1.26`).
+    // Stricter than the loose pip/apt validator on purpose: `:` is allowed
+    // here (channel::name), which would otherwise let a URL through, so
+    // option-shaped args, paths/URLs (no `/` or `\`), and bare package-file
+    // names (`x.conda`, `x.tar.bz2` — conda installs those straight from
+    // disk, bypassing the channel resolution this firewall scans) are all
+    // rejected up front.
+    const CONDA_SPEC_RE     = /^[A-Za-z0-9_][A-Za-z0-9_.*+!<>=,~:[\]-]*$/;
+    const CONDA_ARTIFACT_RE = /\.(conda|tar\.bz2)$/i;
+
     if (args.length) {
       const bad = this.engine === "composer"
         ? args.filter(a => !COMPOSER_PKG_ARG_RE.test(a))
+        : this.engine === "conda"
+          ? args.filter(a => !CONDA_SPEC_RE.test(a) || CONDA_ARTIFACT_RE.test(a))
         : this.systemType === "npm"
           ? args.filter(a => !PKG_ARG_RE.test(a))
           : args.filter(a => !validatePkgArgsLoose(a));
@@ -3551,6 +3570,8 @@ export class UbelEngineInstance {
         console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
         console.error(this.engine === "composer"
           ? "[!] Expected format: vendor/package or vendor/package:constraint"
+          : this.engine === "conda"
+            ? "[!] Expected format: a conda match spec such as numpy, numpy=1.26 or conda-forge::numpy>=1.26 (no options, paths or URLs)"
           : this.systemType === "npm"
             ? "[!] Expected format: name, name@version, or @scope/name@version"
             : "[!] Expected format: a package name, optionally with a version/extras specifier");
@@ -3618,6 +3639,10 @@ export class UbelEngineInstance {
           } else if (this.engine === "uv") {
             manager.initUvVenv(venvDir); // uv-native project + venv (`uv init` + `uv venv`), not a bare stdlib venv
             purls = manager.runDryRun(args, venvDir); // sets manager.engineVersion internally (uv --version)
+          } else if (this.engine === "conda") {
+            // No env pre-creation: the dry-run targets a scratch prefix that
+            // never exists, so `check` leaves nothing behind (see conda_runner.js).
+            purls = manager.runDryRun(args, this.venvDir || path.join(projectRoot, "conda-env")); // sets manager.engineVersion internally
           } else if (this.engine === "pipx") {
             purls = manager.dryRunCli(args[0]);
           }
@@ -4274,6 +4299,10 @@ export class UbelEngineInstance {
             const venvDir = this.venvDir || path.join(projectRoot, "venv");
             const reqFile = this._generateRequirementsFile(purls, projectRoot);
             manager.runRealInstall(reqFile, this.engine, venvDir);
+          } else if (this.engine === "conda") {
+            const envDir   = this.venvDir || path.join(projectRoot, "conda-env");
+            const specFile = manager.writeCondaSpecFile(purls, projectRoot);
+            manager.runRealInstall(specFile, "conda", envDir);
           } else if (this.engine === "pipx") {
             manager.installCli(args[0]);
           }
