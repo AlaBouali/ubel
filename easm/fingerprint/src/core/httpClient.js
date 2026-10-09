@@ -27,8 +27,16 @@ export function decompress(buf, encoding) {
 export class Headers {
   constructor(raw = {}) {
     this._map = new Map();
+    // Set-Cookie is the one header that must never be comma-joined: an Expires
+    // attribute ("Wed, 21 Oct 2026 ...") contains commas of its own, so a joined
+    // string cannot be split back reliably. Keep the original values separately.
+    this._setCookie = [];
     for (const [k, v] of Object.entries(raw || {})) {
-      this._map.set(String(k).toLowerCase(), Array.isArray(v) ? v.join(", ") : String(v ?? ""));
+      const key = String(k).toLowerCase();
+      this._map.set(key, Array.isArray(v) ? v.join(", ") : String(v ?? ""));
+      if (key === "set-cookie") {
+        this._setCookie = (Array.isArray(v) ? v : [v]).filter((x) => x != null && x !== "").map(String);
+      }
     }
   }
   get(name, fallback = "") {
@@ -37,6 +45,10 @@ export class Headers {
   }
   has(name) {
     return this._map.has(String(name).toLowerCase());
+  }
+  /** Every Set-Cookie header value, one entry per cookie, exactly as received (never comma-joined). */
+  getSetCookie() {
+    return [...this._setCookie];
   }
   /** Plain object form, e.g. for passing into Backend_Fingerprinter.analyze() */
   toObject() {
