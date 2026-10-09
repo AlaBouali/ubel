@@ -583,12 +583,15 @@ instead; see **Email Security** below.
   credential pattern, `high` otherwise.
 - `exposed-git-directory` — a publicly readable `.git/HEAD` (validated as an
   actual ref or commit hash, not just a 200 response), with a best-effort
-  remote URL read from `.git/config` when available. Always `critical` — the
+  remote URL read from `.git/config` when available (any credentials embedded
+  in that URL are redacted before they reach the report). Always `critical` — the
   entire repository history, including deleted branches, is typically
   reconstructable from this alone.
 - `exposed-phpinfo` — `phpinfo()` output reachable at `/info.php` or
-  `/phpinfo.php`, disclosing the PHP version, loaded extensions, and
-  absolute server paths. `high`.
+  `/phpinfo.php` (recognised by `phpinfo()` or by "PHP Version" together with
+  a marker only real phpinfo output has, so an ordinary page that mentions a
+  PHP version isn't flagged), disclosing the PHP version, loaded extensions,
+  and absolute server paths. `high`.
 
 **WordPress** — only run on hosts the fingerprinter's own component
 inventory already flagged as WordPress (`wp_kind` set on a detected
@@ -619,7 +622,9 @@ third-party TLS library.
 - `tls-hostname-mismatch` — the certificate doesn't cover the hostname it's
   served on. `high`.
 - `tls-weak-protocol-negotiated` — SSLv3/TLS 1.0 negotiated by default
-  (`high`), or TLS 1.1 (`medium`).
+  (`high`), or TLS 1.1 (`medium`). Also reported when the host *only* speaks
+  TLS 1.0/1.1, so the default TLS 1.2+ handshake fails (rather than
+  `tls-broken`).
 - `tls-weak-cipher` — a legacy cipher (RC4, DES/3DES, export-grade,
   anonymous/NULL) negotiated by default. `medium`.
 - `tls-legacy-protocol-supported` — the server still *accepts* an explicit
@@ -637,7 +642,8 @@ ignore it over plain HTTP) or HTTP otherwise.
 - `missing-hsts` — no `Strict-Transport-Security` header on an HTTPS
   response, leaving an SSL-stripping window on the first request of every
   new session. `medium`.
-- `hsts-disabled` — HSTS present but `max-age=0`, which actively tells
+- `hsts-disabled` — HSTS present but `max-age=0` (a quoted value such as
+  `max-age="31536000"` is read correctly), which actively tells
   browsers to discard any previously stored HSTS policy. `medium`.
 - `hsts-short-max-age` — HSTS present with `max-age` below the ~6-month
   (15768000s) floor commonly recommended (and required for preload-list
@@ -735,10 +741,12 @@ bare IP address rather than a domain name. Implemented in
 - `email-spf-multiple-records` — more than one `v=spf1` record published;
   RFC 7208 requires exactly one, and a receiver that finds more than one is
   required to treat SPF as a permanent error (i.e. ignore it). `medium`.
-- `email-spf-permissive-all` — the SPF record ends in `+all`, explicitly
-  authorizing *any* server on the internet to send mail as this domain and
-  pass SPF. `high`.
-- `email-dmarc-missing` — no TXT record at `_dmarc.<host>`. Without DMARC,
+- `email-spf-permissive-all` — the SPF record ends in `+all` (or a bare
+  `all`, which defaults to `+`), explicitly authorizing *any* server on the
+  internet to send mail as this domain and pass SPF. `high`.
+- `email-dmarc-missing` — no TXT record at `_dmarc.<host>` *or at any parent
+  domain* (a subdomain inherits its organizational domain's DMARC record, and
+  its `sp=` policy when present). Without DMARC,
   nothing tells receivers what to do with mail that fails SPF/DKIM, and the
   domain gets no aggregate-report visibility into who's sending as it.
   `high`.

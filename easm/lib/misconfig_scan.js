@@ -271,7 +271,7 @@ async function checkGitExposure(origin, asset, baseline, timeout, findings, erro
   if (res.status_code !== 200 || isSoft404(res, baseline)) return;
 
   const body = res.text.trim();
-  const looksLikeGitHead = /^ref:\s*refs\/[\w./-]+$/.test(body) || /^[0-9a-f]{40}$/i.test(body);
+  const looksLikeGitHead = /^ref:\s*refs\/\S+$/.test(body) || /^[0-9a-f]{40}$/i.test(body);
   if (!looksLikeGitHead) return;
 
   // Best-effort enrichment only — the finding already stands on HEAD alone.
@@ -280,7 +280,9 @@ async function checkGitExposure(origin, asset, baseline, timeout, findings, erro
     const cfgRes = await httpClient.get(origin + "/.git/config", { timeout, maxRedirects: 0 });
     if (cfgRes.status_code === 200 && /\[core\]/.test(cfgRes.text)) {
       const m = cfgRes.text.match(/\[remote\s+"[^"]+"\][^[]*?url\s*=\s*(\S+)/i);
-      if (m) remote = m[1];
+      // A remote URL can embed credentials (https://user:token@host/...) —
+      // never copy those into a report that gets stored and shared.
+      if (m) remote = m[1].replace(/\/\/[^/@\s]+@/, "//***@");
     }
   } catch {
     /* best-effort only */
@@ -382,7 +384,12 @@ async function checkInfoPhp(origin, asset, baseline, timeout, findings, errors) 
 
     const body = res.text;
     if (body.length > MAX_CHECK_BODY_BYTES) continue;
-    if (!/phpinfo\(\)/i.test(body) && !/PHP Version/i.test(body)) continue;
+    // "PHP Version" alone appears on ordinary pages (blog posts, catch-all
+    // error pages); require it alongside markers only real phpinfo() output has.
+    const looksLikePhpinfo =
+      /phpinfo\(\)/i.test(body) ||
+      (/PHP Version/i.test(body) && /Loaded Configuration File|Configure Command|Zend Engine|PHP Credits|Server API/i.test(body));
+    if (!looksLikePhpinfo) continue;
 
     const versionMatch = body.match(/PHP Version\s*(?:<\/td>\s*<td[^>]*>)?\s*([\d.]+)/i);
 
@@ -489,7 +496,7 @@ function joinTxtRecords(records) {
   return (records || []).map((chunks) => chunks.join(""));
 }
 
-const IP_ADDRESS_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+:[0-9a-f:]+$/i;
+const IP_ADDRESS_RE = /^(\d{1,3}\.){3}\d{1,3}$|^\[?[0-9a-f:]+:[0-9a-f:]+\]?$/i;
 
 async function checkSpf(hostname, target, timeout, findings, errors) {
   let records;
@@ -539,8 +546,12 @@ async function checkSpf(hostname, target, timeout, findings, errors) {
     });
   }
 
-  const allMatch = spfRecords[0].match(/([+?~-]?)all\b/i);
-  if (allMatch && allMatch[1] === "+") {
+  // Find the real "all" mechanism by token, not by regex-searching the whole
+  // string (which also matches inside e.g. "include:_spf.mall.example.com").
+  // A bare "all" has the implicit "+" qualifier, so it is just as permissive
+  // as an explicit "+all".
+  const allToken = spfRecords[0].trim().split(/\s+/).map((t) => t.match(/^([+?~-]?)all$/i)).find(Boolean);
+  if (allToken && (allToken[1] === "+" || allToken[1] === "")) {
     findings.push({
       id: "email-spf-permissive-all",
       title: "SPF record ends in +all (authorizes any server to send mail)",
@@ -549,7 +560,7 @@ async function checkSpf(hostname, target, timeout, findings, errors) {
       url: hostname,
       target,
       description:
-        `${hostname}'s SPF record uses "+all", which explicitly authorizes every server on the internet to send mail as this domain and passes SPF for all of it. This looks stricter than having no SPF record only on the surface — in practice it defeats the check entirely and hands forged mail a passing SPF result.`,
+        `${hostname}'s SPF record uses "${allToken[1] ? "+all" : "all"}" (a bare "all" means "+all"), which explicitly authorizes every server on the internet to send mail as this domain and passes SPF for all of it. This looks stricter than having no SPF record only on the surface — in practice it defeats the check entirely and hands forged mail a passing SPF result.`,
       evidence: [spfRecords[0]],
       remediation:
         "Replace \"+all\" with \"-all\" (or \"~all\" while still validating the authorized-sender list is complete) so only the explicitly listed servers pass.",
@@ -558,7 +569,7 @@ async function checkSpf(hostname, target, timeout, findings, errors) {
 }
 
 async function checkDmarc(hostname, target, timeout, findings, errors) {
-  const dmarcName = `_dmarc.${hostname}`;
+  let dmarcName = `_dmarc.${hostname}`;
   let records;
   try {
     records = await resolveTxt(dmarcName, Math.max(1, timeout) * 1000);
@@ -571,7 +582,37 @@ async function checkDmarc(hostname, target, timeout, findings, errors) {
     }
   }
 
-  const dmarcRecords = joinTxtRecords(records).filter((r) => /^v=DMARC1\b/i.test(r));
+  let dmarcRecords = joinTxtRecords(records).filter((r) => /^v=DMARC1\b/i.test(r));
+
+  // DMARC is inherited: a subdomain with no _dmarc record of its own is
+  // covered by its organizational domain's record (RFC 7489 §6.6.3), and for
+  // those hosts the effective policy is the parent's sp= tag if present, else
+  // its p=. Without this, every subdomain of a domain that already enforces
+  // DMARC would be reported as having none. No public-suffix list is bundled,
+  // so each ancestor with at least two labels is tried, nearest first — a
+  // lookup under a bare public suffix (e.g. _dmarc.co.uk) simply finds nothing.
+  let inheritedFrom = null;
+  if (!dmarcRecords.length) {
+    const labels = hostname.split(".");
+    for (let i = 1; i < labels.length - 1; i++) {
+      const parent = labels.slice(i).join(".");
+      const parentName = `_dmarc.${parent}`;
+      let parentRecords;
+      try {
+        parentRecords = await resolveTxt(parentName, Math.max(1, timeout) * 1000);
+      } catch (e) {
+        if (!isNoRecordDnsError(e)) errors.push({ target, check: "email-dmarc", url: parentName, error: e.message });
+        continue;
+      }
+      const found = joinTxtRecords(parentRecords).filter((r) => /^v=DMARC1\b/i.test(r));
+      if (found.length) {
+        dmarcRecords = found;
+        dmarcName = parentName;
+        inheritedFrom = parent;
+        break;
+      }
+    }
+  }
 
   if (!dmarcRecords.length) {
     findings.push({
@@ -607,7 +648,11 @@ async function checkDmarc(hostname, target, timeout, findings, errors) {
   }
 
   const policyMatch = record.match(/(?:^|;)\s*p=(\w+)/i);
-  const policy = policyMatch ? policyMatch[1].toLowerCase() : null;
+  let policy = policyMatch ? policyMatch[1].toLowerCase() : null;
+  if (inheritedFrom) {
+    const spMatch = record.match(/(?:^|;)\s*sp=(\w+)/i);
+    if (spMatch) policy = spMatch[1].toLowerCase();
+  }
   if (!policy || policy === "none") {
     findings.push({
       id: "email-dmarc-policy-none",
@@ -699,7 +744,7 @@ async function checkDkim(hostname, target, timeout, findings, errors) {
   }
 }
 
-async function checkEmailAuth(hostname, target, timeout, findings, errors) {
+export async function checkEmailAuth(hostname, target, timeout, findings, errors) {
   if (IP_ADDRESS_RE.test(hostname)) return; // SPF/DMARC/DKIM apply to domain names, not bare IPs
   await checkSpf(hostname, target, timeout, findings, errors);
   await checkDmarc(hostname, target, timeout, findings, errors);
@@ -713,6 +758,11 @@ async function checkEmailAuth(hostname, target, timeout, findings, errors) {
 // to complete at all with verification on, which would hide exactly the
 // cert problems this is trying to find. socket.authorized/
 // authorizationError carries the real verification result regardless.
+
+// OpenSSL 3 (bundled with Node) refuses TLS 1.0/1.1 at its default security
+// level, so a probe that asks for them must also lower *this client's* local
+// level or it can never succeed — even against a server that accepts them.
+const LEGACY_TLS_CIPHERS = "DEFAULT:@SECLEVEL=0";
 
 const WEAK_CIPHER_PATTERNS = [/\bRC4\b/i, /\bDES\b/i, /\b3DES\b/i, /\bMD5\b/i, /\bNULL\b/i, /EXPORT/i, /aNULL/i, /eNULL/i, /\banon\b/i];
 
@@ -868,6 +918,26 @@ async function checkTls(asset, timeout) {
   try {
     primary = await tlsConnectOnce(hostname, ip, port, {}, timeoutMs);
   } catch (e) {
+    // A server that only speaks TLS 1.0/1.1 is unreachable for this runtime's
+    // default client (minimum TLS 1.2), so the handshake above fails — which is
+    // a weak-protocol finding, not "TLS is broken". Retry once with the legacy
+    // versions and a permissive local security level before concluding that.
+    let legacy = null;
+    try {
+      legacy = await tlsConnectOnce(hostname, ip, port, { minVersion: "TLSv1", maxVersion: "TLSv1.1", ciphers: LEGACY_TLS_CIPHERS }, timeoutMs);
+    } catch { /* really not a TLS listener (or not a legacy one) */ }
+    if (legacy) {
+      findings.push(
+        mkTlsFinding(
+          "tls-weak-protocol-negotiated", legacy.protocol === "TLSv1" ? "high" : "medium", target, hostname, port,
+          `The server only accepts ${legacy.protocol} (the handshake failed with a modern minimum of TLS 1.2: ${e.message}). ${legacy.protocol} is deprecated and rejected by current browsers and API clients, so users on up-to-date software cannot connect over HTTPS at all.`,
+          "Enable TLS 1.2 and TLS 1.3 on the server/load balancer and disable TLS 1.0/1.1."
+        )
+      );
+      // The shared HTTP client can't speak this protocol version, so the
+      // HTTPS-only header/HSTS checks aren't meaningful for this host.
+      return { findings, httpsAvailable: false };
+    }
     if (isHttps) {
       // The URL the fingerprinter recorded is HTTPS, so this host is
       // *supposed* to be serving TLS here. A failed handshake means the
@@ -1029,7 +1099,7 @@ async function checkTls(asset, timeout) {
   // there's nothing conclusive to report from that specific outcome.
   for (const legacy of ["TLSv1", "TLSv1.1"]) {
     try {
-      await tlsConnectOnce(hostname, ip, port, { minVersion: legacy, maxVersion: legacy }, timeoutMs);
+      await tlsConnectOnce(hostname, ip, port, { minVersion: legacy, maxVersion: legacy, ciphers: LEGACY_TLS_CIPHERS }, timeoutMs);
       findings.push(
         mkTlsFinding(
           "tls-legacy-protocol-supported", legacy === "TLSv1" ? "high" : "medium", target, hostname, port,
@@ -1081,18 +1151,30 @@ async function checkTls(asset, timeout) {
   // `primary` above already proved this exact host:port answers TLS.
   try {
     await tlsConnectOnce(hostname, ip, port, { minVersion: "TLSv1.3", maxVersion: "TLSv1.3" }, timeoutMs);
-  } catch {
-    findings.push(
-      mkTlsFinding(
-        "tls-1.3-not-supported", "low", target, hostname, port,
-        "The server does not appear to support TLS 1.3. Every TLS 1.3 cipher suite provides forward secrecy, and its handshake completes in one fewer round trip than TLS 1.2.",
-        "Enable TLS 1.3 in the server/load balancer TLS configuration alongside TLS 1.2 — current web server and load balancer software supports it as a configuration flag with no certificate or application changes required."
-      )
-    );
+  } catch (e) {
+    // Only a protocol-level refusal means "no TLS 1.3". A timeout or a
+    // refused/unreachable connection says nothing about TLS 1.3 support
+    // (rate limiting, a flaky host), so don't report on those.
+    const inconclusive = /timed out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN/i.test(`${e && e.code} ${e && e.message}`);
+    if (!inconclusive) {
+      findings.push(
+        mkTlsFinding(
+          "tls-1.3-not-supported", "low", target, hostname, port,
+          "The server does not appear to support TLS 1.3. Every TLS 1.3 cipher suite provides forward secrecy, and its handshake completes in one fewer round trip than TLS 1.2.",
+          "Enable TLS 1.3 in the server/load balancer TLS configuration alongside TLS 1.2 — current web server and load balancer software supports it as a configuration flag with no certificate or application changes required."
+        )
+      );
+    }
   }
 
   // ── OCSP stapling ────────────────────────────────────────────────────────
-  const stapled = await checkOcspStapling(hostname, ip, port, timeoutMs).catch(() => null);
+  // Only meaningful if the certificate names an OCSP responder at all. Many
+  // CAs have dropped OCSP (Let's Encrypt retired its responders in 2025), and a
+  // cert with no OCSP URL can't have a response stapled — flagging that would
+  // tell the operator to fix something that is impossible to fix.
+  const ocspUris = cert && cert.infoAccess && cert.infoAccess["OCSP - URI"];
+  const certHasOcsp = Array.isArray(ocspUris) ? ocspUris.length > 0 : !!ocspUris;
+  const stapled = certHasOcsp ? await checkOcspStapling(hostname, ip, port, timeoutMs).catch(() => null) : null;
   if (stapled === false) {
     findings.push(
       mkTlsFinding(
@@ -1185,7 +1267,7 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
           "Send `Strict-Transport-Security: max-age=31536000; includeSubDomains` on every HTTPS response. Test with a short max-age (e.g. 300) first so you can back out quickly, then raise it. Add `preload` only once you're certain every subdomain is HTTPS-ready, since preload submissions are slow to reverse.",
       });
     } else {
-      const m = hsts.match(/max-age\s*=\s*(\d+)/i);
+      const m = hsts.match(/max-age\s*=\s*"?(\d+)/i);
       const maxAge = m ? parseInt(m[1], 10) : 0;
       if (maxAge === 0) {
         findings.push({
@@ -1224,9 +1306,13 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
   const hasFrameAncestors = !!(csp && /frame-ancestors\s+/i.test(csp));
   const xfoValid = !!(xfo && /^\s*(DENY|SAMEORIGIN)\s*$/i.test(xfo));
 
-  if (xfoValid || hasFrameAncestors) return; // protection present
+  // NB: must not `return` when protection is present — the CSP / nosniff /
+  // Referrer-Policy / Permissions-Policy / cookie checks below still apply.
+  const clickjackingProtected = xfoValid || hasFrameAncestors;
 
-  if (xfo) {
+  if (clickjackingProtected) {
+    // protection present — nothing to report for this check
+  } else if (xfo) {
     // Header present but with a value modern browsers ignore.
     findings.push({
       id: "weak-clickjacking-protection",
