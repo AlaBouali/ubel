@@ -665,16 +665,26 @@ ignore it over plain HTTP) or HTTP otherwise.
   `Feature-Policy`) header restricting powerful browser features (camera,
   microphone, geolocation, USB, payment, …). `low`.
 
-**Cookies** — `Set-Cookie` attributes on the same root-page response the
-header checks already fetched (no extra request), aggregated per host: a
-site with ten cookies missing `HttpOnly` gets one finding naming all ten,
-not ten.
+**Cookies** — `Set-Cookie` attributes on the site-root response the header
+checks already fetched, plus any same-host redirect hops after it (up to 5,
+so a session cookie set on `/` → `/login` is still seen; the cookie check
+also runs when the root is a redirect or non-2xx). Later `Set-Cookie`s for
+the same name/domain/path replace earlier ones, and cleared cookies
+(`Max-Age<=0` / past `Expires`) are ignored. Aggregated per host: a site
+with ten cookies missing `HttpOnly` gets one finding naming all ten, not
+ten.
 - `cookie-missing-secure` — a cookie set on an HTTPS response lacks
   `Secure`, so it could still be sent over a plaintext downgrade. `medium`.
 - `cookie-missing-httponly` — a cookie lacks `HttpOnly`, so client-side
   JavaScript (including an XSS payload) can read it. `medium` if the
-  cookie's name looks session/auth-related (matches
-  `/session|token|auth|jwt|\bsid\b|csrf/i`), `low` otherwise.
+  cookie's name looks session/auth-related (substring match on `sess`,
+  `sid`, `auth`, `jwt`, `token`, `login`, `logged_in` — so `PHPSESSID`,
+  `connect_sid`, `wordpress_logged_in_*` count; names containing `csrf` /
+  `xsrf` are excluded because those are commonly meant to be
+  script-readable), `low` otherwise.
+- `cookie-prefix-violation` — a `__Secure-` cookie without `Secure`, or a
+  `__Host-` cookie without `Secure`, with a `Domain`, or without `Path=/`.
+  Browsers reject these outright. `low`.
 - `cookie-samesite-none-insecure` — `SameSite=None` set without `Secure`,
   which browsers reject outright but which signals the same
   not-really-configured cookie policy either way. `medium`.

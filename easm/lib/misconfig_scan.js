@@ -20,8 +20,10 @@
 //       * X-Content-Type-Options: nosniff
 //       * Referrer-Policy — presence, and the unsafe-url special case
 //       * Permissions-Policy — presence
-//   - Set-Cookie attributes on the site root response: Secure, HttpOnly,
-//     and SameSite (including the SameSite=None-without-Secure case)
+//   - Set-Cookie attributes on the site root (following same-host redirects,
+//     since session cookies are often set on "/" → "/login"): Secure,
+//     HttpOnly, and SameSite (including the SameSite=None-without-Secure
+//     case), plus __Secure-/__Host- prefix violations
 //   - risky HTTP methods: the OPTIONS Allow header advertising
 //     PUT/DELETE/TRACE/CONNECT, plus an actual (non-destructive) TRACE
 //     request to detect Cross-Site Tracing (XST) — see the note above
@@ -1148,9 +1150,19 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
     errors.push({ target: asset.target, check: "security-headers", url, error: e.message });
     return;
   }
+  // Cookies are collected independently of the header checks: apps very
+  // often set their session cookie on the redirect from "/" (e.g. "/" →
+  // "/login") rather than on a 200, so the cookie check follows same-host
+  // redirects and runs even when the root itself isn't a 2xx.
+  const cookies = await collectRootCookies(url, res, timeout);
+
   // A redirect or 4xx/5xx at the origin root means there's no meaningful
-  // page here to evaluate — treat as "nothing to check", not a finding.
-  if (res.status_code < 200 || res.status_code >= 300) return;
+  // page here to evaluate for the header checks — treat as "nothing to
+  // check", not a finding.
+  if (res.status_code < 200 || res.status_code >= 300) {
+    checkCookieFlags(cookies, url, asset, findings);
+    return;
+  }
 
   const isHttps = url.startsWith("https://");
   const h = res.headers;
@@ -1342,10 +1354,22 @@ async function checkSecurityHeaders(asset, httpsAvailable, timeout, findings, er
     });
   }
 
-  checkCookieFlags(h, url, asset, isHttps, findings);
+  checkCookieFlags(cookies, url, asset, findings);
 }
 
-const SESSION_COOKIE_NAME_RE = /session|token|auth|jwt|\bsid\b|csrf/i;
+// Names that look like they carry a session / login / bearer credential.
+// Matched on substrings rather than \b boundaries because "_" is a word
+// character, so \bsid\b misses connect_sid and /session/ alone misses
+// PHPSESSID / SESSID / wordpress_logged_in_*.
+const SESSION_COOKIE_NAME_RE = /sess|(?:^|[^a-z])sid(?:$|[^a-z])|auth(?!or)|jwt|token|login|logged_in/i;
+// CSRF/XSRF cookies are very often *meant* to be script-readable
+// (double-submit pattern), so they are not escalated as session cookies.
+const CSRF_COOKIE_NAME_RE = /csrf|xsrf/i;
+
+export function isSessionCookieName(name) {
+  const n = String(name || "");
+  return !CSRF_COOKIE_NAME_RE.test(n) && SESSION_COOKIE_NAME_RE.test(n);
+}
 
 /**
  * Case-/shape-tolerant extraction of every Set-Cookie value on a response.
@@ -1368,35 +1392,123 @@ function getSetCookieList(headers) {
   return [];
 }
 
-function parseSetCookie(cookieStr) {
+export function parseSetCookie(cookieStr) {
   const parts = String(cookieStr).split(";").map((p) => p.trim());
-  const name = (parts[0].split("=")[0] || "").trim();
-  const attrs = parts.slice(1);
-  const lowerAttrs = attrs.map((a) => a.toLowerCase());
-  const sameSiteAttr = attrs.find((a) => a.toLowerCase().startsWith("samesite"));
-  const sameSite = sameSiteAttr ? (sameSiteAttr.split("=")[1] || "").trim() : null;
+  const first = parts[0] || "";
+  const eq = first.indexOf("=");
+  const name = (eq === -1 ? first : first.slice(0, eq)).trim();
+  const value = eq === -1 ? "" : first.slice(eq + 1).trim();
+  // Attribute names are case-insensitive; a value (if any) follows the first "=".
+  const attrs = new Map();
+  for (const a of parts.slice(1)) {
+    if (!a) continue;
+    const i = a.indexOf("=");
+    const k = (i === -1 ? a : a.slice(0, i)).trim().toLowerCase();
+    const v = i === -1 ? "" : a.slice(i + 1).trim();
+    if (!attrs.has(k)) attrs.set(k, v);
+  }
   return {
     name: name || "(unnamed)",
-    secure: lowerAttrs.includes("secure"),
-    httpOnly: lowerAttrs.includes("httponly"),
-    sameSite, // null | "Strict" | "Lax" | "None" | ""
+    value,
+    secure: attrs.has("secure"),
+    httpOnly: attrs.has("httponly"),
+    sameSite: attrs.has("samesite") ? attrs.get("samesite") : null, // null | "Strict" | "Lax" | "None" | ""
+    domain: attrs.has("domain") ? attrs.get("domain") : null,
+    path: attrs.has("path") ? attrs.get("path") : null,
+    maxAge: attrs.has("max-age") && /^-?\d+$/.test(attrs.get("max-age")) ? parseInt(attrs.get("max-age"), 10) : null,
+    expires: attrs.has("expires") ? attrs.get("expires") : null,
   };
 }
 
-/**
- * Set-Cookie attribute checks on the same site-root response the other
- * header checks already fetched — no extra request. Aggregated per host
- * rather than per cookie: a site with ten cookies missing HttpOnly gets
- * one finding naming all ten, not ten findings.
- */
-function checkCookieFlags(headers, url, asset, isHttps, findings) {
-  const cookies = getSetCookieList(headers).map(parseSetCookie);
-  if (!cookies.length) return;
+/** A Set-Cookie that clears an existing cookie (Max-Age<=0 or Expires in the past) isn't a live cookie. */
+function isCookieDeletion(c, now = Date.now()) {
+  if (c.maxAge !== null) return c.maxAge <= 0;
+  if (c.expires) {
+    const t = Date.parse(c.expires);
+    if (!Number.isNaN(t)) return t <= now;
+  }
+  return false;
+}
 
-  const missingSecure = isHttps ? cookies.filter((c) => !c.secure) : [];
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
+const MAX_COOKIE_REDIRECT_HOPS = 5;
+
+/**
+ * Gathers the cookies the site root hands out, following same-host
+ * redirects (up to MAX_COOKIE_REDIRECT_HOPS) so a session cookie set on
+ * "/" → "/login" is still seen. The first response is passed in (already
+ * fetched by checkSecurityHeaders); only the redirect hops cost a request.
+ * A later Set-Cookie for the same name/domain/path replaces an earlier one,
+ * and cookies that are cleared (Max-Age<=0 / past Expires) are dropped.
+ * Each cookie records whether it was set over HTTPS, since the Secure
+ * attribute only matters for cookies set on an HTTPS response.
+ *
+ * @returns {Promise<object[]>} parsed cookies, each with `.https` and `.url`
+ */
+export async function collectRootCookies(startUrl, firstRes, timeout) {
+  const jar = new Map();
+  let startHost;
+  try { startHost = new URL(startUrl).hostname; } catch { return []; }
+
+  let cur = startUrl;
+  let res = firstRes;
+  for (let hop = 0; ; hop++) {
+    const https = cur.startsWith("https:");
+    for (const raw of getSetCookieList(res.headers)) {
+      const c = parseSetCookie(raw);
+      c.https = https;
+      c.url = cur;
+      const key = `${c.name}|${(c.domain || "").toLowerCase()}|${c.path || ""}`;
+      if (isCookieDeletion(c)) jar.delete(key);
+      else jar.set(key, c);
+    }
+
+    if (hop >= MAX_COOKIE_REDIRECT_HOPS) break;
+    if (!REDIRECT_STATUSES.includes(res.status_code)) break;
+    const loc = pickHeader(res.headers, "location");
+    if (!loc) break;
+    let next;
+    try { next = new URL(loc, cur); } catch { break; }
+    if (!/^https?:$/.test(next.protocol) || next.hostname !== startHost) break;
+    try {
+      res = await httpClient.get(next.toString(), { timeout, maxRedirects: 0 });
+    } catch {
+      break;
+    }
+    cur = next.toString();
+  }
+  return [...jar.values()];
+}
+
+/**
+ * Set-Cookie attribute checks on the cookies collected from the site root
+ * (including same-host redirect hops) — no requests of its own. Aggregated
+ * per host rather than per cookie: a site with ten cookies missing HttpOnly
+ * gets one finding naming all ten, not ten findings.
+ *
+ * @param {object[]} cookies  from collectRootCookies() (parsed, with .https)
+ */
+export function checkCookieFlags(cookies, url, asset, findings) {
+  if (!cookies || !cookies.length) return;
+
+  // Secure only matters for cookies delivered over HTTPS.
+  const missingSecure = cookies.filter((c) => c.https && !c.secure);
   const missingHttpOnly = cookies.filter((c) => !c.httpOnly);
   const missingSameSite = cookies.filter((c) => !c.sameSite);
   const noneWithoutSecure = cookies.filter((c) => c.sameSite && /^none$/i.test(c.sameSite) && !c.secure);
+
+  // __Secure- / __Host- prefixed cookies promise attributes the browser then
+  // enforces; violating them gets the cookie silently dropped.
+  const prefixViolations = [];
+  for (const c of cookies) {
+    if (/^__secure-/i.test(c.name) && !c.secure) {
+      prefixViolations.push({ name: c.name, why: "__Secure- prefix requires Secure" });
+    } else if (/^__host-/i.test(c.name)) {
+      if (!c.secure) prefixViolations.push({ name: c.name, why: "__Host- prefix requires Secure" });
+      else if (c.domain) prefixViolations.push({ name: c.name, why: "__Host- prefix forbids a Domain attribute" });
+      else if (c.path !== "/") prefixViolations.push({ name: c.name, why: "__Host- prefix requires Path=/" });
+    }
+  }
 
   if (missingSecure.length) {
     findings.push({
@@ -1406,14 +1518,14 @@ function checkCookieFlags(headers, url, asset, isHttps, findings) {
       severity: "medium",
       url,
       target: asset.target,
-      description: `${missingSecure.length} cookie(s) set on this HTTPS response lack the Secure attribute (${missingSecure.map((c) => c.name).join(", ")}), so they could still be sent over a plain HTTP request — a downgrade, a misconfigured link, or a network attacker forcing plaintext — exposing the cookie's value in transit.`,
+      description: `${missingSecure.length} cookie(s) set on an HTTPS response lack the Secure attribute (${missingSecure.map((c) => c.name).join(", ")}), so they could still be sent over a plain HTTP request — a downgrade, a misconfigured link, or a network attacker forcing plaintext — exposing the cookie's value in transit.`,
       evidence: missingSecure.map((c) => c.name),
       remediation: "Add the Secure attribute to every cookie set on an HTTPS response.",
     });
   }
 
   if (missingHttpOnly.length) {
-    const sensitive = missingHttpOnly.filter((c) => SESSION_COOKIE_NAME_RE.test(c.name));
+    const sensitive = missingHttpOnly.filter((c) => isSessionCookieName(c.name));
     findings.push({
       id: "cookie-missing-httponly",
       title: "Cookie set without the HttpOnly attribute",
@@ -1453,6 +1565,20 @@ function checkCookieFlags(headers, url, asset, isHttps, findings) {
       description: `${missingSameSite.length} cookie(s) don't set SameSite explicitly (${missingSameSite.map((c) => c.name).join(", ")}). Chromium-based browsers default an unset cookie to Lax, but that default isn't universal across every browser/version still in use, and an explicit value is what actually documents the intended behavior.`,
       evidence: missingSameSite.map((c) => c.name),
       remediation: "Set SameSite explicitly on every cookie — Lax is a reasonable default; Strict for cookies that never need to be sent on cross-site navigation.",
+    });
+  }
+
+  if (prefixViolations.length) {
+    findings.push({
+      id: "cookie-prefix-violation",
+      title: "Cookie violates its __Secure-/__Host- prefix rules",
+      category: "Cookies",
+      severity: "low",
+      url,
+      target: asset.target,
+      description: `${prefixViolations.length} cookie(s) use a __Secure-/__Host- name prefix without meeting its requirements (${prefixViolations.map((v) => `${v.name}: ${v.why}`).join("; ")}). Browsers reject such cookies outright, so the cookie is silently never stored and the protection the prefix was meant to give doesn't exist.`,
+      evidence: prefixViolations.map((v) => `${v.name} — ${v.why}`),
+      remediation: "Send __Secure- cookies with Secure; send __Host- cookies with Secure, Path=/, and no Domain attribute.",
     });
   }
 }
