@@ -32,6 +32,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
+import { loadTargetsFileOrExit } from './lib/targets_file.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
 import { resolveHostsToIps, scanIps, buildTargets, printIpGrouping, buildHostsMeta, SUBDOMAIN_PORT_MODES, IPV4_RE } from './lib/ip_scan.js';
 import {
@@ -104,6 +105,7 @@ Options:
   --hosts-file <path>      Read newline-separated hosts from a file (blank
                             lines and lines starting with "#" are ignored).
                             Combines with any hosts given as arguments.
+                            Alias: --targets-file.
   --exclude <host>         Never resolve or scan this host, even if it was
                             given. Repeatable. Matches the exact hostname,
                             applied before resolution.
@@ -306,19 +308,11 @@ function parseArgs(argv) {
     if (a === '--help' || a === '-h') {
       console.log(HELP);
       process.exit(0);
-    } else if (a === '--hosts-file') {
+    } else if (a === '--hosts-file' || a === '--targets-file') {
       const file = argv[++i];
-      if (!file) { console.error('--hosts-file requires a path\n'); console.log(HELP); process.exit(2); }
-      let lines;
-      try {
-        lines = fs.readFileSync(path.resolve(file), 'utf8').split(/\r?\n/);
-      } catch (err) {
-        console.error(`Failed to read --hosts-file "${file}": ${err.message}`);
-        process.exit(2);
-      }
-      for (const line of lines) {
-        const t = line.trim();
-        if (t && !t.startsWith('#')) args.hosts.push(...t.split(/[,\s]+/).filter(Boolean).map(normalizeHost));
+      if (!file) { console.error(`${a} requires a path\n`); console.log(HELP); process.exit(2); }
+      for (const line of loadTargetsFileOrExit(file, a)) {
+        args.hosts.push(...line.split(/[,\s]+/).filter(Boolean).map(normalizeHost));
       }
     } else if (a === '--exclude') {
       const host = argv[++i];

@@ -353,6 +353,7 @@ misuse this README opens with.
 ubel-url example.com                                   # single target, https:// then http:// fallback
 ubel-url a.example.com b.example.com api.example.com   # multiple targets in one run, one report
 ubel-url --targets-file targets.txt                    # newline-separated targets; "#" comments/blank lines ignored
+ubel-url --targets-file targets.txt extra.example.com  # file + arguments combine
 ubel-url staging.internal:8443 --allow-private          # a lab/internal target you own
 ubel-url example.com --concurrency 8                    # fingerprint up to 8 targets in parallel
 ubel-url example.com --working-dir /path/to/project     # reports written under <path>/.ubel/ instead of cwd
@@ -376,6 +377,8 @@ scheme is given, the fingerprinter tries `https://` first and falls back to
 
 ```bash
 ubel-domain example.com                                 # discover via crt.sh, fingerprint every host found
+ubel-domain example.com example.org                     # several domains — discovered in turn, scanned and reported together
+ubel-domain --domains-file domains.txt                  # one domain per line ("#" comments and blank lines ignored); alias: --targets-file
 ubel-domain example.com --list-only                     # print the discovered host list and exit — sends NOTHING to those hosts
 ubel-domain example.com --exclude legacy.example.com    # skip a discovered host (repeatable)
 ubel-domain example.com --include internal.example.com  # add a host crt.sh didn't return (repeatable)
@@ -386,7 +389,15 @@ ubel-domain --help
 ```
 
 `<domain>` is a bare registrable domain — `example.com`, not a URL, a
-`host:port` pair, or a wildcard; exactly one per run. It shares every
+`host:port` pair, or a wildcard. Give as many as you like — as arguments,
+via `--domains-file` (alias `--targets-file`), or both; repeats collapse to
+one. Each domain is looked up on crt.sh in turn and every host found is
+fingerprinted in **one combined run with one report** (a host covered by two
+of the listed domains is scanned once). If the crt.sh lookup for *any* of
+them fails, the report flags discovery as incomplete — the others
+succeeding doesn't hide it. The JSON report's `domain` is the single domain
+for a one-domain run, or a short `"a.com and N other domains"` label
+otherwise, with the full list in `domains`. It shares every
 scanning/reporting flag with `ubel-url` (`--allow-private`, `--concurrency`,
 `--working-dir`, `--min-severity`, `--fail-on`, `--block-kev`,
 `--epss-threshold`, `--verbose`, `--quiet`) and
@@ -418,7 +429,7 @@ discovered host, so you can confirm the scope (and trim it with
 ubel-host example.com                                   # connect-scan ports 1-30000, fingerprint HTTP(S) ports found
 ubel-host example.com 203.0.113.10 api.example.org      # several hosts at once — IPs and/or domains, one combined report
 ubel-host example.com,203.0.113.10                      # comma-separated works too
-ubel-host --hosts-file hosts.txt                        # one host per line ("#" comments and blank lines ignored)
+ubel-host --hosts-file hosts.txt                        # one host per line ("#" comments and blank lines ignored); alias: --targets-file
 ubel-host --hosts-file hosts.txt extra.example.com      # file + arguments combine
 ubel-host a.example.com b.example.com --resolve-only    # resolve + group by distinct IP, print, exit — no port touched
 ubel-host a.example.com b.example.com --exclude b.example.com    # drop a host before it's ever resolved (repeatable)
@@ -510,6 +521,8 @@ code would otherwise read as a pass when nothing was examined.
 
 ```bash
 ubel-easm example.com                                    # crt.sh discovery -> resolve to IPs -> port-scan each -> fingerprint
+ubel-easm example.com example.org                        # several domains — one combined discovery, one port sweep per distinct IP, one report
+ubel-easm --domains-file domains.txt                     # one domain per line ("#" comments and blank lines ignored); alias: --targets-file
 ubel-easm example.com --list-only                        # discover, resolve, group by IP, print, exit — no port touched
 ubel-easm example.com --exclude legacy.example.com       # drop a hostname before it's ever resolved (repeatable)
 ubel-easm example.com --exclude-ip 198.51.100.7          # never port-scan this IP, even if a hostname resolves to it (repeatable)
@@ -524,7 +537,9 @@ ubel-easm example.com --verbose                              # per-hostname/per-
 ubel-easm --help
 ```
 
-`<domain>` is a bare registrable domain, exactly one per run — same format
+`<domain>` is a bare registrable domain — one or more per run (arguments,
+`--domains-file`/`--targets-file`, or both; the distinct IPs across all of them
+are port-scanned once each) — same format
 rule as `ubel-domain`. It shares every scanning/reporting flag with
 `ubel-url`, `ubel-domain`'s own `--include`/`--exclude`, and `ubel-host`'s
 own port-scan flags (`--ports`, `--port-concurrency`, `--port-timeout`,

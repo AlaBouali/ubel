@@ -402,6 +402,12 @@ ubel-url example.com
 # Several targets in one run, one report
 ubel-url a.example.com b.example.com --fail-on high
 
+# Targets loaded from a file (one per line, "#" comments ignored)
+ubel-url --targets-file targets.txt
+
+# Several domains from a file: discover each, scan everything found, one report
+ubel-domain --domains-file domains.txt --list-only
+
 # A lab/localhost target you own
 ubel-url localhost:8080 --allow-private
 

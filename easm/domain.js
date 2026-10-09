@@ -2,9 +2,10 @@
 // easm/domain.js — ubel-domain
 //
 // One flow, in order:
-//   1. Take a root domain name.
-//   2. Look up every subdomain of it via Certificate Transparency logs
-//      (crt.sh) — see ./lib/crtsh.js.
+//   1. Take one or more root domain names — as arguments and/or from
+//      --domains-file (alias --targets-file).
+//   2. Look up every subdomain of each via Certificate Transparency logs
+//      (crt.sh) — see ./lib/crtsh.js — and merge them into one host list.
 //   3. Fingerprint all of them and group the detected technologies by
 //      name+version with the list of hosts each was seen on.
 //   4. Look up vulnerabilities for those technologies.
@@ -23,7 +24,8 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
-import { queryCrtShDetailed, extractSubdomains } from './lib/crtsh.js';
+import { loadTargetsFileOrExit } from './lib/targets_file.js';
+import { splitDomains, firstInvalidDomain, describeDomains, discoverFromCrtSh } from './lib/domain_input.js';
 import {
   VALID_SEVERITIES,
   parseFailOn,
@@ -54,7 +56,8 @@ ubel-domain — EASM: crt.sh subdomain discovery + fingerprinting + vuln lookup
 ${BANNER}
 
 Usage:
-  ubel-domain <domain> [options]
+  ubel-domain <domain> [<domain2> ...] [options]
+  ubel-domain --domains-file <path> [options]
 
   <domain> is a bare registrable domain ("example.com"). Subdomains of it
   are discovered from Certificate Transparency logs via crt.sh, then each
@@ -66,7 +69,17 @@ Usage:
   A subdomain that has never had a logged certificate issued for it won't
   be found; use --include to add such hosts by hand.
 
+  Several domains (as arguments, in --domains-file, or both) are each
+  looked up on crt.sh in turn, and every host found is fingerprinted in ONE
+  combined run and reported together — not one report per domain. To scan
+  an already-known list of hosts directly, use ubel-url --targets-file.
+
 Options:
+  --domains-file <path>    Read domains from a file: one per line (several
+                            per line may be space- or comma-separated);
+                            blank lines and lines starting with "#" are
+                            ignored. Combines with any domains given as
+                            arguments. Alias: --targets-file.
   --include <host>         Additionally scan this host, even if crt.sh
                             didn't return it. Repeatable. Useful for
                             internal/HTTP-only hosts with no CT record.
@@ -164,15 +177,9 @@ while; point UBEL_NVD_ENDPOINT at an authenticated proxy/mirror to speed
 this up.
 `;
 
-// Deliberately strict: this is the one argument the whole run is built
-// from, and a URL or "host:port" slipped in here would be passed to crt.sh
-// as-is and silently return nothing useful. Rejecting it up front with a
-// clear message beats an empty, confusing result.
-const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
-
 function parseArgs(argv) {
   const args = {
-    domain: null,
+    domains: [],
     include: [],
     exclude: [],
     listOnly: false,
@@ -194,6 +201,10 @@ function parseArgs(argv) {
     if (a === '--help' || a === '-h') {
       console.log(HELP);
       process.exit(0);
+    } else if (a === '--domains-file' || a === '--targets-file') {
+      const file = argv[++i];
+      if (!file) { console.error(`${a} requires a path\n`); console.log(HELP); process.exit(2); }
+      for (const line of loadTargetsFileOrExit(file, a)) args.domains.push(...splitDomains(line));
     } else if (a === '--include') {
       const host = argv[++i];
       if (!host) { console.error('--include requires a hostname\n'); process.exit(2); }
@@ -244,27 +255,25 @@ function parseArgs(argv) {
       console.error(`Unknown argument: ${a}\n`);
       console.log(HELP);
       process.exit(2);
-    } else if (args.domain) {
-      console.error(
-        `ubel-domain takes exactly one domain (got "${args.domain}" and "${a}").\n` +
-        `To scan several unrelated domains, run it once per domain; to scan a\n` +
-        `known list of hosts directly, use ubel-url --targets-file instead.\n`
-      );
-      process.exit(2);
     } else {
-      args.domain = a.trim().toLowerCase().replace(/\.$/, '');
+      // Any number of domains, space- and/or comma-separated.
+      args.domains.push(...splitDomains(a));
     }
   }
 
-  if (!args.domain) {
-    console.error('No domain given — pass exactly one domain, e.g. "ubel-domain example.com".\n');
+  if (!args.domains.length) {
+    console.error('No domain given — pass at least one domain (or --domains-file), e.g. "ubel-domain example.com".\n');
     console.log(HELP);
     process.exit(2);
   }
 
-  if (!DOMAIN_RE.test(args.domain)) {
+  // Same domain given twice (or via both argv and --domains-file) is one domain.
+  args.domains = [...new Set(args.domains)];
+
+  const bad = firstInvalidDomain(args.domains);
+  if (bad) {
     console.error(
-      `"${args.domain}" doesn't look like a bare domain name.\n` +
+      `"${bad}" doesn't look like a bare domain name.\n` +
       `Pass just the registrable domain — "example.com", not a URL, a "host:port"\n` +
       `pair, or a wildcard.\n`
     );
@@ -293,56 +302,20 @@ function parseArgs(argv) {
 }
 
 /**
- * Step 1-2 of the flow: domain in, deduplicated host list out.
+ * Step 1-2 of the flow: domain(s) in, deduplicated host list out.
  * --include hosts are merged in (and deduplicated against) the discovered
  * set; --exclude is applied last so it overrides both discovery and
- * --include.
+ * --include. The lookup loop itself lives in ./lib/domain_input.js, shared
+ * with ubel-easm.
  */
 async function discoverTargets(args, log) {
-  log(`[*] Querying crt.sh for certificates issued under ${args.domain}...`);
-  const lookup = await queryCrtShDetailed(args.domain);
-  const entries = lookup.entries;
-  if (!lookup.ok) {
-    console.error(
-      `[ubel-domain] WARNING: the crt.sh lookup for ${args.domain} failed after ${lookup.attempts} attempt(s). ` +
-      `Subdomain discovery is incomplete${args.include.length ? ' — only --include hosts will be scanned' : ''}, ` +
-      `and the report will say so.`
-    );
-  }
-  log(`[*] crt.sh returned ${entries.length} certificate record(s).`);
-
-  const discovered = extractSubdomains(entries, args.domain);
-  log(`[*] ${discovered.length} unique host(s) extracted from those records.`);
-
-  const excluded = new Set(args.exclude);
-  const everything = [...new Set([...discovered, ...args.include])];
-  const merged = everything
-    .filter((h) => !excluded.has(h))
-    .sort();
-
-  // How the lookup went, carried into the report so a FAILED lookup (which
-  // otherwise looks exactly like "this domain has no certificates") is stated
-  // in the report and its executive summary instead of passing as a small,
-  // complete attack surface.
-  const discoveredSet = new Set(discovered);
-  const discovery = {
-    source: 'crt.sh',
-    ok: lookup.ok,
-    attempts: lookup.attempts,
-    certificate_records: entries.length,
-    hosts_discovered: discovered.length,
-    // Names added by hand that discovery did not already return, and names
-    // actually removed by --exclude (an --exclude that matched nothing
-    // removed nothing).
-    hosts_included: args.include.filter((h) => !discoveredSet.has(h)).length,
-    hosts_excluded: everything.filter((h) => excluded.has(h)).length,
-  };
-
-  return { discovered, targets: merged, discovery };
+  const { discovered, hostnames, discovery } = await discoverFromCrtSh(args, { log, cliLabel: '[ubel-domain]' });
+  return { discovered, targets: hostnames, discovery };
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const label = describeDomains(args.domains);
 
   if (!args.quiet) {
     console.log('\n' + BANNER + '\n');
@@ -354,10 +327,10 @@ async function main() {
 
   if (!targets.length) {
     console.error(
-      `\nNo scannable hosts found for "${args.domain}".\n` +
+      `\nNo scannable hosts found for "${label}".\n` +
       (discovery.ok
         ? `crt.sh returned no usable certificate records for it. That can mean the\n` +
-          `domain genuinely has no logged certificates, or that everything found was\n` +
+          `domain(s) genuinely have no logged certificates, or that everything found was\n` +
           `excluded. Pass --verbose to see the raw counts, or --include <host> to scan\n` +
           `specific hosts anyway.\n`
         : `The crt.sh lookup itself failed (unreachable or rate-limiting, ${discovery.attempts} attempts),\n` +
@@ -372,7 +345,7 @@ async function main() {
   // discovered host — the point is to let someone review (and trim, via
   // --exclude) the target list before authorizing an actual scan of it.
   if (args.listOnly) {
-    console.log(`\n${targets.length} host(s) for ${args.domain}:\n`);
+    console.log(`\n${targets.length} host(s) for ${label}:\n`);
     for (const t of targets) console.log(`  ${t}`);
     console.log('');
     process.exitCode = 0;
@@ -381,7 +354,7 @@ async function main() {
 
   if (!args.quiet) {
     console.log(
-      `[ubel-domain] ${args.domain}: ${discovered.length} host(s) discovered via crt.sh` +
+      `[ubel-domain] ${label}: ${discovered.length} host(s) discovered via crt.sh` +
       `${args.include.length ? `, +${args.include.length} via --include` : ''}` +
       `${args.exclude.length ? `, -${args.exclude.length} excluded` : ''}` +
       ` → ${targets.length} to scan.\n`
@@ -409,7 +382,8 @@ async function main() {
     // reports per-host scanned/skipped/error status against it. The root
     // domain travels separately as meta.domain.
     targets,
-    domain: args.domain,
+    domain: label,
+    domains: args.domains,
     subdomainEndpoint: process.env.UBEL_CRTSH_ENDPOINT || null,
     allowPrivate: args.allowPrivate,
     // Deliberately not the cookie value or header values themselves - those can be
@@ -429,7 +403,7 @@ async function main() {
   const reportPayload = buildReportPayload(scanResult, meta);
 
   if (!args.quiet) {
-    printScanSummary(reportPayload, `ubel-domain External Attack Surface Scan Summary — ${args.domain}`);
+    printScanSummary(reportPayload, `ubel-domain External Attack Surface Scan Summary — ${label}`);
   }
 
   await writeEasmReports(reportPayload, args, { reportType: 'easm-domain', cliLabel: '[ubel-domain]' });

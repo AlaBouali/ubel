@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
+import { loadTargetsFileOrExit } from './lib/targets_file.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
 import {
   VALID_SEVERITIES,
@@ -160,17 +161,7 @@ function parseArgs(argv) {
     } else if (a === '--targets-file') {
       const file = argv[++i];
       if (!file) { console.error('--targets-file requires a path\n'); console.log(HELP); process.exit(2); }
-      let lines;
-      try {
-        lines = fs.readFileSync(path.resolve(file), 'utf8').split(/\r?\n/);
-      } catch (err) {
-        console.error(`Failed to read --targets-file "${file}": ${err.message}`);
-        process.exit(2);
-      }
-      for (const line of lines) {
-        const t = line.trim();
-        if (t && !t.startsWith('#')) args.targets.push(t);
-      }
+      args.targets.push(...loadTargetsFileOrExit(file, '--targets-file'));
     } else if (a === '--allow-private') args.allowPrivate = true;
     else if (a === '--concurrency') args.concurrency = parseInt(argv[++i], 10);
     else if (a === '--working-dir') args.workingDir = argv[++i];

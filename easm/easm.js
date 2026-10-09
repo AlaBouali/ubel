@@ -2,9 +2,11 @@
 // easm/easm.js — ubel-easm
 //
 // One flow, in order:
-//   1. Take a root domain name and discover every subdomain of it via
-//      Certificate Transparency logs (crt.sh) — exactly ./domain.js's own
-//      step 1-2, see ./lib/crtsh.js.
+//   1. Take one or more root domain names (as arguments and/or from
+//      --domains-file, alias --targets-file) and discover every subdomain
+//      of each via Certificate Transparency logs (crt.sh) — exactly
+//      ./domain.js's own step 1-2, see ./lib/crtsh.js — merged into one
+//      hostname list.
 //   2. Resolve every discovered (+ --include) hostname to its IP address
 //      and collapse the result onto the set of DISTINCT IPs behind the
 //      domain. Several subdomains commonly share one origin IP (or one
@@ -59,7 +61,8 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
-import { queryCrtShDetailed, extractSubdomains } from './lib/crtsh.js';
+import { loadTargetsFileOrExit } from './lib/targets_file.js';
+import { splitDomains, firstInvalidDomain, describeDomains, discoverFromCrtSh } from './lib/domain_input.js';
 import {
   IPV4_RE,
   SUBDOMAIN_PORT_MODES,
@@ -108,7 +111,8 @@ ubel-easm — EASM: crt.sh discovery + per-IP port scan + fingerprinting + vuln 
 ${BANNER}
 
 Usage:
-  ubel-easm <domain> [options]
+  ubel-easm <domain> [<domain2> ...] [options]
+  ubel-easm --domains-file <path> [options]
 
   <domain> is a bare registrable domain ("example.com"). Subdomains of it
   are discovered from Certificate Transparency logs via crt.sh (same
@@ -128,6 +132,11 @@ Usage:
   that IP answered HTTP(S) on port 443 or 80 — the same per-host scan
   ubel-domain does, but only where the port scan found something listening.
   See --subdomain-ports.
+
+  Several domains (as arguments, in --domains-file, or both) are each
+  discovered on crt.sh in turn; every subdomain found is resolved, and the
+  distinct IPs across ALL of them are port-scanned once and reported
+  together in one run — not one report per domain.
 
   This is the most invasive EASM entry point UBEL ships: think of it as
   "run ubel-domain's discovery, then run ubel-host's full port sweep against
@@ -150,6 +159,11 @@ Shared IPs — read before running unattended:
   any host or IP you don't have standalone authorization to port-scan.
 
 Options:
+  --domains-file <path>     Read domains from a file: one per line (several
+                             per line may be space- or comma-separated);
+                             blank lines and lines starting with "#" are
+                             ignored. Combines with any domains given as
+                             arguments. Alias: --targets-file.
   --include <host>          Additionally resolve+scan this hostname, even
                              if crt.sh didn't return it. Repeatable.
   --exclude <host>          Never resolve this hostname, even if
@@ -298,17 +312,12 @@ only once you've reviewed the --list-only output and know what you're
 authorizing.
 `;
 
-// Same posture as ./domain.js's own DOMAIN_RE: this is the one argument the
-// whole run is built from, and a URL or "host:port" slipped in here would
-// be passed to crt.sh as-is and silently return nothing useful.
-const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
-
 // IPV4_RE (from ./lib/ip_scan.js) validates --exclude-ip values up front
 // rather than letting a typo silently never match anything.
 
 function parseArgs(argv) {
   const args = {
-    domain: null,
+    domains: [],
     include: [],
     exclude: [],
     excludeIp: [],
@@ -339,6 +348,10 @@ function parseArgs(argv) {
     if (a === '--help' || a === '-h') {
       console.log(HELP);
       process.exit(0);
+    } else if (a === '--domains-file' || a === '--targets-file') {
+      const file = argv[++i];
+      if (!file) { console.error(`${a} requires a path\n`); console.log(HELP); process.exit(2); }
+      for (const line of loadTargetsFileOrExit(file, a)) args.domains.push(...splitDomains(line));
     } else if (a === '--include') {
       const host = argv[++i];
       if (!host) { console.error('--include requires a hostname\n'); process.exit(2); }
@@ -405,26 +418,25 @@ function parseArgs(argv) {
       console.error(`Unknown argument: ${a}\n`);
       console.log(HELP);
       process.exit(2);
-    } else if (args.domain) {
-      console.error(
-        `ubel-easm takes exactly one domain (got "${args.domain}" and "${a}").\n` +
-        `To scan several unrelated domains, run it once per domain.\n`
-      );
-      process.exit(2);
     } else {
-      args.domain = a.trim().toLowerCase().replace(/\.$/, '');
+      // Any number of domains, space- and/or comma-separated.
+      args.domains.push(...splitDomains(a));
     }
   }
 
-  if (!args.domain) {
-    console.error('No domain given — pass exactly one domain, e.g. "ubel-easm example.com".\n');
+  if (!args.domains.length) {
+    console.error('No domain given — pass at least one domain (or --domains-file), e.g. "ubel-easm example.com".\n');
     console.log(HELP);
     process.exit(2);
   }
 
-  if (!DOMAIN_RE.test(args.domain)) {
+  // Same domain given twice (or via both argv and --domains-file) is one domain.
+  args.domains = [...new Set(args.domains)];
+
+  const bad = firstInvalidDomain(args.domains);
+  if (bad) {
     console.error(
-      `"${args.domain}" doesn't look like a bare domain name.\n` +
+      `"${bad}" doesn't look like a bare domain name.\n` +
       `Pass just the registrable domain — "example.com", not a URL, a "host:port"\n` +
       `pair, or a wildcard.\n`
     );
@@ -486,48 +498,17 @@ function parseArgs(argv) {
 }
 
 /**
- * Step 1-2 of the flow: domain in, { ip -> hostnames } grouping out.
+ * Step 1-2 of the flow: domain(s) in, { ip -> hostnames } grouping out.
  * --include hosts are merged in (and resolved) alongside crt.sh's own
  * discoveries; --exclude drops a hostname before it's ever resolved;
  * --exclude-ip drops an already-resolved IP before it's added to the
  * scan group (a hostname excluded this way still shows up in
  * `deadHostnames`-adjacent bookkeeping as "resolved but excluded", not as
- * "dead" — it did resolve, it just isn't being scanned).
+ * "dead" — it did resolve, it just isn't being scanned). The crt.sh lookup
+ * loop itself lives in ./lib/domain_input.js, shared with ubel-domain.
  */
 async function discoverIps(args, log) {
-  log(`[*] Querying crt.sh for certificates issued under ${args.domain}...`);
-  const lookup = await queryCrtShDetailed(args.domain);
-  const entries = lookup.entries;
-  if (!lookup.ok) {
-    console.error(
-      `[ubel-easm] WARNING: the crt.sh lookup for ${args.domain} failed after ${lookup.attempts} attempt(s). ` +
-      `Subdomain discovery is incomplete${args.include.length ? ' — only --include hosts will be scanned' : ''}, ` +
-      `and the report will say so.`
-    );
-  }
-  log(`[*] crt.sh returned ${entries.length} certificate record(s).`);
-
-  const discovered = extractSubdomains(entries, args.domain);
-  log(`[*] ${discovered.length} unique host(s) extracted from those records.`);
-
-  const excludedHosts = new Set(args.exclude);
-  const everything = [...new Set([...discovered, ...args.include])];
-  const hostnames = everything
-    .filter((h) => !excludedHosts.has(h))
-    .sort();
-  const discoveredSet = new Set(discovered);
-  const crtsh = {
-    source: 'crt.sh',
-    ok: lookup.ok,
-    attempts: lookup.attempts,
-    certificate_records: entries.length,
-    hosts_discovered: discovered.length,
-    // Names added by hand that discovery did not already return, and names
-    // actually removed by --exclude (an --exclude that matched nothing
-    // removed nothing).
-    hosts_included: args.include.filter((h) => !discoveredSet.has(h)).length,
-    hosts_excluded: everything.filter((h) => excludedHosts.has(h)).length,
-  };
+  const { discovered, hostnames, discovery: crtsh } = await discoverFromCrtSh(args, { log, cliLabel: '[ubel-easm]' });
 
   log(`[*] Resolving ${hostnames.length} hostname(s) to IP addresses...`);
   const { ips, deadHostnames, excludedResolutions } = await resolveHostsToIps(hostnames, { excludeIp: args.excludeIp });
@@ -541,6 +522,7 @@ async function discoverIps(args, log) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const label = describeDomains(args.domains);
 
   if (!args.quiet) {
     console.log('\n' + BANNER + '\n');
@@ -552,7 +534,7 @@ async function main() {
 
   if (!discovery.ips.length) {
     console.error(
-      `\nNo scannable IP found for "${args.domain}".\n` +
+      `\nNo scannable IP found for "${label}".\n` +
       `Every discovered/included hostname either failed to resolve or landed on an\n` +
       `excluded IP. Pass --verbose to see the raw counts, or --include <host> to add\n` +
       `specific hostnames by hand.\n`
@@ -568,14 +550,14 @@ async function main() {
   // the "actual scan" this module gates is a full port sweep, not just a
   // single fingerprint request.
   if (args.listOnly) {
-    printIpGrouping(args.domain, discovery);
+    printIpGrouping(label, discovery);
     process.exitCode = 0;
     return;
   }
 
   if (!args.quiet) {
     console.log(
-      `[ubel-easm] ${args.domain}: ${discovery.hostnames.length} hostname(s) resolved to ` +
+      `[ubel-easm] ${label}: ${discovery.hostnames.length} hostname(s) resolved to ` +
       `${discovery.ips.length} distinct IP(s) to port-scan` +
       `${discovery.deadHostnames.length ? `, ${discovery.deadHostnames.length} did not resolve` : ''}` +
       `${discovery.excludedResolutions.length ? `, ${discovery.excludedResolutions.length} dropped via --exclude-ip` : ''}.\n`
@@ -630,7 +612,8 @@ async function main() {
     // as ubel-domain's/ubel-host's own `targets` — the discovered-and-
     // scanned set, not the raw input.
     targets,
-    domain: args.domain,
+    domain: label,
+    domains: args.domains,
     subdomainEndpoint: process.env.UBEL_CRTSH_ENDPOINT || null,
     // Per-IP port-scan detail — the plural counterpart to ubel-host's own
     // singular host/portRange/openPorts meta fields, one entry per distinct
@@ -656,7 +639,7 @@ async function main() {
   const reportPayload = buildReportPayload(scanResult, meta);
 
   if (!args.quiet) {
-    printScanSummary(reportPayload, `ubel-easm External Attack Surface Scan Summary — ${args.domain}`);
+    printScanSummary(reportPayload, `ubel-easm External Attack Surface Scan Summary — ${label}`);
   }
 
   // reportType is "easm-full" rather than "easm-easm": every sibling entry

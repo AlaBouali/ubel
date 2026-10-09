@@ -512,9 +512,11 @@ export function buildScope({
  *   crt.sh subdomain lookup went: {source, ok, certificate_records, hosts_discovered,
  *   hosts_included, hosts_excluded}. `ok: false` means the lookup failed after every retry,
  *   which is otherwise indistinguishable from a domain with no certificates.
- * @param {string} [meta.domain]           set only for ubel-domain runs — the
- *   root domain crt.sh was queried for; `targets` is the resulting
+ * @param {string} [meta.domain]           set only for ubel-domain / ubel-easm runs — the
+ *   root domain crt.sh was queried for (or, given several, a short label like
+ *   "a.com and 2 other domains"); `targets` is the resulting
  *   discovered-subdomain list that was actually fingerprinted
+ * @param {string[]} [meta.domains]        every root domain crt.sh was queried for
  * @param {string} [meta.subdomainEndpoint]  crt.sh endpoint used, when meta.domain is set
  * @param {string} [meta.host]             set only for ubel-host runs given exactly ONE
  *   host — the host that was port-scanned; `targets` is the resulting
@@ -621,6 +623,9 @@ export function buildReportPayload(scanResult, meta = {}) {
     },
     discovery: meta.discovery || null,
     domain: meta.domain || null,
+    // The individual domains behind `domain` when ubel-domain/ubel-easm were given
+    // several (then `domain` is a short "a.com and N other domains" label).
+    domains: Array.isArray(meta.domains) && meta.domains.length ? meta.domains : null,
     subdomain_endpoint: meta.domain ? meta.subdomainEndpoint || null : null,
     host: meta.host || null,
     input_hosts: inputHosts.length ? inputHosts : null,
@@ -2548,7 +2553,7 @@ function renderScanInfo() {
   document.getElementById('sys-osv-endpoint').textContent = reportData.osv_endpoint || 'https://api.osv.dev (default)';
   document.getElementById('sys-nvd-endpoint').textContent = reportData.nvd_endpoint || 'https://services.nvd.nist.gov (default)';
   document.getElementById('sys-wpvuln-endpoint').textContent = reportData.wpvulnerability_endpoint || 'https://www.wpvulnerability.net (default)';
-  document.getElementById('sys-domain').textContent = reportData.domain || 'n/a (not a domain scan)';
+  document.getElementById('sys-domain').textContent = (reportData.domains && reportData.domains.length > 1 ? reportData.domains.join(', ') : reportData.domain) || 'n/a (not a domain scan)';
   document.getElementById('sys-crtsh-endpoint').textContent = reportData.domain ? (reportData.subdomain_endpoint || 'https://crt.sh (default)') : '—';
   const inputHosts = reportData.input_hosts || [];
   document.getElementById('sys-host').textContent = reportData.host || (inputHosts.length ? inputHosts.join(', ') : 'n/a (not a host scan)');
