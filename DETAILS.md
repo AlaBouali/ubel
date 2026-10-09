@@ -273,6 +273,8 @@ ubel-chunk /path/to/project
 
 Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-hosted (Ollama-compatible), and fully custom endpoints — selectable per run, no code changes.
 
+Like the SCA binaries, `ubel-sast` and `ubel-mal` make sure `.gitignore` and `.dockerignore` in the scanned directory ignore `.ubel/` and `.ubelignore` before they write their reports there, creating the files if needed — idempotent, append-only, and it respects an explicit `!.ubelignore`. Opt out with `UBEL_NO_IGNORE_FILES=1`.
+
 **Exit codes:** governed by `--fail-on`, which only changes the process exit code — reports on disk always contain every finding regardless of this flag.
 - `ubel-sast` (`analyze`): `any` *(default)* fails on any finding, including unresolved ones; `valid` fails only on findings verified `is_valid: true`; `exploitable` fails only on findings taint-traced `exploitable: true`.
 - `ubel-mal` (`malware`): `any` *(default)* fails on any finding, including unresolved ones; `confirmed` fails only on findings verified `is_valid: true` — an unresolved finding still fails the build, since "couldn't determine" is never treated as clean.

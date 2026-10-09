@@ -379,6 +379,17 @@ Every `malware` run writes the equivalent set under its own namespace:
 
 The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware` and `meta.scan_options` records the non-secret run settings (verification and taint-trace on/off, diff mode, chunk limits, language/folder filters) the summary needs to say what was and was not checked; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
 
+### Keeping UBEL's own files out of git and Docker
+
+`ubel-sast` and `ubel-mal` write `.ubel/` (the reports above) into the scanned directory. Before the first file is read or LLM request sent, the entry point (`main.js` — never the analyzers) makes sure `.gitignore` **and** `.dockerignore` in that directory ignore `.ubel/` and `.ubelignore`, creating either file if it does not exist. It is the same guard the SCA binaries use (`sca/ignore_files.js`), with the same rules:
+
+- **Idempotent.** An entry counts as covered if any equivalent pattern is present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
+- **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
+- **Opt-out respected.** A negation such as `!.ubelignore` means you want that entry tracked, so it is not re-added.
+- **Never fails a scan.** A read-only checkout or a permissions problem is swallowed (with `DEBUG` set, it is logged).
+- **Where it applies.** The directory the reports are written under — the positional path / `--working-dir`, else the current directory. Changed files are announced with one `[ubel] Created|Updated …` line on stderr. Programmatically (`main({ projectRoot, … })`) it applies to `projectRoot`, but only when `save_reports` is on: with `save_reports: false` nothing is written to `.ubel/`, so nothing in your tree is touched either. `ubel-chunk` and `--help` never trigger it (`ubel-chunk` only writes `sast_chunks.json` to the current directory).
+- **Kill switch:** `UBEL_NO_IGNORE_FILES=1`.
+
 ---
 
 ## Executive summary

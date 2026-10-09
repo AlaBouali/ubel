@@ -14,6 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
+import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
   getComplianceForMalwareFinding,
@@ -49,6 +50,26 @@ function parseArgs(args) {
     }
   }
   return { flags, positional };
+}
+
+// ─── .gitignore / .dockerignore guard ──────────────────────────────────────────
+// Same guard ubel-npm/pip/... apply (see sca/ignore_files.js, and the "Ubel's own
+// files stay out of git and docker contexts" note in sca/main.js): make sure
+// `.gitignore` and `.dockerignore` in the directory that holds `.ubel/` ignore
+// `.ubel/` and `.ubelignore`, creating either file if missing. Idempotent,
+// append-only, honours `!.ubelignore`, never throws, kill switch
+// UBEL_NO_IGNORE_FILES=1.
+//
+// Done HERE, at the entry points (runAnalyzeCommand / runMalwareCommand and the
+// programmatic main()), never inside the analyzers. The directory is the one
+// writeAnalyzeReports()/writeMalwareReports() put `.ubel/` under: the target
+// path / --working-dir / projectRoot, else the cwd. `chunk` is not covered: it
+// only writes sast_chunks.json into the cwd and creates no `.ubel/`.
+//
+// @param {string|undefined} dir     target directory (undefined = cwd)
+// @param {{notify?: boolean}} [opts] notify: one stderr line per changed file
+export function ensureUbelIgnoreFiles(dir, { notify = false } = {}) {
+  return ensureUbelIgnoreEntries(dir, { notify });
 }
 
 function atomicWrite(filePath, content) {
@@ -528,6 +549,10 @@ function runAnalyzeCommand(args) {
     }
   }
 
+  // Before the first LLM call or file read: keep .ubel/ and .ubelignore out of
+  // git and docker contexts (this run is about to create .ubel/ in workingDir).
+  ensureUbelIgnoreFiles(opts.workingDir, { notify: true });
+
   analyzeSast([], opts)
     .then(results => writeAnalyzeReports(results, opts))
     .then(({ shouldFail }) => process.exit(shouldFail ? 1 : 0))
@@ -597,6 +622,9 @@ function runMalwareCommand(args) {
       process.exit(1);
     }
   }
+
+  // Same guard as `analyze` above: this run creates .ubel/ in workingDir too.
+  ensureUbelIgnoreFiles(opts.workingDir, { notify: true });
 
   analyzeMalware([], opts)
     .then(results => writeMalwareReports(results, opts))
@@ -707,6 +735,10 @@ export async function main(programmaticOptions) {
     if (mode === "analyze" && opts.taintTrace === undefined) opts.taintTrace = true;
     if (opts.skipSignals === undefined) opts.skipSignals = true;
     if (opts.failOn === undefined) opts.failOn = "any";
+
+    // .ubel/ is only created when reports are saved, so a caller that passes
+    // save_reports: false (a pure in-memory scan) gets no changes to its tree.
+    if (save_reports) ensureUbelIgnoreFiles(opts.workingDir);
 
     if (mode === "malware") {
       const results = await analyzeMalware([], opts);
