@@ -28,7 +28,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Exploit intelligence** — every vulnerability is checked against the [CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/); policy blocks KEV entries and anything at or above an EPSS threshold, and a feed outage never aborts the scan (see [Exploit Intelligence](#exploit-intelligence-kev--epss))
 - Policy engine — block/allow by severity threshold, unknown-severity packages, CISA KEV membership, EPSS score, and license risk
 - Malicious package (infection) detection — always blocked regardless of policy
-- **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, Stripe restricted keys, Twilio SIDs, URL-embedded git credentials, and more). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
+- **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, live Stripe restricted keys, URL-embedded git credentials, database connection strings with embedded passwords, and more). Findings can be suppressed with a `.ubelignore` file or inline `ubel:ignore` markers (see [Suppressing findings](#suppressing-findings)). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
 - Dependency graph with introduced-by and parent tracking (Swift and Flutter/Dart lockfiles don't record a dependency graph, so those packages have no edges)
 - Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of each scan's reports is saved too
@@ -151,11 +151,18 @@ Every detected component carries its actual license or vendor EULA — proprieta
 
 **Linux** — reads the system package database directly, works as a standard user on most distributions:
 
-| Distro family | Source |
-|---|---|
-| Debian / Ubuntu | `/var/lib/dpkg/status` |
-| Alpine / Alpaquita | `/lib/apk/db/installed` |
-| Red Hat / AlmaLinux / Rocky / CentOS / Fedora | `rpm -qa` |
+| Distribution | Package manager | Source | PURL type |
+|---|---|---|---|
+| Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
+| Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
+| Alpine | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
+| Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpaquita/` |
+| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+
+Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
 > On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
 
@@ -173,16 +180,26 @@ The report is always written to `~/.ubel/reports/latest.*`, independent of any o
 
 Runs a secrets-only pass over the open workspace folder — no dependency resolution, no package-manager calls. Built on Trivy's ported secret-scanning ruleset (Apache-2.0, see [`sca/vendor/trivy/NOTICE`](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover:
 
-- HashiCorp Vault tokens
-- Google Cloud API keys and OAuth access tokens
+- HashiCorp Vault tokens (`hvs.` prefix)
+- Google Cloud API keys (`AIza…`) and OAuth access tokens (`ya29.`)
 - Anthropic and OpenRouter API keys
-- Firebase tokens
+- Firebase server tokens
 - Amazon MWS auth tokens
-- Stripe restricted keys (`rk_live_` / `rk_test_`)
-- Twilio Account/App SIDs
-- Square and Braintree credentials
-- Credentials embedded in a git remote URL (`https://user:token@host/...`)
-- Generic high-entropy and key-value fallback rules for unknown vendors
+- Square OAuth secrets and access tokens, Braintree access tokens. A Square `EAAA…` token must be a standalone string with enough entropy: it is not reported when it sits inside a longer base64/base64url run (inlined wasm, data URIs)
+- Stripe live restricted keys (`rk_live_`) — Trivy covers publishable/secret keys but not this format. Test-mode keys (`rk_test_`) are deliberately skipped, since they can only reach test-mode data
+- Credentials embedded in a git remote URL (`https://user:token@host/...`) — covers GitHub, GitLab, Bitbucket, Azure DevOps, Codeberg, Gitea, Gitee and SourceHut, self-hosted instances whose hostname starts with `git`, `gitlab`, `bitbucket`, `gitea`, `gogs` or `forgejo`, and any other host when the URL is a `.git` remote. Placeholder passwords (`password`, `token`, `xxxx`, …) and `${VAR}` references are ignored
+- Database and broker connection strings with an embedded password — three forms, all reporting the password only:
+  - **URL** (rule `database-url-credentials`): `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `mongodb://` / `mongodb+srv://`, `redis://` / `rediss://`, `amqp://` / `amqps://`, `mssql://`, `sqlserver://`, `cockroachdb://`, `clickhouse://`, `neo4j://`, `bolt://`, and SQLAlchemy-style `postgresql+psycopg2://`
+  - **Key/value** (rule `database-connection-string-password`): ADO.NET, ODBC and libpq strings such as `Server=…;Database=…;Password=…` or `host=… password=…`; a host/database key must appear earlier on the same line, so a bare `password=` is left to the generic rule
+  - **JDBC** (rule `jdbc-url-password`): `jdbc:mysql://host/db?user=u&password=…`, `jdbc:sqlserver://host;…;password=…`
+
+  Not reported: placeholders and templates (`${DB_PASS}`, `<password>`, `changeme`, `YOUR_PASSWORD`, `xxxx`, …), `user:user` pairs such as `guest:guest`, default passwords (`postgres`, `root`, `admin`, `test`, …) against `localhost`, `127.0.0.1`, `host.docker.internal` or a bare docker-compose service name, and hosts containing `example`. The same default password against a real hostname *is* reported.
+- Generic high-entropy fallback for unknown vendors — a vendor-style prefix (`sk-`, `pk_`, `xox*`, `api_`, `key_`, `token_`) followed by 32+ characters, where the part after the prefix must also clear a Shannon-entropy check, so repeated runs and plain snake_case identifiers aren't reported
+- Generic key-value fallback — `password`/`secret`/`token`/`api_key`/`private_key` assigned a 32+ character value; there is no entropy check here, the key name is the signal
+
+Twilio Account/App SIDs are intentionally **not** detected: the `AC…`/`AP…` + 32-character pattern has no checksum or distinguishing context and produced far too much noise.
+
+The ruleset is a generated snapshot of Trivy's, regenerated from upstream when it changes — not a live mirror.
 
 Match previews shown in every report are redacted — the raw secret value is never written to disk, in this report or any other.
 
@@ -197,6 +214,41 @@ In the other report formats, secrets are exposed as a `ubel:secrets` entry in th
 ```
 
 > This is the same path **UBEL: Scan Project** writes to. Running one after the other overwrites `latest.*` with whichever ran most recently — the timestamped copy under `.ubel/local/reports/.../<date>/` from the earlier run is retained, but `latest.*` always reflects the most recent scan of either kind.
+
+### What gets scanned
+
+- **Every match on every line** is reported, not just the first per rule; overlapping matches collapse to one finding (a specific rule beats a generic one).
+- **Private keys**: PEM blocks are matched across lines (the finding points at the `BEGIN` line and carries `end_line`), including encrypted/legacy PEM and PGP blocks. Extensionless key files are opened too: `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519` (and `id_rsa.bak`-style variants) are always scanned, and files with no extension or a backup-style one (`.bak`, `.old`, `.orig`, `.p8`, `.ppk`, `.asc` …) are scanned if they start with a PEM private-key header.
+- **`.env*` files are skipped** (they aren't meant to be committed). The global allow-rules still apply, so a file such as `.env.example` is skipped either way.
+- **Skipped directories**: dependency trees, build output and caches are skipped (`node_modules`, `vendor`, `target`, `dist`, `build`, `out`, virtualenvs, …). `packages`, `bin`, `obj` and `env` are ambiguous names, so they are skipped only when the layout says they hold generated content — a NuGet `packages/` (next to a `.sln`, or containing `repositories.config`), a .NET `bin/`/`obj/` (next to a `.sln`/`.csproj`), a Python venv (`pyvenv.cfg`). A monorepo's `packages/*` and a Node `bin/` are scanned. Any default-skipped directory can be re-included with `include-dir:` in `.ubelignore` (below); VCS metadata (`.git`, `.svn`, `.hg`) and UBEL's own `.ubel/` directory are never walked and cannot be re-included.
+
+### Suppressing findings
+
+Put a `.ubelignore` file at the workspace root. One entry per line; `#` starts a comment.
+
+```gitignore
+docs/generated/                 # skip a directory
+*.snap                          # skip files by glob, at any depth
+/fixtures/keys/*.pem            # leading "/" anchors to the scan root
+src/seed.js rule:generic-key-value-credential   # suppress one rule (comma list ok) on matching paths
+rule:generic-fallback           # disable a rule everywhere
+fingerprint:3f9a1c0be27d4a55    # accept one specific finding
+include-dir:dist                # scan a directory that is skipped by default
+exclude-dir:generated           # skip a directory name wherever it appears
+unallow:tests                   # switch off a builtin allow-rule (e.g. scan test paths)
+```
+
+Or mark the line in the source, in any comment syntax:
+
+```js
+const k = "..."; // ubel:ignore
+const k = "..."; // ubel:ignore[aws-access-key-id]
+// ubel:ignore-next-line
+```
+
+Every finding carries a `fingerprint` in the JSON report — a hash of rule id, path and the secret, stable across line moves and never containing the secret itself — so a finding can be accepted by adding its `fingerprint:` line. The scan result also reports `suppressed` (how many findings the ignore rules dropped). The CLI's `ubel-secrets --write-baseline`, which writes these lines for you, is not available in the extension.
+
+The builtin allow-list still skips paths containing `test`/`example` and secrets whose text contains "example"; `unallow:tests` / `unallow:examples` turn those off. The per-rule allow-lists of the database-connection-string rules are part of the rule, so `unallow:` does not affect them; switch one off with `rule:<id>`.
 
 ---
 
@@ -215,6 +267,18 @@ See [License Compliance](#license-compliance) below for how licenses are normali
 ```
 
 > This is the same path **UBEL: Scan Project** and **UBEL: Scan project for Exposed Secrets** write to. Running any of the three overwrites `latest.*` with whichever ran most recently — the timestamped copy under `.ubel/local/reports/.../<date>/` from the earlier run is retained, but `latest.*` always reflects the most recent scan.
+
+---
+
+## Files UBEL Writes to Your Workspace
+
+Besides the reports under `.ubel/` (see [Reports](#reports)), the **Scan Project**, **Scan Code Editor's Extensions**, **Scan project for Exposed Secrets** and **Scan project for License Compliance** commands make sure the scanned directory's `.gitignore` **and** `.dockerignore` ignore both `.ubel/` and `.ubelignore`, creating either file if it doesn't exist. **Scan Host Platform** does not touch them.
+
+- **Idempotent.** An entry counts as covered if any equivalent pattern is already present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
+- **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
+- **Opt-out respected.** A negation such as `!.ubelignore` means you want that entry tracked, so it is not re-added — this is how you commit a shared `.ubelignore` while everything else stays ignored.
+- **Never fails a scan.** A read-only checkout or a permissions problem is silently skipped.
+- **Kill switch:** set `UBEL_NO_IGNORE_FILES=1` in the environment the editor was launched from to turn this off.
 
 ---
 
@@ -244,7 +308,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | **Executive Summary** | Plain-language risk rating, policy verdict, key findings, components to fix first, and suggested actions for non-technical readers, printable as a PDF — see [Executive Summary](#executive-summary) |
 | **Secrets** | Exposed secrets by category, severity, file/line, and redacted match preview |
 | **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS score/percentile, KEV badge, severity, fix version, reachability level, and policy decision. Click any row for a detail modal (CVSS vector, fix recommendations, OSV/NVD references, compliance frameworks) |
-| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, license risk (OSI-approved status, risk level), and vulnerability count. Click a package for its detail modal, which includes **Suggested Fixes** — see [Recommended Package Fixes](#recommended-package-fixes) |
+| **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, state (safe / vulnerable / infected / undetermined), license risk (OSI-approved status, risk level), and vulnerability count. Click a package for its detail modal, which includes **Suggested Fixes** — see [Recommended Package Fixes](#recommended-package-fixes) |
 | **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
@@ -456,7 +520,7 @@ Each feed is tried with a 15-second timeout and two retries. There is currently 
 
 ## Reachability Analysis
 
-Every vulnerability in the report is annotated with a reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and performs a source-level import scan over the workspace files to confirm or refute whether the vulnerable package is actually used by application code.
+Every vulnerability in the report is annotated with a heuristic reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and optionally performs a source-level import scan over the project files to confirm or refute whether the vulnerable package is actually used by application code. The host-platform scan has no project source, so it has no import-scan signal.
 
 The goal is prioritization: to separate vulnerabilities in packages your code actively exercises from those in packages that are installed but unreachable from any production code path.
 
@@ -482,15 +546,17 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 
 **Priority 1 (non-library type)** — Frameworks, applications, plugins, and OS-level packages have no meaningful import boundary. The component itself is the attack surface.
 
-**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes. For Node.js, scope is derived from `devDependencies` and propagated through the dependency graph.
+**Priority 2 (dev/test scope)** — Packages that are exclusively development or test dependencies are excluded from production runtimes. Scope is derived from `package.json` `devDependencies` (for Rust, from the `[dev-dependencies]` / `[build-dependencies]` sections of `Cargo.toml` and its workspace members) and propagated through the dependency graph via BFS.
 
-**Priorities 3–4 (import scan)** — UBEL scans workspace source files for import statements matching the package. For transitive dependencies where the package itself is not directly imported, it checks whether any of the package's parents in the dependency graph are imported — confirming that the transitive path is exercised.
+**Priorities 3–4 (import scan)** — When a project root is provided, UBEL scans source files for import statements matching the package. For transitive dependencies where the package itself is not directly imported, it checks whether any of the package's parents in the dependency graph are imported — confirming that the transitive path is exercised.
 
-**Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools not called by application code.
+**Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools included in the environment but not called by application code.
 
 **Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. Network-reachable (`AV:N`) and shallow (`depth ≤ 1`) packages score higher.
 
 ### Import scan coverage
+
+Source files are scanned for ecosystem-appropriate import patterns:
 
 | Ecosystem | Extensions | Patterns matched |
 |---|---|---|
@@ -505,7 +571,7 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 | Flutter / Dart | `.dart` | `import 'package:<pkg>/…'`, `export 'package:<pkg>/…'` |
 | Swift | `.swift` `.m` `.mm` `.h` | `import <Module>`, `@import <Module>`, `#import <Module/…>` |
 
-Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report under each vulnerability's `reachability` field:
+Reachability results appear in the **Vulnerabilities** tab of the HTML report and in the machine-readable JSON report. Each vulnerability record includes a `reachability` object:
 
 ```json
 {
@@ -515,7 +581,25 @@ Reachability results appear in the **Vulnerabilities** tab of the HTML report an
     "confidence": "high",
     "rationale": "Import of this package was found in project source code. Found in 2 source file(s): src/index.js, src/utils.js. Depth=0, AV=N.",
     "tags": ["import_confirmed", "network_av"],
-    "signals": { "depth": 0, "attack_vector": "N", "scope": "prod", "pkg_type": "library", "import_scan": { "searched": true, "found": true, "files_scanned": 87 } }
+    "signals": {
+      "depth": 0,
+      "attack_vector": "N",
+      "is_orphan_tool": false,
+      "scope": "prod",
+      "num_paths": 3,
+      "introduced_by_count": 1,
+      "pkg_type": "library",
+      "is_non_library": false,
+      "is_malware": false,
+      "has_env_scope": false,
+      "import_scan": {
+        "searched": true,
+        "found": true,
+        "files_scanned": 87,
+        "matched_files": ["src/index.js", "src/utils.js"],
+        "skipped_no_source": false
+      }
+    }
   }
 }
 ```
@@ -527,7 +611,7 @@ Reachability results appear in the **Vulnerabilities** tab of the HTML report an
 | `confidence` | `high`, `medium`, or `low` — how much evidence backs the verdict |
 | `rationale` | Human-readable explanation of which signal drove the decision |
 | `tags` | Machine-readable labels for the signals that fired (e.g. `import_confirmed`, `dev_scope`, `malware`, `env_scope`) |
-| `signals` | Snapshot of all inputs considered, regardless of which rule fired (abbreviated above) |
+| `signals` | Full signal snapshot — all inputs that were considered, regardless of which rule fired |
 
 ---
 
@@ -538,7 +622,7 @@ Every project scan classifies each package's declared license by default. Licens
 | Category | Examples | Risk |
 |---|---|---|
 | Permissive | MIT, Apache-2.0, BSD-2/3-Clause, ISC, 0BSD | `low` |
-| Public domain | Unlicense (OSI-approved), CC0-1.0 | `low` |
+| Public domain | Unlicense (OSI-approved), CC0-1.0 (not OSI-approved but permissive in practice) | `low` |
 | Weak copyleft | MPL-2.0, LGPL-2.1/3.0, EPL-2.0, CDDL | `medium` |
 | Strong copyleft with linking exception | GPL-2.0-only WITH Classpath-exception-2.0 (OpenJDK JRE/JDK) | `medium` |
 | Strong copyleft | GPL-2.0/3.0, AGPL-3.0 | `high` |
@@ -552,7 +636,36 @@ Other shapes that are normalized: case/whitespace variants, SPDX expressions (`G
 
 Run standalone via **UBEL: Scan project for License Compliance** (`Ctrl+Alt+L`) — see above — when you want license data only, with no vulnerability lookups or secrets scan.
 
-Results appear in the **Inventory** tab of the HTML report (per-package license, OSI-approved status, and risk) and in the machine-readable JSON/SBOM/SARIF reports under each package's `license_info` field. The report-level `stats.license_stats` summarizes the whole inventory (`total`, `osi_approved`, `not_osi_approved`, `unknown`, and `by_risk`).
+**Output fields.** Each inventory item gets a `license_info` object:
+
+```json
+{
+  "license": "UNLICENSED",
+  "license_info": {
+    "raw": "UNLICENSED",
+    "spdx": null,
+    "identifiers": [],
+    "osi_approved": false,
+    "risk": "high",
+    "category": "proprietary",
+    "reason": "npm \"UNLICENSED\" marker — explicitly no license grant (all rights reserved). Not to be confused with the SPDX \"Unlicense\" public-domain license."
+  }
+}
+```
+
+The top-level `stats.license_stats` field summarizes the whole inventory:
+
+```json
+{
+  "total": 142,
+  "osi_approved": 118,
+  "not_osi_approved": 9,
+  "unknown": 15,
+  "by_risk": { "low": 112, "medium": 6, "high": 9, "unknown": 15 }
+}
+```
+
+- **HTML report**: the **Inventory** tab and the per-package detail modal render `license_info` as a risk-badged license table (SPDX id, identifiers, OSI-approved, risk, category, reason) rather than a bare string, and the Dashboard carries a license-risk stats card.
 
 - **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name`; OSI status, risk, category, and reason are added as component `properties`, and the root `properties` carry the OSI/unknown counts.
 - **SARIF 2.1.0**: a dedicated `ubel-license-compliance` run, separate from the vulnerability and secrets runs. Only packages that need review are reported — any package with `risk: "high"`, or `osi_approved` not equal to `true` — so a fully permissively-licensed tree produces no findings. Result `level` maps from risk (`high` → `error`, `medium` → `warning`, `low` → `note`).
@@ -579,6 +692,46 @@ Each finding is first assigned one or more internal risk categories — for a de
 | CIS Controls v8 | Numbered controls |
 
 **This is best-effort guidance, not a certified compliance assessment.** Control identifiers are the stable, publicly documented ones for each framework, but framework text, versioning, and applicable scope can change, and always depend on the org's own environment. Every report carries this disclaimer verbatim in `compliance_summary.disclaimer` — treat the mapping as a starting point for an audit conversation, not a citation to quote in one.
+
+**Output fields.** Each vulnerability and secrets finding gets a `compliance` object:
+
+```json
+{
+  "compliance": {
+    "categories": ["vulnerable_components", "injection"],
+    "frameworks": [
+      {
+        "id": "owasp_top10_2021",
+        "name": "OWASP Top 10 (2021)",
+        "controls": [
+          { "id": "A06:2021", "title": "Vulnerable and Outdated Components" },
+          { "id": "A03:2021", "title": "Injection" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The top-level `compliance_summary` field aggregates every vulnerability and secrets finding in the report into per-framework, per-control finding counts:
+
+```json
+{
+  "disclaimer": "Compliance framework references are best-effort guidance ...",
+  "frameworks": [
+    {
+      "id": "owasp_top10_2021",
+      "name": "OWASP Top 10 (2021)",
+      "findings_count": 14,
+      "controls": [
+        { "id": "A06:2021", "title": "Vulnerable and Outdated Components", "findings_count": 11 },
+        { "id": "A03:2021", "title": "Injection", "findings_count": 3 }
+      ]
+    }
+  ],
+  "by_category": { "vulnerable_components": 11, "injection": 3, "secrets_management": 2 }
+}
+```
 
 **Output**
 
@@ -659,11 +812,18 @@ Detected via registry probes and PowerShell — no elevated privileges required.
 
 Detected by reading the system package database directly.
 
-| Distro family | Package manager | Source |
-|---|---|---|
-| Debian / Ubuntu | dpkg | `/var/lib/dpkg/status` |
-| Alpine / Alpaquita | apk | `/lib/apk/db/installed` |
-| Red Hat / AlmaLinux / Rocky / CentOS / Fedora | rpm | `rpm -qa` |
+| Distribution | Package manager | Source | PURL type |
+|---|---|---|---|
+| Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
+| Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
+| Alpine | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
+| Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpaquita/` |
+| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+
+Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
 > On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
 
@@ -721,9 +881,10 @@ Previous scans are retained as timestamped zipped snapshots (`<ecosystem>_<mode>
 
 The extension runs the same engine as the CLI's `health` mode. These parts of the [`@arcane-spark/ubel-node`](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) package are **not** in the extension:
 
-- The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection
+- The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, conda, cargo, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection (always with install scripts blocked)
 - `ubel-docker` container-image scanning
 - Fixed-configuration CLIs for AI-agent sandboxes and CI/CD (`ubel-agent`, `ubel-cicd`)
+- The git pre-commit hook (`install-hook` / `uninstall-hook`) and the `ubel-secrets` extras: git-history scanning (`--history`), staged-changes scanning (`--staged`), and baselining (`--write-baseline`) — the extension scans the working tree only
 - Persistent policy modes and per-run policy flags (`--threshold`, `--block-kev`, `--epss-threshold`, …) — in the extension, edit `config.json` instead
 - The GitHub Action
 
