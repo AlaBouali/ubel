@@ -68,7 +68,7 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-agent` / `ubel-cicd` / `ubel-platform` | Fixed-configuration scans: AI-agent workspace, built CI/CD workspace, host |
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |
-| `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of one host, combined sweep |
+| `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of the given IPs/domains, combined sweep |
 
 ## Quick start
 

@@ -213,8 +213,8 @@ const MODES = {
     discovery: "Public names under the domain were discovered passively from Certificate Transparency logs (the public record of every HTTPS certificate issued), through crt.sh. A name that never had a logged certificate is not found unless it was added by hand.",
   },
   "ubel-host": {
-    what: "an outside-in check of one network address, covering the network ports in the range scanned",
-    discovery: "Every port in the configured range was tested for a connection, and each open port was then tried with web (HTTP/HTTPS) requests. Only ports that answered as web servers were examined further.",
+    what: "an outside-in check of the hosts it was given (names and/or network addresses), covering the network ports in the range scanned on each address they point to",
+    discovery: "The hosts to examine were supplied directly. Each name was resolved to a network address, every distinct address was port-scanned across the configured range, and each open port was then tried with web (HTTP/HTTPS) requests. Open ports that answered as web servers were examined further, along with the supplied names whose address answered on the standard web ports.",
   },
   "ubel-easm": {
     what: "an outside-in check of a domain's internet-facing footprint: its public names, the addresses they point to, and the network ports open on those addresses",
@@ -230,7 +230,10 @@ function describeScan(report) {
 
 function buildSubject(report) {
   const targets = Array.isArray(report?.targets) ? report.targets : [];
+  const inputHosts = Array.isArray(report?.input_hosts) ? report.input_hosts : [];
   let name = report?.domain || report?.host || null;
+  if (!name && inputHosts.length === 1) name = inputHosts[0];
+  if (!name && inputHosts.length > 1) name = `${inputHosts[0]} and ${inputHosts.length - 1} other ${plural(inputHosts.length - 1, "host")}`;
   if (!name && targets.length === 1) name = stripUserinfo(targets[0]);
   if (!name && targets.length > 1) name = `${stripUserinfo(targets[0])} and ${targets.length - 1} other ${plural(targets.length - 1, "target")}`;
   return {

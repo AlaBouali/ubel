@@ -11,10 +11,11 @@
 > `ubel-domain` does the same, but **discovers its own target list** from
 > Certificate Transparency logs first — meaning it can end up scanning hosts
 > you didn't explicitly name and may not have expected to exist. `ubel-host`
-> goes further: it **connect-scans every port in a range (1-30000 by
-> default) on one host**, probes whatever accepts a connection for HTTP(S),
-> and fingerprints what answers — a live port sweep, not just a passive
-> fingerprint request. `ubel-easm` combines all of it: it discovers a
+> goes further: it resolves **every host you give it** (any number of IPs
+> and/or domains) to its distinct IPs, **connect-scans every port in a range
+> (1-30000 by default) on each**, probes whatever accepts a connection for
+> HTTP(S), and fingerprints what answers — a live port sweep, not just a
+> passive fingerprint request. `ubel-easm` combines all of it: it discovers a
 > domain's subdomains the way `ubel-domain` does, resolves every one of them
 > to an IP, then runs `ubel-host`'s full port sweep against **every distinct
 > IP behind the domain**, and fingerprints the combined result — the most
@@ -72,15 +73,21 @@ near-identical rows repeating the same CVEs. See "Known limitations" for how
 that interacts with multi-id components.
 
 `ubel-host` adds a step *before* fingerprinting instead of before discovery:
-give it one host, and it connect-scans every port in range, probes whatever
+give it one or more hosts (IPs and/or domains), and it resolves them to their
+distinct IPs, connect-scans every port in range on each, probes whatever
 accepts a connection for HTTP(S), and hands only the HTTP(S)-speaking ports
 to the same fingerprint/lookup engine `ubel-url` uses — so you don't have to
-already know which port a target's web app or admin panel lives on.
+already know which port a target's web app or admin panel lives on. The
+hosts are handled exactly the way `ubel-easm` handles the hostnames it gets
+from crt.sh (it is the same code, `lib/ip_scan.js`); only where the list
+comes from differs.
 
 ```
-host  →  connect-scan port range  →  probe open ports for HTTP(S)
-      →  fingerprint every host:port that answered  →  group by name+version
-      →  vulnerability lookup + misconfiguration checks  →  one report
+hosts  →  resolve to distinct IPs  →  connect-scan port range on each IP
+       →  probe open ports for HTTP(S)
+       →  fingerprint every ip:port that answered (+ the names, by name)
+       →  group by name+version  →  vulnerability lookup + misconfiguration
+       →  checks  →  one report
 ```
 
 `ubel-easm` is `ubel-domain`'s discovery and `ubel-host`'s port sweep run
@@ -210,9 +217,9 @@ dependency; if it's answering HTTP requests, it's running.
   crt.sh, then scans all of them in one run; `--list-only` prints the scope
   without touching a single discovered host
 - **Port scanning** (`ubel-host`, `ubel-easm`) — a bounded-concurrency raw
-  TCP connect scan across a port range (1-30000 by default) on one host
-  (`ubel-host`) or on every distinct IP a domain's discovered subdomains
-  resolve to (`ubel-easm`), followed by an HTTP(S) liveness probe of
+  TCP connect scan across a port range (1-30000 by default) on every
+  distinct IP the hosts you give it resolve to (`ubel-host`) or a domain's
+  discovered subdomains resolve to (`ubel-easm`), followed by an HTTP(S) liveness probe of
   whatever accepted a connection, so you don't need to already know which
   port a target's web app lives on; `--list-only` prints the open/HTTP(S)
   port list (or, for `ubel-easm`, the IP grouping) without fingerprinting
@@ -322,9 +329,9 @@ actually never probed.
 For `ubel-host` and `ubel-easm`, the same check runs **one stage earlier**:
 before the port scan even starts (not just before fingerprinting), since a
 full port sweep of an unintended target is a bigger deal than a single
-fingerprint request. `ubel-host` checks the one host it's given directly;
-`ubel-easm` checks every IP it resolves for itself, one entry in the report
-per IP. Neither guard can detect the separate "shared/CDN IP" risk
+fingerprint request. `ubel-host` and `ubel-easm` both check every IP they
+resolve for themselves, one entry in the report per IP (a refused IP is
+reported as `skipped`, never silently dropped). Neither guard can detect the separate "shared/CDN IP" risk
 `ubel-easm` carries — see
 [`ubel-easm`](#ubel-easm--discover-a-domain-resolve-to-ips-port-scan-each-then-fingerprint-everything)
 below.
@@ -405,33 +412,73 @@ discovery and prints the host list without sending a single request to any
 discovered host, so you can confirm the scope (and trim it with
 `--exclude`) before authorizing the real scan.
 
-### `ubel-host` — port-scan one host, then scan whatever answers HTTP(S)
+### `ubel-host` — port-scan one or more hosts, then scan whatever answers HTTP(S)
 
 ```bash
 ubel-host example.com                                   # connect-scan ports 1-30000, fingerprint HTTP(S) ports found
+ubel-host example.com 203.0.113.10 api.example.org      # several hosts at once — IPs and/or domains, one combined report
+ubel-host example.com,203.0.113.10                      # comma-separated works too
+ubel-host --hosts-file hosts.txt                        # one host per line ("#" comments and blank lines ignored)
+ubel-host --hosts-file hosts.txt extra.example.com      # file + arguments combine
+ubel-host a.example.com b.example.com --resolve-only    # resolve + group by distinct IP, print, exit — no port touched
+ubel-host a.example.com b.example.com --exclude b.example.com    # drop a host before it's ever resolved (repeatable)
+ubel-host a.example.com b.example.com --exclude-ip 198.51.100.7  # never port-scan this IP, even if a host resolves to it (repeatable)
 ubel-host example.com --ports 1-1024                    # narrow the scanned range (well-known ports only)
 ubel-host example.com --ports 1-65535                   # the full port space
-ubel-host example.com --list-only                       # print open + HTTP(S) ports and exit — sends nothing further
+ubel-host example.com --list-only                       # port-scan, print open + HTTP(S) ports per IP and exit — fingerprints nothing
 ubel-host 203.0.113.10                                  # a bare IPv4 address works the same as a hostname
 ubel-host staging.internal --allow-private               # a lab/internal host you own
+ubel-host a.example.com b.example.com --subdomain-ports none    # IP:port targets only; don't also fingerprint the names
+ubel-host a.example.com b.example.com --subdomain-ports all     # + every other HTTP(S) port found on a name's IP, by name
+ubel-host a.example.com b.example.com --ip-concurrency 1        # port-scan distinct IPs one at a time (default: 2)
 ubel-host example.com --port-concurrency 200             # slower/gentler connect scan (default: 500)
 ubel-host example.com --port-timeout 3000                 # more patient per-port connect timeout, ms (default: 1500)
 ubel-host example.com --http-concurrency 10               # slower HTTP(S) liveness-probe stage (default: 20)
-ubel-host example.com --concurrency 8                     # fingerprint up to 8 HTTP(S)-speaking ports in parallel
+ubel-host example.com --concurrency 8                     # fingerprint up to 8 HTTP(S)-speaking targets in parallel
 ubel-host example.com --min-severity high --fail-on high
-ubel-host example.com --verbose                           # per-port/per-host progress
+ubel-host example.com --verbose                           # per-host/per-IP/per-port progress
 ubel-host --help
 ```
 
-`<host>` is a single bare hostname or IPv4 address — not a URL, not a
-`host:port` pair; exactly one per run. It shares every scanning/reporting
-flag with `ubel-url` (`--allow-private`, `--concurrency`, `--working-dir`,
-`--min-severity`, `--fail-on`, `--block-kev`, `--epss-threshold`,
-`--no-secrets`, `--verbose`, `--quiet`), plus
-its own discovery-stage flags (`--ports`, `--port-concurrency`,
-`--port-timeout`, `--http-concurrency`, `--http-timeout`).
+Each `<host>` is a bare hostname or IPv4 address — not a URL, not a
+`host:port` pair. Any number may be given (space- or comma-separated, via
+`--hosts-file`, or both); repeats collapse to one. `ubel-host` treats them
+**exactly the way `ubel-easm` treats the hostnames it discovers from
+crt.sh** — both call the same functions in `lib/ip_scan.js`:
 
-Discovery is **active**, two stages, both against the one host:
+1. Each host is DNS-resolved (an IP given directly resolves to itself) and
+   the result is collapsed onto the **distinct IPs** behind them, so two names
+   on one IP port-scan that IP once. A name that never resolves is listed as
+   `dead` in the report and contributes no IP.
+2. Every distinct IP goes through the private/self-IP safety guard and is
+   then port-scanned (below), `--ip-concurrency` IPs at a time.
+3. Every IP's HTTP(S)-speaking ports are merged into **one** target list and
+   fingerprinted, looked up and reported together: `ip:port` for each web port
+   found, plus each given *hostname* fingerprinted **by name** (a bare-IP
+   request carries no Host header or TLS SNI, so it can never see a
+   name-based virtual host) — `https://name` when its IP answered on 443,
+   else `http://name` when it answered on 80. An IP given directly has no
+   name, so it is scanned as `ip:port` only. `--subdomain-ports` controls
+   this exactly as it does for `ubel-easm`.
+
+It shares every scanning/reporting flag with `ubel-url` (`--allow-private`,
+`--concurrency`, `--working-dir`, `--min-severity`, `--fail-on`,
+`--block-kev`, `--epss-threshold`, `--no-secrets`, `--verbose`, `--quiet`),
+plus `ubel-easm`'s own `--exclude`, `--exclude-ip`, `--ip-concurrency` and
+`--subdomain-ports`, and its discovery-stage flags (`--ports`,
+`--port-concurrency`, `--port-timeout`, `--http-concurrency`,
+`--http-timeout`).
+
+> **Shared IPs.** Several of the hosts you give it may resolve to the same
+> IP — your own origin server, or a CDN/load-balancer/shared-hosting IP that
+> is *not* exclusively yours. `ubel-host` only de-duplicates identical IPs;
+> it cannot tell the two apart, and owning a domain does not by itself
+> authorize a port sweep of every IP it points at. Review the grouping with
+> `--resolve-only` first and drop anything you can't authorize with
+> `--exclude` / `--exclude-ip`. Same warning as for
+> [`ubel-easm`](#ubel-easm--discover-a-domain-resolve-to-ips-port-scan-each-then-fingerprint-everything).
+
+Discovery is **active**, two stages, run against every distinct IP:
 
 1. Every port in `--ports` (default `1-30000`, inclusive) is connect-scanned
    in parallel. A port that accepts a TCP connection counts as "open" —
@@ -442,15 +489,22 @@ Discovery is **active**, two stages, both against the one host:
    database, a message queue, ...) are not web servers, and only the
    HTTP(S)-speaking subset is handed to the fingerprinter.
 
-Both lists are recorded in the report: the HTTP(S)-speaking subset becomes
-the usual Targets/assets list (identical shape to a `ubel-url` run), and the
-**full open-port list** is additionally shown in the Scan Info tab so the
-report reflects the whole scanned range, not just the ports that went on to
-be fingerprinted.
+Both lists are recorded in the report, per IP: the HTTP(S)-speaking subset
+becomes the usual Targets/assets list (identical shape to a `ubel-url` run),
+and the **full open-port list** is additionally shown in the Scan Info and
+Scope tabs so the report reflects the whole scanned range, not just the ports
+that went on to be fingerprinted.
 
-Start with `--list-only` on any host you haven't swept before — it runs both
-discovery stages and prints the open-port and HTTP(S)-port lists, then exits
-before a single fingerprinting request is sent.
+Two review checkpoints, in order of how much they touch:
+`--resolve-only` is fully passive (DNS only — no request is sent to any of the
+IPs) and prints the IP grouping, the names that didn't resolve, and any
+dropped by `--exclude-ip`; `--list-only` runs both discovery stages and
+prints each IP's open-port and HTTP(S)-port lists, then exits before a single
+fingerprinting request is sent.
+
+If every resolved IP is refused by the safety guard (or its port scan
+fails), the report still records that, but the run exits `1` — a clean exit
+code would otherwise read as a pass when nothing was examined.
 
 ### `ubel-easm` — discover a domain, resolve to IPs, port-scan each, then fingerprint everything
 
@@ -972,11 +1026,16 @@ payload format is identical across all four; a `ubel-domain` report
 additionally carries `domain` (the root domain queried) and
 `subdomain_endpoint`, with `targets` holding the discovered host list that
 was actually fingerprinted. A `ubel-host` report additionally carries
-`host`, `portRange`, and `openPorts` (the full scanned port list, not just
-the HTTP(S)-speaking subset that became `targets`). A `ubel-easm` report
+`input_hosts` (every host it was asked to scan, after `--exclude`), `hosts`
+and `dead_hostnames` — the same per-IP and unresolved-name records a
+`ubel-easm` report has, built by the same code — and, when exactly one host
+was given, the singular `host`, `port_range` and `open_ports` it has always
+had (the full scanned port list, not just the HTTP(S)-speaking subset that
+became `targets`). A `ubel-easm` report
 additionally carries `domain`, `subdomain_endpoint`, `hosts` (one entry per
 distinct IP resolved and port-scanned — the plural counterpart to
-`ubel-host`'s singular `host`/`portRange`/`openPorts`, each carrying its own
+`ubel-host`'s singular `host`/`portRange`/`openPorts` (which `ubel-host`
+itself now also emits, per IP, in the same shape), each carrying its own
 `resolvedFrom` hostname list, status, port range, and open/HTTP(S) port
 lists), and `deadHostnames` (hostnames that never resolved to an IP).
 

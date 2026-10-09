@@ -14,8 +14,9 @@
 //   3. Connect-scan every port in range on EACH of those distinct IPs and,
 //      of the ports that accept a connection, keep only the ones that
 //      answer HTTP(S) — ./lib/portscan.js's scanPorts() / probeHttpPorts(),
-//      the exact same two functions ./host.js itself uses, just run once
-//      per discovered IP instead of once for a single host given directly.
+//      via ./lib/ip_scan.js, the same code ./host.js uses, run once
+//      per discovered IP (ubel-host now does the same for the hosts it is given —
+//      both call ./lib/ip_scan.js).
 //   4. Fingerprint every "ip:port" target discovered across every scanned
 //      IP AND the discovered subdomains themselves (see "Subdomain
 //      targets" below) in ONE combined pass, look up its technologies against
@@ -59,10 +60,15 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { scanTargets } from './lib/scan.js';
 import { buildReportPayload, USAGE_NOTICE } from './lib/html_report.js';
 import { queryCrtShDetailed, extractSubdomains } from './lib/crtsh.js';
-import { resolveTargets } from './lib/resolve.js';
-import { scanPorts, probeHttpPorts } from './lib/portscan.js';
-import { IpInfo } from './fingerprint/src/index.js';
-import { mapLimit } from '../cloud/lib/concurrency.js';
+import {
+  IPV4_RE,
+  SUBDOMAIN_PORT_MODES,
+  resolveHostsToIps,
+  scanIps,
+  buildTargets,
+  printIpGrouping,
+  buildHostsMeta,
+} from './lib/ip_scan.js';
 import {
   VALID_SEVERITIES,
   parseFailOn,
@@ -108,7 +114,7 @@ Usage:
   are discovered from Certificate Transparency logs via crt.sh (same
   discovery ubel-domain uses), each discovered hostname is resolved to its
   IP address, and every DISTINCT IP found is then port-scanned the way
-  ubel-host port-scans a single host — one connect-scan across the whole
+  ubel-host port-scans a host — one connect-scan across the whole
   range, then an HTTP(S) liveness probe of whatever accepted a connection.
   Every IP's HTTP(S)-speaking ports are merged into one target list and
   fingerprinted, looked up, and reported together in a single run — not one
@@ -273,8 +279,8 @@ and contribute no IP to port-scan.
 
 Safety guard: by default, a resolved IP that is private/RFC1918 or is this
 scanning host's own public IP is refused outright, before a single port is
-probed on it — same guard ubel-host applies to the one host it's given
-directly, applied here to every IP this module resolves for itself.
+probed on it — same guard ubel-host applies to every IP its own hosts resolve to,
+applied here to every IP this module resolves for itself.
 --allow-private disables it — only for an IP you actually own, e.g. a local
 dev/staging box. This guard does NOT and cannot detect the separate "shared/
 CDN IP" risk described above — that one has no automatic detection and is
@@ -297,11 +303,8 @@ authorizing.
 // be passed to crt.sh as-is and silently return nothing useful.
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
-// Same posture as ./host.js's own IPV4_RE, reused here for validating
-// --exclude-ip values up front rather than silently never matching anything.
-const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
-
-const SUBDOMAIN_PORT_MODES = new Set(['none', 'default', 'all']);
+// IPV4_RE (from ./lib/ip_scan.js) validates --exclude-ip values up front
+// rather than letting a typo silently never match anything.
 
 function parseArgs(argv) {
   const args = {
@@ -527,142 +530,13 @@ async function discoverIps(args, log) {
   };
 
   log(`[*] Resolving ${hostnames.length} hostname(s) to IP addresses...`);
-  const { alive, dead, byTarget } = await resolveTargets(hostnames);
+  const { ips, deadHostnames, excludedResolutions } = await resolveHostsToIps(hostnames, { excludeIp: args.excludeIp });
 
-  if (dead.length) {
-    log(`[*] ${dead.length} hostname(s) did not resolve and contribute no IP.`);
+  if (deadHostnames.length) {
+    log(`[*] ${deadHostnames.length} hostname(s) did not resolve and contribute no IP.`);
   }
 
-  const excludedIps = new Set(args.excludeIp);
-  const hostsByIp = new Map(); // ip -> Set<hostname>
-  const excludedResolutions = []; // {hostname, ip} for hostnames that DID resolve but landed on an excluded IP
-
-  for (const hostname of alive) {
-    const resolution = byTarget.get(hostname);
-    const ip = resolution ? resolution.ip : null;
-    if (!ip) continue; // resolveTargets() marked it alive but gave no ip — treat like unresolved
-    if (excludedIps.has(ip)) {
-      excludedResolutions.push({ hostname, ip });
-      continue;
-    }
-    if (!hostsByIp.has(ip)) hostsByIp.set(ip, new Set());
-    hostsByIp.get(ip).add(hostname);
-  }
-
-  const ips = [...hostsByIp.entries()]
-    .map(([ip, hostnameSet]) => ({ ip, hostnames: [...hostnameSet].sort() }))
-    .sort((a, b) => a.ip.localeCompare(b.ip));
-
-  return { discovered, hostnames, deadHostnames: dead, excludedResolutions, ips, crtsh };
-}
-
-/**
- * Same private/self-IP check ./host.js's own isBlockedHost() applies —
- * reused verbatim here except that the IP is already in hand (resolved in
- * discoverIps() above), so there's no need for DomainInfo.getIpFromDomain.
- */
-async function isBlockedIp(ip) {
-  return IpInfo.ipIsPrivate(ip) || IpInfo.isLocalAddress(ip);
-}
-
-/**
- * Step 3 of the flow, for ONE distinct IP: the private/self-IP guard, then
- * the same scanPorts()/probeHttpPorts() pair ./host.js itself calls.
- * Never throws — an error here becomes a "error" status entry so one bad
- * IP can't abort the whole run, same contract ./lib/scan.js's own
- * fingerprintTarget() holds itself to.
- *
- * @param {{ip: string, hostnames: string[]}} ipEntry
- * @param {object} args
- * @param {(msg:string)=>void} log
- */
-async function scanIpPorts(ipEntry, args, log) {
-  const { ip, hostnames } = ipEntry;
-  const entry = {
-    ip,
-    hostnames,
-    status: 'scanned', // "scanned" | "skipped" | "error"
-    detail: null,
-    openPorts: [],
-    httpPorts: [],
-  };
-
-  if (!args.allowPrivate && (await isBlockedIp(ip))) {
-    entry.status = 'skipped';
-    entry.detail =
-      'private/RFC1918 address or this scanning host\'s own public IP — refused by the same safety guard ' +
-      'every other UBEL EASM module uses (pass --allow-private only for a lab/localhost IP you own)';
-    return entry;
-  }
-
-  entry.openPorts = await scanPorts(ip, { from: args.portFrom, to: args.portTo }, {
-    concurrency: args.portConcurrency,
-    timeout: args.portTimeout,
-    log,
-  });
-
-  entry.httpPorts = await probeHttpPorts(ip, entry.openPorts, {
-    concurrency: args.httpConcurrency,
-    timeout: args.httpTimeout,
-    log,
-  });
-
-  return entry;
-}
-
-/**
- * Step 4's target list: what to hand scanTargets() once every IP has been
- * port-scanned.
- *
- *   ipTargets       "ip:port" for every HTTP(S)-speaking port found — what
- *                   this module has always scanned.
- *   hostnameTargets the discovered subdomains themselves, so name-based
- *                   virtual hosts (invisible to a bare-IP request) get
- *                   fingerprinted, looked up and misconfig-checked as their
- *                   real site. Built ONLY from ports the port scan already
- *                   proved answer HTTP(S) on the subdomain's own IP:
- *                     - 443 open -> the bare hostname. scanTargets() tries
- *                       https first, so this is https://sub.example.com.
- *                     - only 80 open -> "http://<hostname>", explicitly: the
- *                       fingerprinter's https-first probe would otherwise
- *                       wait out a full connect timeout on a 443 we already
- *                       know isn't listening.
- *                     - neither (port range excluded them, or nothing web
- *                       there) -> no bare-hostname target.
- *                   With mode "all", every other web port also yields
- *                   "<hostname>:<port>".
- *
- * IPs whose status isn't "scanned" (private/self-IP guard, errors) yield
- * nothing — their subdomains are not scanned by name either, so the guard
- * can't be sidestepped through a hostname.
- *
- * @param {{ip: string, hostnames: string[], status: string, httpPorts: number[]}[]} hostScans
- * @param {'none'|'default'|'all'} mode
- * @returns {{ipTargets: string[], hostnameTargets: string[]}}
- */
-function buildTargets(hostScans, mode = 'default') {
-  const ipTargets = new Set();
-  const hostnameTargets = new Set();
-
-  for (const h of hostScans) {
-    if (h.status !== 'scanned') continue;
-    for (const p of h.httpPorts) ipTargets.add(`${h.ip}:${p}`);
-    if (mode === 'none') continue;
-
-    const has443 = h.httpPorts.includes(443);
-    const has80 = h.httpPorts.includes(80);
-    for (const hostname of h.hostnames) {
-      if (has443) hostnameTargets.add(hostname);
-      else if (has80) hostnameTargets.add(`http://${hostname}`);
-      if (mode === 'all') {
-        for (const p of h.httpPorts) {
-          if (p !== 80 && p !== 443) hostnameTargets.add(`${hostname}:${p}`);
-        }
-      }
-    }
-  }
-
-  return { ipTargets: [...ipTargets], hostnameTargets: [...hostnameTargets] };
+  return { discovered, hostnames, deadHostnames, excludedResolutions, ips, crtsh };
 }
 
 async function main() {
@@ -694,19 +568,7 @@ async function main() {
   // the "actual scan" this module gates is a full port sweep, not just a
   // single fingerprint request.
   if (args.listOnly) {
-    console.log(`\n${discovery.ips.length} distinct IP(s) for ${args.domain}:\n`);
-    for (const { ip, hostnames } of discovery.ips) {
-      console.log(`  ${ip}  (${hostnames.join(', ')})`);
-    }
-    if (discovery.deadHostnames.length) {
-      console.log(`\n${discovery.deadHostnames.length} hostname(s) did not resolve:`);
-      for (const r of discovery.deadHostnames) console.log(`  ${r.target}`);
-    }
-    if (discovery.excludedResolutions.length) {
-      console.log(`\n${discovery.excludedResolutions.length} hostname(s) resolved to an --exclude-ip address and were dropped:`);
-      for (const r of discovery.excludedResolutions) console.log(`  ${r.hostname} -> ${r.ip}`);
-    }
-    console.log('');
+    printIpGrouping(args.domain, discovery);
     process.exitCode = 0;
     return;
   }
@@ -720,21 +582,7 @@ async function main() {
     );
   }
 
-  const ipResults = await mapLimit(discovery.ips, args.ipConcurrency, (ipEntry) =>
-    scanIpPorts(ipEntry, args, log)
-  );
-  const hostScans = ipResults.map((r, i) =>
-    r.ok
-      ? r.value
-      : {
-          ip: discovery.ips[i].ip,
-          hostnames: discovery.ips[i].hostnames,
-          status: 'error',
-          detail: r.error?.message || String(r.error),
-          openPorts: [],
-          httpPorts: [],
-        }
-  );
+  const hostScans = await scanIps(discovery.ips, args, log);
 
   // The collective merge: every IP's HTTP(S)-speaking ports become one
   // flat target list, deduplicated, so the fingerprinting/OSV/NVD/
@@ -787,16 +635,7 @@ async function main() {
     // Per-IP port-scan detail — the plural counterpart to ubel-host's own
     // singular host/portRange/openPorts meta fields, one entry per distinct
     // IP this run resolved and (attempted to) port-scan.
-    hosts: hostScans.map((h) => ({
-      host: h.ip,
-      resolvedFrom: h.hostnames,
-      status: h.status,
-      skipReason: h.detail,
-      portRange: `${args.portFrom}-${args.portTo}`,
-      openPorts: h.openPorts,
-      httpPorts: h.httpPorts,
-    })),
-    deadHostnames: discovery.deadHostnames.map((r) => ({ hostname: r.target, error: r.error })),
+    ...buildHostsMeta(hostScans, discovery.deadHostnames, args),
     allowPrivate: args.allowPrivate,
     // Deliberately not the cookie value or header values themselves - those can be
     // session tokens/API keys and have no business landing in a written report.

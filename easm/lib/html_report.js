@@ -516,22 +516,27 @@ export function buildScope({
  *   root domain crt.sh was queried for; `targets` is the resulting
  *   discovered-subdomain list that was actually fingerprinted
  * @param {string} [meta.subdomainEndpoint]  crt.sh endpoint used, when meta.domain is set
- * @param {string} [meta.host]             set only for ubel-host runs — the
- *   host that was port-scanned; `targets` is the resulting HTTP(S)-speaking
- *   "host:port" list that was actually fingerprinted
+ * @param {string} [meta.host]             set only for ubel-host runs given exactly ONE
+ *   host — the host that was port-scanned; `targets` is the resulting
+ *   HTTP(S)-speaking list that was actually fingerprinted. A multi-host
+ *   ubel-host run leaves this null and is described by meta.inputHosts and
+ *   meta.hosts instead.
+ * @param {string[]} [meta.inputHosts]     set only for ubel-host runs — every host
+ *   (hostname or IP) the run was asked to scan, after --exclude
  * @param {string} [meta.portRange]        "<from>-<to>" port range scanned, when meta.host is set
  * @param {number[]} [meta.openPorts]      every port that accepted a TCP connection on meta.host,
  *   independent of whether it went on to answer HTTP(S) — the fuller scanned
  *   scope, vs. `targets` which is only the fingerprinted subset
- * @param {object[]} [meta.hosts]          set only for ubel-easm runs — the plural,
+ * @param {object[]} [meta.hosts]          set for ubel-easm and ubel-host runs — the plural,
  *   per-IP counterpart to meta.host/portRange/openPorts above: one entry per
- *   distinct IP resolved from the scanned domain's subdomains, each shaped
+ *   distinct IP resolved from the scanned domain's subdomains (ubel-easm) or
+ *   from the given hosts (ubel-host), each shaped
  *   {host, resolvedFrom, status, skipReason, portRange, openPorts, httpPorts}.
  *   `targets` is still the merged "ip:port" list across every entry here that
  *   was actually fingerprinted, same relationship meta.host/openPorts has to
  *   `targets` in a single-host ubel-host run.
- * @param {object[]} [meta.deadHostnames]  set only for ubel-easm runs — hostnames
- *   discovered/included that never resolved to an IP, shaped {hostname, error}
+ * @param {object[]} [meta.deadHostnames]  set for ubel-easm and ubel-host runs — hostnames
+ *   discovered/included/given that never resolved to an IP, shaped {hostname, error}
  */
 export function buildReportPayload(scanResult, meta = {}) {
   const { assets, inventory, vulnerabilities, resolution, secrets, misconfigurations } = scanResult;
@@ -591,6 +596,7 @@ export function buildReportPayload(scanResult, meta = {}) {
       }))
     : [];
   const deadHostnames = Array.isArray(meta.deadHostnames) ? meta.deadHostnames : [];
+  const inputHosts = Array.isArray(meta.inputHosts) ? meta.inputHosts : [];
 
   const payload = {
     generated_at: meta.generated_at || new Date().toISOString(),
@@ -617,7 +623,8 @@ export function buildReportPayload(scanResult, meta = {}) {
     domain: meta.domain || null,
     subdomain_endpoint: meta.domain ? meta.subdomainEndpoint || null : null,
     host: meta.host || null,
-    port_range: meta.host ? meta.portRange || null : null,
+    input_hosts: inputHosts.length ? inputHosts : null,
+    port_range: meta.host || inputHosts.length ? meta.portRange || null : null,
     open_ports: meta.host ? meta.openPorts || [] : [],
     hosts,
     dead_hostnames: deadHostnames,
@@ -1224,7 +1231,7 @@ export async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">WPVulnerability endpoint</span><span class="mono text-xs" id="sys-wpvuln-endpoint">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Domain (ubel-domain / ubel-easm)</span><span class="mono text-xs" id="sys-domain">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Subdomain source</span><span class="mono text-xs" id="sys-crtsh-endpoint">—</span></div>
-            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Host (ubel-host only)</span><span class="mono text-xs" id="sys-host">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Host(s) (ubel-host only)</span><span class="mono text-xs" id="sys-host">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Port range scanned</span><span class="mono text-xs" id="sys-port-range">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2 items-start"><span class="text-neutral-500 text-xs pt-0.5">Open ports</span><span class="mono text-xs text-right max-w-[65%] break-words" id="sys-open-ports">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Platform</span><span class="mono text-xs" id="sys-platform">—</span></div>
@@ -1240,7 +1247,7 @@ export async function generateHtmlReport(reportPayload) {
       </div>
 
       <div class="glass p-6 rounded-xl space-y-3">
-        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Resolved IPs &amp; Port Scans (ubel-easm only)</h3>
+        <h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Resolved IPs &amp; Port Scans (ubel-easm / ubel-host)</h3>
         <div id="sys-host-scans" class="text-xs grid grid-cols-1 md:grid-cols-2 gap-2">—</div>
       </div>
     </section>
@@ -2543,11 +2550,12 @@ function renderScanInfo() {
   document.getElementById('sys-wpvuln-endpoint').textContent = reportData.wpvulnerability_endpoint || 'https://www.wpvulnerability.net (default)';
   document.getElementById('sys-domain').textContent = reportData.domain || 'n/a (not a domain scan)';
   document.getElementById('sys-crtsh-endpoint').textContent = reportData.domain ? (reportData.subdomain_endpoint || 'https://crt.sh (default)') : '—';
-  document.getElementById('sys-host').textContent = reportData.host || 'n/a (not a host scan)';
-  document.getElementById('sys-port-range').textContent = reportData.host ? (reportData.port_range || '—') : '—';
+  const inputHosts = reportData.input_hosts || [];
+  document.getElementById('sys-host').textContent = reportData.host || (inputHosts.length ? inputHosts.join(', ') : 'n/a (not a host scan)');
+  document.getElementById('sys-port-range').textContent = (reportData.host || inputHosts.length) ? (reportData.port_range || '—') : '—';
   document.getElementById('sys-open-ports').textContent = reportData.host
     ? ((reportData.open_ports || []).length ? reportData.open_ports.join(', ') : 'none found')
-    : '—';
+    : (inputHosts.length ? 'see per-IP port scans below' : '—');
   document.getElementById('sys-platform').textContent = reportData.platform || '—';
   document.getElementById('sys-arch').textContent = reportData.arch || '—';
   document.getElementById('sys-node').textContent = reportData.runtime_version || '—';
