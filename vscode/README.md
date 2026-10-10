@@ -31,7 +31,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, live Stripe restricted keys, URL-embedded git credentials, database connection strings with embedded passwords, and more). Findings can be suppressed with a `.ubelignore` file or inline `ubel:ignore` markers (see [Suppressing findings](#suppressing-findings)). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
 - Dependency graph with introduced-by and parent tracking (Swift and Flutter/Dart lockfiles don't record a dependency graph, so those packages have no edges)
-- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of each scan's reports is saved too
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` — the tag (`sca`, `secrets` or `licenses`) says which command produced the file (e.g. `latest.sca.json`, `latest.secrets.html`, `latest.licenses.sarif.json`), plus `latest.<tag>.*` convenience links. For historic tracking, a zipped snapshot of each scan's reports is saved too
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -104,7 +104,7 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 **Report location**
 
 ```
-<project-root>/.ubel/reports/latest.*
+<project-root>/.ubel/reports/latest.sca.*
 ```
 
 ---
@@ -116,15 +116,15 @@ Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codiu
 **Report location**
 
 ```
-~/.vscode/extensions/.ubel/reports/latest.*
+~/.vscode/extensions/.ubel/reports/latest.sca.*
 ```
 or
 ```
-~/.vscode-oss/extensions/.ubel/reports/latest.*
+~/.vscode-oss/extensions/.ubel/reports/latest.sca.*
 ```
 or
 ```
-~/.cursor/extensions/.ubel/reports/latest.*
+~/.cursor/extensions/.ubel/reports/latest.sca.*
 ```
 
 ---
@@ -168,10 +168,10 @@ Each package entry includes its binary install paths and direct dependency edges
 
 **Report location**
 
-The report is always written to `~/.ubel/reports/latest.*`, independent of any open workspace.
+The report is always written to `~/.ubel/reports/latest.sca.*`, independent of any open workspace.
 
 ```
-~/.ubel/reports/latest.*
+~/.ubel/reports/latest.sca.*
 ```
 
 ---
@@ -210,10 +210,10 @@ In the other report formats, secrets are exposed as a `ubel:secrets` entry in th
 **Report location**
 
 ```
-<project-root>/.ubel/reports/latest.*
+<project-root>/.ubel/reports/latest.secrets.*
 ```
 
-> This is the same path **UBEL: Scan Project** writes to. Running one after the other overwrites `latest.*` with whichever ran most recently — the timestamped copy under `.ubel/local/reports/.../<date>/` from the earlier run is retained, but `latest.*` always reflects the most recent scan of either kind.
+> **UBEL: Scan Project** (which also runs the secrets pass) writes `latest.sca.*`, while this command writes its own `latest.secrets.*`, so the two never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/secrets/`.
 
 ### What gets scanned
 
@@ -263,10 +263,10 @@ See [License Compliance](#license-compliance) below for how licenses are normali
 **Report location**
 
 ```
-<project-root>/.ubel/reports/latest.*
+<project-root>/.ubel/reports/latest.licenses.*
 ```
 
-> This is the same path **UBEL: Scan Project** and **UBEL: Scan project for Exposed Secrets** write to. Running any of the three overwrites `latest.*` with whichever ran most recently — the timestamped copy under `.ubel/local/reports/.../<date>/` from the earlier run is retained, but `latest.*` always reflects the most recent scan.
+> **UBEL: Scan Project** writes `latest.sca.*`, **UBEL: Scan project for Exposed Secrets** writes `latest.secrets.*`, and this command writes `latest.licenses.*` — the three never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/licenses/`.
 
 ---
 
@@ -850,30 +850,38 @@ Each package entry includes its binary install paths and direct dependency edges
 
 ## Reports
 
-Every scan writes a self-contained interactive **HTML** report plus machine-readable **JSON**, **SBOM**, and **SARIF** files:
+Every scan writes a self-contained interactive **HTML** report plus machine-readable **JSON**, **SBOM**, and **SARIF** files. A scan-type **tag** sits between the file name and the extension (`<file_name>.<tag>.<extension>`), so each command keeps its own set of files:
 
-| File | Format | Notes |
+| Command | `<tag>` |
+|---|---|
+| Scan Project / Scan VS Code Extensions / Scan Host Platform | `sca` |
+| Scan project for Exposed Secrets | `secrets` |
+| Scan project for License Compliance | `licenses` |
+
+| File (SCA scans shown) | Format | Notes |
 |---|---|---|
-| `latest.html` | Self-contained HTML | Works fully offline, no server needed |
-| `latest.json` | JSON | Full report, including the executive summary, suggested fixes, reachability, KEV/EPSS, and compliance data |
-| `latest.cdx.json` | CycloneDX v1.6 SBOM | Components, dependency graph, and vulnerabilities as VEX; secrets, license, KEV/EPSS, and suggested-fix data in `properties` |
-| `latest.sarif.json` | SARIF 2.1.0 | Separate runs for dependency vulnerabilities, secrets, and license compliance |
+| `latest.sca.html` | Self-contained HTML | Works fully offline, no server needed |
+| `latest.sca.json` | JSON | Full report, including the executive summary, suggested fixes, reachability, KEV/EPSS, and compliance data |
+| `latest.sca.cdx.json` | CycloneDX v1.6 SBOM | Components, dependency graph, and vulnerabilities as VEX; secrets, license, KEV/EPSS, and suggested-fix data in `properties` |
+| `latest.sca.sarif.json` | SARIF 2.1.0 | Separate runs for dependency vulnerabilities, secrets, and license compliance |
+
+For the other two commands, swap the tag: `latest.secrets.html`, `latest.licenses.json`, and so on. **Open Report** in each notification opens that command's own `latest.<tag>.html`.
 
 | Scan target | Report path |
 |---|---|
-| Workspace | `<project-root>/.ubel/reports/latest*` |
-| Secrets-only scan | `<project-root>/.ubel/reports/latest*` — same path as Workspace, see the note in [Scan for Exposed Secrets](#scan-for-exposed-secrets-ctrlalts) |
-| License-only scan | `<project-root>/.ubel/reports/latest*` — same path as Workspace, see the note in [Scan for License Compliance](#scan-for-license-compliance-ctrlaltl) |
-| VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest*` or `~/.vscode-oss/extensions/.ubel/reports/latest*` or `~/.cursor/extensions/.ubel/reports/latest*` |
-| Host platform | `~/.ubel/reports/latest*` |
+| Workspace | `<project-root>/.ubel/reports/latest.sca.*` |
+| Secrets-only scan | `<project-root>/.ubel/reports/latest.secrets.*` |
+| License-only scan | `<project-root>/.ubel/reports/latest.licenses.*` |
+| VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.sca.*` or `~/.cursor/extensions/.ubel/reports/latest.sca.*` |
+| Host platform | `~/.ubel/reports/latest.sca.*` |
 
-Previous scans are retained as timestamped zipped snapshots (`<ecosystem>_<mode>_<engine>__<timestamp>.zip`) under:
+Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, `report.<tag>.cdx.json`, `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
-- `<project-root>/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.vscode/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.vscode-oss/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.cursor/extensions/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
-- `~/.ubel/local/reports/npm/health/<year>/<month>/<day>/`
+- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform
+- `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
+- `~/.ubel/history/licenses/` — Scan project for License Compliance
+
+All projects and commands share this one folder, so a zip doesn't record which project it came from — open its `report.<tag>.json` to see. If two scans finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
 
 ---
 

@@ -238,7 +238,7 @@ dependency; if it's answering HTTP requests, it's running.
   (see [Vulnerability data sources](#vulnerability-data-sources))
 - **Compliance framework mapping**, same shared engine as every other module
 - Automatic report generation: timestamped **JSON** + interactive **HTML**,
-  plus `latest.*` convenience copies
+  plus `latest.<mode>.*` convenience copies (`latest.url.*`, `latest.domain.*`, `latest.host.*`, `latest.easm.*`)
 - `--fail-on` severity/count gate (vulnerabilities, infections and web
   misconfigurations) — same syntax as `ubel-cloud` — for CI use
 - **Exploit intelligence** — every vulnerability is checked against the
@@ -980,59 +980,63 @@ sent to FIRST's API.
 
 All four CLIs follow the same reporting flow the SAST/malware scanners use:
 the per-run timestamped copies are bundled into a **single `.zip`**, while
-the always-current `latest.*` copies stay plain and unzipped so anything
+the always-current `latest.<mode>.*` copies stay plain and unzipped so anything
 watching them (a CI step, a dashboard, a browser tab left open on
-`latest.*.html`) needs no unpacking step. Each of the four writes to its own
-report family, named after the string each entry point passes to
-`writeEasmReports()` in `lib/report_output.js` — which replaces the first
-`-` in that string with `_` before building any path, so despite the
-hyphenated labels used throughout this document and each CLI's own source
-comments (`easm-url`, `easm-domain`, `easm-host`, `easm-full`), what
-actually lands on disk uses an **underscore**:
+`latest.<mode>.html`) needs no unpacking step.
 
-`ubel-url` writes:
+Files follow the shared `<file_name>.<tag>.<extension>` scheme. The tag is the
+CLI's own mode — `url`, `domain`, `host` or `easm` — and the file name is
+`latest` for the always-current copies, a `YYYY_MM_DD__HH_MM_SS` (UTC)
+timestamp for the zip, and `report` for the files inside the zip.
 
-```
-.ubel/reports/latest.easm_url.json     ← always current, unzipped
-.ubel/reports/latest.easm_url.html     ← always current, unzipped
+The zips of all four go to the shared `$HOME/.ubel/history/<mode>/` folder
+(`url`, `domain`, `host`, `easm`) that every UBEL scanner uses, so they don't
+record which target they came from — open `report.<mode>.json` (`targets`,
+`input_hosts`, `domain`) to find out. A second run in the same second gets a
+`_2` suffix instead of overwriting the first.
 
-.ubel/local/reports/easm_url/<YYYY>/<MM>/<DD>/
-    easm_url__<timestamp>.zip          ← contains report.json + report.html
-```
-
-`ubel-domain` writes the same, under its own `easm_domain` name:
+`ubel-url` writes (tag `url`):
 
 ```
-.ubel/reports/latest.easm_domain.json
-.ubel/reports/latest.easm_domain.html
+.ubel/reports/latest.url.json          ← always current, unzipped
+.ubel/reports/latest.url.html          ← always current, unzipped
 
-.ubel/local/reports/easm_domain/<YYYY>/<MM>/<DD>/
-    easm_domain__<timestamp>.zip
+$HOME/.ubel/history/url/
+    <timestamp>.url.zip                ← contains report.url.json + report.url.html
 ```
 
-`ubel-host` writes under `easm_host`:
+`ubel-domain` writes the same (tag `domain`):
 
 ```
-.ubel/reports/latest.easm_host.json
-.ubel/reports/latest.easm_host.html
+.ubel/reports/latest.domain.json
+.ubel/reports/latest.domain.html
 
-.ubel/local/reports/easm_host/<YYYY>/<MM>/<DD>/
-    easm_host__<timestamp>.zip
+$HOME/.ubel/history/domain/
+    <timestamp>.domain.zip             ← report.domain.json + report.domain.html
 ```
 
-`ubel-easm` writes under `easm_full` — not `easm_easm`: every sibling entry
-point names its report family `easm_<word>` using a word that isn't the
-module's own binary name, and `ubel-easm` keeps that convention instead of
-doubling "easm", while still starting with `easm_` so all four report
-families sort and namespace together on disk:
+`ubel-host` writes (tag `host`):
 
 ```
-.ubel/reports/latest.easm_full.json
-.ubel/reports/latest.easm_full.html
+.ubel/reports/latest.host.json
+.ubel/reports/latest.host.html
 
-.ubel/local/reports/easm_full/<YYYY>/<MM>/<DD>/
-    easm_full__<timestamp>.zip
+$HOME/.ubel/history/host/
+    <timestamp>.host.zip               ← report.host.json + report.host.html
 ```
+
+`ubel-easm` writes (tag `easm`):
+
+```
+.ubel/reports/latest.easm.json
+.ubel/reports/latest.easm.html
+
+$HOME/.ubel/history/easm/
+    <timestamp>.easm.zip               ← report.easm.json + report.easm.html
+```
+
+(Earlier versions wrote `latest.easm_url.json`, `<project>/.ubel/local/reports/easm_url/<date>/easm_url__<timestamp>.zip`,
+and untagged `report.json` / `report.html` inside; old files are left untouched.)
 
 They're kept separate so a domain-wide sweep, a port sweep, or a combined
 run never overwrites another entry point's `latest` pointer — the four

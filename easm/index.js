@@ -101,10 +101,10 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm_url__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm_url/<year>/<month>/<day>/,
-plus fixed, unzipped "latest" copies at .ubel/reports/latest.easm_url.json and
-.ubel/reports/latest.easm_url.html — same bundling flow the SAST/malware
+Every run writes a timestamped <ts>.url.zip bundle (report.url.json +
+report.url.html inside) under $HOME/.ubel/history/url/,
+plus fixed, unzipped "latest" copies at .ubel/reports/latest.url.json and
+.ubel/reports/latest.url.html — same bundling flow the SAST/malware
 scanners use. JSON and HTML are the only output formats — no SBOM, no SARIF
 (see README). Both carry a plain-language Executive Summary (overall risk,
 key findings, suggested actions and the methodology used) written for

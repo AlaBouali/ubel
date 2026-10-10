@@ -14,6 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -3610,22 +3611,11 @@ export class UbelEngineInstance {
     }
     
 
+    // The timestamped zip is named <timestamp>.<tag>.zip and lands in
+    // $HOME/.ubel/history/<mode>/ (see report_naming.js) — it is created at
+    // write time, once the scan has actually produced reports.
     const now       = new Date();
-    const pad       = (n) => String(n).padStart(2, "0");
-    const timestamp = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}__`
-                    + `${pad(now.getUTCHours())}_${pad(now.getUTCMinutes())}_${pad(now.getUTCSeconds())}`;
-    const datePath  = `${now.getUTCFullYear()}/${pad(now.getUTCMonth()+1)}/${pad(now.getUTCDate())}`;
-
-    const outputDir = path.join(
-      this.reportsLocation,
-      this.systemType,
-      this.checkMode,
-      datePath
-    );
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    const baseName = `${this.systemType}_${this.checkMode}_${this.engine}__${timestamp}`;
-    const jsonPath = path.join(outputDir, `${encodeURIComponent(baseName)}.json`);
+    const timestamp = reportTimestamp(now);
 
     const policy     = this.loadPolicy();
     let purls        = [];
@@ -4223,7 +4213,19 @@ export class UbelEngineInstance {
         console.log();
       }
 
-      // ── latest.{json,html} — always points to the most recent scan ─────────
+      // ── latest.<tag>.{json,html,cdx.json,sarif.json} ───────────────────────
+      // Always points to the most recent scan OF THAT TYPE: the tag is
+      //   sca            health scan
+      //   sca_<engine>   firewall (check / install): sca_npm, sca_pip, sca_apt, …
+      //   licenses       ubel-license
+      //   secrets        ubel-secrets
+      // so a license or secrets run no longer overwrites the SCA report.
+      const reportTag = scaReportTag({
+        checkMode: this.checkMode,
+        engine:    this.engine,
+        scanScope: options.scan_scope,
+      });
+      //
       // Derived from reportsLocation's own root (".../.ubel/local/reports" →
       // ".../.ubel/reports") rather than hardcoded to projectRoot, so that
       // ubel-apt/ubel-dnf/ubel-yum — which redirect reportsLocation to
@@ -4232,8 +4234,8 @@ export class UbelEngineInstance {
       // applied to this convenience path too, not just the timestamped one.
       const ubelRoot        = path.dirname(path.dirname(this.reportsLocation));
       const latestDir       = path.join(ubelRoot, "reports");
-      const latestPath      = path.join(latestDir, "latest.json");
-      const latestHtmlPath  = path.join(latestDir, "latest.html");
+      const latestPath      = path.join(latestDir, reportFileName("latest", reportTag, "json"));
+      const latestHtmlPath  = path.join(latestDir, reportFileName("latest", reportTag, "html"));
       fs.mkdirSync(latestDir, { recursive: true });
       fs.writeFileSync(latestHtmlPath, htmlReport);
       fs.writeFileSync(latestPath, jsonReportString);
@@ -4248,23 +4250,29 @@ export class UbelEngineInstance {
       const sbomString  = safeJsonString(sbomData, 1000);
       const sarifString = safeJsonString(sarifData, 1000);
 
-      const latestSbom  = path.join(latestDir, "latest.cdx.json");
-      const latestSarif = path.join(latestDir, "latest.sarif.json");
+      const latestSbom  = path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"));
+      const latestSarif = path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"));
       fs.writeFileSync(latestSbom, sbomString);
       fs.writeFileSync(latestSarif, sarifString);
 
       // ── Timestamped bundle ──────────────────────────────────────────────────
       // json/html/sbom/sarif used to be written out as four separate files
-      // per scan alongside each other under outputDir; they're now bundled
-      // into a single baseName.zip to cut down on file count and storage as
-      // reports accumulate over time. The "latest" copies above are
-      // intentionally left as plain files, unzipped.
-      const zipPath = jsonPath.replace(/\.json$/, ".zip");
+      // per scan alongside each other; they're now bundled into a single
+      // <timestamp>.<tag>.zip under $HOME/.ubel/history/<mode>/ to cut down on
+      // file count and storage as reports accumulate over time. <mode> is
+      // sca | firewall | os | licenses | secrets. Inside, every entry is named
+      // "report" (report.<tag>.json, …) regardless of timestamp. The "latest"
+      // copies above are intentionally left as plain files, unzipped.
+      const zipPath = historyZipPath(
+        scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope }),
+        timestamp,
+        reportTag,
+      );
       fs.writeFileSync(zipPath, buildZip([
-        { name: "report.json",       data: jsonReportString },
-        { name: "report.html",       data: htmlReport },
-        { name: "sbom.cdx.json",     data: sbomString },
-        { name: "report.sarif.json", data: sarifString },
+        { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
+        { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
+        { name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString },
+        { name: reportFileName("report", reportTag, "sarif.json"), data: sarifString },
       ]));
 
       if (!is_script) {

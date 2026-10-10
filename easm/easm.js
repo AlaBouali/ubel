@@ -277,10 +277,10 @@ Options:
   --quiet                     Suppress the console summary (reports still write).
   --help, -h                  Show this help.
 
-Every run writes a timestamped easm_full__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm_full/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm_full.json and
-.html — kept separate from ubel-url's, ubel-domain's, and ubel-host's own
+Every run writes a timestamped <ts>.easm.zip bundle (report.easm.json +
+report.easm.html inside) under $HOME/.ubel/history/easm/, plus
+fixed, unzipped "latest" copies at .ubel/reports/latest.easm.json and
+latest.easm.html — kept separate from ubel-url's, ubel-domain's, and ubel-host's own
 reports so none of the four ever overwrites another's latest pointer. Both
 include a plain-language Executive Summary for non-technical readers (the
 tab after Dashboard in the HTML).
@@ -647,7 +647,7 @@ async function main() {
   // easm-url) using a word that isn't the module's own name; this keeps
   // that same convention instead of doubling "easm" here, while still
   // starting with "easm-" so all four report families sort and namespace
-  // together under .ubel/local/reports/ and .ubel/reports/latest.*.
+  // together (history folder easm, latest copies .ubel/reports/latest.easm.*).
   await writeEasmReports(reportPayload, args, { reportType: 'easm-full', cliLabel: '[ubel-easm]' });
 
   process.exitCode = failOnExitCode(scanResult.vulnerabilities, args.failOn, { blockKev: args.blockKev, epssThreshold: args.epssThreshold, misconfigurations: scanResult.misconfigurations?.findings });

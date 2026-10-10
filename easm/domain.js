@@ -137,10 +137,10 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm_domain__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm_domain/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm_domain.json and
-.html — same bundling flow the SAST/malware scanners use. These are kept
+Every run writes a timestamped <ts>.domain.zip bundle (report.domain.json +
+report.domain.html inside) under $HOME/.ubel/history/domain/,
+plus fixed, unzipped "latest" copies at .ubel/reports/latest.domain.json and
+latest.domain.html — same bundling flow the SAST/malware scanners use. These are kept
 separate from ubel-url's own easm_url reports so a domain-wide sweep never
 overwrites a targeted scan's latest pointer, or vice versa. Both include a
 plain-language Executive Summary for non-technical readers (the tab after

@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
+import { reportTimestamp, reportFileName, historyZipPath } from "../../sca/report_naming.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
@@ -134,11 +135,12 @@ export async function collectScanMetadata(opts = {}) {
  * scanners use (see writeAnalyzeReports in sast/main.js):
  *
  *   - the timestamped per-run copies are bundled into ONE .zip under
- *     .ubel/local/reports/<reportType>/<date>/ rather than written out as
- *     loose files, to keep file count and storage down as runs accumulate
+ *     $HOME/.ubel/history/<mode>/ (mode = url | domain | host | easm)
+ *     rather than written out as loose files, to keep file count and
+ *     storage down as runs accumulate
  *   - the always-current "latest" copies under .ubel/reports/ stay as
  *     plain, unzipped files, so anything watching them (a CI step, a
- *     dashboard, a browser tab on latest.*.html) needs no unpacking step
+ *     dashboard, a browser tab on latest.<mode>.html) needs no unpacking step
  *   - each piece only makes it into the bundle if it generated
  *     successfully; a failed HTML render warns and still leaves a complete
  *     JSON report behind rather than losing the whole run
@@ -150,47 +152,44 @@ export async function collectScanMetadata(opts = {}) {
  * @param {{workingDir?: string}} opts
  * @param {{reportType: string, cliLabel: string}} labels  e.g.
  *   {reportType: "easm-url", cliLabel: "[ubel-url]"} or
- *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}. Hyphens in
- *   reportType become underscores on disk, so these write to
- *   .ubel/local/reports/easm_url/... and .ubel/reports/latest.easm_url.*
- *   (and easm_domain, easm_host, easm_full for the other entry points).
+ *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}. The mode is
+ *   reportType without its "easm-" prefix ("easm-full" -> "easm"), so these
+ *   write to $HOME/.ubel/history/url/<timestamp>.url.zip and
+ *   <project>/.ubel/reports/latest.url.* (and domain, host, easm for the
+ *   other entry points).
  */
 export async function writeEasmReports(reportPayload, opts, { reportType, cliLabel }) {
-  // Every hyphen, not just the first: "easm-url" -> "easm_url" is what lands on
-  // disk (see the README's Reports section), and a future label with two
-  // hyphens must not leave one behind in a folder/file name.
+  // Every hyphen, not just the first, so a future label with two hyphens
+  // can't leave one behind in a file or folder name.
   reportType = reportType.replace(/-/g, "_");
-  const now      = new Date();
-  const pad      = n => String(n).padStart(2, "0");
-  const ts       = `${now.getUTCFullYear()}_${pad(now.getUTCMonth()+1)}_${pad(now.getUTCDate())}`
-                 + `__${pad(now.getUTCHours())}_${pad(now.getUTCMinutes())}_${pad(now.getUTCSeconds())}`;
-  const datePath = `${now.getUTCFullYear()}/${pad(now.getUTCMonth()+1)}/${pad(now.getUTCDate())}`;
+  const ts       = reportTimestamp();
 
   const workingDir = opts.workingDir ? path.resolve(opts.workingDir) : process.cwd();
-
-  const reportDir = path.join(workingDir, ".ubel", "local", "reports", reportType, datePath);
-  fs.mkdirSync(reportDir, { recursive: true });
 
   const latestDir = path.join(workingDir, ".ubel", "reports");
   fs.mkdirSync(latestDir, { recursive: true });
 
-  const baseName = `${reportType}__${ts}`;
-  const zipPath = path.join(reportDir, `${baseName}.zip`);
+  // Tag = the CLI's own mode: url | domain | host | easm
+  // ("easm_url" -> "url", "easm_full" -> "easm"). It names the history folder
+  // and the files: $HOME/.ubel/history/<tag>/<timestamp>.<tag>.zip,
+  // latest.<tag>.<ext>, and report.<tag>.<ext> inside the zip.
+  const tag     = reportType === "easm_full" ? "easm" : reportType.replace(/^easm_/, "");
+  const zipPath = historyZipPath(tag, ts, tag);
 
-  const latestJson = path.join(latestDir, `latest.${reportType}.json`);
-  const latestHtml = path.join(latestDir, `latest.${reportType}.html`);
+  const latestJson = path.join(latestDir, reportFileName("latest", tag, "json"));
+  const latestHtml = path.join(latestDir, reportFileName("latest", tag, "html"));
 
   const bundleEntries = [];
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);
   atomicWrite(latestJson, jsonPayload);
-  bundleEntries.push({ name: "report.json", data: jsonPayload });
+  bundleEntries.push({ name: reportFileName("report", tag, "json"), data: jsonPayload });
   console.log(`\n${cliLabel} JSON report : bundled in ${zipPath}`);
 
   try {
     const htmlReport = await generateHtmlReport(reportPayload);
     atomicWrite(latestHtml, htmlReport);
-    bundleEntries.push({ name: "report.html", data: htmlReport });
+    bundleEntries.push({ name: reportFileName("report", tag, "html"), data: htmlReport });
     console.log(`${cliLabel} HTML report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`${cliLabel} HTML report failed: ${e.message}`);

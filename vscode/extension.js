@@ -160,7 +160,7 @@ function activate(context) {
     const projectRoot = folders[0].uri.fsPath;
 
     const reportUri = vscode.Uri.file(
-      path.join(projectRoot, ".ubel", "reports", "latest.html")
+      path.join(projectRoot, ".ubel", "reports", "latest.sca.html")
     );
 
     // Detect editor so the report can surface it as the host environment.
@@ -220,7 +220,7 @@ function activate(context) {
     const extensionsDir = editor.extensionsDir;
 
     const reportUri = vscode.Uri.file(
-      path.join(extensionsDir, ".ubel", "reports", "latest.html")
+      path.join(extensionsDir, ".ubel", "reports", "latest.sca.html")
     );
 
     try {
@@ -278,7 +278,7 @@ function activate(context) {
     const platformRoot = os.homedir();
 
     const reportUri = vscode.Uri.file(
-      path.join(platformRoot, ".ubel", "reports", "latest.html")
+      path.join(platformRoot, ".ubel", "reports", "latest.sca.html")
     );
 
     // Detect editor so the report can surface it as the host environment.
@@ -346,7 +346,7 @@ function activate(context) {
     const editor = detectEditor();
 
     const reportUri = vscode.Uri.file(
-      path.join(projectRoot, ".ubel", "reports", "latest.html")
+      path.join(projectRoot, ".ubel", "reports", "latest.secrets.html")
     );
 
     try {
@@ -406,7 +406,7 @@ function activate(context) {
     const projectRoot = folders[0].uri.fsPath;
 
     const reportUri = vscode.Uri.file(
-      path.join(projectRoot, ".ubel", "reports", "latest.html")
+      path.join(projectRoot, ".ubel", "reports", "latest.licenses.html")
     );
 
     // Detect editor so the report can surface it as the host environment.

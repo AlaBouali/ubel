@@ -23,7 +23,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
-- Automatic report generation: timestamped **JSON** (`*.json`) + **HTML** (`*.html`) + **SBOM** (`*.cdx.json`) + **SARIF** (`*.sarif.json`) per scan, plus `latest.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca`, `sca_<engine>` for firewall runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -204,7 +204,7 @@ Earlier versions installed the secrets hook and the dependency hook as two separ
 
 - The hook itself, at `<hooks-dir>/pre-commit`.
 - A chained foreign hook, at `<hooks-dir>/pre-commit.local` (only when `--force` was used and there was a foreign hook).
-- Nothing else. Reports still go to the usual `<project>/.ubel/local/reports/...` path when the hook actually runs a scan that produces one.
+- Nothing else. Reports still go to the usual `<project>/.ubel/reports/latest.<tag>.*` copies and the `$HOME/.ubel/history/<mode>/` zip when the hook actually runs a scan that produces one.
 
 ---
 
@@ -779,7 +779,7 @@ Each feed is tried with a 15-second timeout and two retries. There is currently 
 | `ubel-agent` | `process.cwd()` | ✅ | ✅ | default | `agent` |
 | `ubel-cicd` | `process.cwd()` | ✅ | ✅ | default | `cicd` |
 | `ubel-platform` | home directory (`os.homedir()`) | ✅ | ❌ | default | `developer_platform` |
-| `ubel-secrets` | `process.cwd()` | ❌ | ❌ | ✅ (forced on; `scan_os`/`scan_node` forced off) | `agent` |
+| `ubel-secrets` | `process.cwd()` | ❌ | ❌ | ✅ (forced on; `scan_os`/`scan_node` forced off) | `secrets` |
 | `ubel-license` | `process.cwd()` | ❌ | ✅ (full-stack) | ❌ (forced off; `scan_vulns` also forced off) | `license` |
 
 ```bash
@@ -797,7 +797,7 @@ ubel-platform
 ubel-platform /path/to/specific/directory
 ```
 
-`scan_scope` only affects labeling in the report (`scan_info.scan_scope`) and how the report path is filed under `.ubel/local/reports/<ecosystem>/<mode>/...` — it has no effect on scan behavior itself. All three are also reachable programmatically via `SCA_scan()`/`main()` with the same options, for embedding in a VS Code extension, an orchestration agent, or a custom CI step (see [Programmatic API](#programmatic-api)).
+`scan_scope` only affects labeling in the report (`scan_info.scan_scope`) and how reports are filed and named — `license` and `secrets` select the `.licenses` / `.secrets` report tag and history folder (see [File naming](#file-naming-the-tag)) — it has no effect on scan behavior itself. All three are also reachable programmatically via `SCA_scan()`/`main()` with the same options, for embedding in a VS Code extension, an orchestration agent, or a custom CI step (see [Programmatic API](#programmatic-api)).
 
 ---
 
@@ -1299,19 +1299,53 @@ The pre-commit hook installer is not exposed programmatically; use the CLI (`ube
 
 ## Reports
 
-Every scan writes two files to a timestamped path and overwrites the `latest*` convenience links:
+Every scan overwrites the `latest.<tag>.*` convenience links for its scan type and saves a timestamped, zipped snapshot:
 
 ```
-.ubel/reports/latest.json          ← always current
-.ubel/reports/latest.html          ← always current
-.ubel/reports/latest.cdx.json          ← always current
-.ubel/reports/latest.sarif.json          ← always current
+.ubel/reports/latest.<tag>.json          ← always current
+.ubel/reports/latest.<tag>.html          ← always current
+.ubel/reports/latest.<tag>.cdx.json      ← always current (CycloneDX SBOM)
+.ubel/reports/latest.<tag>.sarif.json    ← always current
 
-.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/
-    <ecosystem>_<mode>_<engine>__<timestamp>.zip
+$HOME/.ubel/history/<mode>/
+    <timestamp>.<tag>.zip                ← YYYY_MM_DD__HH_MM_SS (UTC)
+        report.<tag>.json
+        report.<tag>.html
+        report.<tag>.cdx.json
+        report.<tag>.sarif.json
 ```
 
-`<ecosystem>` is `npm` for npm/pnpm/bun/yarn/composer, `pypi` for pip/uv/pipx/conda, `cargo` for cargo, and `linux` for apt/dnf/yum; `<engine>` is the specific binary invoked (`npm`, `pnpm`, `composer`, `pip`, `uv`, `apt`, …). For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, both report paths above are rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.json`, `~/.ubel/local/reports/...`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+### File naming: the `<tag>`
+
+A scan-type **tag** sits between the file name and the real extension (`<file_name>.<tag>.<extension>`), so reports from different scanners never overwrite one another and can be told apart at a glance. The file name itself is `latest` for the always-current copies, a `YYYY_MM_DD__HH_MM_SS` UTC timestamp for the zip, and always `report` for the files *inside* the zip.
+
+| Scan | `<tag>` | Example (latest) | Example (zip) |
+|---|---|---|---|
+| SCA — `health` (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
+| Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `sca_<engine>` | `latest.sca_npm.html`, `latest.sca_apt.json` | `2026_10_10__12_30_05.sca_pip.zip` |
+| Licenses — `ubel-license` | `licenses` | `latest.licenses.json` | `2026_10_10__12_30_05.licenses.zip` |
+| Secrets — `ubel-secrets` | `secrets` | `latest.secrets.json` | `2026_10_10__12_30_05.secrets.zip` |
+
+`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`). The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+
+### History: `$HOME/.ubel/history/<mode>/`
+
+Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode, so a zip's name only needs the timestamp and tag. The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
+
+| `<mode>` folder | Holds |
+|---|---|
+| `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) |
+| `firewall` | `check` / `install` for npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo |
+| `os` | `check` / `install` for apt, dnf, yum |
+| `licenses` | `ubel-license` |
+| `secrets` | `ubel-secrets` |
+| `sast`, `malware`, `cloud`, `easm`, `host`, `domain`, `url` | the other scanners — see their READMEs |
+
+Because the folder is shared, the zip does not record which project it came from — open its `report.<tag>.json` (`scan_info`, git metadata) to find out. If two runs finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
+
+For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+
+> **Upgrading:** earlier versions wrote `latest.json` / `latest.html` / `latest.cdx.json` / `latest.sarif.json` and zipped each scan to `<project>/.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/<ecosystem>_<mode>_<engine>__<timestamp>.zip` (with `report.json`, `report.html`, `sbom.cdx.json`, `report.sarif.json` inside). Those old files are not touched, moved or removed; point any CI step or dashboard at the new names (for example `latest.sca.sarif.json` for code-scanning upload).
 
 The HTML report is fully self-contained (no server required) and includes:
 

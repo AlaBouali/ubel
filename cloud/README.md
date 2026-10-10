@@ -28,7 +28,7 @@ Written against **Node.js's standard library only** — no AWS SDK, no
 - Auto-discovers enabled AWS regions via `DescribeRegions` by default — no need to list them out by hand
 - Credentials are only ever used for that run — nothing stored or reused, same model as the SAST module's LLM credentials
 - **Compliance framework mapping** — every finding is mapped onto the frameworks that apply to its risk category — OWASP Top 10, PCI DSS, HIPAA Security Rule, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, plus the provider-specific CIS Foundations Benchmarks (AWS, Azure, GCP) where a check has one — with a report-level per-framework/per-control finding-count summary (see [Compliance Framework Mapping](#compliance-framework-mapping))
-- Automatic report generation: timestamped **JSON** + interactive **HTML**, plus `latest.*` convenience links; a zipped snapshot of both is also saved for historic tracking
+- Automatic report generation: timestamped **JSON** + interactive **HTML**, plus `latest.cloud.*` convenience links; a zipped snapshot of both is also saved for historic tracking
 - **Executive Summary** in both reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Reports](#reports))
 - `--fail-on` severity/count gate — same syntax as the rest of UBEL — for CI use
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -356,9 +356,13 @@ Every run writes:
 .ubel/reports/latest.cloud.json     ← always current
 .ubel/reports/latest.cloud.html     ← always current
 
-.ubel/local/reports/cloud/<YYYY>/<MM>/<DD>/
-    cloud__<timestamp>.zip
+$HOME/.ubel/history/cloud/
+    <timestamp>.cloud.zip           ← YYYY_MM_DD__HH_MM_SS (UTC)
+        report.cloud.json
+        report.cloud.html
 ```
+
+Files follow the shared `<file_name>.<tag>.<extension>` scheme with the tag `cloud`: `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zip goes to the shared `$HOME/.ubel/history/cloud/` folder, so it doesn't record which project or account it came from — see `accounts` and `providers` in the report JSON. A second run in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/cloud/<date>/cloud__<timestamp>.zip` with untagged `report.json` / `report.html` inside; old files are left untouched.)
 
 No SARIF and no SBOM — this isn't a dependency scan, so neither format applies.
 

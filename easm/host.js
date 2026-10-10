@@ -211,10 +211,10 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Every run writes a timestamped easm_host__<ts>.zip bundle (report.json +
-report.html inside) under .ubel/local/reports/easm_host/<y>/<m>/<d>/, plus
-fixed, unzipped "latest" copies at .ubel/reports/latest.easm_host.json and
-.html — kept separate from ubel-url's and ubel-domain's own reports so one
+Every run writes a timestamped <ts>.host.zip bundle (report.host.json +
+report.host.html inside) under $HOME/.ubel/history/host/, plus
+fixed, unzipped "latest" copies at .ubel/reports/latest.host.json and
+latest.host.html — kept separate from ubel-url's and ubel-domain's own reports so one
 never overwrites another's latest pointer. Both include a plain-language
 Executive Summary for non-technical readers (the tab after Dashboard in the
 HTML).

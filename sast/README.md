@@ -18,7 +18,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - `--only-diff` mode — scan only chunks touched by a git diff, while still building the full chunk set so cross-file taint chains keep resolving correctly
 - Configurable `--fail-on` exit-code gate (`any` / `valid` / `exploitable` for SAST, `any` / `confirmed` for malware) — reports always contain every finding regardless of this flag; it only changes the CI exit code
 - Pluggable LLM provider registry — OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, and local/Docker-hosted models (Ollama-compatible), selectable per run with no code changes
-- Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.*` convenience links, kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
+- Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.<tag>.*` convenience links (`latest.sast.*`, `latest.malware.*`), kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - **Executive Summary** in the JSON and HTML reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Executive summary](#executive-summary))
 - **Compliance framework mapping** — every finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -362,8 +362,11 @@ Every `analyze` run writes:
 .ubel/reports/latest.sast.html          ← always current
 .ubel/reports/latest.sast.sarif.json    ← always current
 
-.ubel/local/reports/sast/<YYYY>/<MM>/<DD>/
-    sast__<timestamp>.zip
+$HOME/.ubel/history/sast/
+    <timestamp>.sast.zip            ← YYYY_MM_DD__HH_MM_SS (UTC)
+        report.sast.json
+        report.sast.html
+        report.sast.sarif.json
 ```
 
 Every `malware` run writes the equivalent set under its own namespace:
@@ -373,9 +376,14 @@ Every `malware` run writes the equivalent set under its own namespace:
 .ubel/reports/latest.malware.html
 .ubel/reports/latest.malware.sarif.json
 
-.ubel/local/reports/malware/<YYYY>/<MM>/<DD>/
-    malware__<timestamp>.zip
+$HOME/.ubel/history/malware/
+    <timestamp>.malware.zip
+        report.malware.json
+        report.malware.html
+        report.malware.sarif.json
 ```
+
+Files follow the shared `<file_name>.<tag>.<extension>` scheme: the tag (`sast` or `malware`) sits between the file name and the extension; the file name is `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zips go to one shared `$HOME/.ubel/history/<mode>/` folder (the same one every UBEL scanner uses), so they don't record which project they came from — see `meta.workingDir` in the report JSON. A second run in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/sast/<date>/sast__<timestamp>.zip` and `…/malware/<date>/malware__<timestamp>.zip` with untagged `report.json` / `report.html` / `report.sarif.json` inside; old files are left untouched.)
 
 The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware` and `meta.scan_options` records the non-secret run settings (verification and taint-trace on/off, diff mode, chunk limits, language/folder filters) the summary needs to say what was and was not checked; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
 
