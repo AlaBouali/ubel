@@ -1306,9 +1306,9 @@ Every scan overwrites the `latest.<tag>.*` convenience links for its scan type a
 .ubel/reports/latest.<tag>.html          ← always current
 .ubel/reports/latest.<tag>.cdx.json      ← always current (CycloneDX SBOM)
 .ubel/reports/latest.<tag>.sarif.json    ← always current
-.ubel/ubel_project.json                  ← this project's id and name (id created once, never changed)
+.ubel/ubel_asset.json                  ← this asset's id and name (id created once, never changed)
 
-$HOME/.ubel/history/<mode>/<project_id>/
+$HOME/.ubel/history/<mode>/<asset_id>/
     <timestamp>.<tag>.zip                ← YYYY_MM_DD__HH_MM_SS (UTC)
         report.<tag>.json
         report.<tag>.html
@@ -1331,9 +1331,9 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 
 ### History: `$HOME/.ubel/history/<mode>/`
 
-Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip` (see [Project id](#project-id-ubel_projectjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
+Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip` (see [Asset id](#asset-id-ubel_assetjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
 
-The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<project_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
+The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<asset_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
 
 Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.ubel/reports/`, the timestamped history zips and the `latest_reports/` copy — is written the same way, for every scanner (SCA, firewall, OS, licenses, secrets, SAST, malware, cloud, EASM): the content goes to a temp file in the same folder and is then renamed over the target in one step. A script, CI step or browser tab that reads `latest.<tag>.json` / `.html` / `.zip` while a scan is finishing sees either the complete previous file or the complete new one, never a partial file. If a write fails, the temp file is removed, the previous file is left as it was, and the scan reports the error.
 
@@ -1346,56 +1346,72 @@ Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.u
 | `secrets` | `ubel-secrets` |
 | `sast`, `malware`, `cloud`, `easm`, `host`, `domain`, `url` | the other scanners — see their READMEs |
 
-One project's zips sit together in its own `<project_id>` folder, so listing a project's history is `ls ~/.ubel/history/<mode>/<project_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which project it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
+One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<mode>/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
 For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
-### Project id: `ubel_project.json`
+### Asset id: `ubel_asset.json`
 
-Every `.ubel/` folder a scan writes into holds a small `ubel_project.json`:
+Every `.ubel/` folder a scan writes into holds a small `ubel_asset.json`:
 
 ```json
 {
-  "project_id": "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13",
-  "project_name": "shop",
+  "asset_id": "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65",
+  "asset_name": "shop",
   "created_at": "2026-10-10T12:30:05.000Z"
 }
 ```
 
-- **Created on first use.** The first scan in a folder generates a random UUID and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `project_id` is not a valid UUID is replaced with a fresh one.
-- **`project_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
-- **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<project_id>/`, so each project's zips stay together instead of mixing in one flat folder.
-- **Written into every report.** The JSON report carries `project_id` and `project_name` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Project* and *Project ID* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it.
-- **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_project.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
-- **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no project, so they use `$HOME/.ubel/ubel_project.json` instead — a tag for *that machine*, shared by every OS scan on it (and by a host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*), and used as the `os/<project_id>/` folder the same way.
-- If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report has no project fields, and that zip is written straight into `history/<mode>/` without a project folder.
+An **asset id is two UUIDs joined by a hyphen** — `<uuid>-<uuid>`, 73 characters — for extra randomisation. Only that form is accepted (case-insensitive; stored lowercase).
 
-Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are.
+- **Created on first use.** The first scan in a folder generates a random `<uuid>-<uuid>` and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `asset_id` is not a valid `<uuid>-<uuid>` is replaced with a fresh one.
+- **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
+- **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
+- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows the id and name as *Asset* and *Asset ID* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it.
+- **`asset_type` is the scan's `<mode>`** (the history folder it files under): `sca`, `firewall`, `os`, `licenses`, `secrets`, `sast`, `malware`, `cloud`, `easm`, `host`, `domain` or `url`.
+- **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
+- **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
+- **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no asset folder, so they use `$HOME/.ubel/ubel_asset.json` instead — a tag for *that machine*, shared by every OS scan on it (and by a host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*), and used as the `os/<asset_id>/` folder the same way.
+- If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report's `asset_id` / `asset_name` are `null`, and that zip is written straight into `history/<mode>/` without an asset folder.
 
-#### Linking a folder to an existing project id
+Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are. A `ubel_project.json` left by an earlier version is no longer read: the next scan creates a `ubel_asset.json` with a new id.
 
-The id lives in the folder's own `.ubel/ubel_project.json`, so a fresh clone, a second checkout, or a deleted `.ubel/` would otherwise start a **new** project and file its zips under a new id. Reconnect it to the original instead. These are commands of **every** UBEL CLI (`ubel-npm`, `ubel-pip`, `ubel-cargo`, `ubel-docker`, `ubel-secrets`, `ubel-license`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, `ubel-url`, … — not separate binaries), so use whichever one you already have:
+#### Setting the asset id for one run: `--asset-id`
+
+Every UBEL CLI accepts `--asset-id <uuid>-<uuid>` (or `--asset-id=<uuid>-<uuid>`), anywhere on the command line:
 
 ```bash
-ubel-npm project-id                      # print this folder's id (just the UUID, pipe-friendly)
-ubel-npm project-id --json               # { project_id, project_name, created_at, file }
-ubel-npm project-id /path/to/project     # a folder other than the current one
-
-ubel-npm set-project-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13                 # link the current folder
-ubel-npm set-project-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13 /path/to/project
-ubel-npm set-project-id <id> --name shop # also set the readable name
-
-ubel-npm version                         # print the installed UBEL version (--json adds name, Node version, platform)
+ubel-npm health --asset-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65
+ubel-sast ./src --asset-id=3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65
+ubel-cloud --asset-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65
+ubel-apt check nginx --asset-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65
 ```
 
-Every CLI behaves the same (`ubel-sast project-id`, `ubel-cloud set-project-id <id>`, `ubel-url version`, …) because they all read and write the same `.ubel/ubel_project.json`; the command is only handled when it is the **first** argument, so a scan of a folder literally named `version` is written `./version`.
+For that run the given id replaces the one in `ubel_asset.json`: it is written into the report, SBOM and SARIF, and the zip is filed under `history/<mode>/<asset_id>/` and `latest_reports/<mode>/<asset_id>/`. **Nothing is saved** — `ubel_asset.json` is neither created nor changed, so the next run without the flag uses the folder's own id again (use `set-asset-id` below to make an id permanent). `asset_name` is the one stored for that same id when there is one, otherwise it is derived as usual. An id that is not `<uuid>-<uuid>`, or a flag with no value, stops the CLI with exit code `2` before anything is scanned.
 
-- **`ubel-apt` / `ubel-dnf` / `ubel-yum`** have no project folder: their commands act on the machine tag, `$HOME/.ubel/ubel_project.json`, directly (`ubel-apt project-id`, `ubel-apt set-project-id <id>`) and refuse a folder argument. Any other CLI can reach the machine tag with `--machine` (`ubel-npm project-id --machine`; it can't be combined with a folder).
+#### Linking a folder to an existing asset id
+
+The id lives in the folder's own `.ubel/ubel_asset.json`, so a fresh clone, a second checkout, or a deleted `.ubel/` would otherwise start a **new** asset and file its zips under a new id. Reconnect it to the original instead. These are commands of **every** UBEL CLI (`ubel-npm`, `ubel-pip`, `ubel-cargo`, `ubel-docker`, `ubel-secrets`, `ubel-license`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, `ubel-url`, … — not separate binaries), so use whichever one you already have:
+
+```bash
+ubel-npm asset-id                      # print this folder's id (just the id, pipe-friendly)
+ubel-npm asset-id --json               # { asset_id, asset_name, created_at, file }
+ubel-npm asset-id /path/to/project     # a folder other than the current one
+
+ubel-npm set-asset-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65                 # link the current folder
+ubel-npm set-asset-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65 /path/to/project
+ubel-npm set-asset-id <id> --name shop # also set the readable name
+
+ubel-npm version                       # print the installed UBEL version (--json adds name, Node version, platform)
+```
+
+Every CLI behaves the same (`ubel-sast asset-id`, `ubel-cloud set-asset-id <id>`, `ubel-url version`, …) because they all read and write the same `.ubel/ubel_asset.json`; the command is only handled when it is the **first** argument, so a scan of a folder literally named `version` is written `./version`.
+
+- **`ubel-apt` / `ubel-dnf` / `ubel-yum`** have no asset folder: their commands act on the machine tag, `$HOME/.ubel/ubel_asset.json`, directly (`ubel-apt asset-id`, `ubel-apt set-asset-id <id>`) and refuse a folder argument. Any other CLI can reach the machine tag with `--machine` (`ubel-npm asset-id --machine`; it can't be combined with a folder).
 - **`ubel-docker`, `ubel-cloud` and the EASM CLIs** keep their id in the `.ubel/` of the directory you run them from (see above), so run the command there, or pass the folder.
-- **`set-project-id`** only replaces the **id** (and the name with `--name`). `created_at`, the existing `project_name` and any other field in the file are kept; a missing or corrupt file is recreated with the id and a derived name. It does not move or rewrite any history — new zips simply land in `history/<mode>/<project_id>/` next to the old ones.
+- **`set-asset-id`** only replaces the **id** (and the name with `--name`). `created_at`, the existing `asset_name` and any other field in the file are kept; a missing or corrupt file is recreated with the id and a derived name. It does not move or rewrite any history — new zips simply land in `history/<mode>/<asset_id>/` next to the old ones.
 - It checks `$HOME/.ubel/history/` for zips already filed under the id and lists the modes it finds. If there are none it still links the folder but prints a warning, since the usual cause is a mistyped id (or old history that lives on another machine).
-- **`project-id`** is read-only and never creates an id. Exit codes: `0` found, `1` no id in that folder yet, `2` error. `set-project-id` exits `0` on success and `2` on a bad id, a missing folder or a write failure.
-- Ids must be UUIDs (case-insensitive; stored lowercase).
+- **`asset-id`** is read-only and never creates an id. Exit codes: `0` found, `1` no id in that folder yet, `2` error. `set-asset-id` exits `0` on success and `2` on a bad id, a missing folder or a write failure.
 
 The HTML report is fully self-contained (no server required) and includes:
 

@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -203,16 +203,17 @@ async function writeAnalyzeReports(results, opts) {
 
   // <timestamp>.sast.zip (in $HOME/.ubel/history/sast/), latest.sast.<ext>, and report.sast.<ext> inside the zip.
   const tag     = 'sast';
-  const project = projectFor('sast', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('sast', ts, tag, project?.project_id ?? null);
+  const asset   = assetFor('sast', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('sast', ts, tag, asset.asset_id);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
-  meta.project_id   = project?.project_id   ?? null;
-  meta.project_name = project?.project_name ?? null;
+  meta.asset_id     = asset.asset_id;
+  meta.asset_name   = asset.asset_name;
+  meta.asset_type   = asset.asset_type;
   meta.scan_type    = 'analyze';
   meta.scan_options = scanOptionsFor(opts, 'analyze', results);
   meta.scan_stats   = scanStatsFor(results);
@@ -392,16 +393,17 @@ async function writeMalwareReports(results, opts) {
 
   // <timestamp>.malware.zip (in $HOME/.ubel/history/malware/), latest.malware.<ext>, and report.malware.<ext> inside the zip.
   const tag     = 'malware';
-  const project = projectFor('malware', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('malware', ts, tag, project?.project_id ?? null);
+  const asset   = assetFor('malware', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('malware', ts, tag, asset.asset_id);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
-  meta.project_id   = project?.project_id   ?? null;
-  meta.project_name = project?.project_name ?? null;
+  meta.asset_id     = asset.asset_id;
+  meta.asset_name   = asset.asset_name;
+  meta.asset_type   = asset.asset_type;
   meta.scan_type = 'malware';
   meta.scan_options = scanOptionsFor(opts, 'malware', results);
   meta.scan_stats   = scanStatsFor(results);
@@ -713,10 +715,14 @@ function printUsage() {
 If no subcommand is given, "analyze" is assumed and the first argument is
 treated as the target path (or --working-dir).
 
-Project commands (any of ubel-sast / ubel-mal / ubel-chunk; run instead of a scan):
-  ubel-sast project-id [folder] [--json]    Print this folder's project id
-  ubel-sast set-project-id <id> [folder]    Link this folder to an existing project id
-  ubel-sast version [--json]                Print the UBEL version
+Asset commands (any of ubel-sast / ubel-mal / ubel-chunk; run instead of a scan):
+  ubel-sast asset-id [folder] [--json]    Print this folder's asset id
+  ubel-sast set-asset-id <id> [folder]    Link this folder to an existing asset id
+  ubel-sast version [--json]              Print the UBEL version
+
+Asset option (any command; the id is <uuid>-<uuid>):
+  --asset-id <id>                         Use this asset id for this run: it is written into the
+                                          reports and the history zip; nothing is saved to disk
 
 PROVIDER / REQUEST OPTIONS  (analyze, malware)
   --provider <name>              LLM provider (default: openrouter)

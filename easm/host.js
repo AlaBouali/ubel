@@ -211,10 +211,14 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
-Project commands (run instead of a scan):
-  ubel-host project-id [folder] [--json]    Print this folder's project id
-  ubel-host set-project-id <id> [folder]    Link this folder to an existing project id
-  ubel-host version [--json]                Print the UBEL version
+Asset commands (run instead of a scan):
+  ubel-host asset-id [folder] [--json]    Print this folder's asset id
+  ubel-host set-asset-id <id> [folder]    Link this folder to an existing asset id
+  ubel-host version [--json]              Print the UBEL version
+
+Asset option (any command; the id is <uuid>-<uuid>):
+  --asset-id <id>                         Use this asset id for this run: it is written into the
+                                          reports and the history zip; nothing is saved to disk
 
 Every run writes a timestamped <ts>.host.zip bundle (report.host.json +
 report.host.html inside) under $HOME/.ubel/history/host/, plus

@@ -991,10 +991,10 @@ timestamp for the zip, and `report` for the files inside the zip.
 
 The zips of all four go to the shared `$HOME/.ubel/history/<mode>/` folder
 (`url`, `domain`, `host`, `easm`) that every UBEL scanner uses, each in a
-sub-folder named after `<project_id>` — the UUID in `.ubel/ubel_project.json`
+sub-folder named after `<asset_id>` — the `<uuid>-<uuid>` id in `.ubel/ubel_asset.json`
 of the directory you ran the CLI from (created on the first run, never changed
-— see the SCA README's [Project id](../sca/README.md#project-id-ubel_projectjson)
-section). `project_id` and `project_name` are also written into the report
+— see the SCA README's [Asset id](../sca/README.md#asset-id-ubel_assetjson)
+section). `asset_id`, `asset_name` and `asset_type` are also written into the report
 JSON and shown on the HTML report's Scan Info tab. They identify that folder,
 not the target — open `report.<mode>.json` (`targets`, `input_hosts`, `domain`)
 to see what was scanned. A second run from the same folder in the same second
@@ -1006,7 +1006,7 @@ gets a `_2` suffix instead of overwriting the first.
 .ubel/reports/latest.url.json          ← always current, unzipped
 .ubel/reports/latest.url.html          ← always current, unzipped
 
-$HOME/.ubel/history/url/<project_id>/
+$HOME/.ubel/history/url/<asset_id>/
     <timestamp>.url.zip                ← contains report.url.json + report.url.html
 ```
 
@@ -1016,7 +1016,7 @@ $HOME/.ubel/history/url/<project_id>/
 .ubel/reports/latest.domain.json
 .ubel/reports/latest.domain.html
 
-$HOME/.ubel/history/domain/<project_id>/
+$HOME/.ubel/history/domain/<asset_id>/
     <timestamp>.domain.zip             ← report.domain.json + report.domain.html
 ```
 
@@ -1026,7 +1026,7 @@ $HOME/.ubel/history/domain/<project_id>/
 .ubel/reports/latest.host.json
 .ubel/reports/latest.host.html
 
-$HOME/.ubel/history/host/<project_id>/
+$HOME/.ubel/history/host/<asset_id>/
     <timestamp>.host.zip               ← report.host.json + report.host.html
 ```
 
@@ -1036,7 +1036,7 @@ $HOME/.ubel/history/host/<project_id>/
 .ubel/reports/latest.easm.json
 .ubel/reports/latest.easm.html
 
-$HOME/.ubel/history/easm/<project_id>/
+$HOME/.ubel/history/easm/<asset_id>/
     <timestamp>.easm.zip               ← report.easm.json + report.easm.html
 ```
 

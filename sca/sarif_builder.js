@@ -1070,6 +1070,7 @@ export class SarifBuilder {
       originalUriBaseIds: { "%SRCROOT%": { uri: baseUri } },
       results: this.buildSecretsResults(),
       properties: {
+        ...this._assetProps(),
         secrets_count: secrets.count,
         secrets_stats: secrets.stats || {},
       },
@@ -1283,8 +1284,19 @@ export class SarifBuilder {
       originalUriBaseIds: { "%SRCROOT%": { uri: baseUri } },
       results,
       properties: {
+        ...this._assetProps(),
         license_stats: (this.data.stats || {}).license_stats || {},
       },
+    };
+  }
+
+  /** Asset identity of this scan, for each run's `properties` bag. */
+  _assetProps() {
+    const si = this.data.scan_info || {};
+    return {
+      asset_id:   si.asset_id   ?? null,
+      asset_name: si.asset_name ?? null,
+      asset_type: si.asset_type ?? null,
     };
   }
 
@@ -1330,6 +1342,8 @@ export class SarifBuilder {
         this.buildArtifacts(),
 
       properties: {
+        ...this._assetProps(),
+
         generated_at:
           this.data.generated_at ||
           new Date()

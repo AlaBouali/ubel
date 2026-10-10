@@ -660,7 +660,7 @@ async function main(programmaticOptions) {
   const [, , engine, mode, ...extraArgs] = process.argv;
 
   if (!engine) {
-    console.error("Usage: ubel-<engine> <mode> [args...]");
+    console.error("Usage: ubel-<engine> <mode> [args...] [--asset-id <uuid>-<uuid>]");
     process.exit(1);
   }
 
@@ -1086,8 +1086,8 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
         full_stack:   true,
         scan_scope:   "container-image",
         // The rootfs (and the .ubel inside it) is thrown away after the scan,
-        // so the project id lives in the cwd's .ubel, next to <uuid>/ scratch.
-        project_ubel_dir: path.join(process.cwd(), ".ubel"),
+        // so the asset id lives in the cwd's .ubel, next to <uuid>/ scratch.
+        asset_ubel_dir:   path.join(process.cwd(), ".ubel"),
         ...rest,
       });
     } catch (err) {

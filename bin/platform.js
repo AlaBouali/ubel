@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { runProjectCommand } from "../sca/project_cli.js";
-// project-id / set-project-id / version are commands of every ubel CLI; handle them before any scan setup.
-const projectCmd = runProjectCommand(process.argv.slice(2), { cli: "ubel-platform" });
-if (projectCmd !== null) process.exit(projectCmd);
+import { runAssetCommand } from "../sca/asset_cli.js";
+// asset-id / set-asset-id / version are commands of every ubel CLI, and --asset-id <id> is a flag of every one;
+// handle them before any scan setup.
+const assetCmd = runAssetCommand(process.argv.slice(2), { cli: "ubel-platform" });
+if (assetCmd !== null) process.exit(assetCmd);
 
 import { SCA_scan }    from "../sca/main.js";
 import { homedir } from "os";

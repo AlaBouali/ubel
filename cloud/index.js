@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -47,10 +47,14 @@ Options:
   --quiet                Suppress the console findings summary (reports are still written)
   --help, -h             Show this help
 
-Project commands (run instead of a scan):
-  ubel-cloud project-id [folder] [--json]    Print this folder's project id
-  ubel-cloud set-project-id <id> [folder]    Link this folder to an existing project id
-  ubel-cloud version [--json]                Print the UBEL version
+Asset commands (run instead of a scan):
+  ubel-cloud asset-id [folder] [--json]    Print this folder's asset id
+  ubel-cloud set-asset-id <id> [folder]    Link this folder to an existing asset id
+  ubel-cloud version [--json]              Print the UBEL version
+
+Asset option (any command; the id is <uuid>-<uuid>):
+  --asset-id <id>                          Use this asset id for this run: it is written into the
+                                           reports and the history zip; nothing is saved to disk
 
 AWS region resolution (highest priority first):
   1. --regions <list>              explicit override
@@ -221,8 +225,8 @@ async function writeCloudReports(reporter, meta, opts) {
 
   // <timestamp>.cloud.zip (in $HOME/.ubel/history/cloud/), latest.cloud.<ext>, and report.cloud.<ext> inside the zip.
   const tag     = 'cloud';
-  const project = projectFor('cloud', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('cloud', ts, tag, project?.project_id ?? null);
+  const asset   = assetFor('cloud', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('cloud', ts, tag, asset.asset_id);
 
   const latestJson = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml = path.join(latestDir, reportFileName('latest', tag, 'html'));
@@ -236,8 +240,9 @@ async function writeCloudReports(reporter, meta, opts) {
   // the exact same object — never a separately-shaped, stripped-down JSON.
   const reportPayload = buildReportPayload(reporter, {
     ...meta,
-    project_id:   project?.project_id   ?? null,
-    project_name: project?.project_name ?? null,
+    asset_id:     asset.asset_id,
+    asset_name:   asset.asset_name,
+    asset_type:   asset.asset_type,
   });
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);

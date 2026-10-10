@@ -525,6 +525,9 @@ export class SastSarifBuilder {
       results:                  this.buildResults(),
       artifacts:                this.buildArtifacts(),
       properties: {
+        asset_id:        this.meta.asset_id   || null,
+        asset_name:      this.meta.asset_name || null,
+        asset_type:      this.meta.asset_type || null,
         generated_at:    new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
         scan_type:       'sast',
         tool:            SAST_TOOL,

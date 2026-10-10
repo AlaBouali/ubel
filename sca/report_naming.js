@@ -10,7 +10,7 @@
 // The tag identifies WHAT produced the file, so reports from different
 // scanners never collide on disk and can be told apart without opening them:
 //
-//     sca                 .sca              (health scan of a project/host)
+//     sca                 .sca              (health scan of an asset: folder/host)
 //     sca / os firewall   .sca_<engine>     (check / install — npm, pip, apt, …)
 //     licenses            .licenses
 //     secrets             .secrets
@@ -21,40 +21,48 @@
 // Compound extensions keep their own suffix after the tag:
 //     latest.sca.json   latest.sca.html   latest.sca.cdx.json   latest.sca.sarif.json
 //
-// History: every timestamped zip, from every scanner and every project, is
+// History: every timestamped zip, from every scanner and every asset, is
 // kept in one place — $HOME/.ubel/history/<mode>/ — where <mode> is
 //
 //     sca  firewall  os  licenses  secrets  sast  malware  cloud  easm  host  domain  url
 //
 // ("firewall" = check/install for npm/pnpm/bun/yarn/composer/pip/pipx/uv/conda/
 // cargo; "os" = check/install for apt/dnf/yum). The "latest" copies stay
-// per-project under <project>/.ubel/reports/.
+// per-asset under <asset folder>/.ubel/reports/.
 //
 // The newest zip of each tag is also kept, apart from the history, in
-// $HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip — the same
-// <mode>/<project_id> layout as history, in a folder of its own. It is
+// $HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip — the same
+// <mode>/<asset_id> layout as history, in a folder of its own. It is
 // refreshed after every scan, so it always holds the most recent scan of that
-// tag for the project, and history/ holds nothing but timestamped zips.
+// tag for the asset, and history/ holds nothing but timestamped zips.
 //
 // Every report file — latest.<tag>.*, the history zip, the latest_reports copy —
 // is written with atomicWriteFile() below: temp file in the same folder, then an
 // atomic rename, so a reader never sees a half-written report.
 //
-// Project identity: every .ubel/ folder a scan writes into holds a
-// ubel_project.json ({ "project_id": "<uuid>", "project_name": "<readable>",
-// "created_at": "<iso>" }), created on first use; the id never changes. Zips are
-// filed under the project's id — history/<mode>/<project_id>/ — so projects
-// sharing one history folder stay apart, and the id and name are written into
-// each report's own metadata so a zip that is moved or renamed still says where
-// it came from. Every scanner gets one — SCA, SAST/malware, secrets, licenses,
-// docker, cloud, EASM. The one exception is the OS firewall (apt/dnf/yum): it
-// has no project, so it uses $HOME/.ubel/ubel_project.json as a tag for the
-// machine itself (the same file a host-platform scan of $HOME uses).
+// Asset identity: every .ubel/ folder a scan writes into holds a
+// ubel_asset.json ({ "asset_id": "<uuid>-<uuid>", "asset_name": "<readable>",
+// "created_at": "<iso>" }), created on first use; the id never changes. An id is
+// two UUIDs joined by a hyphen (73 characters). Zips are filed under the asset's
+// id — history/<mode>/<asset_id>/ — so assets sharing one history folder stay
+// apart, and the id, name and type are written into each report's own metadata
+// (and into the SBOM / SARIF output) so a zip that is moved or renamed still says
+// where it came from. Every scanner gets one — SCA, SAST/malware, secrets,
+// licenses, docker, cloud, EASM. The one exception is the OS firewall
+// (apt/dnf/yum): it has no folder, so it uses $HOME/.ubel/ubel_asset.json as a tag
+// for the machine itself (the same file a host-platform scan of $HOME uses).
+//
+// Run-time override: every CLI accepts `--asset-id <id>`. For that run it replaces
+// the id from ubel_asset.json (nothing on disk is created or changed), so the
+// report, SBOM, SARIF and the history zip all carry the id you passed.
+//
+// Asset type: the history mode the scan files under (see above) — sca, firewall,
+// os, licenses, secrets, sast, malware, cloud, easm, host, domain, url.
 //
 // Where the tag is used:
 //   • "latest" copies   .ubel/reports/latest.<tag>.<ext>
-//   • timestamped zip   $HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip
-//   • latest zip        $HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip
+//   • timestamped zip   $HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip
+//   • latest zip        $HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip
 //   • entries in a zip  report.<tag>.<ext>  (always "report", never the
 //                       timestamp or "latest")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -142,12 +150,23 @@ export function historyRoot() {
   return path.join(os.homedir(), ".ubel", "history");
 }
 
-// ── Project identity (ubel_project.json) ─────────────────────────────────────
+// ── Asset identity (ubel_asset.json) ─────────────────────────────────────
 
-/** Name of the per-project (or per-machine) identity file inside a .ubel/ folder. */
-export const PROJECT_FILE_NAME = "ubel_project.json";
+/** Name of the per-asset (or per-machine) identity file inside a .ubel/ folder. */
+export const ASSET_FILE_NAME = "ubel_asset.json";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_PART = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+/** An asset id is two UUIDs joined by a hyphen: <uuid>-<uuid>. */
+const ASSET_ID_RE = new RegExp(`^${UUID_PART}-${UUID_PART}$`, "i");
+
+/** Example id shown in help and error messages. */
+export const ASSET_ID_EXAMPLE = "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65";
+
+/** A fresh asset id: {uuid}-{uuid}. */
+export function generateAssetId() {
+  return `${randomUUID()}-${randomUUID()}`;
+}
 
 /** $HOME/.ubel — holds the machine tag (and the OS firewall's reports). */
 export function machineUbelDir() {
@@ -155,12 +174,12 @@ export function machineUbelDir() {
 }
 
 /**
- * Readable name for a project, used only when ubel_project.json is first
+ * Readable name for an asset, used only when ubel_asset.json is first
  * written (or backfilled): the repository name from `origin` when the folder
  * is a git checkout (credentials in the URL are never read — only the last path
  * segment), else the folder's own name. The machine tag is named after the host.
  */
-function deriveProjectName(ubelDir) {
+function deriveAssetName(ubelDir) {
   if (path.resolve(ubelDir) === path.resolve(machineUbelDir())) return os.hostname();
   const dir = path.dirname(path.resolve(ubelDir));
   try {
@@ -173,11 +192,11 @@ function deriveProjectName(ubelDir) {
   return path.basename(dir) || os.hostname();
 }
 
-function readProjectFile(file) {
+function readAssetFile(file) {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf-8"));
-    if (!j || typeof j !== "object" || typeof j.project_id !== "string" || !UUID_RE.test(j.project_id)) return null;
-    return { ...j, project_id: j.project_id.toLowerCase() };
+    if (!j || typeof j !== "object" || typeof j.asset_id !== "string" || !ASSET_ID_RE.test(j.asset_id)) return null;
+    return { ...j, asset_id: j.asset_id.toLowerCase() };
   } catch {
     return null; // missing, unreadable, or not valid JSON
   }
@@ -218,12 +237,12 @@ export function atomicWriteFile(filePath, content) {
 const writeAtomic = atomicWriteFile;
 
 /**
- * Return { project_id, project_name } from <ubelDir>/ubel_project.json,
+ * Return { asset_id, asset_name } from <ubelDir>/ubel_asset.json,
  * creating the folder and the file (fresh UUID + derived name) if they don't
  * exist yet.
  *
  *   • An existing valid id is never changed.
- *   • An existing project_name (including one edited by hand) is never changed;
+ *   • An existing asset_name (including one edited by hand) is never changed;
  *     a file that has an id but no name gets one added.
  *   • A file that holds no valid UUID (corrupt, hand-edited wrongly) is replaced.
  *
@@ -232,27 +251,27 @@ const writeAtomic = atomicWriteFile;
  *
  * Never throws — a scan must not fail because this file can't be written
  * (read-only folder, …). On failure it warns on stderr and returns null; the
- * history zip then lands directly in history/<mode>/ without a project folder.
+ * history zip then lands directly in history/<mode>/ without an asset folder.
  *
- * @param {string} ubelDir  the .ubel folder (not the project root)
- * @returns {{project_id: string, project_name: string}|null}
+ * @param {string} ubelDir  the .ubel folder (not the folder root)
+ * @returns {{asset_id: string, asset_name: string}|null}
  */
-export function ensureProject(ubelDir) {
-  const file = path.join(ubelDir, PROJECT_FILE_NAME);
-  const pick = (j) => ({ project_id: j.project_id, project_name: j.project_name });
+export function ensureAsset(ubelDir) {
+  const file = path.join(ubelDir, ASSET_FILE_NAME);
+  const pick = (j) => ({ asset_id: j.asset_id, asset_name: j.asset_name });
   try {
-    let existing = readProjectFile(file);
+    let existing = readAssetFile(file);
     if (existing) {
-      if (typeof existing.project_name === "string" && existing.project_name.trim()) return pick(existing);
-      existing.project_name = deriveProjectName(ubelDir); // backfill: id untouched
+      if (typeof existing.asset_name === "string" && existing.asset_name.trim()) return pick(existing);
+      existing.asset_name = deriveAssetName(ubelDir); // backfill: id untouched
       writeAtomic(file, JSON.stringify(existing, null, 2) + "\n");
       return pick(existing);
     }
 
     fs.mkdirSync(ubelDir, { recursive: true });
     const fresh = {
-      project_id:   randomUUID(),
-      project_name: deriveProjectName(ubelDir),
+      asset_id:   generateAssetId(),
+      asset_name: deriveAssetName(ubelDir),
       created_at:   new Date().toISOString(),
     };
     const body = JSON.stringify(fresh, null, 2) + "\n";
@@ -265,45 +284,45 @@ export function ensureProject(ubelDir) {
     }
 
     // Lost a race, or the file exists but held no valid id.
-    const winner = readProjectFile(file);
-    if (winner && typeof winner.project_name === "string" && winner.project_name.trim()) return pick(winner);
-    if (winner) return ensureProject(ubelDir); // id present, name still missing → backfill path
+    const winner = readAssetFile(file);
+    if (winner && typeof winner.asset_name === "string" && winner.asset_name.trim()) return pick(winner);
+    if (winner) return ensureAsset(ubelDir); // id present, name still missing → backfill path
     writeAtomic(file, body);
     return pick(fresh);
   } catch (e) {
-    console.warn(`[ubel] could not write ${file}: ${e.message} — history zip will not be filed under a project id`);
+    console.warn(`[ubel] could not write ${file}: ${e.message} — history zip will not be filed under an asset id`);
     return null;
   }
 }
 
-/** True when `id` is a well-formed project UUID. */
-export function isValidProjectId(id) {
-  return typeof id === "string" && UUID_RE.test(id.trim());
+/** True when `id` is a well-formed asset id (<uuid>-<uuid>). */
+export function isValidAssetId(id) {
+  return typeof id === "string" && ASSET_ID_RE.test(id.trim());
 }
 
 /**
- * Read-only lookup of <ubelDir>/ubel_project.json. Unlike ensureProject() this
- * never creates or repairs anything — it is what the `project-id` command of every CLI uses, so
+ * Read-only lookup of <ubelDir>/ubel_asset.json. Unlike ensureAsset() this
+ * never creates or repairs anything — it is what the `asset-id` command of every CLI uses, so
  * merely asking for an id can't mint one.
  *
- * @param {string} ubelDir  the .ubel folder (not the project root)
- * @returns {{project_id: string, project_name?: string, created_at?: string}|null}
+ * @param {string} ubelDir  the .ubel folder (not the folder root)
+ * @returns {{asset_id: string, asset_name?: string, created_at?: string}|null}
  *          null when the file is missing, unreadable, or holds no valid UUID
  */
-export function readProject(ubelDir) {
-  return readProjectFile(path.join(ubelDir, PROJECT_FILE_NAME));
+export function readAsset(ubelDir) {
+  return readAssetFile(path.join(ubelDir, ASSET_FILE_NAME));
 }
 
 /**
- * History modes under $HOME/.ubel/history that already hold zips for a project
+ * History modes under $HOME/.ubel/history that already hold zips for an asset
  * id (i.e. the id was used by earlier scans on this machine). Used to tell the
  * user whether an id they are linking a folder to is one UBEL has seen here.
  *
- * @param {string} projectId
+ * @param {string} assetId
  * @returns {{mode: string, zips: number}[]}
  */
-export function historyForProject(projectId) {
-  const id = String(projectId).toLowerCase();
+export function historyForAsset(assetId) {
+  const id = String(assetId).toLowerCase();
   const out = [];
   let modes = [];
   try { modes = fs.readdirSync(historyRoot(), { withFileTypes: true }); } catch { return out; }
@@ -318,85 +337,138 @@ export function historyForProject(projectId) {
 }
 
 /**
- * Point <ubelDir>/ubel_project.json at an existing project id — the way to
- * reconnect a folder to a project it was previously scanned as (a fresh clone,
+ * Point <ubelDir>/ubel_asset.json at an existing asset id — the way to
+ * reconnect a folder to an asset it was previously scanned as (a fresh clone,
  * a deleted .ubel/, a second checkout of the same repo), so new scans file
- * their history zips next to the old ones instead of starting a new project.
+ * their history zips next to the old ones instead of starting a new asset.
  *
- *   • Only the id is replaced. created_at, project_name and any other field
- *     already in the file are kept; `name`, when given, replaces project_name.
+ *   • Only the id is replaced. created_at, asset_name and any other field
+ *     already in the file are kept; `name`, when given, replaces asset_name.
  *   • A missing, corrupt, or id-less file is (re)created with the id, `name`
  *     (else a derived name) and a fresh created_at.
- *   • Unlike ensureProject() this THROWS on failure: the user asked for the
+ *   • Unlike ensureAsset() this THROWS on failure: the user asked for the
  *     change explicitly, so a silent no-op would be wrong.
  *
  * @param {string} ubelDir
- * @param {string} projectId  a UUID (case-insensitive; stored lowercase)
+ * @param {string} assetId  <uuid>-<uuid> (case-insensitive; stored lowercase)
  * @param {{name?: string}} [opts]
- * @returns {{project_id: string, project_name: string, previous_id: string|null, changed: boolean}}
+ * @returns {{asset_id: string, asset_name: string, previous_id: string|null, changed: boolean}}
  */
-export function setProjectId(ubelDir, projectId, opts = {}) {
-  if (!isValidProjectId(projectId)) {
-    throw new Error(`not a valid project id (expected a UUID like 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13): ${projectId}`);
+export function setAssetId(ubelDir, assetId, opts = {}) {
+  if (!isValidAssetId(assetId)) {
+    throw new Error(`not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
   }
-  const id = projectId.trim().toLowerCase();
-  const file = path.join(ubelDir, PROJECT_FILE_NAME);
-  const existing = readProjectFile(file);
+  const id = assetId.trim().toLowerCase();
+  const file = path.join(ubelDir, ASSET_FILE_NAME);
+  const existing = readAssetFile(file);
   const name = typeof opts.name === "string" && opts.name.trim()
     ? opts.name.trim().slice(0, 200)
-    : (typeof existing?.project_name === "string" && existing.project_name.trim()
-        ? existing.project_name
-        : deriveProjectName(ubelDir));
+    : (typeof existing?.asset_name === "string" && existing.asset_name.trim()
+        ? existing.asset_name
+        : deriveAssetName(ubelDir));
 
   const next = {
     ...(existing || {}),
-    project_id:   id,
-    project_name: name,
+    asset_id:   id,
+    asset_name: name,
     created_at:   existing?.created_at || new Date().toISOString(),
   };
   fs.mkdirSync(ubelDir, { recursive: true });
   writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
   return {
-    project_id:  id,
-    project_name: name,
-    previous_id: existing ? existing.project_id : null,
-    changed:     !existing || existing.project_id !== id,
+    asset_id:  id,
+    asset_name: name,
+    previous_id: existing ? existing.asset_id : null,
+    changed:     !existing || existing.asset_id !== id,
   };
 }
 
+// ── Run-time asset id (--asset-id) ───────────────────────────────────────────
+
+let runtimeAssetId = null;
+
 /**
- * Project identity for a scan that writes history under `mode`.
+ * Use `id` as the asset id for every scan in this process, instead of the one in
+ * ubel_asset.json. Set by the `--asset-id <id>` flag (see asset_cli.js). Nothing
+ * on disk is created or changed. Pass null to clear it.
  *
- *   mode "os" (apt/dnf/yum)   → machine tag, $HOME/.ubel/ubel_project.json
- *   everything else           → <ubelDir>/ubel_project.json
+ * @param {string|null} id  <uuid>-<uuid>; THROWS when it is not a valid asset id
+ */
+export function setRuntimeAssetId(id) {
+  if (id == null) { runtimeAssetId = null; return; }
+  if (!isValidAssetId(id)) {
+    throw new Error(`not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${id}`);
+  }
+  runtimeAssetId = id.trim().toLowerCase();
+}
+
+/** The id set by --asset-id for this run, or null. */
+export function getRuntimeAssetId() {
+  return runtimeAssetId;
+}
+
+/**
+ * Asset type of a scan: the history mode it files under — sca, firewall, os,
+ * licenses, secrets, sast, malware, cloud, easm, host, domain or url.
+ * @param {string} mode
+ */
+export function assetTypeFor(mode) {
+  return sanitizeReportTag(mode);
+}
+
+/**
+ * Asset identity for a scan that writes history under `mode`.
+ *
+ *   mode "os" (apt/dnf/yum)   → machine tag, $HOME/.ubel/ubel_asset.json
+ *   everything else           → <ubelDir>/ubel_asset.json
+ *
+ * When --asset-id was given (setRuntimeAssetId) that id is used instead of the
+ * stored one and the file is left untouched; the name is the stored one when it
+ * belongs to the same id, else derived.
+ *
+ * asset_id / asset_name are null when the identity file could not be written
+ * (see ensureAsset); asset_type is always set.
  *
  * @param {string} mode      history mode (see historyZipPath)
  * @param {string} ubelDir   the .ubel folder this scan writes its reports into
- * @returns {{project_id: string, project_name: string}|null}
+ * @returns {{asset_id: string|null, asset_name: string|null, asset_type: string}}
  */
-export function projectFor(mode, ubelDir) {
-  return ensureProject(mode === "os" ? machineUbelDir() : ubelDir);
+export function assetFor(mode, ubelDir) {
+  const asset_type = assetTypeFor(mode);
+  const dir = mode === "os" ? machineUbelDir() : ubelDir;
+
+  if (runtimeAssetId) {
+    const stored = readAssetFile(path.join(dir, ASSET_FILE_NAME));
+    const asset_name = stored && stored.asset_id === runtimeAssetId
+      && typeof stored.asset_name === "string" && stored.asset_name.trim()
+      ? stored.asset_name
+      : deriveAssetName(dir);
+    return { asset_id: runtimeAssetId, asset_name, asset_type };
+  }
+
+  const asset = ensureAsset(dir);
+  return { asset_id: asset?.asset_id ?? null, asset_name: asset?.asset_name ?? null, asset_type };
 }
 
 /**
  * Path for a new history zip:
- *   $HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip
- * (history/<mode>/<timestamp>.<tag>.zip when no project id is available).
- * Creates the folders. If two runs of the same project land in the same second
+ *   $HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip
+ * (history/<mode>/<timestamp>.<tag>.zip when no asset id is available).
+ * Creates the folders. If two runs of the same asset land in the same second
  * the later one gets "<timestamp>_2.<tag>.zip" rather than overwriting the first.
  *
  * @param {string} mode        history sub-folder, e.g. "sca", "os", "url"
  * @param {string} timestamp   from reportTimestamp()
  * @param {string} tag         file-name tag, e.g. "sca", "sca_apt", "url"
- * @param {string|null} [projectId]  project_id from projectFor(); omitted/null = no project folder
+ * @param {string|null} [assetId]  asset_id from assetFor(); omitted/null = no asset folder
  * @returns {string}
  */
-export function historyZipPath(mode, timestamp, tag, projectId = null) {
-  if (projectId != null && !UUID_RE.test(projectId)) {
-    throw new Error(`invalid project id: ${projectId}`);
+export function historyZipPath(mode, timestamp, tag, assetId = null) {
+  if (assetId != null && !ASSET_ID_RE.test(assetId)) {
+    throw new Error(`invalid asset id: ${assetId}`);
   }
   let dir = path.join(historyRoot(), sanitizeReportTag(mode));
-  if (projectId) dir = path.join(dir, projectId);
+  if (assetId) dir = path.join(dir, assetId);
   fs.mkdirSync(dir, { recursive: true });
   let candidate = path.join(dir, reportFileName(timestamp, tag, "zip"));
   for (let n = 2; fs.existsSync(candidate); n++) {
@@ -405,7 +477,7 @@ export function historyZipPath(mode, timestamp, tag, projectId = null) {
   return candidate;
 }
 
-/** $HOME/.ubel/latest_reports — the newest zip of every tag, per mode and project. */
+/** $HOME/.ubel/latest_reports — the newest zip of every tag, per mode and asset. */
 export function latestReportsRoot() {
   return path.join(os.homedir(), ".ubel", "latest_reports");
 }
@@ -413,11 +485,11 @@ export function latestReportsRoot() {
 /**
  * Keep the newest scan of a tag in latest_reports/, apart from the history:
  *
- *   history/<mode>/<project_id>/<timestamp>.<tag>.zip   (just written)
- *   latest_reports/<mode>/<project_id>/latest.<tag>.zip (this copy)
+ *   history/<mode>/<asset_id>/<timestamp>.<tag>.zip   (just written)
+ *   latest_reports/<mode>/<asset_id>/latest.<tag>.zip (this copy)
  *
- * The <mode>/<project_id> part is taken from where the history zip was filed,
- * so the two trees always line up (and a zip filed without a project id lands
+ * The <mode>/<asset_id> part is taken from where the history zip was filed,
+ * so the two trees always line up (and a zip filed without a asset id lands
  * in latest_reports/<mode>/). The copy goes to a temp file first and is renamed
  * over the old one, so a reader never sees a half-written latest zip and a
  * failed copy leaves the previous latest in place. Best effort: a scan must not
