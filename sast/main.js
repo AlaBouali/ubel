@@ -36,7 +36,7 @@ const clip  = (v, n) => String(v ?? '').slice(0, n);
 // Flags that never take a value. Without this list, `ubel-sast --only-diff
 // /path/to/project` read "/path/to/project" as the value of --only-diff, left
 // the target path unset, and silently scanned the current directory instead.
-const BOOLEAN_FLAGS = new Set(['no-retry', 'no-verify', 'no-taint', 'include-signals', 'only-diff']);
+const BOOLEAN_FLAGS = new Set(['no-retry', 'no-verify', 'no-taint', 'include-signals', 'only-diff', 'no-pack', 'include-generated', 'skip-tests']);
 
 function parseArgs(args) {
   const flags = {};
@@ -73,6 +73,36 @@ export function ensureUbelIgnoreFiles(dir, { notify = false } = {}) {
   return ensureUbelIgnoreEntries(dir, { notify });
 }
 
+// Parses a positive/zero integer flag; exits with a clear error instead of
+// letting NaN reach the pipeline (parseInt('abc') used to become NaN silently).
+function intFlag(flags, name, { min = 0 } = {}) {
+  if (flags[name] === undefined) return undefined;
+  const n = parseInt(flags[name], 10);
+  if (!Number.isFinite(n) || n < min) {
+    console.error(`Error: --${name} must be an integer >= ${min} (got "${flags[name]}")`);
+    process.exit(2);
+  }
+  return n;
+}
+
+const csvFlag = (v) => String(v).split(',').map(s => s.trim()).filter(Boolean);
+
+// Scope / chunker / packing flags shared by `chunk`, `analyze` and `malware`.
+function applyScopeFlags(flags, opts, { packing = true } = {}) {
+  const maxFileSize = intFlag(flags, 'max-file-size', { min: 1 });
+  if (maxFileSize !== undefined) opts.maxFileSize = maxFileSize;
+  if (flags['include-folders']) opts.includeFolders = csvFlag(flags['include-folders']);
+  if (flags['include-generated']) opts.includeMinified = true;
+  if (flags['skip-tests']) opts.skipTests = true;
+  if (packing) {
+    const packSize = intFlag(flags, 'pack-size');
+    if (packSize !== undefined) opts.packSize = packSize;
+    if (flags['no-pack']) opts.packSize = 0;
+    const packMax = intFlag(flags, 'pack-max-chunks', { min: 1 });
+    if (packMax !== undefined) opts.packMaxChunks = packMax;
+  }
+}
+
 function atomicWrite(filePath, content) {
   const tmp = filePath + '.tmp';
   fs.writeFileSync(tmp, content);
@@ -83,7 +113,10 @@ function atomicWrite(filePath, content) {
 // was not checked (verification off, diff mode, chunk limits, ...). Built from
 // an explicit whitelist — never spread `opts`, which carries the API key and
 // endpoint.
-function scanOptionsFor(opts, mode) {
+function scanOptionsFor(opts, mode, results) {
+  const stats    = (results && results.scan_stats) || null;
+  const coverage = stats ? stats.coverage : null;
+  const tooLarge = coverage && Array.isArray(coverage.files_skipped_too_large) ? coverage.files_skipped_too_large : null;
   return {
     mode,
     verify:          opts.verify !== false,
@@ -91,14 +124,40 @@ function scanOptionsFor(opts, mode) {
     include_signals: opts.skipSignals === false,
     only_diff:       !!opts.onlyDiff,
     diff_base:       opts.onlyDiff ? (opts.diffBase || 'HEAD^') : null,
-    max_chunk_size:  opts.maxChunkSize ?? null,
+    // The limits actually in force (a flag left unset used to be recorded as null,
+    // so a run silently capped at the 1000-chunk default looked unlimited).
+    max_chunk_size:  opts.maxChunkSize ?? 12000,
     chunks_start:    opts.chunksStart  || null,
-    max_chunks:      opts.maxChunks    || null,
+    max_chunks:      opts.maxChunks    || null,              // only when set explicitly
+    max_chunks_effective: opts.maxChunks || coverage?.max_chunks_effective || 1000,
+    pack_size:       opts.packSize ?? 12000,
+    max_file_size:   opts.maxFileSize ?? 512000,
+    include_folders: opts.includeFolders || null,
+    include_generated: mode === 'malware' ? opts.includeMinified !== false : !!opts.includeMinified,
+    skip_tests:      !!opts.skipTests,
     languages:       opts.languages    || null,
     skip_folders:    opts.skipFolders  || null,
     skip_files:      opts.skipFiles    || null,
     fail_on:         opts.failOn       || 'any',
+    // What the run did NOT cover — measured by the chunker, not inferred from flags.
+    chunks_found:             coverage ? coverage.chunks_found : null,
+    chunks_scanned:           coverage ? coverage.chunks_scanned : null,
+    chunks_dropped_by_cap:    coverage ? coverage.chunks_dropped_by_cap : null,
+    files_skipped_too_large_count: tooLarge ? tooLarge.length : null,
+    files_skipped_too_large:  tooLarge ? tooLarge.slice(0, 50) : null,
+    files_skipped_generated:  coverage ? coverage.files_skipped_generated : null,
+    chunks_partial_output:    coverage ? coverage.chunks_partial_output : null,
   };
+}
+
+// Token usage + call counters for the report (real provider-reported numbers
+// where the provider gave them; `estimated_calls` says how many were guessed).
+function scanStatsFor(results) {
+  const st = results && results.scan_stats;
+  if (!st) return null;
+  const total = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, estimated_calls: 0 };
+  for (const pass of Object.values(st.usage || {})) for (const k of Object.keys(total)) total[k] += pass[k] || 0;
+  return { usage: { ...st.usage, total }, pipeline: st.pipeline || {} };
 }
 
 // Built once per run and handed to both the JSON and the HTML writer, so the
@@ -160,7 +219,8 @@ async function writeAnalyzeReports(results, opts) {
   meta.project_id   = project?.project_id   ?? null;
   meta.project_name = project?.project_name ?? null;
   meta.scan_type    = 'analyze';
-  meta.scan_options = scanOptionsFor(opts, 'analyze');
+  meta.scan_options = scanOptionsFor(opts, 'analyze', results);
+  meta.scan_stats   = scanStatsFor(results);
 
   // ── Normalize findings ────────────────────────────────────────────────────
   // The LLM outputs `vuln_name` (per the prompt schema). The HTML and SARIF
@@ -347,7 +407,8 @@ async function writeMalwareReports(results, opts) {
   meta.project_id   = project?.project_id   ?? null;
   meta.project_name = project?.project_name ?? null;
   meta.scan_type = 'malware';
-  meta.scan_options = scanOptionsFor(opts, 'malware');
+  meta.scan_options = scanOptionsFor(opts, 'malware', results);
+  meta.scan_stats   = scanStatsFor(results);
 
   for (const chunk of results) {
     for (const f of (chunk.findings || [])) {
@@ -464,6 +525,7 @@ function runChunkCommand(args) {
   if (flags['skip-folders'])   opts.skipFolders   = String(flags['skip-folders']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['skip-files'])     opts.skipFiles     = String(flags['skip-files']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['languages'])      opts.languages     = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
+  applyScopeFlags(flags, opts, { packing: false });
 
   const root = opts.workingDir ? path.resolve(opts.workingDir) : process.cwd();
   if (!fs.existsSync(root)) { console.error(`Error: path not found — ${root}`); process.exit(1); }
@@ -472,6 +534,12 @@ function runChunkCommand(args) {
   const outputPath = path.join(process.cwd(), 'sast_chunks.json');
   fs.writeFileSync(outputPath, JSON.stringify(chunks, null, 2));
   console.log(`\n[ubel-sast] Chunks written to: ${outputPath}`);
+  const info = chunks.info;
+  if (info) {
+    console.log(`[ubel-sast] ${info.total_chunks} chunk(s) found, ${chunks.length} returned` +
+      (info.truncated ? `  ⚠ ${info.chunks_dropped_by_cap} dropped by --max-chunks ${info.max_chunks}` : ''));
+    if (info.files_skipped_too_large.length) console.log(`[ubel-sast] ⚠ ${info.files_skipped_too_large.length} file(s) over ${info.max_file_size} chars skipped`);
+  }
 
   console.log('\n── Preview (first 3 chunks) ─────────────────────────────────');
   for (const chunk of chunks.slice(0, 3)) {
@@ -530,6 +598,9 @@ function runAnalyzeCommand(args) {
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['only-diff'] )       opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
+  applyScopeFlags(flags, opts);
+  const taintChars = intFlag(flags, 'taint-chain-chars', { min: 1000 });
+  if (taintChars !== undefined) opts.taintChainChars = taintChars;
 
   const FAIL_ON_MODES = new Set(['any', 'valid', 'exploitable']);
   const failOn = flags['fail-on'] ? String(flags['fail-on']) : 'any';
@@ -604,6 +675,7 @@ function runMalwareCommand(args) {
   if (flags['languages'])        opts.languages    = String(flags['languages']).split(',').map(s => s.trim()).filter(Boolean);
   if (flags['only-diff'])        opts.onlyDiff   = true;
   if (flags['diff-base'])        opts.diffBase     = String(flags['diff-base']);
+  applyScopeFlags(flags, opts);
 
   const FAIL_ON_MODES = new Set(['any', 'confirmed']);
   const failOn = flags['fail-on'] ? String(flags['fail-on']) : 'any';
@@ -657,7 +729,7 @@ PROVIDER / REQUEST OPTIONS  (analyze, malware)
   --endpoint <url>               Override the API base URL (provider default otherwise)
   --model <name>                 Override the model string (provider default otherwise)
   --concurrency <n>              Parallel Pass-1 requests (default: 5)
-  --temperature <n>              Pass-1 sampling temperature (default: 0.1; Passes 2/3 are always 0)
+  --temperature <n>              Pass-1 sampling temperature (default: 0.1; Passes 2/3 are always 0, on every provider)
   --max-tokens <n>               Pass-1 response token budget (default: 4096)
   --timeout <ms>                 Per-request timeout, shared across all passes (default: 120000)
   --max-retries <n>              Max retry attempts per request (default: 2)
@@ -666,19 +738,29 @@ PROVIDER / REQUEST OPTIONS  (analyze, malware)
 PIPELINE CONTROLS  (analyze, malware)
   --no-verify                    Skip Pass 2 (verification) — findings get is_valid: undefined
   --no-taint                     Skip Pass 3 (taint-trace) — analyze only; findings get no taint field
-  --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default)
+  --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default; ~6x the catalog size)
+  --pack-size <n>                Pack small same-language chunks into one Pass-1 call, up to <n> chars of code (default: 12000)
+  --pack-max-chunks <n>          Max chunks per packed call (default: 10)
+  --no-pack                      One Pass-1 call per chunk (same as --pack-size 0)
   --verify-concurrency <n>       Parallel Pass-2 requests (default: = --concurrency)
   --taint-concurrency <n>        Parallel Pass-3 requests, analyze only (default: = --concurrency)
   --verification-max-tokens <n>  Pass-2 response token budget (default: 4096)
   --taint-max-tokens <n>         Pass-3 response token budget, analyze only (default: 4096)
+  --taint-chain-chars <n>        Character budget of the call chain sent to Pass 3, analyze only (default: 24000)
 
 SCOPE & CHUNKING  (chunk, analyze, malware)
   --working-dir <path>           Target directory (same as the positional path argument)
-  --max-chunk-size <n>           Max characters per chunk (default: 12000)
+  --max-chunk-size <n>           HARD cap on characters per chunk, over-long lines are split (default: 12000)
+  --max-file-size <n>            Skip files larger than <n> characters, listed in the report (default: 512000)
   --chunks-start <n>             Skip the first N chunks
-  --max-chunks <n>               Cap the number of chunks scanned
+  --max-chunks <n>               Cap the number of chunks scanned (default: 1000; chunks beyond the cap are
+                                 reported as NOT scanned, never silently dropped)
   --skip-folders <a,b,c>         Comma-separated folder names to exclude
   --skip-files <a,b,c>           Comma-separated file names to exclude
+  --include-folders <a,b,c>      Scan these folders even though they are ignored by default (node_modules, dist,
+                                 build, out, bin, obj, target, vendor, packages, Pods, ... and dot-directories)
+  --skip-tests                   Skip test folders and test-named files (scanned by default)
+  --include-generated            Scan *.min.js / *.bundle.js (analyze skips them by default; malware scans them)
   --languages <a,b,c>            Comma-separated language filter, e.g. java,kotlin,flutter,swift
 
 DIFF MODE  (analyze, malware)
@@ -697,6 +779,8 @@ EXAMPLES
   ubel-sast --only-diff --diff-base main
   ubel-sast --provider anthropic --model claude-haiku-4-5-20251001
   ubel-mal --fail-on confirmed
+  ubel-mal ./project --include-folders node_modules,dist     # sweep a dependency tree / build output
+  ubel-sast --skip-tests --pack-size 16000
   ubel-chunk /path/to/project --max-chunk-size 8000
 
 Full documentation (pipeline mechanics, token-cost breakdown, CI examples):

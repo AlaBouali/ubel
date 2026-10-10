@@ -194,7 +194,10 @@ function confClass(c) {
   return {high:'conf-high',medium:'conf-medium',low:'conf-low'}[(c||'').toLowerCase()] || 'conf-low';
 }
 
-function taintBadge(taint) {
+function taintBadge(taint, finding) {
+  // Classes that need no attacker input (hardcoded secrets, weak crypto, ...) are
+  // deliberately not taint-traced: say so instead of showing an unexplained dash.
+  if (!taint && finding && finding.taint_skipped) return '<span class="px-1.5 py-0.5 rounded border text-[10px] font-bold text-neutral-400 border-neutral-700" title="This weakness does not depend on attacker input, so no exploitability trace was run">NOT REQUIRED</span>';
   if (!taint) return '<span class="text-neutral-600 text-[10px]">—</span>';
   if (taint.exploitable === true)  return '<span class="px-1.5 py-0.5 rounded border text-[10px] font-bold text-red-400 border-red-400">EXPLOITABLE</span>';
   if (taint.reachable   === false) return '<span class="px-1.5 py-0.5 rounded border text-[10px] font-bold text-green-400 border-green-400">UNREACHABLE</span>';
@@ -781,7 +784,7 @@ function renderFindings(search='', sev='all', conf='all', status='all') {
       <td class="px-4 py-3 mono text-[11px] text-neutral-300">\${escH(chunk.class ? chunk.class+'.'+chunk.name : chunk.name)}</td>
       <td class="px-4 py-3"><span class="px-1.5 py-0.5 rounded border text-[10px] \${confClass(f.confidence)}">\${escH(f.confidence||'?')}</span></td>
       <td class="px-4 py-3">\${validBadge(f.is_valid)}</td>
-      <td class="px-4 py-3">\${taintBadge(f.taint)}</td>
+      <td class="px-4 py-3">\${taintBadge(f.taint, f)}</td>
     \`;
     tbody.appendChild(row);
   });
@@ -811,7 +814,7 @@ function _renderFindingModal({chunk, finding: f}) {
   const taintHtml = f.taint ? \`
     <div class="space-y-3">
       <div class="flex flex-wrap gap-4 items-center">
-        \${taintBadge(f.taint)}
+        \${taintBadge(f.taint, f)}
         \${taint.reachable   != null ? '<span class="text-xs text-neutral-400">Reachable: <span class="font-semibold '+(taint.reachable?'text-red-400':'text-green-400')+'">'+(taint.reachable?'YES':'NO')+'</span></span>' : ''}
         \${taint.sanitized   === true ? '<span class="text-xs text-neutral-400">Sanitized: <span class="font-semibold text-blue-400">YES</span></span>' : ''}
         \${taint.exploitable != null ? '<span class="text-xs text-neutral-400">Exploitable: <span class="font-semibold '+(taint.exploitable?'text-red-500':'text-green-400')+'">'+(taint.exploitable?'YES':'NO')+'</span></span>' : ''}
@@ -979,7 +982,7 @@ function openInvModal(chunkId) {
       </div>
       <div class="flex items-center gap-2">
         \${validBadge(f.is_valid)}
-        \${taintBadge(f.taint)}
+        \${taintBadge(f.taint, f)}
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
       </div>
     </div>
@@ -1274,7 +1277,7 @@ function openComplianceModal(fwIdx, cIdx) {
       </div>
       <div class="flex items-center gap-2">
         \${validBadge(f.is_valid)}
-        \${taintBadge(f.taint)}
+        \${taintBadge(f.taint, f)}
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
       </div>
     </div>

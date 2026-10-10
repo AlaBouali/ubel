@@ -1,7 +1,7 @@
 'use strict';
 
 import { callProvider } from './dispatcher.js';
-import { parseFindings } from './parsers.js';
+import { parseFindingsDetailed } from './parsers.js';
 
 // ─── Shared retry logic ──────────────────────────────────────────────────────
 // Returns true for status codes that should never be retried.
@@ -21,32 +21,61 @@ function retryDelayMs(err, attempt_n) {
   return (2 ** attempt_n) * 1000;
 }
 
-async function callProviderWithRetry(callOpts, { retryOnParseError = true, maxRetries = 2 } = {}) {
-  async function attempt(maxTokensOverride) {
-    const opts = maxTokensOverride
-      ? { ...callOpts, maxTokens: maxTokensOverride }
-      : callOpts;
-    const raw = await callProvider(opts);
-    return { raw, findings: parseFindings(raw) };
-  }
+// Hard ceiling for the one budget-doubling retry, so a small default can't
+// balloon into a request most providers would reject outright.
+const MAX_RETRY_OUTPUT_TOKENS = 32_768;
 
+// Attach how the reply was obtained without changing the return type (an
+// array of findings): `findings.info = { truncated, salvaged, retried }`.
+function withInfo(findings, info) {
+  Object.defineProperty(findings, 'info', { value: info, enumerable: false, writable: true });
+  return findings;
+}
+
+/**
+ * Pass-1 call with transport retries and ONE parse-error retry.
+ *
+ * Parse-error policy (this used to double max_tokens blindly on every parse
+ * failure, paying for a whole second call even when the reply was prose or
+ * had a stray character):
+ *   - valid JSON                         → return it.
+ *   - cut off mid-JSON, but ≥1 COMPLETE finding precedes the cut
+ *                                        → return those findings (salvaged), no second call.
+ *                                          info.truncated is set so the report can say the
+ *                                          tail of that reply may be missing.
+ *   - cut off before any finding completes
+ *                                        → retry once with DOUBLED max_tokens (it really was too small).
+ *   - complete but unparseable (prose, markdown, bad escape)
+ *                                        → retry once at the SAME max_tokens (doubling would not help).
+ */
+async function callProviderWithRetry(callOpts, { retryOnParseError = true, maxRetries = 2 } = {}) {
   let lastError = null;
 
   for (let attempt_n = 0; attempt_n <= maxRetries; attempt_n++) {
     try {
-      const { findings } = await attempt();
+      const raw = await callProvider(callOpts);
+      const first = parseFindingsDetailed(raw);
 
-      if (retryOnParseError && findings.some(f => f._parse_error)) {
-        try {
-          const { findings: retried } = await attempt(callOpts.maxTokens * 2);
-          if (!retried.some(f => f._parse_error)) return retried;
-        } catch {
-          // Fall through to return the original parse-error findings
-        }
-        return findings;
+      if (!first.findings.some(f => f._parse_error)) {
+        return withInfo(first.findings, { truncated: first.truncated, salvaged: first.salvaged, retried: false });
+      }
+      if (!retryOnParseError) {
+        return withInfo(first.findings, { truncated: first.truncated, salvaged: false, retried: false });
       }
 
-      return findings;
+      try {
+        const nextTokens = first.truncated
+          ? Math.min(callOpts.maxTokens * 2, MAX_RETRY_OUTPUT_TOKENS)
+          : callOpts.maxTokens;
+        const retriedRaw = await callProvider({ ...callOpts, maxTokens: nextTokens });
+        const second = parseFindingsDetailed(retriedRaw);
+        if (!second.findings.some(f => f._parse_error)) {
+          return withInfo(second.findings, { truncated: second.truncated, salvaged: second.salvaged, retried: true });
+        }
+      } catch {
+        // Fall through to return the original parse-error findings
+      }
+      return withInfo(first.findings, { truncated: first.truncated, salvaged: false, retried: true });
 
     } catch (err) {
       lastError = err;
@@ -63,4 +92,21 @@ async function callProviderWithRetry(callOpts, { retryOnParseError = true, maxRe
   throw lastError;
 }
 
-export { isTerminalStatus, retryDelayMs, callProviderWithRetry };
+// Generic transport-retry wrapper for raw-text calls (verify / taint passes).
+async function callRawWithRetry(callOpts, maxRetries = 2) {
+  let lastErr = null;
+  for (let attempt_n = 0; attempt_n <= maxRetries; attempt_n++) {
+    try {
+      return await callProvider(callOpts);
+    } catch (err) {
+      lastErr = err;
+      if (isTerminalStatus(err)) throw err;
+      if (attempt_n < maxRetries) {
+        await new Promise(r => setTimeout(r, retryDelayMs(err, attempt_n)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+export { isTerminalStatus, retryDelayMs, callProviderWithRetry, callRawWithRetry };

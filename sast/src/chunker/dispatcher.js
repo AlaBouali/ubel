@@ -13,13 +13,17 @@ import {
 
 // ─── Dispatcher ───────────────────────────────────────────────────────────────
 
-function chunkFile(filePath) {
+// opts.maxFileSize     — skip files longer than this many characters (default 512000)
+// opts.onSkipTooLarge  — (filePath, size) => void, so callers can report the skip
+function chunkFile(filePath, opts = {}) {
+  const maxFileSize = opts.maxFileSize ?? 512_000;
   let content;
   try { content = fs.readFileSync(filePath, 'utf8'); }
   catch { return []; }
 
-  if (content.length > 512_000) {
-    console.warn(`[skip] ${filePath} — file too large (${(content.length / 1024).toFixed(0)}KB)`);
+  if (content.length > maxFileSize) {
+    console.warn(`[skip] ${filePath} — file too large (${(content.length / 1024).toFixed(0)}KB, limit ${(maxFileSize / 1024).toFixed(0)}KB)`);
+    if (typeof opts.onSkipTooLarge === 'function') opts.onSkipTooLarge(filePath, content.length);
     return [];
   }
 

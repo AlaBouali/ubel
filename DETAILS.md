@@ -278,7 +278,7 @@ Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-h
 Like the SCA binaries, `ubel-sast` and `ubel-mal` make sure `.gitignore` and `.dockerignore` in the scanned directory ignore `.ubel/` and `.ubelignore` before they write their reports there, creating the files if needed — idempotent, append-only, and it respects an explicit `!.ubelignore`. Opt out with `UBEL_NO_IGNORE_FILES=1`.
 
 **Exit codes:** governed by `--fail-on`, which only changes the process exit code — reports on disk always contain every finding regardless of this flag.
-- `ubel-sast` (`analyze`): `any` *(default)* fails on any finding, including unresolved ones; `valid` fails only on findings verified `is_valid: true`; `exploitable` fails only on findings taint-traced `exploitable: true`.
+- `ubel-sast` (`analyze`): `any` *(default)* fails on any finding, including unresolved ones; `valid` fails only on findings verified `is_valid: true`; `exploitable` fails only on findings taint-traced `exploitable: true` (classes that need no attacker input, such as hardcoded secrets, are never traced — gate on them with `valid` or `any`). SAST also packs small chunks into shared calls, batches verification and tracing per chunk, records real token usage in the report, and reports anything it did not scan (chunk cap, oversized files, cut-off replies) instead of presenting it as a clean result — see the SAST documentation.
 - `ubel-mal` (`malware`): `any` *(default)* fails on any finding, including unresolved ones; `confirmed` fails only on findings verified `is_valid: true` — an unresolved finding still fails the build, since "couldn't determine" is never treated as clean.
 
 **Full documentation — pipeline mechanics, every flag, token-cost breakdown, and CI examples:**

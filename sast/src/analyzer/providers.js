@@ -2,15 +2,61 @@
 
 import {httpPost} from './httpTransport.js';
 
+// ─── Token usage extraction ───────────────────────────────────────────────────
+// Every provider reports real token counts in its response; reading them is what
+// lets a run say what it actually spent instead of a chars/4 guess. Normalised to
+// { input, output, cache_read, cache_write } (any missing field is 0).
+function usageFrom(parsed) {
+  const u = parsed?.usage;
+  if (u) {
+    // Anthropic: input_tokens EXCLUDES cached tokens; OpenAI-style: prompt_tokens includes them.
+    if (u.input_tokens !== undefined || u.output_tokens !== undefined) {
+      return {
+        input: u.input_tokens || 0, output: u.output_tokens || 0,
+        cache_read: u.cache_read_input_tokens || 0, cache_write: u.cache_creation_input_tokens || 0,
+      };
+    }
+    return {
+      input: u.prompt_tokens || 0, output: u.completion_tokens || 0,
+      cache_read: u.prompt_tokens_details?.cached_tokens || u.prompt_cache_hit_tokens || 0, cache_write: 0,
+    };
+  }
+  const g = parsed?.usageMetadata;                       // Gemini
+  if (g) {
+    return {
+      input: g.promptTokenCount || 0, output: g.candidatesTokenCount || 0,
+      cache_read: g.cachedContentTokenCount || 0, cache_write: 0,
+    };
+  }
+  return null;
+}
+function reportUsage(onUsage, parsed) {
+  if (typeof onUsage !== 'function') return;
+  // A provider that returns no usage block is still a call: report it with
+  // missing:true so the totals can say how many calls were estimated, not measured.
+  const u = usageFrom(parsed) || { input: 0, output: 0, cache_read: 0, cache_write: 0, missing: true };
+  try { onUsage(u); } catch { /* accounting must never break a scan */ }
+}
+
+// Prompt = promptPrefix (static, cache-friendly) + prompt (the variable tail).
+// Providers with no explicit cache control just get the concatenation — the
+// static-prefix-first ordering still lets automatic prefix caching work.
+const fullPrompt = (promptPrefix, prompt) => (promptPrefix ? promptPrefix + prompt : prompt);
+
+// Prompt caching needs a minimum prefix length (1,024 tokens on most Claude
+// models, more on some); below it the marker is simply ignored by the API, but
+// there is no point sending it for a tiny prefix.
+const MIN_CACHEABLE_PREFIX_CHARS = 4096;
+
 // ─── Provider caller functions ────────────────────────────────────────────────
 
 async function callOpenRouter({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                                model, prompt, maxTokens, temperature, timeoutMs }) {
+                                model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   if (!apiKey) throw new Error('OpenRouter requires an API key (--api-key or OPENROUTER_API_KEY)');
 
   const body = JSON.stringify({
     model,
-    messages:   [{ role: 'user', content: prompt }],
+    messages:   [{ role: 'user', content: fullPrompt(promptPrefix, prompt) }],
     temperature,
     max_tokens: maxTokens,
   });
@@ -24,16 +70,17 @@ async function callOpenRouter({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
+  reportUsage(onUsage, parsed);
   return parsed?.choices?.[0]?.message?.content ?? '';
 }
 
 async function callOpenAI({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                            model, prompt, maxTokens, temperature, timeoutMs }) {
+                            model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   if (!apiKey) throw new Error('OpenAI requires an API key (--api-key or OPENAI_API_KEY)');
 
   const body = JSON.stringify({
     model,
-    messages:   [{ role: 'user', content: prompt }],
+    messages:   [{ role: 'user', content: fullPrompt(promptPrefix, prompt) }],
     temperature,
     max_tokens: maxTokens,
   });
@@ -45,17 +92,30 @@ async function callOpenAI({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
+  reportUsage(onUsage, parsed);
   return parsed?.choices?.[0]?.message?.content ?? '';
 }
 
 async function callAnthropic({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                               model, prompt, maxTokens, temperature, timeoutMs }) {
+                               model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   if (!apiKey) throw new Error('Anthropic requires an API key (--api-key or ANTHROPIC_API_KEY)');
 
-  const body = JSON.stringify({
+  // temperature MUST be sent: without it Anthropic runs at its default (1.0), which
+  // silently broke the "Pass 2/3 are deterministic (temperature 0)" guarantee.
+  // When a static prefix is supplied it goes in its own content block with a
+  // cache_control breakpoint, so every call after the first reads it from cache.
+  const content = (promptPrefix && promptPrefix.length >= MIN_CACHEABLE_PREFIX_CHARS)
+    ? [
+        { type: 'text', text: promptPrefix, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: prompt },
+      ]
+    : fullPrompt(promptPrefix, prompt);
+
+  const makeBody = (withTemperature) => JSON.stringify({
     model,
     max_tokens: maxTokens,
-    messages:   [{ role: 'user', content: prompt }],
+    ...(withTemperature && typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {}),
+    messages:   [{ role: 'user', content }],
   });
 
   const headers = {
@@ -64,13 +124,28 @@ async function callAnthropic({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
     'anthropic-version': '2023-06-01',
   };
 
-  const raw    = await httpPost(endpoint, headers, body, timeoutMs);
+  let raw;
+  try {
+    raw = await httpPost(endpoint, headers, makeBody(true), timeoutMs);
+  } catch (err) {
+    // A few newer Claude models reject an explicit sampling temperature. Retry
+    // once without it rather than failing the whole scan on a parameter the
+    // model has fixed anyway.
+    if (err.statusCode === 400 && /temperature/i.test(err.message || '')) {
+      raw = await httpPost(endpoint, headers, makeBody(false), timeoutMs);
+    } else {
+      throw err;
+    }
+  }
   const parsed = JSON.parse(raw);
-  return parsed?.content?.[0]?.text ?? '';
+  reportUsage(onUsage, parsed);
+  // Join every text block (models with extended thinking put a non-text block first).
+  const blocks = Array.isArray(parsed?.content) ? parsed.content : [];
+  return blocks.filter(b => b && b.type === 'text').map(b => b.text).join('') || (parsed?.content?.[0]?.text ?? '');
 }
 
 async function callGemini({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                            model, prompt, maxTokens, temperature, timeoutMs }) {
+                            model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   if (!apiKey) throw new Error('Gemini requires an API key (--api-key or GEMINI_API_KEY)');
 
   let resolvedEndpoint = endpoint.includes('{model}')
@@ -88,7 +163,7 @@ async function callGemini({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
   }
 
   const body = JSON.stringify({
-    contents: [{ parts: [{ text: prompt }] }],
+    contents: [{ parts: [{ text: fullPrompt(promptPrefix, prompt) }] }],
     generationConfig: {
       temperature,
       maxOutputTokens: maxTokens,
@@ -97,16 +172,17 @@ async function callGemini({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
 
   const raw    = await httpPost(resolvedEndpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
+  reportUsage(onUsage, parsed);
   return parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
 async function callDeepSeek({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                              model, prompt, maxTokens, temperature, timeoutMs }) {
+                              model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   if (!apiKey) throw new Error('DeepSeek requires an API key (--api-key or DEEPSEEK_API_KEY)');
 
   const body = JSON.stringify({
     model,
-    messages:   [{ role: 'user', content: prompt }],
+    messages:   [{ role: 'user', content: fullPrompt(promptPrefix, prompt) }],
     temperature,
     max_tokens: maxTokens,
   });
@@ -118,14 +194,15 @@ async function callDeepSeek({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
+  reportUsage(onUsage, parsed);
   return parsed?.choices?.[0]?.message?.content ?? '';
 }
 
 async function callLocal({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                           model, prompt, maxTokens, temperature, timeoutMs }) {
+                           model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   const body = JSON.stringify({
     model,
-    messages:   [{ role: 'user', content: prompt }],
+    messages:   [{ role: 'user', content: fullPrompt(promptPrefix, prompt) }],
     temperature,
     max_tokens: maxTokens,
   });
@@ -135,19 +212,20 @@ async function callLocal({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
 
   const raw    = await httpPost(endpoint, headers, body, timeoutMs);
   const parsed = JSON.parse(raw);
+  reportUsage(onUsage, parsed);
   return parsed?.choices?.[0]?.message?.content ?? '';
 }
 
 async function callDockerDesktop({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                                   model, prompt, maxTokens, temperature, timeoutMs }) {
+                                   model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   return callLocal({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                     model, prompt, maxTokens, temperature, timeoutMs });
+                     model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage });
 }
 
 async function callDocker({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                            model, prompt, maxTokens, temperature, timeoutMs }) {
+                            model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage }) {
   return callLocal({ endpoint, apiKey, apiKeyHeader, apiKeyPrefix,
-                     model, prompt, maxTokens, temperature, timeoutMs });
+                     model, prompt, promptPrefix, maxTokens, temperature, timeoutMs, onUsage });
 }
 
 // ─── Provider registry & defaults ─────────────────────────────────────────────

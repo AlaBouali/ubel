@@ -204,63 +204,165 @@ function findCallers(funcName, chunkMap) {
   return callers;
 }
 
+// ─── Full (caller + callee) chain for the taint-trace prompt ─────────────────
+//
+// Returns an Array of chunk references ordered outermost caller → … → nearest
+// caller → SINK → nearest callee → …, with these extra properties so the
+// prompt can label every entry correctly:
+//   chain.roles[i]        'caller' | 'sink' | 'callee'
+//   chain.callTargets[i]  names (in the chain) that entry i calls — used to
+//                         excerpt a caller down to its call-site windows
+//   chain.sinkIndex       index of the chunk that holds the flagged finding
+//
+// maxDepth is a real BFS depth now: callers-of-callers are followed for up to
+// `maxDepth` LEVELS (it used to be 10 node expansions, which is far less on
+// a wide graph). maxChainLength caps the total number of chunks; when the
+// graph is bigger, the NEAREST callers and callees are kept (alternating
+// caller / callee, so slots one side doesn't need go to the other) — the old
+// splice() dropped the nearest callers and kept the farthest.
 function buildFullCallChain(sourceChunk, chunkMap, maxDepth = 10, maxChainLength = 15) {
   const visited = new Set([sourceChunk.id]);
-  const chain = [];
 
-  // 1. Collect callers (reverse) using BFS
-  const callerQueue = [sourceChunk];
-  const callerSet = new Set();
-
-  for (let depth = 0; depth < maxDepth && callerQueue.length > 0; depth++) {
-    const current = callerQueue.shift();
-    const callers = findCallers(current.name, chunkMap);
-    for (const caller of callers) {
-      if (!visited.has(caller.id)) {
+  // 1. Callers (reverse), level-by-level BFS. Each entry remembers the name
+  //    of the function it calls toward the sink so it can be excerpted later.
+  const callers = [];                       // { chunk, depth, calls:Set<string> }
+  let frontier = [sourceChunk];
+  for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
+    const next = [];
+    for (const current of frontier) {
+      for (const caller of findCallers(current.name, chunkMap)) {
+        if (visited.has(caller.id)) {
+          const seen = callers.find(c => c.chunk.id === caller.id);
+          if (seen) seen.calls.add(current.name);
+          continue;
+        }
         visited.add(caller.id);
-        callerSet.add(caller);
-        callerQueue.push(caller);
+        const entry = { chunk: caller, depth, calls: new Set([current.name]) };
+        callers.push(entry);
+        next.push(caller);
+      }
+    }
+    frontier = next;
+  }
+
+  // 2. Callees (forward): direct callees first, then the callees they call.
+  const callees = [];                       // { chunk, depth }
+  const direct = findCalledFunctions(sourceChunk.code, sourceChunk, chunkMap);
+  for (const call of direct) {
+    if (call.chunk && !visited.has(call.chunk.id)) {
+      visited.add(call.chunk.id);
+      callees.push({ chunk: call.chunk, depth: 1 });
+    }
+  }
+  for (const d1 of [...callees]) {
+    for (const nested of findCalledFunctions(d1.chunk.code, d1.chunk, chunkMap)) {
+      if (nested.chunk && !visited.has(nested.chunk.id)) {
+        visited.add(nested.chunk.id);
+        callees.push({ chunk: nested.chunk, depth: 2 });
       }
     }
   }
 
-  // 2. Collect callees (forward) using existing function
-  const calleeSet = new Set();
-  const forwardChain = buildCallChain(sourceChunk, chunkMap);
-  for (const chunk of forwardChain) {
-    if (chunk.id !== sourceChunk.id && !visited.has(chunk.id)) {
-      visited.add(chunk.id);
-      calleeSet.add(chunk);
-    }
+  // 3. Cap: nearest first, alternating caller / callee.
+  const budget = Math.max(0, maxChainLength - 1);
+  const callersByDist = [...callers].sort((a, b) => a.depth - b.depth);
+  const calleesByDist = [...callees].sort((a, b) => a.depth - b.depth);
+  const keptCallers = [], keptCallees = [];
+  let ci = 0, ei = 0;
+  while (keptCallers.length + keptCallees.length < budget && (ci < callersByDist.length || ei < calleesByDist.length)) {
+    if (ci < callersByDist.length) keptCallers.push(callersByDist[ci++]);
+    if (keptCallers.length + keptCallees.length >= budget) break;
+    if (ei < calleesByDist.length) keptCallees.push(calleesByDist[ei++]);
   }
 
-  // 3. Order: outermost callers first (reverse of BFS order), then source, then callees
-  const callerArray = Array.from(callerSet);
-  callerArray.reverse(); // outermost first
+  // 4. Order: outermost callers first, nearest caller last, then the sink,
+  //    then callees nearest-first.
+  const orderedCallers = keptCallers.sort((a, b) => b.depth - a.depth);
+  const chain = [];
+  const roles = [];
+  const callTargets = [];
+  for (const c of orderedCallers) { chain.push(c.chunk); roles.push('caller'); callTargets.push([...c.calls]); }
+  const sinkIndex = chain.length;
+  chain.push(sourceChunk); roles.push('sink'); callTargets.push(null);
+  for (const c of keptCallees) { chain.push(c.chunk); roles.push('callee'); callTargets.push(null); }
 
-  // Cap the chain length to avoid token overflow
-  const total = callerArray.length + 1 + calleeSet.size;
-  let maxCallers = Math.max(0, Math.floor((maxChainLength - 1) / 2));
-  let maxCallees = Math.max(0, maxChainLength - 1 - maxCallers);
-  if (total > maxChainLength) {
-    const excess = total - maxChainLength;
-    if (callerArray.length > maxCallers) {
-      callerArray.splice(maxCallers);
-    }
-    if (calleeSet.size > maxCallees) {
-      // Remove excess callees (keep closest)
-      const calleeArray = Array.from(calleeSet);
-      calleeArray.splice(maxCallees);
-      calleeSet.clear();
-      calleeArray.forEach(c => calleeSet.add(c));
-    }
-  }
-
-  chain.push(...callerArray);
-  chain.push(sourceChunk);
-  chain.push(...Array.from(calleeSet));
-
+  chain.roles = roles;
+  chain.callTargets = callTargets;
+  chain.sinkIndex = sinkIndex;
+  chain.truncated = (callers.length + callees.length) > (keptCallers.length + keptCallees.length);
   return chain;
+}
+
+// ─── Excerpting: keep the taint prompt small ─────────────────────────────────
+//
+// A caller only matters at the lines where it calls the next function toward
+// the sink, and a callee only matters for what it does with its inputs — so
+// instead of sending every chain member whole, send the call-site windows
+// (callers) or the head (callees) within a character budget. The sink chunk is
+// always sent whole.
+function excerptAroundCalls(code, names, maxChars, context = 6) {
+  if (code.length <= maxChars) return code;
+  const lines  = code.split('\n');
+  const masked = maskNonCode(code).split('\n');
+  const re = names && names.length
+    ? new RegExp(`\\b(?:${names.map(escapeRegex).join('|')})\\s*\\(`)
+    : null;
+
+  const hit = [];
+  if (re) masked.forEach((l, i) => { if (re.test(l)) hit.push(i); });
+  if (hit.length === 0) return excerptHead(code, maxChars);
+
+  const ranges = [];
+  for (const i of hit) {
+    const lo = Math.max(0, i - context), hi = Math.min(lines.length - 1, i + context);
+    const last = ranges[ranges.length - 1];
+    if (last && lo <= last[1] + 1) last[1] = Math.max(last[1], hi); else ranges.push([lo, hi]);
+  }
+
+  const out = [];
+  let used = 0, prevEnd = -1;
+  for (const [lo, hi] of ranges) {
+    const seg = lines.slice(lo, hi + 1).join('\n');
+    if (used + seg.length > maxChars && out.length > 0) break;
+    const room = maxChars - used;
+    const text = seg.length > room ? seg.slice(0, room) : seg;
+    if (lo > prevEnd + 1) out.push(`// … ${lo - prevEnd - 1} line(s) omitted …`);
+    out.push(text);
+    used += text.length; prevEnd = hi;
+    if (used >= maxChars) break;
+  }
+  if (prevEnd < lines.length - 1) out.push(`// … ${lines.length - 1 - prevEnd} line(s) omitted …`);
+  return out.join('\n');
+}
+
+function excerptHead(code, maxChars) {
+  if (code.length <= maxChars) return code;
+  const cut = code.slice(0, maxChars);
+  const lastNl = cut.lastIndexOf('\n');
+  const body = lastNl > maxChars * 0.5 ? cut.slice(0, lastNl) : cut;
+  const omitted = code.slice(body.length).split('\n').length - 1;
+  return `${body}\n// … ${Math.max(omitted, 1)} more line(s) omitted …`;
+}
+
+// Applies the excerpt policy to a chain. `strip(chunk)` returns the chunk with
+// comments removed (done BEFORE excerpting so comment text never eats budget).
+// Returns plain objects [{...chunk, code, _role, _excerpted}] ready for the prompt.
+function prepareChainForPrompt(chain, strip, { maxChainChars = 24000, perChunkChars = 3500 } = {}) {
+  const sinkIdx = chain.sinkIndex ?? 0;
+  const sink = strip(chain[sinkIdx]);
+  const others = chain.length - 1;
+  const remaining = Math.max(0, maxChainChars - sink.code.length);
+  const perOther = others > 0 ? Math.max(600, Math.min(perChunkChars, Math.floor(remaining / others))) : 0;
+
+  return chain.map((c, i) => {
+    const role = chain.roles ? chain.roles[i] : (i === sinkIdx ? 'sink' : 'caller');
+    if (i === sinkIdx) return { ...sink, _role: 'sink', _excerpted: false };
+    const stripped = strip(c);
+    const code = role === 'caller'
+      ? excerptAroundCalls(stripped.code, chain.callTargets ? chain.callTargets[i] : null, perOther)
+      : excerptHead(stripped.code, perOther);
+    return { ...stripped, code, _role: role, _excerpted: code !== stripped.code };
+  });
 }
 
 export  {
@@ -274,4 +376,7 @@ export  {
   getMaskedCode,
   findCallers,
   buildFullCallChain,
+  excerptAroundCalls,
+  excerptHead,
+  prepareChainForPrompt,
 };

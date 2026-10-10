@@ -398,10 +398,15 @@ function overallRisk(m) {
   if (n("low") > 0) {
     return { level: "low", rationale: `Only low-priority ${plural(n("low"), noun)} found${m.mitigated ? `, including ${count(m.mitigated, "real weakness", "real weaknesses")} currently blocked by other code` : ""}.${gapsOnRisk}` };
   }
-  if (m.unreadable > 0) {
+  if (m.unreadable > 0 || (m.limits && m.limits.length > 0)) {
+    const why = [];
+    if (m.unreadable > 0) why.push(`${count(m.unreadable, "code unit")} could not be analyzed because the AI's reply was unreadable`);
+    for (const l of (m.limits || [])) why.push(l);
+    const others = m.gaps.filter((g) => !why.includes(g));
     return {
       level: "low",
-      rationale: `${count(m.unreadable, "code unit")} could not be analyzed because the AI's reply was unreadable, so a Minimal rating cannot be given. The true rating could be higher.${gapsOnRisk}`,
+      rationale: `${joinGaps(why)}, so a Minimal rating cannot be given. The true rating could be higher.` +
+        (others.length ? ` Not everything was covered: ${joinGaps(others)}.` : ""),
     };
   }
   const dismissed = m.falsePositives > 0
@@ -630,19 +635,39 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const gapsScope = [];
   if (opts.only_diff) gapsScope.push(`only code changed since ${opts.diff_base || "the previous commit"} was scanned`);
   if (opts.chunks_start) gapsScope.push(`the first ${opts.chunks_start} code units were skipped`);
-  if (opts.max_chunks) gapsScope.push(`at most ${opts.max_chunks} code units were scanned`);
+  // Only the legacy fallback: when the scanner measured truncation (chunks_dropped_by_cap)
+  // the real, involuntary gap is reported below; a limit that was set but never reached
+  // is not a gap at all.
+  if (opts.max_chunks && typeof opts.chunks_dropped_by_cap !== "number") gapsScope.push(`at most ${opts.max_chunks} code units were scanned`);
   if (Array.isArray(opts.languages) && opts.languages.length) gapsScope.push(`only ${joinList(opts.languages)} code was scanned`);
   if (Array.isArray(opts.skip_folders) && opts.skip_folders.length) gapsScope.push(`folders excluded: ${opts.skip_folders.join(", ")}`);
   if (Array.isArray(opts.skip_files) && opts.skip_files.length) gapsScope.push(`files excluded: ${opts.skip_files.join(", ")}`);
 
+  // Involuntary coverage gaps MEASURED by the scanner (not choices the user made):
+  // the default code-unit cap, files over the size limit, and AI replies cut off
+  // by the output limit. Each one means code that was not (fully) examined, so
+  // each blocks a Minimal rating the same way an unreadable reply does.
+  const gapsLimits = [];
+  if (typeof opts.chunks_dropped_by_cap === "number" && opts.chunks_dropped_by_cap > 0) {
+    gapsLimits.push(`${count(opts.chunks_dropped_by_cap, "code unit")}${opts.chunks_found ? ` (of ${opts.chunks_found})` : ""} ${plural(opts.chunks_dropped_by_cap, "was", "were")} never scanned because the limit of ${opts.max_chunks_effective || opts.max_chunks} code units per run was reached`);
+  }
+  if (typeof opts.files_skipped_too_large_count === "number" && opts.files_skipped_too_large_count > 0) {
+    const kb = opts.max_file_size ? ` ${Math.round(opts.max_file_size / 1024)} KB` : "";
+    gapsLimits.push(`${count(opts.files_skipped_too_large_count, "file")} larger than${kb} ${plural(opts.files_skipped_too_large_count, "was", "were")} skipped`);
+  }
+  if (typeof opts.chunks_partial_output === "number" && opts.chunks_partial_output > 0) {
+    gapsLimits.push(`${count(opts.chunks_partial_output, "code unit")} had an AI reply that was cut off, so findings after the cut-off point may be missing`);
+  }
+
   const gaps = [];
   if (unreadable > 0) gaps.push(`${count(unreadable, "code unit")} could not be analyzed because the AI's reply was unreadable`);
+  for (const g of gapsLimits) gaps.push(g);
   if (verifyRan === false) gaps.push("verification was skipped, so no finding was double-checked");
   if (taintApplicable && taintRan === false) gaps.push("the exploitability check was skipped, so no finding could be confirmed exploitable");
   for (const g of gapsScope) gaps.push(g);
 
   const mitigated = S.mitigated;
-  const m = { mode, assessed, units, unreadable, gaps, levels, mitigated, falsePositives: S.false_positive };
+  const m = { mode, assessed, units, unreadable, gaps, limits: gapsLimits, levels, mitigated, falsePositives: S.false_positive };
   const risk = overallRisk(m);
   const rated = risk.level !== "not_assessed";
 
@@ -823,6 +848,9 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     gapFinding("Exploitability was not checked",
       "The exploitability check was switched off, so no weakness could be confirmed as attackable and the rating cannot exceed High.");
   }
+  if (gapsLimits.length) {
+    gapFinding("Part of the code was not scanned", `${gapsLimits[0].charAt(0).toUpperCase() + gapsLimits[0].slice(1)}${gapsLimits.length > 1 ? "; " + joinGaps(gapsLimits.slice(1)) : ""}. Weaknesses in that code, if any, are not in this report.`);
+  }
   if (gapsScope.length) {
     gapFinding("Only part of the code was scanned", `${gapsScope[0].charAt(0).toUpperCase() + gapsScope[0].slice(1)}${gapsScope.length > 1 ? "; " + joinGaps(gapsScope.slice(1)) : ""}. Code outside this scope is not covered by this report.`);
   }
@@ -910,6 +938,12 @@ export function buildSastExecutiveSummary(results, meta = {}) {
       "Without it no weakness can be confirmed as attackable, so the most serious ones cannot be told apart from the rest.",
       "Security team");
   }
+  if (gapsLimits.length) {
+    push("Before relying on this report",
+      "Run the scan again with higher size limits, or in several parts, so the code that was left out is covered.",
+      "Code that hit a size or count limit was never examined, so its absence from the findings gives no assurance.",
+      "Security team");
+  }
   if (gapsScope.length) {
     push("Before relying on this report",
       "Run a full scan of the whole codebase, or confirm that the narrowed scope is intended.",
@@ -976,7 +1010,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const pipeline = [
     {
       stage: mal ? "Read the code for malicious intent" : "Read the code for weaknesses",
-      status: unreadable > 0 ? "partial" : (units > 0 ? "done" : "skipped"),
+      status: (unreadable > 0 || gapsLimits.length > 0) ? "partial" : (units > 0 ? "done" : "skipped"),
       detail: `${count(units, "code unit")} sent to the AI` + (unreadable > 0 ? `; ${unreadable} came back unreadable` : "") + ".",
     },
     {
@@ -997,6 +1031,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
       .map(([language, v]) => ({ language, code_units: v.units, open_issues: v.open }))
       .sort((a, b) => b.code_units - a.code_units || a.language.localeCompare(b.language)),
     scope_limits: gapsScope,
+    coverage_limits: gapsLimits,
   };
 
   // ── Scope & caveats ──────────────────────────────────────────────────────

@@ -12,6 +12,8 @@ async function callProvider({
   endpoint,
   model,
   prompt,
+  promptPrefix,
+  onUsage,
   maxTokens    = 1024,
   temperature  = 0.1,
   timeoutMs    = 120_000,
@@ -62,6 +64,12 @@ async function callProvider({
     apiKeyPrefix: apiKeyPrefix !== undefined ? apiKeyPrefix : def.apiKeyPrefix,
     model:        resolvedModel,
     prompt,
+    promptPrefix,
+    // prompt_chars lets the accounting fall back to a chars/4 estimate for
+    // providers that don't report token usage.
+    onUsage: typeof onUsage === 'function'
+      ? (u) => onUsage({ ...u, prompt_chars: (promptPrefix ? promptPrefix.length : 0) + prompt.length })
+      : undefined,
     maxTokens,
     temperature,
     timeoutMs,

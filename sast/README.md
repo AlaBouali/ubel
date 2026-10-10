@@ -11,8 +11,10 @@ This document covers the **SAST / malware-scan** component (source-level code an
 
 - Semantic code chunker across 15 language families (12 source-code languages — including Dart/Flutter and Swift — plus Docker, IaC, and Kubernetes) — class/function-aware boundaries, not naive line-splitting
 - Three-pass analysis pipeline for vulnerability findings: **scan** (Pass 1) → **verify** (Pass 2) → **taint trace** (Pass 3)
-- Structured, CWE-mapped vulnerability catalog — 64 classes across the 15 language families, each with concrete "detect when you see" signals fed to the model
+- Structured, CWE-mapped vulnerability catalog — 64 classes across the 15 language families, each with concrete "detect when you see" signals available to the model (sent only with `--include-signals`; the default prompt carries class name, CWE and scope rule)
 - Per-language catalog filtering — classes irrelevant to a chunk's language are dropped before the prompt is built, cutting token usage and false positives
+- **Token-lean by design** — small chunks are packed into shared Pass-1 calls, findings are verified and traced per chunk (not per finding), classes that need no attacker input skip the taint pass, the static prompt prefix is prompt-cache-friendly (explicit `cache_control` on Anthropic), and every report records the real token usage the provider returned (see [Token Consumption & Optimization](#token-consumption--optimization))
+- **Honest coverage** — anything that was *not* scanned (chunks past `--max-chunks`, files over the size limit, AI replies cut off) is measured by the scanner, recorded in the report and stated in the executive summary; a capped run can never read as a clean one
 - Cross-chunk call-graph resolution — `buildFullCallChain` walks callers/callees across chunk boundaries so the taint-trace pass reasons about real source→sink flow, not a single isolated snippet
 - Separate **malicious code / backdoor** scan — its own catalog (15 classes: reverse shells, C2 beacons, supply-chain implants, persistence, exfiltration, anti-analysis evasion, logic bombs, and more), own prompts, own report set, never mixed with accidental-vulnerability findings
 - `--only-diff` mode — scan only chunks touched by a git diff, while still building the full chunk set so cross-file taint chains keep resolving correctly
@@ -93,21 +95,50 @@ ubel-mal /path/to/project
 
 ### Pass 1 — Scan
 
-The chunker (`buildChunks`) walks the target directory, skipping `node_modules`, `vendor`, `dist`, `.git`, and similar noise directories, and splits each source file into semantically-bounded chunks (functions, classes, or brace-delimited blocks depending on the language) up to `--max-chunk-size` characters each. Each chunk has its comments stripped (`stripComments`) before submission, is matched against the vulnerability (or malware) catalog filtered to its language family, and sent to the configured LLM provider, which returns candidate findings with a `vuln_name`, `CWE`, code snippet, description, fix suggestion, and confidence level.
+The chunker (`buildChunks`) walks the target directory and splits each source file into semantically-bounded chunks (functions, classes, or brace-delimited blocks depending on the language). `--max-chunk-size` is a **hard cap** on characters per chunk: an over-long single line (a minified bundle, a generated data blob) is cut at the nearest statement or space boundary rather than sent as one oversized chunk. Each chunk has its comments stripped (`stripComments`) before submission and is matched against the vulnerability (or malware) catalog filtered to its language family. The LLM returns candidate findings with a `vuln_name`, code snippet, description, fix suggestion, severity and confidence level.
+
+**Packing.** The prompt scaffold (rules, catalog, schema) is a fixed cost per call, and a real repository's median chunk is only a few hundred characters. Small chunks of the **same language** are therefore packed into one call (up to `--pack-size` characters of code, at most `--pack-max-chunks` chunks); each is labelled `C1…Cn` and every finding cites its `chunk_id`. A chunk larger than half the pack size is always sent alone. If anything goes wrong with a packed call — a transport error, an unreadable or truncated reply, or a finding that cannot be attributed to a chunk — those chunks are re-scanned one by one, so packing can only save tokens, never silently lose a chunk. `--no-pack` restores one call per chunk. A custom `buildPrompt` / `buildMalwarePrompt` override always gets one chunk per call.
+
+**What is skipped (and how to override it).**
+
+| Skipped by default | Why | Override |
+|---|---|---|
+| Directories: `node_modules`, `.nyc_output`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.tox`, `venv`, `.venv`, `env`, `.env`, `eggs`, `.eggs`, `htmlcov`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `vendor`, `Pods`, `Carthage`, `DerivedData`, `SourcePackages`, `.gradle`, `.idea`, `.vs`, `packages`, `.git`, `.svn`, `.hg`, `coverage`, `.terraform` | dependency, build and tooling output | `--include-folders <names>` |
+| **Every dot-directory** (`.github`, `.dart_tool`, `.build`, `.symlinks`, …) | tooling / hidden state | `--include-folders <name>` |
+| `*.d.ts` | type declarations only — no executable code | none (always skipped) |
+| `*.min.js`, `*.bundle.js` (and `.mjs`/`.cjs` forms) | one-line generated output | `--include-generated`. **The malware scan scans them by default.** |
+| Generated Dart (`*.g.dart`, `*.freezed.dart`, `*.gr.dart`, `*.mocks.dart`, `*.chopper.dart`, `generated_plugin_registrant.dart`) | codegen noise | none |
+| Files over 512,000 characters | cost guard | `--max-file-size <n>`. **Skipped files are listed in the report** |
+| Test folders / test-named files | *scanned by default* (fixtures sometimes hold real secrets) | opt in to skipping with `--skip-tests` |
+
+Pointing the scanner *inside* an ignored folder works (only sub-folders are checked), so `ubel-mal ./node_modules/some-pkg` scans that package; to sweep a dependency tree or build output from its parent, use `--include-folders node_modules,dist`.
+
+**Coverage is measured, not assumed.** The run records how many chunks were found, how many fell outside `--max-chunks` (default 1000) or `--chunks-start`, which files were over the size limit, and how many AI replies were cut off. Anything that was not scanned is printed at the end of the run, stored in `meta.scan_options` / `meta.scan_stats.coverage`, and stated in the executive summary — which also refuses to give a *Minimal* rating when part of the code was left out.
 
 ### Pass 2 — Verify
 
-Every candidate finding from Pass 1 is re-submitted, alongside its originating chunk, to the LLM with a narrower prompt: *is this finding actually valid given the code shown?* This catches cases where Pass 1 flagged a pattern that is provably safe in context (e.g. a query built from a fully hardcoded string that only looks parameterized). Verification always runs at `temperature: 0` regardless of the `--temperature` flag — it's a binary verdict and needs to be deterministic — and sets `is_valid: true | false | null` (`null` = inconclusive) on each finding.
+Candidate findings from Pass 1 are re-submitted, alongside their originating chunk, to the LLM with a narrower prompt: *is this finding actually valid given the code shown?* This catches cases where Pass 1 flagged a pattern that is provably safe in context (e.g. a query built from a fully hardcoded string that only looks parameterized). **All findings of one chunk are verified in a single call** (the chunk's code is sent once, not once per finding); any finding the batched answer does not cover is re-asked on its own, so batching never leaves a finding unverified that a one-by-one run would have settled. Only the finding itself is sent — none of the bookkeeping fields earlier passes attach. Verification always runs at `temperature: 0` regardless of the `--temperature` flag, **on every provider including Anthropic** (the temperature is sent explicitly; a model that rejects the parameter is retried without it) — it's a binary verdict and needs to be deterministic — and sets `is_valid: true | false | null` (`null` = inconclusive) on each finding.
 
 ### Pass 3 — Taint Trace (SAST only)
 
-For findings that need attacker-controlled input to be exploitable, `buildFullCallChain` walks the call graph — masking out string/comment contents first so identifiers inside logs or strings never produce false call edges — to resolve the finding's full caller/callee chain across chunk boundaries, up to a configurable depth (10 BFS levels, capped at 15 total chunks in the assembled chain). The assembled call chain is handed to the LLM, also at `temperature: 0`, with a dedicated prompt asking whether attacker input can actually reach the flagged sink, and whether any sanitization occurs along the way. This pass sets `taint.exploitable`, `taint.reachable`, `taint.sanitized`, and `taint.flow_path` on the finding. Findings that resolve to an isolated function with no callers and no entry-point signature are short-circuited locally with `inconclusive_reason: "orphan_no_callers"` — no LLM call spent.
+For verified findings whose class needs attacker-controlled input to be exploitable, `buildFullCallChain` walks the call graph — masking out string/comment contents first so identifiers inside logs or strings never produce false call edges — to resolve the finding's caller/callee chain across chunk boundaries:
+
+- Callers are followed for up to **10 BFS levels** (callers of callers of callers …), callees for two levels. The call graph is built from **every chunk found**, not just the `--max-chunks` window, so a capped or `--only-diff` run still sees callers outside it.
+- The chain is capped at **15 chunks**. When the graph is bigger, the **nearest** callers and callees are kept (alternating, so slots one side doesn't need go to the other).
+- Every entry is labelled from its real role — `OUTERMOST CALLER`, `CALLER n`, `SINK (contains the flagged finding)`, `CALLEE n` — and presented outermost caller → sink → callees.
+- The chain also has a **character budget** (`--taint-chain-chars`, default 24,000): the sink is always sent whole, callers are cut down to the windows around their call sites, callees to their head, and the prompt says when an entry is an excerpt.
+- The chain depends on the chunk, not the finding, so it is built once per chunk and all of that chunk's findings are traced in **one call**; findings the batched answer misses are re-asked individually. Passes run at `temperature: 0`.
+
+The pass sets `taint.exploitable`, `taint.reachable`, `taint.sanitized`, and `taint.flow_path` on the finding. Two cases never cost an LLM call:
+
+- **Orphans.** A finding in a function with no callers in the analysed code *and* no entry-point signature is answered locally with `inconclusive_reason: "orphan_no_callers"`. "Entry-point signature" means a handler-style name (`*Handler`, `*Controller`, `route`, `endpoint`, `middleware`, `webhook`, `main`, …) or a concrete framework idiom in the code (`req.query`, `request.args`, `$_GET`, `HttpServletRequest`, `@GetMapping`, `os.Args`, `sys.argv`, …). Ordinary words such as `message`, `args`, `query`, `context` or `process` no longer count, so the shortcut actually fires on library/utility code.
+- **Classes that need no attacker input** (`needsUserInput: false` in the catalog — hardcoded secrets, weak crypto, and similar). "Does attacker input reach the sink" is not the question for them, and the answer used to be misleading. They keep their Pass-2 verdict and carry `taint_skipped: "no_attacker_input_required"`; in reports they show as *confirmed real, reachability not established* and the HTML badge reads **NOT REQUIRED**. Consequently they are **never** counted as `exploitable`: gate on them with `--fail-on valid` (or the default `any`), not `--fail-on exploitable`.
 
 The malware scan omits Pass 3 — intent-based findings (a planted backdoor, a hardcoded C2 endpoint) don't hinge on attacker-input reachability the way accidental vulnerabilities do, so malware findings stop after verification.
 
 ### Diff mode
 
-`--only-diff [--diff-base <ref>]` restricts **Pass 1** to chunks belonging to files changed in the given git diff (default base: `HEAD^`; `staged` diffs the index against `HEAD`). The full, untouched chunk set is still built in the background — for free, since chunking is pure static parsing, not an LLM call — so Pass 3's call-graph resolution can trace a diff-introduced sink back through unchanged code. The diff is the union of the commits since the base and any uncommitted (staged or unstaged) working-tree changes; paths are matched relative to the scanned directory. **If the diff can't be resolved** — not a git repo, `git` missing, an unknown ref, or a shallow clone that doesn't contain the base commit (the default for `actions/checkout`) — `--only-diff` never skips anything: it logs the reason and scans everything, because an unresolvable diff must not be mistaken for an empty one. In CI, use `fetch-depth: 0` (or a `--diff-base` that exists in the clone) to get the real diff-scoped run. A diff that resolves and is genuinely empty scans nothing. `--diff-base` must look like a git ref (no leading `-`, no whitespace); `git` is invoked without a shell.
+`--only-diff [--diff-base <ref>]` restricts **Pass 1** to chunks belonging to files changed in the given git diff (default base: `HEAD^`; `staged` diffs the index against `HEAD`). The full, untouched chunk set is still built in the background — for free, since chunking is pure static parsing, not an LLM call — and used as call-graph context, so Pass 3 can trace a diff-introduced sink back through unchanged code. The diff is the union of the commits since the base and any uncommitted (staged or unstaged) working-tree changes; paths are matched relative to the scanned directory. **If the diff can't be resolved** — not a git repo, `git` missing, an unknown ref, or a shallow clone that doesn't contain the base commit (the default for `actions/checkout`) — `--only-diff` never skips anything: it logs the reason and scans everything, because an unresolvable diff must not be mistaken for an empty one. In CI, use `fetch-depth: 0` (or a `--diff-base` that exists in the clone) to get the real diff-scoped run. A diff that resolves and is genuinely empty scans nothing. `--diff-base` must look like a git ref (no leading `-`, no whitespace); `git` is invoked without a shell.
 
 ---
 
@@ -120,14 +151,18 @@ Builds the semantic chunk set for a directory and writes it to `sast_chunks.json
 | Flag | Type | Default | What it does |
 |---|---|---|---|
 | `[path]` / `--working-dir <dir>` | string | cwd | Root directory to walk |
-| `--max-chunk-size <n>` | int | `12000` | Max characters per chunk |
+| `--max-chunk-size <n>` | int | `12000` | **Hard** cap on characters per chunk (over-long lines are split) |
+| `--max-file-size <n>` | int | `512000` | Files longer than this many characters are skipped — and listed in the report |
 | `--chunks-start <n>` | int | `0` | Slice offset into the chunk list — resume support |
-| `--max-chunks <n>` | int | `1000` | Hard cap on chunks returned |
+| `--max-chunks <n>` | int | `1000` | Cap on chunks returned. Chunks beyond it are **reported as not scanned**, never silently dropped |
 | `--skip-folders <a,b,c>` | CSV | `[]` | Extra folder names to exclude, on top of the built-in ignore set |
+| `--include-folders <a,b,c>` | CSV | `[]` | Folders to scan even though they are in the built-in ignore set or are dot-directories |
 | `--skip-files <a,b,c>` | CSV | `[]` | File names to exclude |
+| `--skip-tests` | flag | off | Skip test folders and test-named files |
+| `--include-generated` | flag | off | Scan `*.min.js` / `*.bundle.js` (`ubel-mal` does this by default) |
 | `--languages <a,b,c>` | CSV | all 15 families | Restrict to specific language families |
 
-Built-in ignore directories (always excluded, on top of `--skip-folders`): `node_modules`, `.nyc_output`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.tox`, `venv`, `.venv`, `env`, `.env`, `eggs`, `.eggs`, `htmlcov`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `vendor`, `.gradle`, `.idea`, `.vs`, `packages`, `.git`, `.svn`, `.hg`, `coverage`.
+The built-in ignore list, the dot-directory rule and the other default skips are tabulated under [Pass 1 — Scan](#pass-1--scan).
 
 ```bash
 node sast/main.js chunk /path/to/project --max-chunk-size 8000 --languages python,go
@@ -162,11 +197,15 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 |---|---|---|---|
 | `--no-verify` | flag | verify on | Skip Pass 2 — findings get `is_valid: undefined` |
 | `--no-taint` | flag | taint on | Skip Pass 3 — findings get no `taint` field |
-| `--include-signals` | flag | off (signals omitted by default) | Include the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept regardless of this flag |
+| `--include-signals` | flag | off (signals omitted by default) | Include the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept regardless of this flag. Roughly 6–7× the catalog size |
+| `--pack-size <n>` | int | `12000` | Pack small same-language chunks into one Pass-1 call, up to `<n>` characters of code. `0` disables |
+| `--pack-max-chunks <n>` | int | `10` | Maximum chunks per packed call |
+| `--no-pack` | flag | packing on | One Pass-1 call per chunk (same as `--pack-size 0`) |
 | `--verify-concurrency <n>` | int | = `--concurrency` | Parallel Pass-2 requests |
 | `--taint-concurrency <n>` | int | = `--concurrency` | Parallel Pass-3 requests |
 | `--verification-max-tokens <n>` | int | `4096` | Pass-2 response token budget |
 | `--taint-max-tokens <n>` | int | `4096` | Pass-3 response token budget |
+| `--taint-chain-chars <n>` | int | `24000` | Character budget of the call chain sent to Pass 3 |
 
 **Diff mode**
 
@@ -181,7 +220,7 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 |---|---|
 | `any` *(default)* | A finding is confirmed exploitable, verified valid, or couldn't be resolved either way (a Pass 2/3 error or inconclusive result) — "didn't finish checking" is never silently treated as clean. With both verification and taint-trace switched off, any finding at all fails the build. Findings Pass 2 dismissed as false positives never fail it. |
 | `valid` | A finding was verified `is_valid: true`, regardless of exploitability. |
-| `exploitable` | A finding was taint-traced with `exploitable: true`. |
+| `exploitable` | A finding was taint-traced with `exploitable: true`. Classes that need no attacker input (e.g. hardcoded secrets) are never traced, so they do not trip this mode — use `valid` or `any` to gate on them. |
 
 In every mode, the JSON/HTML/SARIF reports contain **all** findings regardless of the gate — `--fail-on` only changes the process exit code, never what gets written to disk.
 
@@ -210,6 +249,9 @@ ubel-sast --languages k8s
 # Small, high-value repo — opt into the full catalog detection bullets for max recall
 ubel-sast --include-signals --skip-folders legacy,scripts --languages java,kotlin
 
+# Skip tests and raise the file-size guard for a repo with a few big generated sources
+ubel-sast --skip-tests --max-file-size 1500000
+
 # Point at a local Ollama model, no API key needed
 ubel-sast --provider local --endpoint http://localhost:11434/v1/chat/completions
 ```
@@ -218,7 +260,7 @@ ubel-sast --provider local --endpoint http://localhost:11434/v1/chat/completions
 
 Runs scan → verify against the 15-class intentional-malicious-code catalog. No taint-trace pass — reachability isn't the relevant question for code that's itself the payload. Writes an entirely separate report set (`*.malware.*`) so it never collides with `analyze` output.
 
-**Flags:** identical to `analyze` above, **minus** everything taint-related (no `--no-taint`, `--taint-concurrency`, `--taint-max-tokens`). The only mode-specific difference is the `--fail-on` value set:
+**Flags:** identical to `analyze` above, **minus** everything taint-related (no `--no-taint`, `--taint-concurrency`, `--taint-max-tokens`, `--taint-chain-chars`). Mode-specific differences: the `--fail-on` value set below, and `*.min.js` / `*.bundle.js` are **scanned by default** (bundles are where planted code hides; `--include-generated` is implied). Like `analyze`, it hard-excludes `node_modules`, `dist`, `build`, `vendor`, `bin`, `packages` and the rest of the ignore list unless you pass `--include-folders`.
 
 | `--fail-on` | Fails the build when… |
 |---|---|
@@ -232,8 +274,14 @@ ubel-mal /path/to/project
 # CI gate: only fail on confirmed malicious code
 ubel-mal --fail-on confirmed
 
-# Cheap, fast malware sweep on a dependency tree pulled in via CI (signals omitted by default)
-ubel-mal --provider local --concurrency 8
+# Sweep installed dependencies. node_modules is ignored by default, so name it explicitly
+ubel-mal --include-folders node_modules --provider local --concurrency 8
+
+# Sweep one package (pointing INSIDE an ignored folder needs no flag)
+ubel-mal ./node_modules/some-package
+
+# Include build output that normally stays out
+ubel-mal --include-folders dist,build,vendor
 
 # Malware scan restricted to files changed in a PR
 ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
@@ -267,7 +315,7 @@ ubel-mal --only-diff --diff-base origin/main --fail-on confirmed
 
 ## Vulnerability Catalog (64 classes)
 
-Each catalog entry carries a canonical name, primary CWE, a `needsUserInput` flag (whether the class requires a visible attacker-controlled source to be reportable — hardcoded secrets don't, SQL injection does), the language families it realistically applies to, and a set of concrete "detect when you see" signal bullets shown to the model. Classes irrelevant to a chunk's language are filtered out before the prompt is built via `filterVulnClassesForLanguage()`.
+Each catalog entry carries a canonical name, primary CWE, a `needsUserInput` flag (whether the class requires a visible attacker-controlled source to be reportable — hardcoded secrets don't, SQL injection does), the language families it realistically applies to, and a set of concrete "detect when you see" signal bullets that are shown to the model when `--include-signals` is set. Classes irrelevant to a chunk's language are filtered out before the prompt is built via `filterVulnClassesForLanguage()`.
 
 Representative coverage: SQL/command/code injection, XSS, XXE, insecure deserialization, path traversal, SSRF, hardcoded secrets, weak cryptography, race conditions, use-after-free / buffer overflow (C/Rust/Go/JVM/.NET-scoped), CSRF, open redirect, insecure randomness, prototype pollution (JS-scoped), insecure container/pod configuration, missing Kubernetes network segmentation, IaC public-cloud exposure, and more — spanning CWE-20 through CWE-1104.
 
@@ -351,6 +399,8 @@ node sast/main.js malware /path/to/project --fail-on confirmed
 
 If no subcommand is given, `analyze` is assumed and the first argument is treated as the target path.
 
+From code, `main({ projectRoot, mode: "analyze" | "malware", ...options })` takes the same settings as camelCase options (`maxChunks`, `maxFileSize`, `includeFolders`, `includeMinified`, `skipTests`, `packSize`, `packMaxChunks`, `taintChainChars`, `skipSignals`, …) and never calls `process.exit`. The array of per-chunk `results` it returns carries a non-enumerable `scan_stats` property — `{ coverage, usage, pipeline }` — with what was not scanned, the real token usage per pass, and the packing/batching counters; the same data is written to the report's `meta`. `skipSignals` defaults to `true` here exactly as it does on the CLI.
+
 ---
 
 ## Reports
@@ -386,7 +436,18 @@ $HOME/.ubel/history/malware/<project_id>/
 
 Files follow the shared `<file_name>.<tag>.<extension>` scheme: the tag (`sast` or `malware`) sits between the file name and the extension; the file name is `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zips go to the shared `$HOME/.ubel/history/<mode>/` folder (the same one every UBEL scanner uses), in a sub-folder named after the project: `<project_id>` is the UUID in `<project>/.ubel/ubel_project.json`, created on the first run and never changed. `project_id` and `project_name` (also from that file) are written into the report's `meta` and shown in the HTML report's system panel — see the SCA README's [Project id](../sca/README.md#project-id-ubel_projectjson) section. A second run of the same project in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/sast/<date>/sast__<timestamp>.zip` and `…/malware/<date>/malware__<timestamp>.zip` with untagged `report.json` / `report.html` / `report.sarif.json` inside; old files are left untouched.)
 
-The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware` and `meta.scan_options` records the non-secret run settings (verification and taint-trace on/off, diff mode, chunk limits, language/folder filters) the summary needs to say what was and was not checked; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware`, `meta.scan_options` records the non-secret run settings **and the measured coverage** (verification and taint-trace on/off, diff mode, the limits actually in force, `chunks_found` / `chunks_scanned` / `chunks_dropped_by_cap`, files skipped as too large, AI replies cut off) the summary needs to say what was and was not checked, and `meta.scan_stats` records the **real token usage** the provider returned per pass (`usage.scan|verify|taint|total`: calls, input/output/cache-read/cache-write tokens, and `estimated_calls` for any provider that returned no usage) plus pipeline counters (packed calls, pack fallbacks, batched verify/trace calls, findings not traced); the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+
+### Keeping UBEL's own files out of git and Docker
+
+`ubel-sast` and `ubel-mal` write `.ubel/` (the reports above) into the scanned directory. Before the first file is read or LLM request sent, the entry point (`main.js` — never the analyzers) makes sure `.gitignore` **and** `.dockerignore` in that directory ignore `.ubel/` and `.ubelignore`, creating either file if it does not exist. It is the same guard the SCA binaries use (`sca/ignore_files.js`), with the same rules:
+
+- **Idempotent.** An entry counts as covered if any equivalent pattern is present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
+- **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
+- **Opt-out respected.** A negation such as `!.ubelignore` means you want that entry tracked, so it is not re-added.
+- **Never fails a scan.** A read-only checkout or a permissions problem is swallowed (with `DEBUG` set, it is logged).
+- **Where it applies.** The directory the reports are written under — the positional path / `--working-dir`, else the current directory. Changed files are announced with one `[ubel] Created|Updated …` line on stderr. Programmatically (`main({ projectRoot, … })`) it applies to `projectRoot`, but only when `save_reports` is on: with `save_reports: false` nothing is written to `.ubel/`, so nothing in your tree is touched either. `ubel-chunk` and `--help` never trigger it (`ubel-chunk` only writes `sast_chunks.json` to the current directory).
+- **Kill switch:** `UBEL_NO_IGNORE_FILES=1`.
 
 ### Keeping UBEL's own files out of git and Docker
 
@@ -414,11 +475,11 @@ Findings are AI-proposed candidates, so the summary sorts each into exactly one 
 | Critical | at least one Critical-severity issue confirmed exploitable |
 | High | a High issue confirmed exploitable, or a Critical/High finding that is real or not cleared but not confirmed exploitable |
 | Medium | Medium-priority issues, nothing more serious |
-| Low | only low-priority issues, real weaknesses blocked by other code, or no issues but some code units could not be analyzed |
+| Low | only low-priority issues, real weaknesses blocked by other code, or no issues but some code units could not be analyzed or were never scanned (size / count limits) |
 | Minimal | nothing open, nothing uncleared, every code unit analyzed |
 | Not assessed | no code unit could be analyzed — no rating is given instead of "Minimal" |
 
-Anything that means "not everything was checked" — code units whose AI reply could not be decoded, verification or the taint trace switched off, `--only-diff`, `--max-chunks`/`--chunks-start`, `--languages`, `--skip-folders`/`--skip-files` — is stated in the summary and never presented as a clean result. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
+Anything that means "not everything was checked" — code units beyond the `--max-chunks` limit (including the default of 1000), files over the size limit, AI replies that were cut off, code units whose AI reply could not be decoded, verification or the taint trace switched off, `--only-diff`, `--max-chunks`/`--chunks-start`, `--languages`, `--skip-folders`/`--skip-files` — is stated in the summary and never presented as a clean result. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
 
 ---
 
@@ -469,70 +530,98 @@ RUN ubel-sast --fail-on valid .
 
 ## Token Consumption & Optimization
 
-Every scan is, mechanically, a large batch of independent HTTP calls to a chat-completions endpoint. Total token spend is a function of **(a) how many calls are made** and **(b) how large each call's prompt is**. `--concurrency` and friends change *wall-clock time*, not total tokens consumed — that distinction matters, because it's the first thing people reach for when trying to "reduce usage" and it does nothing for cost.
+Every scan is, mechanically, a batch of HTTP calls to a chat-completions endpoint. Total token spend is a function of **(a) how many calls are made** and **(b) how large each call's prompt is**. `--concurrency` and friends change *wall-clock time*, not total tokens consumed — that distinction matters, because it's the first thing people reach for when trying to "reduce usage" and it does nothing for cost.
+
+### Real usage, not a guess
+
+Each response's `usage` block is read and totalled per pass. The end-of-run summary prints calls and tokens (`LLM calls : …`, `Tokens : … in / … out (… read from cache)`), and the JSON report carries the same numbers in `meta.scan_stats.usage` (`scan`, `verify`, `taint`, `total`) next to counters for packing and batching in `meta.scan_stats.pipeline`. A provider that returns no usage is counted in `estimated_calls` with a `chars / 4` input estimate, so a measurement is never confused with a guess.
 
 ### What drives call count, pass by pass
 
 | Pass | Runs when | Number of calls | Governed by |
 |---|---|---|---|
-| **1 — Scan** | always | 1 call per non-import chunk that survives filtering | chunk count → `--max-chunk-size`, `--max-chunks`, `--languages`, `--skip-folders/files`, `--only-diff` |
-| **2 — Verify** | default on, off via `--no-verify` | 1 call per **finding** from Pass 1 (not per chunk) | Pass-1 hit rate |
-| **3 — Taint trace** | `analyze` only, default on, off via `--no-taint` | 1 call per verified finding (or per *every* finding if `--no-verify` is also set) | verification pass-through + call-graph size per finding |
+| **1 — Scan** | always | 1 call per **pack** of small chunks, or per large chunk | chunk count and size → `--pack-size`, `--pack-max-chunks`, `--max-chunk-size`, `--max-chunks`, `--languages`, `--skip-folders/files`, `--skip-tests`, `--only-diff` |
+| **2 — Verify** | default on, off via `--no-verify` | 1 call per **chunk that has findings** (all its findings together) | Pass-1 hit rate |
+| **3 — Taint trace** | `analyze` only, default on, off via `--no-taint` | 1 call per chunk with verified findings **of classes that need attacker input**; none for orphans | verification pass-through, class mix, call-graph size |
 
-A 1,000-chunk repo with a 3% Pass-1 hit rate produces roughly: 1,000 scan calls + ~30 verify calls + ~15–25 taint calls (`analyze`) or 1,000 scan calls + ~30 verify calls (`malware`). **Pass 1 is the dominant cost by call count** in almost every real run — Passes 2 and 3 are a small fraction of total calls, but individually *larger* prompts, so they're not negligible per-call.
+A 1,000-chunk repo with a 3% hit rate costs roughly 1,000 chunks' worth of Pass-1 code plus a few dozen Pass-2/3 calls. **Pass 1 is the dominant cost by call count and by tokens** — which is why it is the pass that gets packed.
 
 ### Fixed prompt scaffolding, measured
 
-Approximating tokens as `chars / 4` (measured directly from the actual prompt-builder output):
+Tokens are approximated as `chars / 4`, measured from the real prompt builders (every real prompt is **language-filtered**, so the 64-class totals in the first row are an upper bound that no single call sends):
 
 | Component | Chars | ≈ Tokens |
 |---|---|---|
-| Full vuln catalog, 64 classes, with signals (`--include-signals`) | 50,940 | ~12,735 |
-| Full vuln catalog, 64 classes, no signals *(default)* | 8,110 | ~2,028 |
-| Malware catalog, 15 classes, with signals (`--include-signals`) | 9,092 | ~2,273 |
-| Malware catalog, 15 classes, no signals *(default)* | 789 | ~197 |
-| Scan prompt scaffold (rules + schema + headers, catalog excluded) | ~2,600 | ~650 |
-| Verification prompt scaffold (excluding injected code + finding JSON) | ~1,000 | ~250 |
-| Taint prompt scaffold (excluding injected call-chain code) | ~1,800 | ~450 |
+| All 64 classes, with signals / lean | 50,940 / 8,110 | 12,735 / 2,028 (6.3×) |
+| **Python** catalog (34 classes), with signals / lean | 28,041 / 4,205 | 7,010 / 1,051 (6.7×) |
+| **JavaScript/TypeScript** catalog (35), with signals / lean | 28,525 / 4,325 | 7,131 / 1,081 (6.6×) |
+| **Go** catalog (33), with signals / lean | 26,719 / 4,065 | 6,680 / 1,016 (6.6×) |
+| **C/C++** catalog (19), with signals / lean | 16,248 / 2,272 | 4,062 / 568 (7.2×) |
+| **Dart** (21) / **Swift** (23), lean | 2,626 / 2,876 | 657 / 719 |
+| Terraform (5) / Dockerfile (6), lean | 639 / 748 | 160 / 187 |
+| Malware catalog (15 classes), with signals / lean | 9,092 / 789 | 2,273 / 197 |
+| Scan prompt scaffold (rules + schema + headers, catalog excluded) | ~2,800 | ~700 |
+| **Whole static prefix per Pass-1 call**, Python, lean / with signals | 6,982 / 30,818 | ~1,750 / ~7,700 |
+| Verification prompt scaffold (excluding code + finding JSON) | ~950 | ~240 |
+| Taint prompt scaffold (excluding call-chain code) | ~1,500 | ~375 |
 
-Per-language catalog filtering (see the catalog table above) already trims the 64-class list before it reaches a prompt — automatic, not a flag. The catalog-only figures above (measured directly from `buildVulnCatalog()`) show **roughly a 5.5× reduction** in the catalog portion alone with signals omitted. Class name, CWE, and the scope rule (attacker-input-required or not) are always retained regardless; only the worked-example detection bullets are gated behind the flag. Signals are omitted by default specifically because Pass 1 is the dominant cost by call count — pass `--include-signals` when the extra recall is worth the extra catalog cost, e.g. a smaller or higher-value repo. *(The previous version of this section quoted a full-Pass-1-prompt example including scaffold text; that figure hasn't been re-measured against the current 64-class catalog and is omitted here rather than left stale — the catalog-only numbers above are independently verified.)*
+Class name, CWE, and the scope rule (attacker-input-required or not) are always retained; only the worked-example detection bullets are gated behind `--include-signals`. Signals are omitted by default because Pass 1 is the dominant cost — pass the flag when the extra recall is worth roughly **6× the catalog** (about 6k extra tokens on every Python call), e.g. a small or high-value repo.
+
+### Why packing matters — measured on this repository
+
+On the `sast/` directory itself (242 chunks): the median chunk is 588 characters of code and 64% of chunks are under 1,000. With one call per chunk, the fixed prefix is the large majority of Pass-1 input — about **77%** in the default lean mode and about **94%** with `--include-signals`. Packing (default `--pack-size 12000`, ≤10 chunks per call, same language only) turns **242 calls into 57**:
+
+| Pass-1 mode | One call per chunk | Packed | Saved |
+|---|---|---|---|
+| Lean (default) | 242 calls, ≈549k tokens | 57 calls, ≈225k tokens | **≈59%** |
+| `--include-signals` | 242 calls, ≈2.01M tokens | 57 calls, ≈570k tokens | **≈72%** |
+
+(Input-token estimates, comment-stripped code; real savings depend on language mix and chunk sizes.) Packing does not change what is sent about each chunk — only how many times the scaffold is paid for.
 
 ### Chunk body cost
 
-Each chunk's code is appended after `stripComments()` runs (comments never reach the LLM — a free, small saving). `--max-chunk-size` caps this at 12,000 characters by default, i.e. up to ~3,000 tokens of code per Pass-1 call on top of scaffold+catalog. Lowering `--max-chunk-size` produces *more, smaller* chunks — it doesn't reduce total code tokens sent, but it does mean the fixed scaffold+catalog cost is paid more times over. **Larger chunks are generally more token-efficient**, as long as the model's output budget (`--max-tokens`) can still cover a chunk's worth of findings.
+Each chunk's code is appended after `stripComments()` runs (comments never reach the LLM — a free, small saving). `--max-chunk-size` is a hard cap on a chunk (12,000 characters ≈ 3,000 tokens by default), so a single huge line can no longer become one enormous call. It does **not** merge small functions — packing does that — so raising it only matters for functions that would otherwise be split mid-body; lowering it makes more, smaller chunks (which packing then regroups).
 
-### The taint-trace call chain — the pass most likely to blow up spend
+### Prompt caching
 
-`buildFullCallChain()` BFS-walks up to 10 levels of callers and callees across the entire chunk map (masking string/comment contents so a log line mentioning a function name never creates a false edge), caps any single function name's callers at 20 matches before treating it as too generic, and hard-excludes common short names (`run`, `get`, `handle`, etc.) regardless of match count. The assembled chain is capped at **15 chunks total**, split roughly evenly between caller-side and callee-side context. That means one taint-trace call can legitimately bundle up to 15 full chunks — easily the largest individual call type in the pipeline. Two things bound this automatically:
+Every request is built as a **static prefix** (role, catalog, rules, schema — identical for every chunk of a language) followed by the variable code. On Anthropic the prefix is sent as its own content block with `cache_control: {type: "ephemeral"}`, so after the first call the rest read it from cache (`cache_read_tokens` in the report). Prefixes under ~4,000 characters are sent without the marker, and a model whose minimum cacheable length is above the prefix size simply won't cache — the lean prefix is near that boundary on some models, so the saving is largest with `--include-signals`. OpenAI-, DeepSeek- and Gemini-style endpoints cache identical prompt prefixes automatically; the prefix-first layout is what lets them.
 
-- **Orphan short-circuit**: a finding whose chunk has no callers and no entry-point signature (no route/handler-style name, no `req`/`ctx` framework idioms) skips the LLM call entirely — answered locally as `inconclusive_reason: "orphan_no_callers"`, at zero token cost.
-- The 15-chunk cap is a hard ceiling regardless of the real call graph's size.
+### Per-finding passes
 
-`--taint-max-tokens` only bounds the *response*; the practical levers on Pass-3 request cost are `--no-taint` (cuts it to zero) or reducing how many findings reach Pass 3 in the first place.
+- **Verify** sends a chunk once with all of its findings (see Pass 2). The per-finding bookkeeping fields are no longer included in the prompt.
+- **Taint trace** builds the call chain once per chunk, caps it at 15 chunks **and** `--taint-chain-chars` characters (call-site windows for callers, function heads for callees), and traces all of the chunk's findings in one call. It is skipped for classes that need no attacker input and for orphans (see Pass 3). `--taint-max-tokens` only bounds the *response*; the levers on request size are `--taint-chain-chars`, `--no-taint`, or fewer findings reaching Pass 3.
 
 ### Retry behavior and its token cost
 
-If a Pass-1 response fails JSON parsing and `retryOnParseError` is true (default; disable via `--no-retry`), the retry doubles `maxTokens` for that one attempt, on the theory that parse failures are often truncation from too-small a budget. This is separate from, and additional to, the transport-failure retry loop governed by `--max-retries`. Setting `--max-tokens` too low doesn't just risk truncated findings — it can silently double the Pass-1 output budget on every chunk the model struggles with, compounding at high concurrency across a large chunk set. Verification and taint calls don't have this doubling behavior — their retries only fire on transport failure, at the original `maxTokens`.
+A Pass-1 reply that fails JSON parsing is handled by what actually went wrong, instead of always doubling `max_tokens`:
+
+- **Cut off, but at least one complete finding precedes the cut** → those findings are kept (no second call). The chunk is marked `partial_output`, counted in the report, and the executive summary says findings after the cut may be missing.
+- **Cut off before any finding completed** → one retry with `max_tokens` doubled (capped at 32,768).
+- **Complete but unparseable** (prose, markdown, a bad escape) → one retry at the *same* `max_tokens`; doubling cannot help.
+- A **packed** call whose reply is unreadable, truncated or unattributable is not salvaged — its chunks are re-scanned individually.
+
+Disable the parse retry with `--no-retry`. This is separate from the transport-failure retry loop governed by `--max-retries`; rate-limit (`429`) retries re-send the same request at the original `maxTokens`. Verification and taint calls retry only on transport failure.
 
 ### Concurrency ≠ token cost
 
-`--concurrency`, `--verify-concurrency`, and `--taint-concurrency` control how many requests are in flight at once — they change how fast the total call count gets processed, not how large that total is. Raising concurrency is free from a spend perspective, though it raises requests/sec against provider rate limits, which can trigger more `429`/backoff cycles — those retries do cost tokens, at the original (non-doubled) `maxTokens`.
+`--concurrency`, `--verify-concurrency`, and `--taint-concurrency` control how many requests are in flight at once — they change how fast the total call count gets processed, not how large that total is. Raising concurrency is free from a spend perspective, though it raises requests/sec against provider rate limits, which can trigger more `429`/backoff cycles.
 
 ### `--only-diff` — the highest-leverage lever for repeat runs
 
-Because Pass 1 is normally the majority of total calls, restricting it to files touched since `--diff-base` is the single biggest lever for repeat/CI runs — a PR touching 5 files out of 500 pays roughly `(5/500)` of the normal Pass-1 bill, plus whatever Pass 2/3 calls the new findings generate. The full chunk set for all 500 files is still built (for Pass 3's cross-file resolution), but that costs nothing — chunking has no LLM calls. In a shallow CI checkout the base commit is usually missing, so UBEL scans everything (and says so); use `fetch-depth: 0` to get the saving.
+Because Pass 1 is normally the majority of total calls, restricting it to files touched since `--diff-base` is the single biggest lever for repeat/CI runs — a PR touching 5 files out of 500 pays roughly `(5/500)` of the normal Pass-1 bill, plus whatever Pass 2/3 calls the new findings generate. The full chunk set is still built (for Pass 3's cross-file resolution), but that costs nothing — chunking has no LLM calls. In a shallow CI checkout the base commit is usually missing, so UBEL scans everything (and says so); use `fetch-depth: 0` to get the saving.
 
 ### Optimization playbook, ordered by typical impact
 
-1. **`chunk` first, always**, on an unfamiliar repo — free, and shows the real chunk count before spend is committed.
+1. **`chunk` first, always**, on an unfamiliar repo — free, and shows the real chunk count (and anything that would be capped or skipped) before spend is committed.
 2. **`--only-diff --diff-base <ref>`** for any repeat/CI run against an already-baselined codebase.
-3. **Leave `--include-signals` off** (the default) — omitting the catalog detection bullets cuts the catalog+scaffold portion of every Pass-1 call by ~3–4×, trading some recall for a flat, compounding saving. Only pass `--include-signals` when the extra recall is worth it.
-4. **Right-size `--max-tokens`** for Pass 1 to avoid the parse-error doubling path firing repeatedly.
-5. **`--no-taint`** when "is this a real bug" (verification) is enough without confirming attacker-reachability — removes the most expensive per-call pass.
-6. **`--languages <subset>`** on monorepos with incidental languages you don't need scanned.
-7. **Bigger `--max-chunk-size`, not smaller**, unless specific functions risk truncated findings.
-8. **`--concurrency` tuning is a speed lever, not a cost lever.**
-9. **Cheap model by default, expensive model selectively** — keep registry defaults for full-repo sweeps, reserve a stronger `--model` for `--only-diff` runs or a manual second pass on confirmed/exploitable findings only.
+3. **Leave packing on** (the default) — it is the biggest single saving on a full sweep. Raise `--pack-size` (e.g. 16000–24000) for models with generous context; use `--no-pack` only to debug a model that handles multi-chunk prompts badly.
+4. **Leave `--include-signals` off** (the default) — it multiplies the catalog about 6×. Turn it on only when the extra recall is worth it.
+5. **`--skip-tests`**, **`--languages <subset>`** and **`--skip-folders`** on repos with test suites, incidental languages or vendored code you don't need scanned.
+6. **Use a provider with prompt caching** (Anthropic, or any endpoint that caches identical prefixes) — most valuable together with `--include-signals`.
+7. **Right-size `--max-tokens`** for Pass 1: a packed call returns findings for several chunks, so an over-small budget produces truncated replies (kept up to the cut, but the tail is lost).
+8. **`--no-taint`** when "is this a real bug" (verification) is enough without confirming attacker-reachability — removes the most expensive per-call pass.
+9. **`--concurrency` tuning is a speed lever, not a cost lever.**
+10. **Cheap model by default, expensive model selectively** — keep registry defaults for full-repo sweeps, reserve a stronger `--model` for `--only-diff` runs or a manual second pass on confirmed/exploitable findings only.
 
 ---
 
