@@ -1335,6 +1335,8 @@ Every timestamped zip — from every project and every scanner on the machine �
 
 The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<project_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
 
+Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.ubel/reports/`, the timestamped history zips and the `latest_reports/` copy — is written the same way, for every scanner (SCA, firewall, OS, licenses, secrets, SAST, malware, cloud, EASM): the content goes to a temp file in the same folder and is then renamed over the target in one step. A script, CI step or browser tab that reads `latest.<tag>.json` / `.html` / `.zip` while a scan is finishing sees either the complete previous file or the complete new one, never a partial file. If a write fails, the temp file is removed, the previous file is left as it was, and the scan reports the error.
+
 | `<mode>` folder | Holds |
 |---|---|
 | `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) |

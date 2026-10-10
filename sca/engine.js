@@ -14,7 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, projectFor } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -84,7 +84,7 @@ function safeJsonString(data, maxSizeMb = 100) {
 }
 
 function safeWriteJson(filePath, data, maxSizeMb = 100) {
-  fs.writeFileSync(filePath, safeJsonString(data, maxSizeMb));
+  atomicWriteFile(filePath, safeJsonString(data, maxSizeMb));
 }
 
 /**
@@ -4209,8 +4209,8 @@ export class UbelEngineInstance {
       const latestPath      = path.join(latestDir, reportFileName("latest", reportTag, "json"));
       const latestHtmlPath  = path.join(latestDir, reportFileName("latest", reportTag, "html"));
       fs.mkdirSync(latestDir, { recursive: true });
-      fs.writeFileSync(latestHtmlPath, htmlReport);
-      fs.writeFileSync(latestPath, jsonReportString);
+      atomicWriteFile(latestHtmlPath, htmlReport);
+      atomicWriteFile(latestPath, jsonReportString);
 
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       const sbomBuilder = new CycloneDXBuilder(finalJson);
@@ -4224,8 +4224,8 @@ export class UbelEngineInstance {
 
       const latestSbom  = path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"));
       const latestSarif = path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"));
-      fs.writeFileSync(latestSbom, sbomString);
-      fs.writeFileSync(latestSarif, sarifString);
+      atomicWriteFile(latestSbom, sbomString);
+      atomicWriteFile(latestSarif, sarifString);
 
       // ── Timestamped bundle ──────────────────────────────────────────────────
       // json/html/sbom/sarif used to be written out as four separate files
@@ -4238,7 +4238,7 @@ export class UbelEngineInstance {
       // Filed under the project: history/<mode>/<project_id>/<timestamp>.<tag>.zip
       // (project and historyMode were resolved above, before the report was built).
       const zipPath = historyZipPath(historyMode, timestamp, reportTag, project?.project_id ?? null);
-      fs.writeFileSync(zipPath, buildZip([
+      atomicWriteFile(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
         { name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString },

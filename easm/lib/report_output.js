@@ -11,7 +11,7 @@ import fs from "fs";
 import path from "path";
 import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from "../../sca/report_naming.js";
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from "../../sca/report_naming.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
@@ -99,11 +99,6 @@ export function failOnExitCode(vulnerabilities, failOn, intel = {}) {
   return matchCount > 0 ? 2 : 0;
 }
 
-function atomicWrite(filePath, content) {
-  const tmp = filePath + ".tmp";
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
-}
 
 /**
  * Host/runtime provenance for the report, mirroring the SAST module's
@@ -191,20 +186,20 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
   const bundleEntries = [];
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);
-  atomicWrite(latestJson, jsonPayload);
+  atomicWriteFile(latestJson, jsonPayload);
   bundleEntries.push({ name: reportFileName("report", tag, "json"), data: jsonPayload });
   console.log(`\n${cliLabel} JSON report : bundled in ${zipPath}`);
 
   try {
     const htmlReport = await generateHtmlReport(reportPayload);
-    atomicWrite(latestHtml, htmlReport);
+    atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName("report", tag, "html"), data: htmlReport });
     console.log(`${cliLabel} HTML report : bundled in ${zipPath}`);
   } catch (e) {
     console.warn(`${cliLabel} HTML report failed: ${e.message}`);
   }
 
-  atomicWrite(zipPath, buildZip(bundleEntries));
+  atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 
   console.log(`\n${cliLabel} Timestamped bundle : ${zipPath}`);

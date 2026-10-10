@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -103,11 +103,6 @@ function applyScopeFlags(flags, opts, { packing = true } = {}) {
   }
 }
 
-function atomicWrite(filePath, content) {
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
-}
 
 // The non-secret run settings the report needs in order to say what was and
 // was not checked (verification off, diff mode, chunk limits, ...). Built from
@@ -266,13 +261,13 @@ async function writeAnalyzeReports(results, opts) {
     ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
     results,
   }, null, 2);
-  atomicWrite(latestJson, jsonPayload);
+  atomicWriteFile(latestJson, jsonPayload);
   bundleEntries.push({ name: reportFileName('report', tag, 'json'), data: jsonPayload });
   console.log(`\n[ubel-sast] JSON  report : ${latestJson}`);
 
   try {
     const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
-    atomicWrite(latestHtml, htmlReport);
+    atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName('report', tag, 'html'), data: htmlReport });
     console.log(`[ubel-sast] HTML  report : ${latestHtml}`);
   } catch (e) {
@@ -282,14 +277,14 @@ async function writeAnalyzeReports(results, opts) {
   try {
     const sarifBuilder = new SastSarifBuilder(results, meta);
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
-    atomicWrite(latestSarif, sarifPayload);
+    atomicWriteFile(latestSarif, sarifPayload);
     bundleEntries.push({ name: reportFileName('report', tag, 'sarif.json'), data: sarifPayload });
     console.log(`[ubel-sast] SARIF report : ${latestSarif}`);
   } catch (e) {
     console.warn(`[ubel-sast] SARIF report failed: ${e.message}`);
   }
 
-  atomicWrite(zipPath, buildZip(bundleEntries));
+  atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-sast] Timestamped bundle : ${zipPath}`);
@@ -441,13 +436,13 @@ async function writeMalwareReports(results, opts) {
     ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
     results,
   }, null, 2);
-  atomicWrite(latestJson, jsonPayload);
+  atomicWriteFile(latestJson, jsonPayload);
   bundleEntries.push({ name: reportFileName('report', tag, 'json'), data: jsonPayload });
   console.log(`\n[ubel-malware] JSON  report : ${latestJson}`);
 
   try {
     const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
-    atomicWrite(latestHtml, htmlReport);
+    atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName('report', tag, 'html'), data: htmlReport });
     console.log(`[ubel-malware] HTML  report : ${latestHtml}`);
   } catch (e) {
@@ -457,14 +452,14 @@ async function writeMalwareReports(results, opts) {
   try {
     const sarifBuilder = new SastSarifBuilder(results, meta);
     const sarifPayload = JSON.stringify(sarifBuilder.generate(), null, 2);
-    atomicWrite(latestSarif, sarifPayload);
+    atomicWriteFile(latestSarif, sarifPayload);
     bundleEntries.push({ name: reportFileName('report', tag, 'sarif.json'), data: sarifPayload });
     console.log(`[ubel-malware] SARIF report : ${latestSarif}`);
   } catch (e) {
     console.warn(`[ubel-malware] SARIF report failed: ${e.message}`);
   }
 
-  atomicWrite(zipPath, buildZip(bundleEntries));
+  atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-malware] Timestamped bundle : ${zipPath}`);
@@ -534,7 +529,7 @@ function runChunkCommand(args) {
 
   const chunks     = buildChunks(root, opts);
   const outputPath = path.join(process.cwd(), 'sast_chunks.json');
-  fs.writeFileSync(outputPath, JSON.stringify(chunks, null, 2));
+  atomicWriteFile(outputPath, JSON.stringify(chunks, null, 2));
   console.log(`\n[ubel-sast] Chunks written to: ${outputPath}`);
   const info = chunks.info;
   if (info) {

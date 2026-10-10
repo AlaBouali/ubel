@@ -1,5 +1,5 @@
 'use strict';
-import fs from 'fs';
+import { atomicWriteFile } from '../../sca/report_naming.js';
 import { getComplianceForCloudCheck } from '../../sca/compliance_mappings.js';
 
 const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -42,7 +42,7 @@ class Reporter {
   }
 
   writeJSON(path) {
-    fs.writeFileSync(path, this.toJSON());
+    atomicWriteFile(path, this.toJSON());
   }
 
   printSummary() {

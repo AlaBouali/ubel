@@ -36,6 +36,10 @@
 // refreshed after every scan, so it always holds the most recent scan of that
 // tag for the project, and history/ holds nothing but timestamped zips.
 //
+// Every report file — latest.<tag>.*, the history zip, the latest_reports copy —
+// is written with atomicWriteFile() below: temp file in the same folder, then an
+// atomic rename, so a reader never sees a half-written report.
+//
 // Project identity: every .ubel/ folder a scan writes into holds a
 // ubel_project.json ({ "project_id": "<uuid>", "project_name": "<readable>",
 // "created_at": "<iso>" }), created on first use; the id never changes. Zips are
@@ -179,11 +183,39 @@ function readProjectFile(file) {
   }
 }
 
-function writeAtomic(file, body) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, body);
-  fs.renameSync(tmp, file);
+/**
+ * Write `content` to `filePath` so that a reader (another process, a CI step, a
+ * dashboard watching latest.<tag>.html) only ever sees the complete old file or
+ * the complete new one — never a half-written file:
+ *
+ *   1. write everything to a temp file in the SAME folder (same filesystem, so
+ *      the rename below is atomic),
+ *   2. rename it over `filePath` in one step.
+ *
+ * The temp name carries the pid and a random suffix, so two scans writing the
+ * same target at once never share (and corrupt) one temp file — the last rename
+ * wins, and each outcome is still a complete file. If the write or the rename
+ * fails, the temp file is removed, `filePath` is left exactly as it was, and
+ * the error is rethrown (a report that could not be saved must not look saved).
+ *
+ * Used for every report UBEL writes: latest.<tag>.* files, history zips, and
+ * the latest_reports/ copy.
+ *
+ * @param {string} filePath
+ * @param {string|Buffer|Uint8Array} content
+ */
+export function atomicWriteFile(filePath, content) {
+  const tmp = `${filePath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, filePath);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* temp file never created, or already gone */ }
+    throw e;
+  }
 }
+
+const writeAtomic = atomicWriteFile;
 
 /**
  * Return { project_id, project_name } from <ubelDir>/ubel_project.json,
@@ -409,7 +441,8 @@ export function updateLatestReportZip(zipPath, tag) {
     const dir = path.join(latestReportsRoot(), rel);
     fs.mkdirSync(dir, { recursive: true });
     latest = path.join(dir, reportFileName("latest", tag, "zip"));
-    tmp = `${latest}.${process.pid}.tmp`;
+    // Same temp-then-rename swap as atomicWriteFile(), with a copy as the first step.
+    tmp = `${latest}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
     fs.copyFileSync(zipPath, tmp);
     fs.renameSync(tmp, latest);
     return latest;

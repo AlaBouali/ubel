@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, projectFor } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -166,11 +166,6 @@ function parseFailOn(value) {
   return { mode: 'severity', severity: value };
 }
 
-function atomicWrite(filePath, content) {
-  const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
-}
 
 /**
  * Resolves AWS regions per the precedence documented in HELP:
@@ -246,20 +241,20 @@ async function writeCloudReports(reporter, meta, opts) {
   });
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);
-  atomicWrite(latestJson, jsonPayload);
+  atomicWriteFile(latestJson, jsonPayload);
   bundleEntries.push({ name: reportFileName('report', tag, 'json'), data: jsonPayload });
   console.log(`\n[ubel-cloud] JSON  report : ${latestJson}`);
 
   try {
     const htmlReport = await generateHtmlReport(reportPayload);
-    atomicWrite(latestHtml, htmlReport);
+    atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName('report', tag, 'html'), data: htmlReport });
     console.log(`[ubel-cloud] HTML  report : ${latestHtml}`);
   } catch (e) {
     console.warn(`[ubel-cloud] HTML report failed: ${e.message}`);
   }
 
-  atomicWrite(zipPath, buildZip(bundleEntries));
+  atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-cloud] Timestamped bundle : ${zipPath}`);
