@@ -485,7 +485,13 @@ export class DockerImageScanner {
     if (!fs.existsSync(src)) return;
 
     const dest = path.join(process.cwd(), ".ubel");
-    fs.cpSync(src, dest, { recursive: true, force: true });
+    // ubel_project.json identifies the cwd's project; an image that happens to
+    // carry its own must never overwrite it.
+    fs.cpSync(src, dest, {
+      recursive: true,
+      force: true,
+      filter: (from) => path.relative(src, from) !== "ubel_project.json",
+    });
     console.log(`[docker] copied .ubel from image to ${dest}`);
   }
 

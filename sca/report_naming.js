@@ -30,9 +30,20 @@
 // cargo; "os" = check/install for apt/dnf/yum). The "latest" copies stay
 // per-project under <project>/.ubel/reports/.
 //
+// Project identity: every .ubel/ folder a scan writes into holds a
+// ubel_project.json ({ "project_id": "<uuid>", "project_name": "<readable>",
+// "created_at": "<iso>" }), created on first use; the id never changes. Zips are
+// filed under the project's id — history/<mode>/<project_id>/ — so projects
+// sharing one history folder stay apart, and the id and name are written into
+// each report's own metadata so a zip that is moved or renamed still says where
+// it came from. Every scanner gets one — SCA, SAST/malware, secrets, licenses,
+// docker, cloud, EASM. The one exception is the OS firewall (apt/dnf/yum): it
+// has no project, so it uses $HOME/.ubel/ubel_project.json as a tag for the
+// machine itself (the same file a host-platform scan of $HOME uses).
+//
 // Where the tag is used:
 //   • "latest" copies   .ubel/reports/latest.<tag>.<ext>
-//   • timestamped zip   $HOME/.ubel/history/<mode>/<timestamp>.<tag>.zip
+//   • timestamped zip   $HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip
 //   • entries in a zip  report.<tag>.<ext>  (always "report", never the
 //                       timestamp or "latest")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +51,8 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { randomUUID } from "crypto";
+import { execFileSync } from "child_process";
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -118,19 +131,145 @@ export function historyRoot() {
   return path.join(os.homedir(), ".ubel", "history");
 }
 
+// ── Project identity (ubel_project.json) ─────────────────────────────────────
+
+/** Name of the per-project (or per-machine) identity file inside a .ubel/ folder. */
+export const PROJECT_FILE_NAME = "ubel_project.json";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** $HOME/.ubel — holds the machine tag (and the OS firewall's reports). */
+export function machineUbelDir() {
+  return path.join(os.homedir(), ".ubel");
+}
+
 /**
- * Path for a new history zip: $HOME/.ubel/history/<mode>/<timestamp>.<tag>.zip.
- * Creates the folder. The history folder is shared by every project on the
- * machine, so if two runs land in the same second the later one gets
- * "<timestamp>_2.<tag>.zip" rather than overwriting the first.
+ * Readable name for a project, used only when ubel_project.json is first
+ * written (or backfilled): the repository name from `origin` when the folder
+ * is a git checkout (credentials in the URL are never read — only the last path
+ * segment), else the folder's own name. The machine tag is named after the host.
+ */
+function deriveProjectName(ubelDir) {
+  if (path.resolve(ubelDir) === path.resolve(machineUbelDir())) return os.hostname();
+  const dir = path.dirname(path.resolve(ubelDir));
+  try {
+    const url = execFileSync("git", ["-C", dir, "remote", "get-url", "origin"], {
+      stdio: ["ignore", "pipe", "ignore"], timeout: 3000, encoding: "utf-8",
+    }).trim();
+    const repo = url.replace(/[\\/]+$/, "").split(/[\\/:]/).pop().replace(/\.git$/i, "");
+    if (repo) return repo.slice(0, 200);
+  } catch { /* not a git checkout, no origin, or git missing */ }
+  return path.basename(dir) || os.hostname();
+}
+
+function readProjectFile(file) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (!j || typeof j !== "object" || typeof j.project_id !== "string" || !UUID_RE.test(j.project_id)) return null;
+    return { ...j, project_id: j.project_id.toLowerCase() };
+  } catch {
+    return null; // missing, unreadable, or not valid JSON
+  }
+}
+
+function writeAtomic(file, body) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, body);
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * Return { project_id, project_name } from <ubelDir>/ubel_project.json,
+ * creating the folder and the file (fresh UUID + derived name) if they don't
+ * exist yet.
  *
- * @param {string} mode       history sub-folder, e.g. "sca", "os", "url"
- * @param {string} timestamp  from reportTimestamp()
- * @param {string} tag        file-name tag, e.g. "sca", "sca_apt", "url"
+ *   • An existing valid id is never changed.
+ *   • An existing project_name (including one edited by hand) is never changed;
+ *     a file that has an id but no name gets one added.
+ *   • A file that holds no valid UUID (corrupt, hand-edited wrongly) is replaced.
+ *
+ * Safe against two scans starting in the same folder at once: the file is
+ * created exclusively, and the loser of the race reads the winner's id.
+ *
+ * Never throws — a scan must not fail because this file can't be written
+ * (read-only folder, …). On failure it warns on stderr and returns null; the
+ * history zip then lands directly in history/<mode>/ without a project folder.
+ *
+ * @param {string} ubelDir  the .ubel folder (not the project root)
+ * @returns {{project_id: string, project_name: string}|null}
+ */
+export function ensureProject(ubelDir) {
+  const file = path.join(ubelDir, PROJECT_FILE_NAME);
+  const pick = (j) => ({ project_id: j.project_id, project_name: j.project_name });
+  try {
+    let existing = readProjectFile(file);
+    if (existing) {
+      if (typeof existing.project_name === "string" && existing.project_name.trim()) return pick(existing);
+      existing.project_name = deriveProjectName(ubelDir); // backfill: id untouched
+      writeAtomic(file, JSON.stringify(existing, null, 2) + "\n");
+      return pick(existing);
+    }
+
+    fs.mkdirSync(ubelDir, { recursive: true });
+    const fresh = {
+      project_id:   randomUUID(),
+      project_name: deriveProjectName(ubelDir),
+      created_at:   new Date().toISOString(),
+    };
+    const body = JSON.stringify(fresh, null, 2) + "\n";
+
+    try {
+      fs.writeFileSync(file, body, { flag: "wx" });
+      return pick(fresh);
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+
+    // Lost a race, or the file exists but held no valid id.
+    const winner = readProjectFile(file);
+    if (winner && typeof winner.project_name === "string" && winner.project_name.trim()) return pick(winner);
+    if (winner) return ensureProject(ubelDir); // id present, name still missing → backfill path
+    writeAtomic(file, body);
+    return pick(fresh);
+  } catch (e) {
+    console.warn(`[ubel] could not write ${file}: ${e.message} — history zip will not be filed under a project id`);
+    return null;
+  }
+}
+
+/**
+ * Project identity for a scan that writes history under `mode`.
+ *
+ *   mode "os" (apt/dnf/yum)   → machine tag, $HOME/.ubel/ubel_project.json
+ *   everything else           → <ubelDir>/ubel_project.json
+ *
+ * @param {string} mode      history mode (see historyZipPath)
+ * @param {string} ubelDir   the .ubel folder this scan writes its reports into
+ * @returns {{project_id: string, project_name: string}|null}
+ */
+export function projectFor(mode, ubelDir) {
+  return ensureProject(mode === "os" ? machineUbelDir() : ubelDir);
+}
+
+/**
+ * Path for a new history zip:
+ *   $HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip
+ * (history/<mode>/<timestamp>.<tag>.zip when no project id is available).
+ * Creates the folders. If two runs of the same project land in the same second
+ * the later one gets "<timestamp>_2.<tag>.zip" rather than overwriting the first.
+ *
+ * @param {string} mode        history sub-folder, e.g. "sca", "os", "url"
+ * @param {string} timestamp   from reportTimestamp()
+ * @param {string} tag         file-name tag, e.g. "sca", "sca_apt", "url"
+ * @param {string|null} [projectId]  project_id from projectFor(); omitted/null = no project folder
  * @returns {string}
  */
-export function historyZipPath(mode, timestamp, tag) {
-  const dir = path.join(historyRoot(), sanitizeReportTag(mode));
+export function historyZipPath(mode, timestamp, tag, projectId = null) {
+  if (projectId != null && !UUID_RE.test(projectId)) {
+    throw new Error(`invalid project id: ${projectId}`);
+  }
+  let dir = path.join(historyRoot(), sanitizeReportTag(mode));
+  if (projectId) dir = path.join(dir, projectId);
   fs.mkdirSync(dir, { recursive: true });
   let candidate = path.join(dir, reportFileName(timestamp, tag, "zip"));
   for (let n = 2; fs.existsSync(candidate); n++) {

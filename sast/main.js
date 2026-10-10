@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, projectFor } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -149,13 +149,16 @@ async function writeAnalyzeReports(results, opts) {
 
   // <timestamp>.sast.zip (in $HOME/.ubel/history/sast/), latest.sast.<ext>, and report.sast.<ext> inside the zip.
   const tag     = 'sast';
-  const zipPath = historyZipPath('sast', ts, tag);
+  const project = projectFor('sast', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('sast', ts, tag, project?.project_id ?? null);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
+  meta.project_id   = project?.project_id   ?? null;
+  meta.project_name = project?.project_name ?? null;
   meta.scan_type    = 'analyze';
   meta.scan_options = scanOptionsFor(opts, 'analyze');
 
@@ -333,13 +336,16 @@ async function writeMalwareReports(results, opts) {
 
   // <timestamp>.malware.zip (in $HOME/.ubel/history/malware/), latest.malware.<ext>, and report.malware.<ext> inside the zip.
   const tag     = 'malware';
-  const zipPath = historyZipPath('malware', ts, tag);
+  const project = projectFor('malware', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('malware', ts, tag, project?.project_id ?? null);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
+  meta.project_id   = project?.project_id   ?? null;
+  meta.project_name = project?.project_name ?? null;
   meta.scan_type = 'malware';
   meta.scan_options = scanOptionsFor(opts, 'malware');
 

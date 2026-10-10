@@ -11,7 +11,7 @@ import fs from "fs";
 import path from "path";
 import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
-import { reportTimestamp, reportFileName, historyZipPath } from "../../sca/report_naming.js";
+import { reportTimestamp, reportFileName, historyZipPath, projectFor } from "../../sca/report_naming.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
@@ -174,7 +174,16 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
   // and the files: $HOME/.ubel/history/<tag>/<timestamp>.<tag>.zip,
   // latest.<tag>.<ext>, and report.<tag>.<ext> inside the zip.
   const tag     = reportType === "easm_full" ? "easm" : reportType.replace(/^easm_/, "");
-  const zipPath = historyZipPath(tag, ts, tag);
+  const project = projectFor(tag, path.join(workingDir, ".ubel"));
+  const zipPath = historyZipPath(tag, ts, tag, project?.project_id ?? null);
+
+  // Identity goes into the report itself (JSON + HTML) — on a copy, so the
+  // caller's payload object is left as it was.
+  reportPayload = {
+    ...reportPayload,
+    project_id:   project?.project_id   ?? null,
+    project_name: project?.project_name ?? null,
+  };
 
   const latestJson = path.join(latestDir, reportFileName("latest", tag, "json"));
   const latestHtml = path.join(latestDir, reportFileName("latest", tag, "html"));

@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, projectFor } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -221,7 +221,8 @@ async function writeCloudReports(reporter, meta, opts) {
 
   // <timestamp>.cloud.zip (in $HOME/.ubel/history/cloud/), latest.cloud.<ext>, and report.cloud.<ext> inside the zip.
   const tag     = 'cloud';
-  const zipPath = historyZipPath('cloud', ts, tag);
+  const project = projectFor('cloud', path.join(workingDir, '.ubel'));
+  const zipPath = historyZipPath('cloud', ts, tag, project?.project_id ?? null);
 
   const latestJson = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml = path.join(latestDir, reportFileName('latest', tag, 'html'));
@@ -233,7 +234,11 @@ async function writeCloudReports(reporter, meta, opts) {
 
   // Built once so the JSON report and the HTML report's embedded data are
   // the exact same object — never a separately-shaped, stripped-down JSON.
-  const reportPayload = buildReportPayload(reporter, meta);
+  const reportPayload = buildReportPayload(reporter, {
+    ...meta,
+    project_id:   project?.project_id   ?? null,
+    project_name: project?.project_name ?? null,
+  });
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);
   atomicWrite(latestJson, jsonPayload);

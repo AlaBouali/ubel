@@ -873,7 +873,7 @@ For the other two commands, swap the tag: `latest.secrets.html`, `latest.license
 | Secrets-only scan | `<project-root>/.ubel/reports/latest.secrets.*` |
 | License-only scan | `<project-root>/.ubel/reports/latest.licenses.*` |
 | VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.sca.*` or `~/.cursor/extensions/.ubel/reports/latest.sca.*` |
-| Host platform | `~/.ubel/reports/latest.sca.*` |
+| Host platform | `~/.ubel/reports/latest.sca.*` (machine tag: `~/.ubel/ubel_project.json`) |
 
 Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, `report.<tag>.cdx.json`, `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
@@ -881,7 +881,15 @@ Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.
 - `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
 - `~/.ubel/history/licenses/` — Scan project for License Compliance
 
-All projects and commands share this one folder, so a zip doesn't record which project it came from — open its `report.<tag>.json` to see. If two scans finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
+All projects and commands share this one folder, but each project's zips live in a sub-folder named after its project id — `~/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/sca/3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_project.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_project.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
+
+```json
+{ "project_id": "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13", "project_name": "shop", "created_at": "2026-10-10T12:30:05.000Z" }
+```
+
+`project_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Project** and **Project ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from.
+
+**Scan Host Platform** scans your home directory, so it uses `~/.ubel/ubel_project.json` — a tag for the machine itself (named after the host), the same one the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use. If a `ubel_project.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/<mode>/`. Zips from earlier versions stay where they are, directly in that folder. If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
 
 ---
 

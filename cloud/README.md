@@ -355,14 +355,15 @@ Every run writes:
 ```
 .ubel/reports/latest.cloud.json     ← always current
 .ubel/reports/latest.cloud.html     ← always current
+.ubel/ubel_project.json             ← this folder's project id and name (id created once, never changed)
 
-$HOME/.ubel/history/cloud/
+$HOME/.ubel/history/cloud/<project_id>/
     <timestamp>.cloud.zip           ← YYYY_MM_DD__HH_MM_SS (UTC)
         report.cloud.json
         report.cloud.html
 ```
 
-Files follow the shared `<file_name>.<tag>.<extension>` scheme with the tag `cloud`: `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zip goes to the shared `$HOME/.ubel/history/cloud/` folder, so it doesn't record which project or account it came from — see `accounts` and `providers` in the report JSON. A second run in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/cloud/<date>/cloud__<timestamp>.zip` with untagged `report.json` / `report.html` inside; old files are left untouched.)
+Files follow the shared `<file_name>.<tag>.<extension>` scheme with the tag `cloud`: `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zip goes to the shared `$HOME/.ubel/history/cloud/` folder, in a sub-folder named after `<project_id>` — the UUID in `.ubel/ubel_project.json` of the directory you ran `ubel-cloud` from (created on the first run, never changed — see the SCA README's [Project id](../sca/README.md#project-id-ubel_projectjson) section), so runs from different directories stay apart. `project_id` and `project_name` are also written into the report JSON and shown in the HTML report's scan info. They identify the folder, not the cloud account — see `accounts` and `providers` in the report JSON for that. A second run from the same folder in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/cloud/<date>/cloud__<timestamp>.zip` with untagged `report.json` / `report.html` inside; old files are left untouched.)
 
 No SARIF and no SBOM — this isn't a dependency scan, so neither format applies.
 

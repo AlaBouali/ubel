@@ -14,7 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, projectFor } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -1287,6 +1287,8 @@ async function generateHTMLReport(data) {
             document.getElementById('scan-ecosystems').textContent = scan.ecosystems.join(', ');
             document.getElementById('scan-engine').textContent = scan.engine;
             document.getElementById('scan-scope').textContent = scan.scan_scope || 'repository';
+            document.getElementById('scan-project-name').textContent = scan.project_name || 'N/A';
+            document.getElementById('scan-project-id').textContent = scan.project_id || 'N/A';
 
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
@@ -1963,6 +1965,14 @@ async function generateHTMLReport(data) {
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">Scan Scope</span>
           <span class="mono text-xs" id="scan-scope">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Project</span>
+          <span class="mono text-xs" id="scan-project-name">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Project ID</span>
+          <span class="mono text-xs break-all text-right" id="scan-project-id">...</span>
         </div>
       </div>
     </div>
@@ -4076,6 +4086,15 @@ export class UbelEngineInstance {
         }
       }
 
+      // Project identity (ubel_project.json) — resolved before the report is built so
+      // its id and name go into the report itself, and the same values file the zip.
+      // ubelRoot is the .ubel folder this scan reports into (docker: the cwd's .ubel via
+      // options.project_ubel_dir — the scanned rootfs is throwaway). apt/dnf/yum ("os")
+      // use the machine tag in $HOME/.ubel/ubel_project.json instead.
+      const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
+      const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
+      const project     = projectFor(historyMode, options.project_ubel_dir || ubelRoot);
+
       const finalJson = {
         generated_at:      now.toISOString().replace("Z", "") + "Z",
         runtime,
@@ -4083,7 +4102,7 @@ export class UbelEngineInstance {
         os_metadata:       { ...os_metadata_info, local_ips: localIPs },
         git_metadata:      git_metadata,
         tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, ...(runtime.editor ? { editor: runtime.editor } : {}) },
+        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, ...(project ? { project_id: project.project_id, project_name: project.project_name } : {}), ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
         vulnerabilities_ids: Array.from(this.vulns_ids_found),
         findings_summary:  findingsSummary,
@@ -4232,7 +4251,6 @@ export class UbelEngineInstance {
       // ~/.ubel/local/reports specifically to avoid writing into whatever
       // directory the CLI happened to be run from — get the same redirect
       // applied to this convenience path too, not just the timestamped one.
-      const ubelRoot        = path.dirname(path.dirname(this.reportsLocation));
       const latestDir       = path.join(ubelRoot, "reports");
       const latestPath      = path.join(latestDir, reportFileName("latest", reportTag, "json"));
       const latestHtmlPath  = path.join(latestDir, reportFileName("latest", reportTag, "html"));
@@ -4263,11 +4281,9 @@ export class UbelEngineInstance {
       // sca | firewall | os | licenses | secrets. Inside, every entry is named
       // "report" (report.<tag>.json, …) regardless of timestamp. The "latest"
       // copies above are intentionally left as plain files, unzipped.
-      const zipPath = historyZipPath(
-        scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope }),
-        timestamp,
-        reportTag,
-      );
+      // Filed under the project: history/<mode>/<project_id>/<timestamp>.<tag>.zip
+      // (project and historyMode were resolved above, before the report was built).
+      const zipPath = historyZipPath(historyMode, timestamp, reportTag, project?.project_id ?? null);
       fs.writeFileSync(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },

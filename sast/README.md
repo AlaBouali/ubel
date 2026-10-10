@@ -361,8 +361,9 @@ Every `analyze` run writes:
 .ubel/reports/latest.sast.json          ← always current
 .ubel/reports/latest.sast.html          ← always current
 .ubel/reports/latest.sast.sarif.json    ← always current
+.ubel/ubel_project.json                 ← this project's id and name (id created once, never changed)
 
-$HOME/.ubel/history/sast/
+$HOME/.ubel/history/sast/<project_id>/
     <timestamp>.sast.zip            ← YYYY_MM_DD__HH_MM_SS (UTC)
         report.sast.json
         report.sast.html
@@ -376,14 +377,14 @@ Every `malware` run writes the equivalent set under its own namespace:
 .ubel/reports/latest.malware.html
 .ubel/reports/latest.malware.sarif.json
 
-$HOME/.ubel/history/malware/
+$HOME/.ubel/history/malware/<project_id>/
     <timestamp>.malware.zip
         report.malware.json
         report.malware.html
         report.malware.sarif.json
 ```
 
-Files follow the shared `<file_name>.<tag>.<extension>` scheme: the tag (`sast` or `malware`) sits between the file name and the extension; the file name is `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zips go to one shared `$HOME/.ubel/history/<mode>/` folder (the same one every UBEL scanner uses), so they don't record which project they came from — see `meta.workingDir` in the report JSON. A second run in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/sast/<date>/sast__<timestamp>.zip` and `…/malware/<date>/malware__<timestamp>.zip` with untagged `report.json` / `report.html` / `report.sarif.json` inside; old files are left untouched.)
+Files follow the shared `<file_name>.<tag>.<extension>` scheme: the tag (`sast` or `malware`) sits between the file name and the extension; the file name is `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zips go to the shared `$HOME/.ubel/history/<mode>/` folder (the same one every UBEL scanner uses), in a sub-folder named after the project: `<project_id>` is the UUID in `<project>/.ubel/ubel_project.json`, created on the first run and never changed. `project_id` and `project_name` (also from that file) are written into the report's `meta` and shown in the HTML report's system panel — see the SCA README's [Project id](../sca/README.md#project-id-ubel_projectjson) section. A second run of the same project in the same second gets a `_2` suffix instead of overwriting the first. (Earlier versions wrote `<project>/.ubel/local/reports/sast/<date>/sast__<timestamp>.zip` and `…/malware/<date>/malware__<timestamp>.zip` with untagged `report.json` / `report.html` / `report.sarif.json` inside; old files are left untouched.)
 
 The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware` and `meta.scan_options` records the non-secret run settings (verification and taint-trace on/off, diff mode, chunk limits, language/folder filters) the summary needs to say what was and was not checked; the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
 

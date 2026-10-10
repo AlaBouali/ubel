@@ -220,6 +220,8 @@ Every SCA binary's `install-hook` / `uninstall-hook` manages the **same single h
 
 Before anything runs, the entry point (`main.js`, not the scanners) makes sure `.gitignore` and `.dockerignore` in the working directory ignore `.ubel/` and `.ubelignore`, creating the files if needed — idempotent, append-only, and it respects an explicit `!.ubelignore`. Opt out with `UBEL_NO_IGNORE_FILES=1`.
 
+Every `.ubel/` folder a scan reports into also gets a `ubel_project.json` holding a random project UUID (never changed) and a readable project name (the git repository name, else the folder name; editable). History zips are filed under the UUID — `~/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip` — so projects sharing `~/.ubel/history/` stay apart, and the id and name are written into every report's JSON and HTML. All scanners do this — SCA, licenses, secrets, SAST/malware, docker, cloud and EASM. `ubel-apt` / `ubel-dnf` / `ubel-yum` use `~/.ubel/ubel_project.json` instead, as a tag for the machine. See [SCA § Project id](sca/README.md#project-id-ubel_projectjson).
+
 Secrets findings are also included in every `health`-mode SCA scan by default (`check`/`install` never run a secrets pass; `ubel-docker` runs the `health` pipeline in all three of its modes, so image scans always include one), surfaced in a dedicated tab in the HTML report and as a schema-correct extension on both the SBOM (a `ubel:secrets` property, since CycloneDX's root schema doesn't permit arbitrary top-level keys) and the SARIF output (its own `run`, separate from the dependency-vulnerability run).
 
 ---
@@ -1141,7 +1143,10 @@ scans that resolution and only then runs the real
 blocked scan just means the real install never runs — nothing to revert.
 Reports and policy live under `~/.ubel/local` specifically so that routine
 `health`/`check` use never needs elevated privileges; only the real install
-step does, same as running the package manager yourself.
+step does, same as running the package manager yourself. With no project to
+identify, their history zips are filed under the machine instead:
+`~/.ubel/ubel_project.json` is created once (named after the host) and its
+UUID is the `os/<project_id>/` folder every OS scan's zip goes into.
 
 **Pre-commit hook:** Not available — apt/dnf/yum scan the host, not a repo,
 so there's no manifest to hook a commit against. Their CLI rejects

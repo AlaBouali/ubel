@@ -1085,6 +1085,9 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
         scan_os:      true,
         full_stack:   true,
         scan_scope:   "container-image",
+        // The rootfs (and the .ubel inside it) is thrown away after the scan,
+        // so the project id lives in the cwd's .ubel, next to <uuid>/ scratch.
+        project_ubel_dir: path.join(process.cwd(), ".ubel"),
         ...rest,
       });
     } catch (err) {

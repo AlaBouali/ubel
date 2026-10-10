@@ -1229,6 +1229,8 @@ export async function generateHtmlReport(reportPayload) {
           <div class="space-y-3 text-sm">
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Tool</span><span class="mono text-xs" id="sys-tool">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="sys-version">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Project</span><span class="mono text-xs" id="sys-project">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Project ID</span><span class="mono text-[10px] break-all text-right" id="sys-project-id">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Generated at</span><span class="mono text-xs" id="sys-generated">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">--allow-private</span><span class="mono text-xs" id="sys-allow-private">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">OSV endpoint</span><span class="mono text-xs" id="sys-osv-endpoint">—</span></div>
@@ -2548,6 +2550,8 @@ function renderScanInfo() {
   document.getElementById('usage-notice').textContent = reportData.usage_notice || '';
   document.getElementById('sys-tool').textContent = reportData.tool;
   document.getElementById('sys-version').textContent = reportData.tool_version || '—';
+document.getElementById('sys-project').textContent = reportData.project_name || '—';
+document.getElementById('sys-project-id').textContent = reportData.project_id || '—';
   document.getElementById('sys-generated').textContent = reportData.generated_at;
   document.getElementById('sys-allow-private').textContent = reportData.allow_private ? 'true' : 'false';
   document.getElementById('sys-osv-endpoint').textContent = reportData.osv_endpoint || 'https://api.osv.dev (default)';

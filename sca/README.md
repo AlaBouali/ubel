@@ -1306,8 +1306,9 @@ Every scan overwrites the `latest.<tag>.*` convenience links for its scan type a
 .ubel/reports/latest.<tag>.html          ← always current
 .ubel/reports/latest.<tag>.cdx.json      ← always current (CycloneDX SBOM)
 .ubel/reports/latest.<tag>.sarif.json    ← always current
+.ubel/ubel_project.json                  ← this project's id and name (id created once, never changed)
 
-$HOME/.ubel/history/<mode>/
+$HOME/.ubel/history/<mode>/<project_id>/
     <timestamp>.<tag>.zip                ← YYYY_MM_DD__HH_MM_SS (UTC)
         report.<tag>.json
         report.<tag>.html
@@ -1330,7 +1331,7 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 
 ### History: `$HOME/.ubel/history/<mode>/`
 
-Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode, so a zip's name only needs the timestamp and tag. The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
+Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip` (see [Project id](#project-id-ubel_projectjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
 
 | `<mode>` folder | Holds |
 |---|---|
@@ -1341,9 +1342,31 @@ Every timestamped zip — from every project and every scanner on the machine �
 | `secrets` | `ubel-secrets` |
 | `sast`, `malware`, `cloud`, `easm`, `host`, `domain`, `url` | the other scanners — see their READMEs |
 
-Because the folder is shared, the zip does not record which project it came from — open its `report.<tag>.json` (`scan_info`, git metadata) to find out. If two runs finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
+One project's zips sit together in its own `<project_id>` folder, so listing a project's history is `ls ~/.ubel/history/<mode>/<project_id>/`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which project it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
 For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+
+### Project id: `ubel_project.json`
+
+Every `.ubel/` folder a scan writes into holds a small `ubel_project.json`:
+
+```json
+{
+  "project_id": "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13",
+  "project_name": "shop",
+  "created_at": "2026-10-10T12:30:05.000Z"
+}
+```
+
+- **Created on first use.** The first scan in a folder generates a random UUID and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `project_id` is not a valid UUID is replaced with a fresh one.
+- **`project_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
+- **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<project_id>/`, so each project's zips stay together instead of mixing in one flat folder.
+- **Written into every report.** The JSON report carries `project_id` and `project_name` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Project* and *Project ID* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it.
+- **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_project.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
+- **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no project, so they use `$HOME/.ubel/ubel_project.json` instead — a tag for *that machine*, shared by every OS scan on it (and by a host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*), and used as the `os/<project_id>/` folder the same way.
+- If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report has no project fields, and that zip is written straight into `history/<mode>/` without a project folder.
+
+Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are.
 
 > **Upgrading:** earlier versions wrote `latest.json` / `latest.html` / `latest.cdx.json` / `latest.sarif.json` and zipped each scan to `<project>/.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/<ecosystem>_<mode>_<engine>__<timestamp>.zip` (with `report.json`, `report.html`, `sbom.cdx.json`, `report.sarif.json` inside). Those old files are not touched, moved or removed; point any CI step or dashboard at the new names (for example `latest.sca.sarif.json` for code-scanning upload).
 
