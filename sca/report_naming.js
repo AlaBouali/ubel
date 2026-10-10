@@ -407,13 +407,43 @@ export function getRuntimeAssetId() {
   return runtimeAssetId;
 }
 
+/** The only values `asset_type` can take. */
+export const ASSET_TYPES = Object.freeze(["codebase", "cloud", "easm", "machine", "agent", "editor", "docker"]);
+
+// scan_scope values that are about a machine rather than a repository.
+const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine"]);
+
 /**
- * Asset type of a scan: the history mode it files under — sca, firewall, os,
- * licenses, secrets, sast, malware, cloud, easm, host, domain or url.
- * @param {string} mode
+ * Asset type of a scan — one of ASSET_TYPES:
+ *
+ *   scan_scope "agent"                                  → agent
+ *   scan_scope "editor_extension"                       → editor
+ *   scan_scope "container-image" (ubel-docker)          → docker
+ *   scan_scope developer_platform / cli_tool /
+ *              linux_machine, or mode "os"              → machine
+ *   mode cloud                                          → cloud
+ *   mode easm / host / domain / url                     → easm
+ *   everything else (sca, firewall, licenses, secrets,
+ *   sast, malware, CI/CD)                             → codebase
+ *
+ * The scope wins over the mode, so `ubel-agent` (history mode "sca") is an agent
+ * and `ubel-platform` is a machine.
+ *
+ * @param {string} mode         history mode (see historyZipPath)
+ * @param {string} [scanScope]  scan_scope of an SCA run, when there is one
+ * @returns {"codebase"|"cloud"|"easm"|"machine"|"agent"|"editor"|"docker"}
  */
-export function assetTypeFor(mode) {
-  return sanitizeReportTag(mode);
+export function assetTypeFor(mode, scanScope) {
+  if (scanScope === "agent") return "agent";
+  if (scanScope === "editor_extension") return "editor";
+  if (scanScope === "container-image") return "docker";
+  if (MACHINE_SCOPES.has(scanScope)) return "machine";
+  switch (sanitizeReportTag(mode)) {
+    case "os":                                      return "machine";
+    case "cloud":                                   return "cloud";
+    case "easm": case "host": case "domain": case "url": return "easm";
+    default:                                        return "codebase";
+  }
 }
 
 /**
@@ -429,12 +459,13 @@ export function assetTypeFor(mode) {
  * asset_id / asset_name are null when the identity file could not be written
  * (see ensureAsset); asset_type is always set.
  *
- * @param {string} mode      history mode (see historyZipPath)
- * @param {string} ubelDir   the .ubel folder this scan writes its reports into
+ * @param {string} mode        history mode (see historyZipPath)
+ * @param {string} ubelDir     the .ubel folder this scan writes its reports into
+ * @param {string} [scanScope] scan_scope of an SCA run; decides agent / machine (see assetTypeFor)
  * @returns {{asset_id: string|null, asset_name: string|null, asset_type: string}}
  */
-export function assetFor(mode, ubelDir) {
-  const asset_type = assetTypeFor(mode);
+export function assetFor(mode, ubelDir, scanScope) {
+  const asset_type = assetTypeFor(mode, scanScope);
   const dir = mode === "os" ? machineUbelDir() : ubelDir;
 
   if (runtimeAssetId) {

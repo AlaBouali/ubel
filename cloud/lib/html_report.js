@@ -82,7 +82,7 @@ function buildStats(findings) {
  * @param {string} [meta.tool_version]
  * @param {string} [meta.asset_id]      <uuid>-<uuid> from .ubel/ubel_asset.json (or --asset-id)
  * @param {string} [meta.asset_name]    readable asset name from the same file
- * @param {string} [meta.asset_type]    scan type: always "cloud" here
+ * @param {string} [meta.asset_type]    asset type: always "cloud" here
  * @param {Array<{provider:string,status:'scanned'|'partial'|'skipped',reason?:string}>} [meta.provider_status]
  *   one row per requested provider — lets the report say which clouds were NOT (fully) scanned
  * @param {object} [meta.accounts]      { gcp?: project id, azure?: subscription id }
@@ -400,6 +400,7 @@ async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Version</span><span class="mono text-xs" id="sys-version">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset</span><span class="mono text-xs" id="sys-asset">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset ID</span><span class="mono text-[10px] break-all text-right" id="sys-asset-id">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset type</span><span class="mono text-xs" id="sys-asset-type">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Generated at</span><span class="mono text-xs" id="sys-generated">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Providers scanned</span><span class="mono text-xs" id="sys-providers">—</span></div>
             <div class="flex justify-between"><span class="text-neutral-500 text-xs">Minimum severity filter</span><span class="mono text-xs" id="sys-filter">—</span></div>
@@ -1190,6 +1191,7 @@ function renderScanInfo() {
   document.getElementById('sys-version').textContent    = reportData.tool_version || '—';
   document.getElementById('sys-asset').textContent      = reportData.asset_name || '—';
   document.getElementById('sys-asset-id').textContent   = reportData.asset_id || '—';
+  document.getElementById('sys-asset-type').textContent = reportData.asset_type || '—';
   document.getElementById('sys-generated').textContent   = reportData.generated_at;
   document.getElementById('sys-providers').textContent   = (reportData.providers || []).join(', ') || '—';
 

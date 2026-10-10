@@ -1268,6 +1268,7 @@ async function generateHTMLReport(data) {
             document.getElementById('scan-scope').textContent = scan.scan_scope || 'repository';
             document.getElementById('scan-asset-name').textContent = scan.asset_name || 'N/A';
             document.getElementById('scan-asset-id').textContent = scan.asset_id || 'N/A';
+            document.getElementById('scan-asset-type').textContent = scan.asset_type || 'N/A';
 
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
@@ -1938,6 +1939,10 @@ async function generateHTMLReport(data) {
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">Asset ID</span>
           <span class="mono text-xs break-all text-right" id="scan-asset-id">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Asset type</span>
+          <span class="mono text-xs" id="scan-asset-type">...</span>
         </div>
       </div>
     </div>
@@ -4048,7 +4053,7 @@ export class UbelEngineInstance {
       // use the machine tag in $HOME/.ubel/ubel_asset.json instead.
       const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
       const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
-      const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot);
+      const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope);
 
       const finalJson = {
         generated_at:      now.toISOString().replace("Z", "") + "Z",

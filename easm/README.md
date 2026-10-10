@@ -995,7 +995,11 @@ sub-folder named after `<asset_id>` — the `<uuid>-<uuid>` id in `.ubel/ubel_as
 of the directory you ran the CLI from (created on the first run, never changed
 — see the SCA README's [Asset id](../sca/README.md#asset-id-ubel_assetjson)
 section). `asset_id`, `asset_name` and `asset_type` are also written into the report
-JSON and shown on the HTML report's Scan Info tab. They identify that folder,
+JSON and shown on the HTML report's Scan Info tab. `asset_type` is always `easm`
+for all four CLIs (see the SCA README's
+[Asset types](../sca/README.md#asset-types-asset_type)); the CLI's own mode
+(`url`, `domain`, `host`, `easm`) only names the history folder and file tag.
+The id and name identify that folder,
 not the target — open `report.<mode>.json` (`targets`, `input_hosts`, `domain`)
 to see what was scanned. A second run from the same folder in the same second
 gets a `_2` suffix instead of overwriting the first.

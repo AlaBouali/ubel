@@ -797,7 +797,7 @@ ubel-platform
 ubel-platform /path/to/specific/directory
 ```
 
-`scan_scope` only affects labeling in the report (`scan_info.scan_scope`) and how reports are filed and named — `license` and `secrets` select the `.licenses` / `.secrets` report tag and history folder (see [File naming](#file-naming-the-tag)) — it has no effect on scan behavior itself. All three are also reachable programmatically via `SCA_scan()`/`main()` with the same options, for embedding in a VS Code extension, an orchestration agent, or a custom CI step (see [Programmatic API](#programmatic-api)).
+`scan_scope` only affects labeling in the report (`scan_info.scan_scope`), how reports are filed and named, and the report's [`asset_type`](#asset-types-asset_type) — `license` and `secrets` select the `.licenses` / `.secrets` report tag and history folder (see [File naming](#file-naming-the-tag)); `agent` makes the asset type `agent`, `developer_platform` makes it `machine`, and `cicd` leaves it `codebase` — it has no effect on scan behavior itself. All three are also reachable programmatically via `SCA_scan()`/`main()` with the same options, for embedding in a VS Code extension, an orchestration agent, or a custom CI step (see [Programmatic API](#programmatic-api)).
 
 ---
 
@@ -1272,7 +1272,7 @@ const report = await SCA_scan({
   scan_os     : false,
   full_stack  : false,
   scan_node   : true,
-  scan_scope  : "repository",   // repository | agent | developer_platform | editor_extension | cli_tool | linux_machine
+  scan_scope  : "repository",   // repository | agent | developer_platform | editor_extension | cli_tool | linux_machine | cicd | container-image  (also sets asset_type, see Asset types)
 });
 // report is the full finalJson object (inventory, vulnerabilities, decision, …)
 ```
@@ -1346,6 +1346,8 @@ Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.u
 | `secrets` | `ubel-secrets` |
 | `sast`, `malware`, `cloud`, `easm`, `host`, `domain`, `url` | the other scanners — see their READMEs |
 
+The `<mode>` is a filing label, not the report's [`asset_type`](#asset-types-asset_type): `ubel-agent` and `ubel-platform` file under `sca` but are typed `agent` and `machine`, and `ubel-docker` is typed `docker`.
+
 One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<mode>/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
 For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
@@ -1367,14 +1369,40 @@ An **asset id is two UUIDs joined by a hyphen** — `<uuid>-<uuid>`, 73 characte
 - **Created on first use.** The first scan in a folder generates a random `<uuid>-<uuid>` and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `asset_id` is not a valid `<uuid>-<uuid>` is replaced with a fresh one.
 - **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
 - **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
-- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows the id and name as *Asset* and *Asset ID* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it.
-- **`asset_type` is the scan's `<mode>`** (the history folder it files under): `sca`, `firewall`, `os`, `licenses`, `secrets`, `sast`, `malware`, `cloud`, `easm`, `host`, `domain` or `url`.
+- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
+- **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
 - **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
 - **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
 - **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no asset folder, so they use `$HOME/.ubel/ubel_asset.json` instead — a tag for *that machine*, shared by every OS scan on it (and by a host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*), and used as the `os/<asset_id>/` folder the same way.
 - If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report's `asset_id` / `asset_name` are `null`, and that zip is written straight into `history/<mode>/` without an asset folder.
 
 Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are. A `ubel_project.json` left by an earlier version is no longer read: the next scan creates a `ubel_asset.json` with a new id.
+
+#### Asset types: `asset_type`
+
+Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing the scan looked at. It is always exactly one of these seven values — never the scan mode, never `null`:
+
+| `asset_type` | What was scanned | Scans that produce it |
+|---|---|---|
+| `codebase` | A source repository or project folder: its dependencies, licenses, secrets and source code | `ubel-npm` / `-pnpm` / `-bun` / `-yarn` / `-pip` / `-pipx` / `-uv` / `-conda` / `-cargo` / `-composer` (`health`, `check`, `install`), `ubel-secrets`, `ubel-license`, `ubel-sast`, `ubel-mal`, `ubel-cicd`, and the VS Code extension's *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* |
+| `cloud` | A cloud account's configuration (AWS / GCP / Azure) | `ubel-cloud` |
+| `easm` | Externally exposed infrastructure: URLs, domains, IPs and hosts | `ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm` |
+| `machine` | A host machine: its OS packages and installed developer tools and runtimes | `ubel-apt`, `ubel-dnf`, `ubel-yum`, `ubel-platform`, and the VS Code extension's *Scan Host Platform* |
+| `agent` | An AI-agent workspace or sandbox (OS, runtimes, tools and dependencies) | `ubel-agent` |
+| `editor` | An editor's installed extensions | the VS Code extension's *Scan VS Code Extensions* |
+| `docker` | A container image | `ubel-docker` |
+
+How it is decided (`assetTypeFor()` in `sca/report_naming.js`, the only place the mapping lives):
+
+1. A scan's **`scan_scope`** wins when it names one of the special kinds: `agent` → `agent`; `editor_extension` → `editor`; `container-image` → `docker`; `developer_platform`, `cli_tool` or `linux_machine` → `machine`.
+2. Otherwise the scan's **history mode** decides: `os` → `machine`; `cloud` → `cloud`; `easm`, `host`, `domain` and `url` → `easm`.
+3. Everything else — `sca`, `firewall`, `licenses`, `secrets`, `sast`, `malware`, and the `repository` and `cicd` scopes — is `codebase`.
+
+Three things to keep straight:
+
+- **Type is not mode.** The mode (`sca`, `os`, `url`, …) still names the history folder and the file tag; the type is what you filter on to ask "show me all cloud scans" or "all agent scans". `ubel-agent` and `ubel-platform` file under the `sca` mode but are typed `agent` and `machine`.
+- **The id belongs to the folder, the type to the scan.** `ubel_asset.json` holds only the id and name, so one folder shared by, say, `ubel-npm health` (`codebase`) and `ubel-cloud` (`cloud`) reports the same `asset_id` with two different `asset_type` values.
+- **Where it appears.** JSON report (`scan_info.asset_type` for SCA, `meta.asset_type` for SAST/malware, top-level `asset_type` for cloud and EASM), the *Asset type* row of the HTML report's scan details, the CycloneDX SBOM's `metadata.properties`, and the SARIF `properties` of every run.
 
 #### Setting the asset id for one run: `--asset-id`
 
