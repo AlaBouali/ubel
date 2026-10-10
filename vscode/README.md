@@ -881,7 +881,7 @@ Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.
 - `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
 - `~/.ubel/history/licenses/` — Scan project for License Compliance
 
-All projects and commands share this one folder, but each project's zips live in a sub-folder named after its project id — `~/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/sca/3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_project.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_project.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
+All projects and commands share this one folder, but each project's zips live in a sub-folder named after its project id — `~/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/sca/3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The newest scan of each tag is also kept apart from the history, at `~/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip` (e.g. `latest.sca.zip`). The id comes from `ubel_project.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_project.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
 
 ```json
 { "project_id": "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13", "project_name": "shop", "created_at": "2026-10-10T12:30:05.000Z" }

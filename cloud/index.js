@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -260,6 +260,7 @@ async function writeCloudReports(reporter, meta, opts) {
   }
 
   atomicWrite(zipPath, buildZip(bundleEntries));
+  updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-cloud] Timestamped bundle : ${zipPath}`);
   console.log(`[ubel-cloud] Latest reports      : ${latestDir}`);

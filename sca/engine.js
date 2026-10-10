@@ -14,7 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, projectFor } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, projectFor } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -4244,6 +4244,8 @@ export class UbelEngineInstance {
         { name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString },
         { name: reportFileName("report", reportTag, "sarif.json"), data: sarifString },
       ]));
+      // latest_reports/<mode>/<project_id>/latest.<tag>.zip always mirrors the newest zip.
+      updateLatestReportZip(zipPath, reportTag);
 
       if (!is_script) {
         console.log(`Latest JSON report saved to: ${latestPath}`);

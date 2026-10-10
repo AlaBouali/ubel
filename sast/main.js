@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, projectFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -290,6 +290,7 @@ async function writeAnalyzeReports(results, opts) {
   }
 
   atomicWrite(zipPath, buildZip(bundleEntries));
+  updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-sast] Timestamped bundle : ${zipPath}`);
   console.log(`[ubel-sast] Latest reports      : ${latestDir}`);
@@ -464,6 +465,7 @@ async function writeMalwareReports(results, opts) {
   }
 
   atomicWrite(zipPath, buildZip(bundleEntries));
+  updateLatestReportZip(zipPath, tag);
 
   console.log(`\n[ubel-malware] Timestamped bundle : ${zipPath}`);
   console.log(`[ubel-malware] Latest reports      : ${latestDir}`);

@@ -1333,6 +1333,8 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 
 Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip` (see [Project id](#project-id-ubel_projectjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
 
+The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<project_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
+
 | `<mode>` folder | Holds |
 |---|---|
 | `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) |
@@ -1342,7 +1344,7 @@ Every timestamped zip — from every project and every scanner on the machine �
 | `secrets` | `ubel-secrets` |
 | `sast`, `malware`, `cloud`, `easm`, `host`, `domain`, `url` | the other scanners — see their READMEs |
 
-One project's zips sit together in its own `<project_id>` folder, so listing a project's history is `ls ~/.ubel/history/<mode>/<project_id>/`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which project it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
+One project's zips sit together in its own `<project_id>` folder, so listing a project's history is `ls ~/.ubel/history/<mode>/<project_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which project it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
 For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 

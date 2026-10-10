@@ -30,6 +30,12 @@
 // cargo; "os" = check/install for apt/dnf/yum). The "latest" copies stay
 // per-project under <project>/.ubel/reports/.
 //
+// The newest zip of each tag is also kept, apart from the history, in
+// $HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip — the same
+// <mode>/<project_id> layout as history, in a folder of its own. It is
+// refreshed after every scan, so it always holds the most recent scan of that
+// tag for the project, and history/ holds nothing but timestamped zips.
+//
 // Project identity: every .ubel/ folder a scan writes into holds a
 // ubel_project.json ({ "project_id": "<uuid>", "project_name": "<readable>",
 // "created_at": "<iso>" }), created on first use; the id never changes. Zips are
@@ -44,6 +50,7 @@
 // Where the tag is used:
 //   • "latest" copies   .ubel/reports/latest.<tag>.<ext>
 //   • timestamped zip   $HOME/.ubel/history/<mode>/<project_id>/<timestamp>.<tag>.zip
+//   • latest zip        $HOME/.ubel/latest_reports/<mode>/<project_id>/latest.<tag>.zip
 //   • entries in a zip  report.<tag>.<ext>  (always "report", never the
 //                       timestamp or "latest")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,4 +371,51 @@ export function historyZipPath(mode, timestamp, tag, projectId = null) {
     candidate = path.join(dir, reportFileName(`${timestamp}_${n}`, tag, "zip"));
   }
   return candidate;
+}
+
+/** $HOME/.ubel/latest_reports — the newest zip of every tag, per mode and project. */
+export function latestReportsRoot() {
+  return path.join(os.homedir(), ".ubel", "latest_reports");
+}
+
+/**
+ * Keep the newest scan of a tag in latest_reports/, apart from the history:
+ *
+ *   history/<mode>/<project_id>/<timestamp>.<tag>.zip   (just written)
+ *   latest_reports/<mode>/<project_id>/latest.<tag>.zip (this copy)
+ *
+ * The <mode>/<project_id> part is taken from where the history zip was filed,
+ * so the two trees always line up (and a zip filed without a project id lands
+ * in latest_reports/<mode>/). The copy goes to a temp file first and is renamed
+ * over the old one, so a reader never sees a half-written latest zip and a
+ * failed copy leaves the previous latest in place. Best effort: a scan must not
+ * fail because this convenience copy couldn't be written, so errors are warned
+ * about, not thrown.
+ *
+ * Call it after the timestamped zip has been written.
+ *
+ * @param {string} zipPath  path returned by historyZipPath(), already written
+ * @param {string} tag      same tag the zip was named with
+ * @returns {string|null}   path of latest.<tag>.zip, or null if it couldn't be written
+ */
+export function updateLatestReportZip(zipPath, tag) {
+  let latest = null;
+  let tmp = null;
+  try {
+    const rel = path.relative(historyRoot(), path.dirname(path.resolve(zipPath)));
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`${zipPath} is not inside ${historyRoot()}`);
+    }
+    const dir = path.join(latestReportsRoot(), rel);
+    fs.mkdirSync(dir, { recursive: true });
+    latest = path.join(dir, reportFileName("latest", tag, "zip"));
+    tmp = `${latest}.${process.pid}.tmp`;
+    fs.copyFileSync(zipPath, tmp);
+    fs.renameSync(tmp, latest);
+    return latest;
+  } catch (e) {
+    if (tmp) { try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ } }
+    console.warn(`[ubel] could not update latest report zip (${latest ?? "latest_reports"}): ${e.message}`);
+    return null;
+  }
 }

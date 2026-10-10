@@ -11,7 +11,7 @@ import fs from "fs";
 import path from "path";
 import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
-import { reportTimestamp, reportFileName, historyZipPath, projectFor } from "../../sca/report_naming.js";
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, projectFor } from "../../sca/report_naming.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
@@ -205,6 +205,7 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
   }
 
   atomicWrite(zipPath, buildZip(bundleEntries));
+  updateLatestReportZip(zipPath, tag);
 
   console.log(`\n${cliLabel} Timestamped bundle : ${zipPath}`);
   console.log(`${cliLabel} Latest reports     : ${latestDir}`);
