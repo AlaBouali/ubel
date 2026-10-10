@@ -42,11 +42,13 @@ ${chunk.code}
 function buildScanPromptParts(chunks, vulnClasses, includeSignals = false) {
   const multi = chunks.length > 1;
   const language = chunks[0].language;
+  // A pack may hold several languages that share one catalog (JS+TS, C+C++, …).
+  const languages = [...new Set(chunks.map(c => c.language))].join(' / ');
   const applicableClasses = filterVulnClassesForLanguage(vulnClasses, language);
   const catalog = buildVulnCatalog(applicableClasses, includeSignals);
 
   const scopeLine = multi
-    ? `Analyze each ${language} code chunk below (C1…C${chunks.length}) for security vulnerabilities. Chunks are independent: judge each one only on its own code.`
+    ? `Analyze each ${languages} code chunk below (C1…C${chunks.length}) for security vulnerabilities. Chunks are independent: judge each one only on its own code.`
     : `Analyze the following ${language} code chunk for security vulnerabilities.`;
 
   const multiRules = multi

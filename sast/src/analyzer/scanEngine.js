@@ -7,7 +7,9 @@
 //   1. PACKING. The prompt scaffold (rules + catalog + schema) is a fixed cost
 //      paid once per call. A real repo's median chunk is a few hundred chars, so
 //      one-call-per-chunk spends 75–95% of Pass-1 input on scaffold. Small
-//      chunks of the same language are therefore grouped into one call (up to
+//      chunks that share one catalog (same language, or languages whose
+//      filtered catalog is identical, e.g. JS+TS, C+C++) are therefore grouped
+//      into one call (up to
 //      `pack.size` characters of code) and the model cites a chunk id per
 //      finding. Anything that goes wrong with a packed call — transport error,
 //      unusable reply, truncated reply, a finding that can't be attributed to a
@@ -50,23 +52,29 @@ function usageSink(bucket) {
 
 /**
  * Greedy, order-preserving packing of chunk indices into calls.
- *   - never mixes languages (the catalog is language-filtered),
+ *   - never mixes catalogs: chunks are grouped by `keyOf(chunk)`, which defaults
+ *     to the chunk's language label. Callers pass makeCatalogPackKey() so that
+ *     languages whose language-filtered catalog is identical (JavaScript and
+ *     TypeScript, C and C++, Terraform/CloudFormation/Ansible, Dockerfile and
+ *     Compose) share calls — and the same cacheable prompt prefix — instead of
+ *     being split by display label,
  *   - a chunk larger than size/2 is scanned alone (it already amortises the scaffold),
  *   - a call holds at most `maxChunks` chunks.
  * `lengths[i]` is the comment-stripped code length of chunk i.
  */
-function planBins(chunks, lengths, { size = 12_000, maxChunks = 10 } = {}) {
+function planBins(chunks, lengths, { size = 12_000, maxChunks = 10, keyOf } = {}) {
   if (!size || size <= 0 || maxChunks <= 1) return chunks.map((_, i) => [i]);
 
-  const byLang = new Map();
+  const groupKey = typeof keyOf === 'function' ? keyOf : (c) => c.language || 'unknown';
+  const byKey = new Map();
   chunks.forEach((c, i) => {
-    const k = c.language || 'unknown';
-    if (!byLang.has(k)) byLang.set(k, []);
-    byLang.get(k).push(i);
+    const k = groupKey(c);
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(i);
   });
 
   const bins = [];
-  for (const idxs of byLang.values()) {
+  for (const idxs of byKey.values()) {
     let cur = [], curLen = 0;
     const close = () => { if (cur.length) bins.push(cur); cur = []; curLen = 0; };
     for (const i of idxs) {
@@ -78,6 +86,36 @@ function planBins(chunks, lengths, { size = 12_000, maxChunks = 10 } = {}) {
     close();
   }
   return bins;
+}
+
+/**
+ * Builds a `keyOf` for planBins: two chunks get the same key exactly when the
+ * language filter selects the same class list for them, i.e. when their prompt
+ * prefixes would be identical. Unknown languages fail open to the full catalog
+ * in the filters, so they naturally land in their own group.
+ */
+function makeCatalogPackKey(filterFn, classes) {
+  const cache = new Map();
+  return (chunk) => {
+    const lang = chunk.language || 'unknown';
+    if (!cache.has(lang)) cache.set(lang, filterFn(classes, lang).map(v => v.name).join('\u0001'));
+    return cache.get(lang);
+  };
+}
+
+// A packed reply carries the findings of up to --pack-max-chunks chunks. If the
+// output budget is too small the reply is cut off, the whole pack is discarded
+// and every chunk in it is re-scanned one by one — the run then costs MORE than
+// it would have with a sane budget. ~1,500 tokens holds roughly a dozen findings.
+const MIN_PACKED_MAX_TOKENS = 1500;
+
+/** Returns a warning string when packing is on and `maxTokens` is too low for it, else null. */
+function packedMaxTokensWarning({ maxTokens, packSize, packMaxChunks }) {
+  if (!(packSize > 0) || !(packMaxChunks > 1)) return null;
+  if (!Number.isFinite(maxTokens) || maxTokens >= MIN_PACKED_MAX_TOKENS) return null;
+  return `--max-tokens ${maxTokens} is low while packing is on: a packed call that is cut off is discarded ` +
+         `and its chunks are re-scanned one by one, which costs more than a larger budget. ` +
+         `Use --max-tokens ${MIN_PACKED_MAX_TOKENS} or more, or --no-pack.`;
 }
 
 // Assign each finding of a packed reply to a chunk of the bin. Returns
@@ -119,6 +157,7 @@ const isAuthFatal = (err) => {
  * @param opts.customPrompt    (chunk) => string — when set, packing and caching are skipped
  * @param opts.providerBase    { provider, apiKey, apiKeyHeader, apiKeyPrefix, endpoint, model }
  * @param opts.pack            { size, maxChunks }  (size 0 disables packing)
+ * @param opts.packKey         (chunk) => string — chunks with the same key may share a call (default: language label)
  * @param opts.hitIcon         icon printed for a chunk with findings
  * @param opts.stats           mutable counters (pipeline stats)
  * @param opts.usage           usage bucket for this pass
@@ -127,7 +166,7 @@ async function runScanPass(opts) {
   const {
     chunks, buildParts, customPrompt, includeSignals = false, providerBase,
     maxTokens, temperature, timeoutMs, retryOnParseError, maxRetries,
-    pack = { size: 12_000, maxChunks: 10 }, concurrency = 5,
+    pack = { size: 12_000, maxChunks: 10 }, packKey, concurrency = 5,
     hitIcon = '⚠ ', stats = {}, usage = emptyUsage(),
   } = opts;
 
@@ -139,7 +178,7 @@ async function runScanPass(opts) {
   const cleaned = chunks.map(c => ({ ...c, code: stripComments(c.code, c.file) }));
   const lengths = cleaned.map(c => c.code.length);
 
-  const bins = customPrompt ? chunks.map((_, i) => [i]) : planBins(cleaned, lengths, pack);
+  const bins = customPrompt ? chunks.map((_, i) => [i]) : planBins(cleaned, lengths, { ...pack, keyOf: packKey });
   stats.scan_calls_planned = bins.length;
   stats.scan_chunks        = total;
   stats.scan_packed_calls  = bins.filter(b => b.length > 1).length;
@@ -203,10 +242,11 @@ async function runScanPass(opts) {
 
     const t0 = Date.now();
     let ok = false, attributed = null;
-    let fatal = null;
+    let fatal = null, truncated = false;
     try {
       const findings = await callFor(idxs.map(i => cleaned[i]));
-      const bad = findings.some(f => f._parse_error) || findings.info?.truncated;
+      truncated = !!findings.info?.truncated;
+      const bad = findings.some(f => f._parse_error) || truncated;
       if (!bad) {
         const { perChunk, unattributed } = attributeFindings(findings, idxs.map(i => cleaned[i]));
         if (unattributed.length === 0) { ok = true; attributed = perChunk; }
@@ -227,6 +267,7 @@ async function runScanPass(opts) {
     if (!ok) {
       stats.scan_pack_fallbacks = (stats.scan_pack_fallbacks || 0) + 1;
       stats.scan_pack_fallback_chunks = (stats.scan_pack_fallback_chunks || 0) + idxs.length;
+      if (truncated) stats.scan_pack_truncated_fallbacks = (stats.scan_pack_truncated_fallbacks || 0) + 1;
       const out = [];
       for (const i of idxs) out.push(...await scanSingle(i));
       return out;
@@ -246,4 +287,7 @@ async function runScanPass(opts) {
   return results;
 }
 
-export { runScanPass, planBins, attributeFindings, emptyUsage, usageSink };
+export {
+  runScanPass, planBins, makeCatalogPackKey, packedMaxTokensWarning, MIN_PACKED_MAX_TOKENS,
+  attributeFindings, emptyUsage, usageSink,
+};

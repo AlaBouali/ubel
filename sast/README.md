@@ -13,7 +13,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - Three-pass analysis pipeline for vulnerability findings: **scan** (Pass 1) → **verify** (Pass 2) → **taint trace** (Pass 3)
 - Structured, CWE-mapped vulnerability catalog — 64 classes across the 15 language families, each with concrete "detect when you see" signals available to the model (sent only with `--include-signals`; the default prompt carries class name, CWE and scope rule)
 - Per-language catalog filtering — classes irrelevant to a chunk's language are dropped before the prompt is built, cutting token usage and false positives
-- **Token-lean by design** — small chunks are packed into shared Pass-1 calls, findings are verified and traced per chunk (not per finding), classes that need no attacker input skip the taint pass, the static prompt prefix is prompt-cache-friendly (explicit `cache_control` on Anthropic), and every report records the real token usage the provider returned (see [Token Consumption & Optimization](#token-consumption--optimization))
+- **Token-lean by design** — small chunks are packed into shared Pass-1 calls, findings are verified and traced per chunk (not per finding), classes that need no attacker input skip the taint pass, the static prompt prefix is prompt-cache-friendly (explicit `cache_control` on Anthropic — it only takes effect when the prefix is longer than the model's minimum cacheable length, see [Prompt caching](#prompt-caching)), and every report records the real token usage the provider returned (see [Token Consumption & Optimization](#token-consumption--optimization))
 - **Honest coverage** — anything that was *not* scanned (chunks past `--max-chunks`, files over the size limit, AI replies cut off) is measured by the scanner, recorded in the report and stated in the executive summary; a capped run can never read as a clean one
 - Cross-chunk call-graph resolution — `buildFullCallChain` walks callers/callees across chunk boundaries so the taint-trace pass reasons about real source→sink flow, not a single isolated snippet
 - Separate **malicious code / backdoor** scan — its own catalog (15 classes: reverse shells, C2 beacons, supply-chain implants, persistence, exfiltration, anti-analysis evasion, logic bombs, and more), own prompts, own report set, never mixed with accidental-vulnerability findings
@@ -97,7 +97,7 @@ ubel-mal /path/to/project
 
 The chunker (`buildChunks`) walks the target directory and splits each source file into semantically-bounded chunks (functions, classes, or brace-delimited blocks depending on the language). `--max-chunk-size` is a **hard cap** on characters per chunk: an over-long single line (a minified bundle, a generated data blob) is cut at the nearest statement or space boundary rather than sent as one oversized chunk. Each chunk has its comments stripped (`stripComments`) before submission and is matched against the vulnerability (or malware) catalog filtered to its language family. The LLM returns candidate findings with a `vuln_name`, code snippet, description, fix suggestion, severity and confidence level.
 
-**Packing.** The prompt scaffold (rules, catalog, schema) is a fixed cost per call, and a real repository's median chunk is only a few hundred characters. Small chunks of the **same language** are therefore packed into one call (up to `--pack-size` characters of code, at most `--pack-max-chunks` chunks); each is labelled `C1…Cn` and every finding cites its `chunk_id`. A chunk larger than half the pack size is always sent alone. If anything goes wrong with a packed call — a transport error, an unreadable or truncated reply, or a finding that cannot be attributed to a chunk — those chunks are re-scanned one by one, so packing can only save tokens, never silently lose a chunk. `--no-pack` restores one call per chunk. A custom `buildPrompt` / `buildMalwarePrompt` override always gets one chunk per call.
+**Packing.** The prompt scaffold (rules, catalog, schema) is a fixed cost per call, and a real repository's median chunk is only a few hundred characters. Small chunks that share **one catalog** are therefore packed into one call — the same language, or languages whose language-filtered catalog is identical (JavaScript + TypeScript, C + C++, Terraform + CloudFormation + Ansible, Dockerfile + Compose; for `ubel-mal` nearly every language, since 14–15 of its 15 classes apply everywhere) (up to `--pack-size` characters of code, at most `--pack-max-chunks` chunks); each is labelled `C1…Cn` and every finding cites its `chunk_id`. A chunk larger than half the pack size is always sent alone. If anything goes wrong with a packed call — a transport error, an unreadable or **truncated** reply, or a finding that cannot be attributed to a chunk — those chunks are re-scanned one by one, so packing can never silently lose a chunk. A truncated packed reply is discarded rather than salvaged (the reply does not say which chunks it finished), so a too-small `--max-tokens` makes a packed run *more* expensive, not cheaper: the run warns up front when `--max-tokens` is below 1,500 with packing on, and reports how many packs were cut off at the end. `--no-pack` restores one call per chunk. A custom `buildPrompt` / `buildMalwarePrompt` override always gets one chunk per call.
 
 **What is skipped (and how to override it).**
 
@@ -186,7 +186,7 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 | `--model <name>` | string | provider default | Overrides the model string |
 | `--concurrency <n>` | int | `5` | Parallel Pass-1 requests |
 | `--temperature <n>` | float | `0.1` | Pass-1 sampling temperature (Passes 2/3 are hardcoded to `0`) |
-| `--max-tokens <n>` | int | `4096` | Pass-1 response token budget |
+| `--max-tokens <n>` | int | `4096` | Pass-1 response token budget. With packing on, keep it at 1,500 or more (a warning is printed below that): a cut-off packed reply is discarded and its chunks re-scanned one by one |
 | `--timeout <ms>` | int | `120000` | Per-request timeout, shared across all passes |
 | `--max-retries <n>` | int | `2` | Max retry attempts per request |
 | `--no-retry` | flag | retries on | Disables the parse-error-triggered retry specifically |
@@ -234,8 +234,8 @@ ubel-sast /path/to/project
 # Only scan what changed since main — fast CI re-scan
 ubel-sast --only-diff --diff-base main
 
-# Switch provider/model, cap cost with a cheaper output budget
-ubel-sast --provider anthropic --model claude-haiku-4-5-20251001 --max-tokens 800
+# Switch provider/model
+ubel-sast --provider anthropic --model claude-haiku-4-5-20251001
 
 # Skip taint-trace, only fail the build on confirmed real bugs
 ubel-sast --no-taint --fail-on valid
@@ -449,17 +449,6 @@ The HTML report is fully self-contained (no server required) and includes an Exe
 - **Where it applies.** The directory the reports are written under — the positional path / `--working-dir`, else the current directory. Changed files are announced with one `[ubel] Created|Updated …` line on stderr. Programmatically (`main({ projectRoot, … })`) it applies to `projectRoot`, but only when `save_reports` is on: with `save_reports: false` nothing is written to `.ubel/`, so nothing in your tree is touched either. `ubel-chunk` and `--help` never trigger it (`ubel-chunk` only writes `sast_chunks.json` to the current directory).
 - **Kill switch:** `UBEL_NO_IGNORE_FILES=1`.
 
-### Keeping UBEL's own files out of git and Docker
-
-`ubel-sast` and `ubel-mal` write `.ubel/` (the reports above) into the scanned directory. Before the first file is read or LLM request sent, the entry point (`main.js` — never the analyzers) makes sure `.gitignore` **and** `.dockerignore` in that directory ignore `.ubel/` and `.ubelignore`, creating either file if it does not exist. It is the same guard the SCA binaries use (`sca/ignore_files.js`), with the same rules:
-
-- **Idempotent.** An entry counts as covered if any equivalent pattern is present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
-- **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
-- **Opt-out respected.** A negation such as `!.ubelignore` means you want that entry tracked, so it is not re-added.
-- **Never fails a scan.** A read-only checkout or a permissions problem is swallowed (with `DEBUG` set, it is logged).
-- **Where it applies.** The directory the reports are written under — the positional path / `--working-dir`, else the current directory. Changed files are announced with one `[ubel] Created|Updated …` line on stderr. Programmatically (`main({ projectRoot, … })`) it applies to `projectRoot`, but only when `save_reports` is on: with `save_reports: false` nothing is written to `.ubel/`, so nothing in your tree is touched either. `ubel-chunk` and `--help` never trigger it (`ubel-chunk` only writes `sast_chunks.json` to the current directory).
-- **Kill switch:** `UBEL_NO_IGNORE_FILES=1`.
-
 ---
 
 ## Executive summary
@@ -584,7 +573,21 @@ Each chunk's code is appended after `stripComments()` runs (comments never reach
 
 ### Prompt caching
 
-Every request is built as a **static prefix** (role, catalog, rules, schema — identical for every chunk of a language) followed by the variable code. On Anthropic the prefix is sent as its own content block with `cache_control: {type: "ephemeral"}`, so after the first call the rest read it from cache (`cache_read_tokens` in the report). Prefixes under ~4,000 characters are sent without the marker, and a model whose minimum cacheable length is above the prefix size simply won't cache — the lean prefix is near that boundary on some models, so the saving is largest with `--include-signals`. OpenAI-, DeepSeek- and Gemini-style endpoints cache identical prompt prefixes automatically; the prefix-first layout is what lets them.
+Every request is built as a **static prefix** (role, catalog, rules, schema — identical for every chunk that shares a catalog) followed by the variable code. On Anthropic the prefix is sent as its own content block with `cache_control: {type: "ephemeral"}`, so after the first call the rest read it from cache (`cache_read_tokens` in the report). OpenAI-, DeepSeek- and Gemini-style endpoints cache identical prompt prefixes automatically; the prefix-first layout is what lets them. Only Pass 1 has a cacheable prefix — Pass 2 and 3 prompts are small and are not cached.
+
+**Caching only happens above the model's minimum cacheable length — and the lean prefix is usually below it.** Anthropic ignores the marker (silently, at no extra cost) for a shorter prefix. The minimum depends on the model: 4,096 tokens on Claude Haiku 4.5 — **the default Anthropic model here** — and on Opus 4.5/4.6, 1,024 on Sonnet 4.x, lower on newer models (see [Anthropic's prompt-caching docs](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)). Measured prefixes:
+
+| Pass-1 prefix | ≈ Tokens | Caches on Haiku 4.5 (4,096)? |
+|---|---|---|
+| Lean, Python / JS / Go / Java … | ~1,700–1,800 | **no** |
+| Lean, C / Dart / Swift | ~1,250–1,400 | **no** |
+| Lean, IaC / Docker / Kubernetes | ~850–900 | **no** |
+| Lean, malware catalog | ~1,100 | **no** |
+| With `--include-signals`, Python / JS / Go / Java … | ~7,400–8,100 | yes |
+| With `--include-signals`, C / Dart / Swift | ~4,800 / ~5,800 / ~6,300 | yes |
+| With `--include-signals`, IaC / Docker / Kubernetes | ~1,600–1,900 | **no** |
+
+So with the defaults (lean prompt on Haiku 4.5) **nothing is cached**; caching starts to matter with `--include-signals`, or with a model whose minimum is lower (the lean Python/JS/Go/Java prefix, ~1,750 tokens, is above the 1,024-token minimum of the Sonnet 4.x models, for instance). Cache reads cost 0.1× the base input price and a 5-minute cache write 1.25× (cheaper still on newer models). By that arithmetic, on Haiku 4.5 a *cached* signals prefix for Python (~7,700 tokens × 0.1 ≈ 770 token-equivalents per call) costs less than the *uncached* lean prefix (~1,750 at full price) while giving the model the detection bullets — if the run keeps the cache warm (calls arrive continuously, within the 5-minute lifetime) and the repo is big enough to amortise one cache write per catalog. This is arithmetic from the published multipliers, not a measured saving; check `cache_read_tokens` in `meta.scan_stats.usage.scan` on your own repo before relying on it.
 
 ### Per-finding passes
 
@@ -598,7 +601,7 @@ A Pass-1 reply that fails JSON parsing is handled by what actually went wrong, i
 - **Cut off, but at least one complete finding precedes the cut** → those findings are kept (no second call). The chunk is marked `partial_output`, counted in the report, and the executive summary says findings after the cut may be missing.
 - **Cut off before any finding completed** → one retry with `max_tokens` doubled (capped at 32,768).
 - **Complete but unparseable** (prose, markdown, a bad escape) → one retry at the *same* `max_tokens`; doubling cannot help.
-- A **packed** call whose reply is unreadable, truncated or unattributable is not salvaged — its chunks are re-scanned individually.
+- A **packed** call whose reply is unreadable, truncated or unattributable is not salvaged — its chunks are re-scanned individually (this is what makes a too-small `--max-tokens` expensive; the run reports the number of cut-off packs in `meta.scan_stats.pipeline.scan_pack_truncated_fallbacks` and in the end-of-run summary).
 
 Disable the parse retry with `--no-retry`. This is separate from the transport-failure retry loop governed by `--max-retries`; rate-limit (`429`) retries re-send the same request at the original `maxTokens`. Verification and taint calls retry only on transport failure.
 
@@ -615,10 +618,10 @@ Because Pass 1 is normally the majority of total calls, restricting it to files 
 1. **`chunk` first, always**, on an unfamiliar repo — free, and shows the real chunk count (and anything that would be capped or skipped) before spend is committed.
 2. **`--only-diff --diff-base <ref>`** for any repeat/CI run against an already-baselined codebase.
 3. **Leave packing on** (the default) — it is the biggest single saving on a full sweep. Raise `--pack-size` (e.g. 16000–24000) for models with generous context; use `--no-pack` only to debug a model that handles multi-chunk prompts badly.
-4. **Leave `--include-signals` off** (the default) — it multiplies the catalog about 6×. Turn it on only when the extra recall is worth it.
+4. **Leave `--include-signals` off** (the default) unless prompt caching applies — it multiplies the catalog about 6× and, uncached, that is paid on every call. Turn it on when the extra recall is worth it, or on a model/provider that caches the prefix (see [Prompt caching](#prompt-caching): on Haiku 4.5 only the signals prefix is long enough to cache).
 5. **`--skip-tests`**, **`--languages <subset>`** and **`--skip-folders`** on repos with test suites, incidental languages or vendored code you don't need scanned.
-6. **Use a provider with prompt caching** (Anthropic, or any endpoint that caches identical prefixes) — most valuable together with `--include-signals`.
-7. **Right-size `--max-tokens`** for Pass 1: a packed call returns findings for several chunks, so an over-small budget produces truncated replies (kept up to the cut, but the tail is lost).
+6. **Use a provider with prompt caching** (Anthropic, or any endpoint that caches identical prefixes) — and check it actually engages: the lean prefix is below Haiku 4.5's 4,096-token minimum, so with that model it is only useful together with `--include-signals`.
+7. **Right-size `--max-tokens`** for Pass 1 — don't go small. A packed call returns findings for several chunks; if the reply is cut off it is discarded and every chunk in the pack is re-scanned one by one, so a too-small budget *adds* calls (in a test with `--max-tokens 100`, 59 calls and ~110k input tokens instead of 11 calls and ~24k). Keep it at 1,500 or more with packing on (the tool warns below that), or use `--no-pack` if you need a very small budget.
 8. **`--no-taint`** when "is this a real bug" (verification) is enough without confirming attacker-reachability — removes the most expensive per-call pass.
 9. **`--concurrency` tuning is a speed lever, not a cost lever.**
 10. **Cheap model by default, expensive model selectively** — keep registry defaults for full-repo sweeps, reserve a stronger `--model` for `--only-diff` runs or a manual second pass on confirmed/exploitable findings only.

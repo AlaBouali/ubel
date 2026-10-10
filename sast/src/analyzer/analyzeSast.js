@@ -4,12 +4,12 @@ import path from 'path';
 
 import { buildChunks, stripComments, DEFAULT_LANGUAGES, KIND_LABEL  } from '../chunker/index.js';
 import { PROVIDERS } from './providers.js';
-import { DEFAULT_VULN_CLASSES } from './vulnCatalog.js';
+import { DEFAULT_VULN_CLASSES, filterVulnClassesForLanguage } from './vulnCatalog.js';
 import { defaultBuildPrompt, buildScanPromptParts } from './prompts.js';
 import { runPool } from './pool.js';
 import { verifyChunkFindings, traceChunkFindings } from './workers.js';
 import { resolveGitDiffFiles } from './gitDiff.js';
-import { runScanPass, emptyUsage, usageSink } from './scanEngine.js';
+import { runScanPass, emptyUsage, usageSink, makeCatalogPackKey, packedMaxTokensWarning } from './scanEngine.js';
 
 // ─── Extension → display language label ───────────────────────────────────────
 
@@ -191,7 +191,11 @@ async function analyzeSast(chunks, opts = {}) {
   log(`[ubel-sast] Concurrency : ${concurrency}`);
   if (onlyDiff)    log(`[ubel-sast] Diff mode   : enabled (base: ${diffBase})`);
   if (!skipSignals) log(`[ubel-sast] Signals     : included in the scan prompt (--include-signals)`);
-  if (packSize > 0 && buildPrompt === defaultBuildPrompt) log(`[ubel-sast] Packing     : up to ${packMaxChunks} small chunks / ${packSize} chars per Pass-1 call`);
+  if (packSize > 0 && buildPrompt === defaultBuildPrompt) {
+    log(`[ubel-sast] Packing     : up to ${packMaxChunks} small chunks / ${packSize} chars per Pass-1 call`);
+    const packWarn = packedMaxTokensWarning({ maxTokens, packSize, packMaxChunks });
+    if (packWarn) log(`[ubel-sast] ⚠  ${packWarn}`);
+  }
   if (verify)      log(`[ubel-sast] Verification: enabled`);
   if (taintTrace)  log(`[ubel-sast] Taint trace : enabled`);
 
@@ -270,6 +274,7 @@ async function analyzeSast(chunks, opts = {}) {
     maxTokens, temperature, timeoutMs: requestTimeout,
     retryOnParseError, maxRetries,
     pack: { size: packSize, maxChunks: packMaxChunks },
+    packKey: makeCatalogPackKey(filterVulnClassesForLanguage, vulnClasses),
     concurrency,
     hitIcon: '⚠ ',
     stats: pipeline,
@@ -427,6 +432,9 @@ async function analyzeSast(chunks, opts = {}) {
   log(`   Tokens          : ${sum('input_tokens')} in / ${sum('output_tokens')} out` +
       (sum('cache_read_tokens') ? `  (${sum('cache_read_tokens')} read from cache)` : '') +
       (sum('estimated_calls') ? `  [${sum('estimated_calls')} call(s) estimated — provider returned no usage]` : ''));
+  if (pipeline.scan_pack_truncated_fallbacks) {
+    log(`   ⚠️ Cut-off packs : ${pipeline.scan_pack_truncated_fallbacks} packed call(s) hit --max-tokens ${maxTokens} and were re-scanned chunk by chunk (extra calls) — raise --max-tokens`);
+  }
   if (chunkInfo?.truncated) {
     log(`   ⚠️ NOT SCANNED   : ${chunkInfo.chunks_dropped_by_cap} chunk(s) beyond --max-chunks ${chunkInfo.max_chunks}`);
   }
