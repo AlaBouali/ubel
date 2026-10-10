@@ -312,7 +312,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
-| **System Info** | OS metadata, local network interfaces, git info, Node.js version, engine/tool versions |
+| **System Info** | OS metadata, git info, Node.js version, engine/tool versions (no IP addresses or ports are recorded) |
 
 ---
 
@@ -925,7 +925,7 @@ UBEL is fully local. The external calls it makes are:
 | [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) (`www.cisa.gov`) | Known-exploited flag | Best-effort — scan completes, KEV fields are `null` |
 | [FIRST EPSS API](https://www.first.org/epss/) (`api.first.org`) | Exploit-likelihood score, queried by CVE id | Best-effort — scan completes, EPSS fields are `null` |
 
-No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. UBEL does not look up your public IP address; the local network interfaces recorded in reports are used only inside the report and never leave the machine. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If an OSV or NVD lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
+No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. UBEL does not look up your public IP address, and reports do not record your local IP addresses or ports. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If an OSV or NVD lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
 
 The OSV and NVD endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where those calls need to stay on an internal network. A mirror must expose the same path shape as the public API, and the "view online" reference links in reports still point at the public sites. There is currently no endpoint override for KEV/EPSS: in a fully air-gapped setup the scan runs without that data and says so. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 

@@ -237,6 +237,94 @@ export function ensureProject(ubelDir) {
   }
 }
 
+/** True when `id` is a well-formed project UUID. */
+export function isValidProjectId(id) {
+  return typeof id === "string" && UUID_RE.test(id.trim());
+}
+
+/**
+ * Read-only lookup of <ubelDir>/ubel_project.json. Unlike ensureProject() this
+ * never creates or repairs anything — it is what the `project-id` command of every CLI uses, so
+ * merely asking for an id can't mint one.
+ *
+ * @param {string} ubelDir  the .ubel folder (not the project root)
+ * @returns {{project_id: string, project_name?: string, created_at?: string}|null}
+ *          null when the file is missing, unreadable, or holds no valid UUID
+ */
+export function readProject(ubelDir) {
+  return readProjectFile(path.join(ubelDir, PROJECT_FILE_NAME));
+}
+
+/**
+ * History modes under $HOME/.ubel/history that already hold zips for a project
+ * id (i.e. the id was used by earlier scans on this machine). Used to tell the
+ * user whether an id they are linking a folder to is one UBEL has seen here.
+ *
+ * @param {string} projectId
+ * @returns {{mode: string, zips: number}[]}
+ */
+export function historyForProject(projectId) {
+  const id = String(projectId).toLowerCase();
+  const out = [];
+  let modes = [];
+  try { modes = fs.readdirSync(historyRoot(), { withFileTypes: true }); } catch { return out; }
+  for (const m of modes) {
+    if (!m.isDirectory()) continue;
+    try {
+      const zips = fs.readdirSync(path.join(historyRoot(), m.name, id)).filter((f) => f.endsWith(".zip")).length;
+      if (zips > 0) out.push({ mode: m.name, zips });
+    } catch { /* no folder for this id under this mode */ }
+  }
+  return out;
+}
+
+/**
+ * Point <ubelDir>/ubel_project.json at an existing project id — the way to
+ * reconnect a folder to a project it was previously scanned as (a fresh clone,
+ * a deleted .ubel/, a second checkout of the same repo), so new scans file
+ * their history zips next to the old ones instead of starting a new project.
+ *
+ *   • Only the id is replaced. created_at, project_name and any other field
+ *     already in the file are kept; `name`, when given, replaces project_name.
+ *   • A missing, corrupt, or id-less file is (re)created with the id, `name`
+ *     (else a derived name) and a fresh created_at.
+ *   • Unlike ensureProject() this THROWS on failure: the user asked for the
+ *     change explicitly, so a silent no-op would be wrong.
+ *
+ * @param {string} ubelDir
+ * @param {string} projectId  a UUID (case-insensitive; stored lowercase)
+ * @param {{name?: string}} [opts]
+ * @returns {{project_id: string, project_name: string, previous_id: string|null, changed: boolean}}
+ */
+export function setProjectId(ubelDir, projectId, opts = {}) {
+  if (!isValidProjectId(projectId)) {
+    throw new Error(`not a valid project id (expected a UUID like 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13): ${projectId}`);
+  }
+  const id = projectId.trim().toLowerCase();
+  const file = path.join(ubelDir, PROJECT_FILE_NAME);
+  const existing = readProjectFile(file);
+  const name = typeof opts.name === "string" && opts.name.trim()
+    ? opts.name.trim().slice(0, 200)
+    : (typeof existing?.project_name === "string" && existing.project_name.trim()
+        ? existing.project_name
+        : deriveProjectName(ubelDir));
+
+  const next = {
+    ...(existing || {}),
+    project_id:   id,
+    project_name: name,
+    created_at:   existing?.created_at || new Date().toISOString(),
+  };
+  fs.mkdirSync(ubelDir, { recursive: true });
+  writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
+  return {
+    project_id:  id,
+    project_name: name,
+    previous_id: existing ? existing.project_id : null,
+    changed:     !existing || existing.project_id !== id,
+  };
+}
+
 /**
  * Project identity for a scan that writes history under `mode`.
  *

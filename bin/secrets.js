@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { runProjectCommand } from "../sca/project_cli.js";
+// project-id / set-project-id / version are commands of every ubel CLI; handle them before any scan setup.
+const projectCmd = runProjectCommand(process.argv.slice(2), { cli: "ubel-secrets" });
+if (projectCmd !== null) process.exit(projectCmd);
 
 import { SCA_scan } from "../sca/main.js";
 import { handleSecretsCli } from "../sca/secrets_cli.js";

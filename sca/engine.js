@@ -63,7 +63,6 @@ const OSV_VULN_BASE  = `${OSV_API_BASE}/v1/vulns`;
 
 // Synchronous version using the already-imported `os` module via dynamic import
 // isn't available at module level — we use Node's built-in synchronously:
-import os_module from "os";
 import { time } from "console";
 
 function safeJsonString(data, maxSizeMb = 100) {
@@ -88,37 +87,18 @@ function safeWriteJson(filePath, data, maxSizeMb = 100) {
   fs.writeFileSync(filePath, safeJsonString(data, maxSizeMb));
 }
 
-function getLocalIPsSync() {
-  try {
-    const ifaces = os_module.networkInterfaces();
-    const result = {};
-    for (const [name, addrs] of Object.entries(ifaces || {})) {
-      for (const addr of addrs) {
-        if (addr.family === "IPv4" && !addr.internal) {
-          result[name] = addr.address;
-        }
-      }
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
 /**
  * Wraps a plain filesystem path string into the canonical SystemPath object.
- * Port list is empty at scan time (populated by enrichment tier if needed).
+ * Deliberately carries NO host IP or port list: reports never record the
+ * scanning machine's network addresses.
  *
  * @param {string} pathStr   - Absolute or relative filesystem path.
- * @param {string} [hostIp]  - IP of the host that owns this path.
- * @returns {{ type: "system_path", text: string, ip: string, ports: [] }}
+ * @returns {{ type: "system_path", text: string }}
  */
-function makeSystemPath(pathStr, hostIp = "") {
+function makeSystemPath(pathStr) {
   return {
     type:  "system_path",
     text:  typeof pathStr === "string" ? pathStr : String(pathStr ?? ""),
-    ip:    hostIp,
-    ports: [],
   };
 }
 
@@ -127,22 +107,21 @@ function makeSystemPath(pathStr, hostIp = "") {
  * SystemPath object.  Already-converted objects are left unchanged.
  *
  * @param {object[]} inventory
- * @param {string}   hostIp
  */
-function normalizeInventoryPaths(inventory, hostIp) {
+function normalizeInventoryPaths(inventory) {
   for (const item of inventory) {
     if (Array.isArray(item.paths)) {
       item.paths = item.paths.map(p =>
         p && typeof p === "object" && p.type === "system_path"
           ? p
-          : makeSystemPath(p, hostIp)
+          : makeSystemPath(p)
       );
     }
     // Also normalise the legacy singular `path` field if present.
     if (item.path !== undefined && item.path !== null) {
       item.path = typeof item.path === "object" && item.path.type === "system_path"
         ? item.path
-        : makeSystemPath(item.path, hostIp);
+        : makeSystemPath(item.path);
     }
   }
 }
@@ -1294,16 +1273,6 @@ async function generateHTMLReport(data) {
             document.getElementById('os-name').textContent = os.os_name;
             document.getElementById('os-version').textContent = os.os_version;
 
-            // Local IPs — render one line per interface
-            const localIpsEl = document.getElementById('os-local-ips');
-            const localIPs = os.local_ips || {};
-            const ifaceEntries = Object.entries(localIPs);
-            localIpsEl.innerHTML = ifaceEntries.length
-                ? ifaceEntries.map(([iface, ip]) =>
-                    \`<div class="flex justify-between gap-4"><span class="text-neutral-500">\${iface}</span><span>\${ip}</span></div>\`
-                  ).join('')
-                : '<span class="text-neutral-600 italic">none detected</span>';
-
             document.getElementById('git-rev').textContent = git.latest_commit || 'N/A';
             document.getElementById('git-branch').textContent = git.branch || 'N/A';
             document.getElementById('git-url').textContent = git.url || 'N/A';
@@ -1477,13 +1446,9 @@ async function generateHTMLReport(data) {
                 ? item.paths.map(p => {
                     const isObj = p && typeof p === 'object' && p.type === 'system_path';
                     const text  = isObj ? p.text  : String(p ?? '');
-                    const ip    = isObj ? p.ip    : '';
-                    const ports = isObj && Array.isArray(p.ports) && p.ports.length ? p.ports : null;
                     return \`
                       <div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all space-y-0.5">
                         <div class="text-neutral-300">\${text}</div>
-                        \${ip    ? \`<div class="text-neutral-600 text-[9px]">host: \${ip}</div>\`                         : ''}
-                        \${ports ? \`<div class="text-neutral-600 text-[9px]">ports: \${ports.join(', ')}</div>\` : ''}
                       </div>\`;
                   }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No path info</span>';
@@ -1996,13 +1961,9 @@ async function generateHTMLReport(data) {
           <span class="text-neutral-500 text-xs">OS Name</span>
           <span class="mono text-xs" id="os-name">...</span>
         </div>
-        <div class="flex justify-between border-b border-neutral-800 pb-2">
+        <div class="flex justify-between">
           <span class="text-neutral-500 text-xs">OS Version</span>
           <span class="mono text-xs" id="os-version">...</span>
-        </div>
-        <div class="flex flex-col gap-1">
-          <span class="text-neutral-500 text-xs">Local IPs</span>
-          <div id="os-local-ips" class="mono text-[10px] text-neutral-300 space-y-0.5"></div>
         </div>
       </div>
     </div>
@@ -3826,18 +3787,11 @@ export class UbelEngineInstance {
         }
       }
 
-      // ── Network metadata ──────────────────────────────────────────────────
-      // Local IP is retained: it's used below to tag every inventory item's
-      // filesystem path with the host it was found on (normalizeInventoryPaths),
-      // which matters once reports from multiple hosts/containers get combined.
-      // The external (public) IP lookup was removed — it phoned home to a
-      // third-party API (ipify) on every scan purely for a display field with
-      // no other consumer, which cut against UBEL's zero-third-party-dependency
-      // and fully-local-execution positioning.
-      const localIPs       = getLocalIPsSync();
-      const primaryLocalIP = Object.values(localIPs)[0] || "";
-
-      normalizeInventoryPaths(inventory, primaryLocalIP);
+      // ── Path normalisation ────────────────────────────────────────────────
+      // Reports record no network addresses: no local IPs in os_metadata and no
+      // host IP / port list on inventory paths. (The external IP lookup was
+      // removed earlier — it phoned home to a third-party API on every scan.)
+      normalizeInventoryPaths(inventory);
 
       // ── License risk enrichment ─────────────────────────────────────────────
       // Replaces each item's raw `license` string with a classification object
@@ -4099,7 +4053,7 @@ export class UbelEngineInstance {
         generated_at:      now.toISOString().replace("Z", "") + "Z",
         runtime,
         engine:            engine_info,
-        os_metadata:       { ...os_metadata_info, local_ips: localIPs },
+        os_metadata:       { ...os_metadata_info },
         git_metadata:      git_metadata,
         tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
         scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, ...(project ? { project_id: project.project_id, project_name: project.project_name } : {}), ...(runtime.editor ? { editor: runtime.editor } : {}) },

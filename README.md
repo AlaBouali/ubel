@@ -69,6 +69,7 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |
 | `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of the given IPs/domains, combined sweep |
+| *every binary above* | Also accepts three commands instead of a scan: `<binary> project-id` (show the folder's project id), `<binary> set-project-id <id>` (link the folder to an existing project id so its scans join that project's history) and `<binary> version` — e.g. `ubel-npm version`, `ubel-sast project-id`. See [Project id](sca/README.md#linking-a-folder-to-an-existing-project-id) |
 
 ## Quick start
 

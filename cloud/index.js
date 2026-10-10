@@ -47,6 +47,11 @@ Options:
   --quiet                Suppress the console findings summary (reports are still written)
   --help, -h             Show this help
 
+Project commands (run instead of a scan):
+  ubel-cloud project-id [folder] [--json]    Print this folder's project id
+  ubel-cloud set-project-id <id> [folder]    Link this folder to an existing project id
+  ubel-cloud version [--json]                Print the UBEL version
+
 AWS region resolution (highest priority first):
   1. --regions <list>              explicit override
   2. AWS_REGIONS / AWS_REGION / AWS_DEFAULT_REGION   environment variables

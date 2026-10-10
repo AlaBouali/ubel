@@ -211,6 +211,11 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
+Project commands (run instead of a scan):
+  ubel-host project-id [folder] [--json]    Print this folder's project id
+  ubel-host set-project-id <id> [folder]    Link this folder to an existing project id
+  ubel-host version [--json]                Print the UBEL version
+
 Every run writes a timestamped <ts>.host.zip bundle (report.host.json +
 report.host.html inside) under $HOME/.ubel/history/host/, plus
 fixed, unzipped "latest" copies at .ubel/reports/latest.host.json and

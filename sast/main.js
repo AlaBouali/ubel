@@ -644,6 +644,11 @@ function printUsage() {
 If no subcommand is given, "analyze" is assumed and the first argument is
 treated as the target path (or --working-dir).
 
+Project commands (any of ubel-sast / ubel-mal / ubel-chunk; run instead of a scan):
+  ubel-sast project-id [folder] [--json]    Print this folder's project id
+  ubel-sast set-project-id <id> [folder]    Link this folder to an existing project id
+  ubel-sast version [--json]                Print the UBEL version
+
 PROVIDER / REQUEST OPTIONS  (analyze, malware)
   --provider <name>              LLM provider (default: openrouter)
   --api-key <key>                API key for the chosen provider

@@ -1368,7 +1368,30 @@ Every `.ubel/` folder a scan writes into holds a small `ubel_project.json`:
 
 Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are.
 
-> **Upgrading:** earlier versions wrote `latest.json` / `latest.html` / `latest.cdx.json` / `latest.sarif.json` and zipped each scan to `<project>/.ubel/local/reports/<ecosystem>/<mode>/<YYYY>/<MM>/<DD>/<ecosystem>_<mode>_<engine>__<timestamp>.zip` (with `report.json`, `report.html`, `sbom.cdx.json`, `report.sarif.json` inside). Those old files are not touched, moved or removed; point any CI step or dashboard at the new names (for example `latest.sca.sarif.json` for code-scanning upload).
+#### Linking a folder to an existing project id
+
+The id lives in the folder's own `.ubel/ubel_project.json`, so a fresh clone, a second checkout, or a deleted `.ubel/` would otherwise start a **new** project and file its zips under a new id. Reconnect it to the original instead. These are commands of **every** UBEL CLI (`ubel-npm`, `ubel-pip`, `ubel-cargo`, `ubel-docker`, `ubel-secrets`, `ubel-license`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, `ubel-url`, … — not separate binaries), so use whichever one you already have:
+
+```bash
+ubel-npm project-id                      # print this folder's id (just the UUID, pipe-friendly)
+ubel-npm project-id --json               # { project_id, project_name, created_at, file }
+ubel-npm project-id /path/to/project     # a folder other than the current one
+
+ubel-npm set-project-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13                 # link the current folder
+ubel-npm set-project-id 3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13 /path/to/project
+ubel-npm set-project-id <id> --name shop # also set the readable name
+
+ubel-npm version                         # print the installed UBEL version (--json adds name, Node version, platform)
+```
+
+Every CLI behaves the same (`ubel-sast project-id`, `ubel-cloud set-project-id <id>`, `ubel-url version`, …) because they all read and write the same `.ubel/ubel_project.json`; the command is only handled when it is the **first** argument, so a scan of a folder literally named `version` is written `./version`.
+
+- **`ubel-apt` / `ubel-dnf` / `ubel-yum`** have no project folder: their commands act on the machine tag, `$HOME/.ubel/ubel_project.json`, directly (`ubel-apt project-id`, `ubel-apt set-project-id <id>`) and refuse a folder argument. Any other CLI can reach the machine tag with `--machine` (`ubel-npm project-id --machine`; it can't be combined with a folder).
+- **`ubel-docker`, `ubel-cloud` and the EASM CLIs** keep their id in the `.ubel/` of the directory you run them from (see above), so run the command there, or pass the folder.
+- **`set-project-id`** only replaces the **id** (and the name with `--name`). `created_at`, the existing `project_name` and any other field in the file are kept; a missing or corrupt file is recreated with the id and a derived name. It does not move or rewrite any history — new zips simply land in `history/<mode>/<project_id>/` next to the old ones.
+- It checks `$HOME/.ubel/history/` for zips already filed under the id and lists the modes it finds. If there are none it still links the folder but prints a warning, since the usual cause is a mistyped id (or old history that lives on another machine).
+- **`project-id`** is read-only and never creates an id. Exit codes: `0` found, `1` no id in that folder yet, `2` error. `set-project-id` exits `0` on success and `2` on a bad id, a missing folder or a write failure.
+- Ids must be UUIDs (case-insensitive; stored lowercase).
 
 The HTML report is fully self-contained (no server required) and includes:
 
@@ -1382,7 +1405,7 @@ The HTML report is fully self-contained (no server required) and includes:
 - Dedicated Secrets tab (category, severity, file/line, redacted match preview)
 - License Risk stats card (low/medium/high/unknown breakdown, OSI-approved count) — populated on `health`-mode scans, see [License Compliance](#license-compliance)
 - Dedicated Compliance tab — per-framework cards showing which controls a scan's findings touch and how often, see [Compliance Framework Mapping](#compliance-framework-mapping)
-- System and runtime metadata (OS, local network interfaces, git info, engine/tool versions)
+- System and runtime metadata (OS, git info, engine/tool versions) — SCA reports record no IP addresses or ports: no local interface addresses in `os_metadata`, and inventory paths are `{ "type": "system_path", "text": "<path>" }` with no host IP or port list
 
 The JSON report contains the full machine-readable equivalent and can be consumed by CI/CD tooling directly.
 

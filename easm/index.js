@@ -101,6 +101,11 @@ Options:
   --quiet                  Suppress the console summary (reports still write).
   --help, -h               Show this help.
 
+Project commands (run instead of a scan):
+  ubel-url project-id [folder] [--json]    Print this folder's project id
+  ubel-url set-project-id <id> [folder]    Link this folder to an existing project id
+  ubel-url version [--json]                Print the UBEL version
+
 Every run writes a timestamped <ts>.url.zip bundle (report.url.json +
 report.url.html inside) under $HOME/.ubel/history/url/,
 plus fixed, unzipped "latest" copies at .ubel/reports/latest.url.json and
