@@ -27,6 +27,9 @@
  *       Separate from license-risk above: blocks packages whose license
  *       couldn't be classified at all, rather than a specific risk level.
  *       Same health-mode-only scope. Defaults to false.
+ *     reachable-only <true|false> — set reachable_only (all engines, default false)
+ *       When true, the vulnerability rules only apply to vulnerabilities the
+ *       reachability analysis doesn't confirm unreachable.
  *
  *   Per-run policy flags (health | check | install, any engine except docker):
  *     --threshold <level>          — override severity_threshold for this run
@@ -37,6 +40,12 @@
  *     --epss-threshold <value>     — override epss_threshold: block EPSS >= value. Accepts a
  *                                    fraction (0.1), a percentage (10%), or "none" to disable.
  *                                    A bare number above 1 is rejected (ambiguous: 10 vs 10%).
+ *     --reachable-only [true|false] — override reachable_only (default false): apply the
+ *                                    vulnerability rules (severity, unknown, KEV, EPSS) to
+ *                                    reachable vulnerabilities only (bare = true). Infections and
+ *                                    KEV (while block_kev is on) still always block; secrets/license
+ *                                    rules are unaffected. May be given with no mode at all
+ *                                    (`ubel-npm --reachable-only` runs `health`).
  *       `--flag value` and `--flag=value` both work, anywhere among the
  *       package args. Unlike the modes above, these are NOT saved: the policy
  *       file is snapshotted and restored on exit, so the persisted policy is
@@ -319,7 +328,7 @@ function printInitAsset(asset) {
 
 const VALID_MODES      = [
   "check", "install", "health", "init",
-  "threshold", "block-unknown", "license-risk", "license-block-unknown",
+  "threshold", "block-unknown", "license-risk", "license-block-unknown", "reachable-only",
   "install-hook", "uninstall-hook",
 ];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
@@ -363,6 +372,7 @@ const POLICY_FLAGS = {
   "--license-block-unknown": { field: "block_unknown_license_risk",    type: "boolean",  license: true },
   "--block-kev":             { field: "block_kev",                       type: "boolean"  },
   "--epss-threshold":        { field: "epss_threshold",                  type: "epss"     },
+  "--reachable-only":        { field: "reachable_only",                  type: "boolean"  },
 };
 
 /**
@@ -588,6 +598,8 @@ async function handleHookMode(engine, mode, extraArgs) {
  *   though only pip/uv/pipx's `init` actually provisions a Python venv there.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
+ * @param {boolean} [programmaticOptions.reachable_only=false]  When true, apply the vulnerability policy
+ *   rules to reachable vulnerabilities only (unreachable ones are reported but never block).
  * @param {boolean} [programmaticOptions.scan_secrets=true]
  * @param {boolean} [programmaticOptions.scan_vulns=true]      When false, skips OSV/NVD entirely —
  *   no vulnerability network calls are made and `vulnerabilities` stays empty. Inventory and
@@ -621,6 +633,7 @@ async function main(programmaticOptions) {
       block_unknown_vulnerabilities = undefined,
       license_risk_threshold = undefined,
       block_unknown_license_risk = undefined,
+      reachable_only = undefined,
       ...rest
     } = programmaticOptions;
 
@@ -689,6 +702,13 @@ async function main(programmaticOptions) {
       eng.setPolicyField("block_unknown_license_risk", block_unknown_license_risk);
     }
 
+    if (reachable_only !== undefined) {
+      if (typeof reachable_only !== "boolean") {
+        throw new Error(`reachable_only must be a boolean, got ${typeof reachable_only}`);
+      }
+      eng.setPolicyField("reachable_only", reachable_only);
+    }
+
     return await eng.scan(packages, {
       is_script,
       save_reports,
@@ -708,7 +728,15 @@ async function main(programmaticOptions) {
   // Called by: bin/npm.js, bin/pnpm.js, bin/bun.js, bin/yarn.js
   // ════════════════════════════════════════════════════════════════════════════
 
-  const [, , engine, mode, ...extraArgs] = process.argv;
+  let [, , engine, mode, ...extraArgs] = process.argv;
+
+  // A policy flag in the mode position (`ubel-npm --reachable-only`) means
+  // "run the default scan with this flag" — without this the flag would be
+  // read as an unknown mode, fall back to `health`, and be silently dropped.
+  if (engine !== "docker" && typeof mode === "string" && mode.startsWith("--") && POLICY_FLAGS[mode.split("=")[0]]) {
+    extraArgs = [mode, ...extraArgs];
+    mode = "health";
+  }
 
   if (!engine) {
     console.error("Usage: ubel-<engine> <mode> [args...] [--asset-id <asset-id>]");
@@ -803,7 +831,7 @@ async function main(programmaticOptions) {
   // dry-run mechanism differs internally (see pypi_runner.js).
   // ════════════════════════════════════════════════════════════════════════════
   if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo") {
-    const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown"];
+    const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown", "reachable-only"];
     const scanScope =
       (engine === "pip" || engine === "uv" || engine === "conda" || engine === "cargo") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
@@ -892,6 +920,21 @@ async function main(programmaticOptions) {
       const value = raw === "true";
       eng.setPolicyField("block_unknown_vulnerabilities", value);
       console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
+      process.exit(0);
+    }
+
+    // ── reachable-only <true|false> ───────────────────────────────────────
+    if (effectiveMode === "reachable-only") {
+      const raw = (extraArgs[0] || "").toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        console.error("[!] Provide true or false");
+        console.error(`[!] Example: ubel-${engine} reachable-only true`);
+        process.exit(1);
+      }
+      const value = raw === "true";
+      eng.setPolicyField("reachable_only", value);
+      console.log(`[+] Policy updated: reachable_only = ${value}`);
+      console.log("[i] When true, vulnerability policy rules only apply to reachable vulnerabilities. Infections and KEV (while block_kev is on) are always blocked.");
       process.exit(0);
     }
 
@@ -1029,6 +1072,21 @@ async function main(programmaticOptions) {
     eng.setPolicyField("block_unknown_license_risk", value);
     console.log(`[+] Policy updated: block_unknown_license_risk = ${value}`);
     console.log("[i] Only enforced against `health`-mode scans, and separate from license-risk — this blocks packages whose license couldn't be classified at all, not a specific risk level.");
+    process.exit(0);
+  }
+
+  // ── reachable-only <true|false> ──────────────────────────────────────────────
+  if (effectiveMode === "reachable-only") {
+    const raw = (extraArgs[0] || "").toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      console.error("[!] Provide true or false");
+      console.error("[!] Example: ubel-npm reachable-only true");
+      process.exit(1);
+    }
+    const value = raw === "true";
+    eng.setPolicyField("reachable_only", value);
+    console.log(`[+] Policy updated: reachable_only = ${value}`);
+    console.log("[i] When true, vulnerability policy rules (severity, unknown, KEV, EPSS) only apply to reachable vulnerabilities. Infections and KEV (while block_kev is on) always block; secrets and license rules are unaffected. Defaults to false.");
     process.exit(0);
   }
 

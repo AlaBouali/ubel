@@ -1029,11 +1029,17 @@ export function analyzeReachability(report, projectRoot = null) {
  * @returns {Object}
  */
 export function enrichReport(report, projectRoot = null) {
-  const results   = analyzeReachability(report, projectRoot);
-  const resultMap = new Map(results.map(r => [r.vulnId, r]));
+  const results = analyzeReachability(report, projectRoot);
 
-  for (const vuln of (report.vulnerabilities || [])) {
-    const r = resultMap.get(vuln.id);
+  // analyzeReachability() returns exactly one result per vulnerability, in
+  // order. Match by position, NOT by vuln id: the same id (e.g. a CVE) can
+  // affect several packages, and an id-keyed lookup would hand every one of
+  // them the last package's verdict — which would let a reachable finding be
+  // marked unreachable (and, with the reachable_only policy, exempted).
+  const vulns = report.vulnerabilities || [];
+  for (let i = 0; i < vulns.length; i++) {
+    const vuln = vulns[i];
+    const r = results[i];
     if (!r) continue;
     const imp = r.signals.importScan;
     vuln.reachability = {

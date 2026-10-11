@@ -13,8 +13,16 @@
  *                                              // at all (default: false)
  *   "block_kev": true,                         // block vulnerabilities in the CISA
  *                                              // Known Exploited Vulnerabilities catalog
- *   "epss_threshold": 0.1                      // block EPSS score >= this (fraction,
+ *   "epss_threshold": 0.1,                     // block EPSS score >= this (fraction,
  *                                              // 0.1 = 10%); "none" disables
+ *   "reachable_only": false                    // true = the vulnerability rules
+ *                                              // (severity, unknown, KEV, EPSS) only
+ *                                              // count REACHABLE vulnerabilities;
+ *                                              // ones confirmed unreachable are
+ *                                              // reported but never block. Default
+ *                                              // false. Infections and KEV (while
+ *                                              // block_kev is on) always block, and
+ *                                              // secrets / license rules are unaffected.
  * }
  *
  * KEV / EPSS are evaluated per vulnerability in engine.js (which records the
@@ -64,6 +72,33 @@ function meetsLicenseRiskThreshold(candidate, threshold) {
 }
 
 /**
+ * True when `v` is exempt from the vulnerability rules under `reachable_only`:
+ * a non-infection whose reachability analysis confirmed it unreachable.
+ * Never exempt: infections, KEV entries while block_kev is on (they always
+ * block), and vulnerabilities with no reachability result (fail closed).
+ */
+function isUnreachableExempt(v, policy) {
+  if (v.is_infection) return false;
+  if (policy.block_kev !== false && v.is_kev === true) return false;
+  return v.reachability?.reachable === false;
+}
+
+/**
+ * Severity buckets over the vulnerabilities that count under `reachable_only`
+ * (same bucketing as the engine's stats: infections are excluded, an
+ * unrecognised severity counts as "unknown").
+ */
+function reachableSeverityStats(vulns, policy) {
+  const buckets = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  for (const v of vulns) {
+    if (v.is_infection || isUnreachableExempt(v, policy)) continue;
+    const sev = (v.severity || "unknown").toLowerCase();
+    buckets[sev in buckets ? sev : "unknown"]++;
+  }
+  return buckets;
+}
+
+/**
  * Evaluate policy against a scan report.
  * Returns [allowed: boolean, reason: string]
  *
@@ -92,6 +127,17 @@ export function evaluatePolicy(report) {
   )];
   const fmtIds = (ids) => ids.length > 5 ? `${ids.slice(0, 5).join(", ")} and ${ids.length - 5} more` : ids.join(", ");
 
+  // reachable_only: severity / unknown rules count only reachable vulnerabilities.
+  // (KEV / EPSS need no change — the engine never tags an exempt vuln with a
+  // policy_reason.) Computed from the vulnerability list rather than
+  // stats.vulnerabilities_stats, which always reports the full, unfiltered totals.
+  const reachableOnly  = policy.reachable_only === true;
+  const exemptCount    = reachableOnly ? vulns.filter(v => isUnreachableExempt(v, policy)).length : 0;
+  const severityCounts = reachableOnly
+    ? reachableSeverityStats(vulns, policy)
+    : (stats?.vulnerabilities_stats?.severity || {});
+  const scopeNote      = reachableOnly ? ", reachable vulnerabilities only" : "";
+
   const kevIds = idsWith("kev");
   if (kevIds.length > 0) {
     return [false, `Blocked by policy: ${kevIds.length} known-exploited (CISA KEV) vulnerabilit${kevIds.length === 1 ? "y" : "ies"} detected: ${fmtIds(kevIds)}`];
@@ -105,14 +151,12 @@ export function evaluatePolicy(report) {
   // ── 2. Severity threshold ─────────────────────────────────────────────────
   const rawThreshold = (policy.severity_threshold || "").toLowerCase();
   if (rawThreshold && SEVERITY_ORDER.includes(rawThreshold)) {
-    const severityStats = stats?.vulnerabilities_stats?.severity || {};
-
     for (const level of SEVERITY_ORDER) {
-      if (meetsThreshold(level, rawThreshold) && (severityStats[level] || 0) > 0) {
+      if (meetsThreshold(level, rawThreshold) && (severityCounts[level] || 0) > 0) {
         return [
           false,
           `Blocked by policy: ${level} severity vulnerabilities detected ` +
-          `(threshold: ${rawThreshold})`,
+          `(threshold: ${rawThreshold}${scopeNote})`,
         ];
       }
     }
@@ -120,9 +164,9 @@ export function evaluatePolicy(report) {
 
   // ── 3. Unknown vulnerabilities ────────────────────────────────────────────
   if (policy.block_unknown_vulnerabilities === true) {
-    const unknownCount = stats?.vulnerabilities_stats?.severity?.unknown || 0;
+    const unknownCount = severityCounts.unknown || 0;
     if (unknownCount > 0) {
-      return [false, `Blocked by policy: ${unknownCount} unknown-severity vulnerabilities detected`];
+      return [false, `Blocked by policy: ${unknownCount} unknown-severity vulnerabilities detected${reachableOnly ? " (reachable vulnerabilities only)" : ""}`];
     }
   }
 
@@ -157,9 +201,10 @@ export function evaluatePolicy(report) {
   if (ti.kev?.status === "unavailable")  unavailable.push("CISA KEV");
   if (ti.epss?.status === "unavailable") unavailable.push("EPSS");
   if (ti.epss?.status === "partial")     unavailable.push("EPSS (partial)");
-  if (unavailable.length > 0) {
-    return [true, `Policy passed (note: ${unavailable.join(" and ")} data unavailable — not enforced for this scan)`];
-  }
+  const notes = [];
+  if (unavailable.length > 0) notes.push(`${unavailable.join(" and ")} data unavailable — not enforced for this scan`);
+  if (exemptCount > 0) notes.push(`${exemptCount} unreachable vulnerabilit${exemptCount === 1 ? "y" : "ies"} not evaluated (reachable_only)`);
+  if (notes.length > 0) return [true, `Policy passed (note: ${notes.join("; ")})`];
 
   return [true, "Policy passed"];
 }

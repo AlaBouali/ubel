@@ -53,12 +53,15 @@ function pct(part, whole) {
 // skipped or failed) is treated as "could be reachable" — the cautious choice
 // for a summary meant to inform decisions.
 //
-// NOTE: this is the SUMMARY's own rule and it does NOT match the policy
-// verdict. policy.js decides pass/fail from report.stats severity counts, which
-// include findings regardless of reachability, and engine.js tags per-finding
-// policy_decision before reachability enrichment has run, so no finding is
-// ever exempted from blocking. The two are described separately in the
-// methodology text on purpose.
+// NOTE: this is the SUMMARY's own rule and by default it does NOT match the
+// policy verdict. Unless the policy sets `reachable_only: true`, policy.js
+// decides pass/fail from report.stats severity counts, which include findings
+// regardless of reachability, and engine.js ignores reachability when tagging
+// per-finding policy_decision, so no finding is ever exempted from blocking.
+// With `reachable_only: true`, engine.js runs reachability first and exempts
+// confirmed-unreachable findings from the vulnerability rules (policy.js
+// counts the same set). The two are described separately in the methodology
+// text on purpose.
 function isConfirmedUnreachable(v) {
   return v?.reachability?.reachable === false;
 }
@@ -562,7 +565,9 @@ function buildMethodology(report, ctx) {
       `; exploit-likelihood forecasts ${epssT.enforced ? `block at ${fmtPct(epssT.value)} or above` : "do not block"}` +
       (lic ? `; license risk ${!policy.license_risk_threshold || policy.license_risk_threshold === "none" ? "does not block" : `blocks at “${policy.license_risk_threshold}” or above`}; components with unrecognized licenses ${policy.block_unknown_license_risk === true ? "block" : "do not block"}` : "") +
       ". Malicious components" + (secretsInfo.enabled ? " and exposed credentials" : "") + " always block." +
-      (hasReach ? " Weaknesses judged not in use still count toward the severity check." : "") +
+      (hasReach ? (policy.reachable_only === true
+        ? " Only weaknesses judged to be in use are checked against these rules; weaknesses judged not in use are listed but do not block (unless they are on the CISA known-exploited catalog and that rule is on)."
+        : " Weaknesses judged not in use still count toward the severity check.") : "") +
       (vulnsChecked && regularCount > 0 && !intelComplete && (policy.block_kev !== false || epssT.enforced) ? " Where exploit data was unavailable, the exploit rules above could not be applied." : ""),
   });
   if (hasCompliance) {

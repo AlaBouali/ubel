@@ -147,11 +147,12 @@ ubel-pip   install-hook                # works on pip/pipx/uv/conda/cargo/compos
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
                                [--license-risk <level>] [--license-block-unknown [true|false]]
                                [--block-kev [true|false]] [--epss-threshold <fraction|percent|none>]
+                               [--reachable-only [true|false]]
 ```
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only six modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only seven modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`, `reachable-only`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
 
 ---
 
@@ -651,6 +652,19 @@ ubel-npm license-block-unknown true
 ubel-npm license-block-unknown false   # default
 ```
 
+---
+
+### `reachable-only`
+
+**All engines.** Controls whether the vulnerability policy rules apply to every vulnerability or only to *reachable* ones — see [Policy](#policy) for the full semantics.
+
+```bash
+ubel-npm reachable-only true
+ubel-npm reachable-only false   # default
+```
+
+Off by default. Secrets and license rules are never affected by it.
+
 Same `health`-mode-only scope as `license-risk`. Off by default: an `unknown` classification is usually a detection gap (unparseable free-text license, missing metadata) rather than an actual compliance finding, so this is opt-in even on a strict `license-risk` policy — a fresh scan of an unfamiliar codebase can otherwise block on packages nobody has actually looked at yet, purely because their metadata didn't parse.
 
 ---
@@ -667,6 +681,7 @@ Every policy field that has a mode can also be passed as a flag on `health`, `ch
 | `--license-block-unknown [true\|false]` | `block_unknown_license_risk` | `true` \| `false` (bare flag = `true`) | npm/pnpm/bun/yarn/composer |
 | `--block-kev [true\|false]` | `block_kev` | `true` \| `false` (bare flag = `true`) | all |
 | `--epss-threshold <value>` | `epss_threshold` | a fraction in (0, 1] (`0.1`), a percentage (`10%`), or `none` | all |
+| `--reachable-only [true\|false]` | `reachable_only` | `true` \| `false` (bare flag = `true`) | all |
 
 Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/conda/cargo/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
 
@@ -686,6 +701,10 @@ ubel-pip install --threshold high requests==2.31.0
 
 # Block anything with EPSS >= 5% for this run, but don't block on KEV membership
 ubel-npm check --epss-threshold 5% --block-kev false
+
+# Only let vulnerabilities that are reachable from your code fail this run
+ubel-npm health --reachable-only
+ubel-npm --reachable-only          # same: a flag with no mode runs `health`
 ```
 
 `license-risk` / `license-block-unknown` keep their usual scope: they're only evaluated on `health` scans, so passing them to `check`/`install` has no effect on the result.
@@ -707,7 +726,8 @@ Default policy created on first run:
     "license_risk_threshold": "none",
     "block_unknown_license_risk": false,
     "block_kev": true,
-    "epss_threshold": 0.1
+    "epss_threshold": 0.1,
+    "reachable_only": false
 }
 ```
 
@@ -724,6 +744,10 @@ Default policy created on first run:
 **EPSS threshold** — vulnerabilities whose EPSS score is at or above this value cause a block, regardless of severity. Stored as a fraction (`0.1` = 10%); defaults to `0.1`. Set to `"none"` to disable.
 
 Both rules need data from an external feed; if it couldn't be fetched the rule cannot fire — see [Exploit Intelligence](#exploit-intelligence-kev--epss).
+
+**Reachable only** — when `true`, the vulnerability rules above (severity threshold, block unknown, KEV and EPSS) are applied to **reachable vulnerabilities only**. A vulnerability the [reachability analysis](#reachability-analysis) confirms is unreachable (`reachability.reachable === false`) is still listed in the report, but it is marked `allow` (with `policy_exempt: "unreachable"`) and never blocks. A vulnerability with no reachability result is not exempted. Defaults to `false`, in which case reachability has no effect on the verdict. Set it persistently with `ubel-npm reachable-only true`, or for one run with `--reachable-only`. A passing verdict says how many findings were skipped, e.g. `Policy passed (note: 3 unreachable vulnerabilities not evaluated (reachable_only))`.
+
+It does **not** change the always-enforced rules: infections (`MAL-`) and secrets always block, and a **KEV** vulnerability still blocks even if it was judged unreachable (while `block_kev` is on) — it is known to be exploited, so the static estimate doesn't override it. The license rules are untouched. EPSS, severity and unknown-severity findings in unreachable packages are skipped. If the reachability analysis fails during a scan, nothing is exempted and a warning is printed.
 
 **Infections** — advisories with IDs beginning `MAL-` are always blocked and are not subject to any of the settings above.
 
@@ -806,6 +830,8 @@ ubel-platform /path/to/specific/directory
 Every vulnerability in the report is annotated with a heuristic reachability assessment. The analyzer operates on the existing report fields — package type, scope, dependency depth, CVSS attack vector, and the dependency graph — and optionally performs a source-level import scan over the project files to confirm or refute whether the vulnerable package is actually used by application code.
 
 The goal is prioritization: to separate vulnerabilities in packages your code actively exercises from those in packages that are installed but unreachable from any production code path.
+
+By default reachability is informational and does not change the policy verdict. Set `reachable_only` (`--reachable-only` / `ubel-npm reachable-only true`) to apply the vulnerability policy to reachable vulnerabilities only — see [Policy](#policy).
 
 ### Decision ladder
 
@@ -1511,7 +1537,7 @@ Every report (JSON and HTML) carries an `executive_summary` written for readers 
 
 Reachability is a heuristic (see [Reachability Analysis](#reachability-analysis)); a finding with no reachability result is treated as potentially reachable.
 
-The rating and the policy verdict are independent. The rating discounts findings that reachability analysis confirmed unused; the verdict comes from `policy.js`, which counts every finding at or above the blocking thresholds (and any exposed secret, of any severity), so a report can be rated Medium yet still be blocked.
+The rating and the policy verdict are independent. The rating discounts findings that reachability analysis confirmed unused; the verdict comes from `policy.js`, which counts every finding at or above the blocking thresholds (and any exposed secret, of any severity) — unless `reachable_only` is on, in which case findings confirmed unreachable are left out of the vulnerability rules — so by default a report can be rated Medium yet still be blocked.
 
 ### Exploit intelligence in the summary
 

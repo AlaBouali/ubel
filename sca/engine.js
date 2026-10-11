@@ -837,6 +837,7 @@ async function generateHTMLReport(data) {
             document.getElementById('policy-kev').textContent = pol.block_kev === false ? 'allow' : 'block';
             const epssT = parseFloat(pol.epss_threshold);
             document.getElementById('policy-epss').textContent = (epssT > 0 && epssT <= 1) ? ('block >= ' + parseFloat((epssT * 100).toFixed(2)) + '%') : 'off';
+            document.getElementById('policy-reachable-only').textContent = pol.reachable_only === true ? 'on' : 'off';
             const tiWarnings = (reportData.threat_intel && Array.isArray(reportData.threat_intel.warnings)) ? reportData.threat_intel.warnings : [];
             if (tiWarnings.length) {
                 const tiEl = document.getElementById('threat-intel-warning');
@@ -1790,7 +1791,7 @@ async function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p><div id="threat-intel-warning" class="mt-3 text-xs text-yellow-400" style="display:none"></div></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr><tr><td class="pr-2">Block KEV</td><td id="policy-kev">...</td></tr><tr><td class="pr-2">EPSS Threshold</td><td id="policy-epss">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p><div id="threat-intel-warning" class="mt-3 text-xs text-yellow-400" style="display:none"></div></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr><tr><td class="pr-2">Block KEV</td><td id="policy-kev">...</td></tr><tr><td class="pr-2">EPSS Threshold</td><td id="policy-epss">...</td></tr><tr><td class="pr-2">Reachable Only</td><td id="policy-reachable-only">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Executive Summary Section (plain-language, for non-technical readers) -->
@@ -3309,6 +3310,18 @@ export async function enrichWithThreatIntel(vulnerabilities) {
 //                                   >= this value (fraction 0-1, so 0.1 = 10%).
 //                                   Default 0.1. "none" disables. Not enforced
 //                                   for CVEs with no/unavailable EPSS score.
+//   reachable_only                — apply the vulnerability rules above (severity,
+//                                   unknown severity, KEV, EPSS) to REACHABLE
+//                                   vulnerabilities only. A vulnerability the
+//                                   reachability analysis confirms unreachable
+//                                   (reachability.reachable === false) is still
+//                                   reported but never blocks. Default false —
+//                                   every vulnerability is evaluated. Infections
+//                                   and KEV vulnerabilities (while block_kev is
+//                                   on) always block, reachable or not, and
+//                                   secrets / license
+//                                   rules are not affected. If the reachability
+//                                   analysis fails, nothing is exempted.
 //
 const DEFAULT_POLICY = {
   severity_threshold:            "high",
@@ -3317,6 +3330,7 @@ const DEFAULT_POLICY = {
   block_unknown_license_risk:    false,
   block_kev:                     true,
   epss_threshold:                0.1,
+  reachable_only:                false,
 };
 
 function parseEpssThreshold(raw) {
@@ -3341,13 +3355,19 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
   const blockUnknown = policy.block_unknown_vulnerabilities === true;
   const epssThreshold = parseEpssThreshold(policy.epss_threshold);
 
+  // Opt-in (policy.reachable_only, default false): only reachable vulnerabilities
+  // are evaluated against the policy rules below.
+  const reachableOnly = policy.reachable_only === true;
+
   for (const v of vulnerabilities) {
-    // Confirmed unreachable by static analysis → never block on policy.
-    // Reachable or unanalysed (no reachability key, or reachable=true) still
-    // go through normal policy evaluation.  Infections are always blocked
-    // regardless of reachability.
+    // With reachable_only on: confirmed unreachable by static analysis → never
+    // block on policy. Reachable or unanalysed (no reachability key, or
+    // reachable=true) still go through normal policy evaluation. Infections are
+    // always blocked regardless of reachability. With it off (the default),
+    // reachability plays no part in the decision.
     const reachability       = v.reachability || {};
     const confirmedUnreachable = (
+      reachableOnly &&
       typeof reachability === "object" &&
       reachability.reachable === false
     );
@@ -3358,8 +3378,14 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
       continue;
     }
 
-    if (confirmedUnreachable) {
+    // KEV overrides reachable_only: a vulnerability on the CISA KEV list blocks
+    // (when block_kev is on) even if it was judged unreachable — it is known to
+    // be exploited in the wild, so the static estimate doesn't get a say.
+    const kevBlocks = policy.block_kev !== false && v.is_kev === true;
+
+    if (confirmedUnreachable && !kevBlocks) {
       v.policy_decision = "allow";
+      v.policy_exempt   = "unreachable";
       continue;
     }
 
@@ -3367,7 +3393,7 @@ function tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy) {
     // CVE that is actively exploited must still block). null = feed was
     // unreachable / no score, so the rule can't fire.
     const reasons = [];
-    if (policy.block_kev !== false && v.is_kev === true) reasons.push("kev");
+    if (kevBlocks) reasons.push("kev");
     if (epssThreshold !== null && typeof v.epss_score === "number" && v.epss_score >= epssThreshold) reasons.push("epss");
     if (reasons.length) {
       v.policy_reasons  = reasons;
@@ -3934,6 +3960,25 @@ export class UbelEngineInstance {
         console.warn();
       }
 
+      // reachable_only: reachability has to be known BEFORE the policy is applied,
+      // so run it now (it normally runs after the report is assembled). The same
+      // result is reused for the report below. If it fails, no vulnerability is
+      // exempted — the policy fails closed to "evaluate everything".
+      let reachabilityDone = false;
+      if (policy.reachable_only === true && vulnerabilities.length > 0) {
+        try {
+          enrichReachability({
+            vulnerabilities,
+            inventory,
+            findings_summary: summarizeVulnerabilities(vulnerabilities, inventory),
+          }, projectRoot);
+          reachabilityDone = true;
+        } catch (e) {
+          console.warn(`[!] Reachability analysis failed (${e.message}): reachable_only was NOT applied — all vulnerabilities are evaluated against the policy.`);
+          for (const v of vulnerabilities) delete v.reachability;
+        }
+      }
+
       tag_vulnerabilities_with_policy_decisions(vulnerabilities, policy);
       const policyViolations = get_policy_violations(vulnerabilities);
 
@@ -4122,8 +4167,10 @@ export class UbelEngineInstance {
         //dependencies_tree: buildImpactDependencyTree(inventory),  // kept for compatibility but not used in new graph
       };
 
-      // Reachability
-      try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
+      // Reachability (already done above when reachable_only is on)
+      if (!reachabilityDone) {
+        try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
+      }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
       // Health mode only, and only when not switched off: `scan_secrets: false`
