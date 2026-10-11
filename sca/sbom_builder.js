@@ -3,6 +3,8 @@
 import { randomUUID } from "crypto";
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
 import { vexAnalysis } from "./vex.js";
+import { isNoLicenseValue } from "./license_checker.js";
+import { cvssMethodFromVector } from "./cvss_parser.js";
 
 /**
  * Convert UBEL final JSON into a CycloneDX 1.6 SBOM document.
@@ -21,19 +23,12 @@ export class CycloneDXBuilder {
 
   /** Normalise CVSS method to CycloneDX accepted values. */
   _normaliseCvssMethod(method, vector) {
-    // The parsers rarely set cvss_method, but the vector string states its own version
-    // ("CVSS:3.1/AV:N/…"), so derive the method from it when none was recorded.
-    if (!method && typeof vector === "string") {
-      const m = vector.match(/^CVSS:(\d)\.(\d)\//i);
-      if (m) {
-        if (m[1] === "4") return "CVSSv4";
-        if (m[1] === "3") return m[2] === "0" ? "CVSSv3" : "CVSSv31";
-      } else if (/^AV:[LAN]\/AC:[HML]\/Au:[MSN]\//.test(vector)) {
-        return "CVSSv2";
-      }
-    }
+    // cvss_method is set by cvss_parser.js, but records from older reports may lack it; the
+    // vector string states its own version ("CVSS:3.1/AV:N/…"), so fall back to that.
+    if (!method) method = cvssMethodFromVector(vector);
     if (!method) return "other";
-    let m = String(method).replace(/\./g, "").toUpperCase();
+    // Accept "CVSSv3.1", "CVSS_V3", "CVSS:3.1", "cvss31", … alike.
+    let m = String(method).replace(/[^A-Za-z0-9]/g, "").toUpperCase().replace(/^CVSSV/, "CVSS");
     if (m.includes("CVSS2")) return "CVSSv2";
     if (m.includes("CVSS31")) return "CVSSv31";
     if (m.includes("CVSS3")) return "CVSSv3";
@@ -149,8 +144,13 @@ export class CycloneDXBuilder {
     if (info && info.spdx) {
       return [{ expression: info.spdx }];
     }
+    // "unknown" / "none" / "n/a" placeholders mean no license information was found — they are
+    // not a license name, so nothing is emitted (the component simply has no `licenses`).
+    if (isNoLicenseValue(item.license) || (info && info.category === "none")) {
+      return [];
+    }
     if (item.license && typeof item.license === "string" && item.license.trim()) {
-      return [{ license: { name: item.license } }];
+      return [{ license: { name: item.license.trim() } }];
     }
     return [];
   }
@@ -165,10 +165,12 @@ export class CycloneDXBuilder {
         "bom-ref": purl,
         type: item.type || "library",
         name: item.name || "",
-        version: item.version || "",
         purl: purl,
-        licenses: this._buildLicenses(item),
       };
+      // A component whose version could not be determined carries no `version` rather than "".
+      if (item.version) comp.version = item.version;
+      const licenses = this._buildLicenses(item);
+      if (licenses.length) comp.licenses = licenses;
       if (cpe) comp.cpe = cpe;
       // Hashes the lockfile recorded for the artifact ({alg, content} pairs, see item.hashes).
       if (Array.isArray(item.hashes) && item.hashes.length) {
@@ -221,9 +223,11 @@ export class CycloneDXBuilder {
         })
         .filter(d => d && typeof d === 'string');
         // Deduplicate while preserving order (Set then spread)
-        const uniqueDependsOn = [...new Set(dependsOnStrings)];
+        const ref = typeof item.id === 'string' ? item.id : (item.id?.purl || item.id?.id || '');
+        // A component never depends on itself.
+        const uniqueDependsOn = [...new Set(dependsOnStrings)].filter(d => d !== ref);
         deps.push({
-        ref: typeof item.id === 'string' ? item.id : (item.id?.purl || item.id?.id || ''),
+        ref,
         dependsOn: uniqueDependsOn,
         });
     }

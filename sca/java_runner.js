@@ -27,15 +27,18 @@ export class JavaMavenScanner {
 
   constructor() {
     this.inventoryData = [];
+    this._ctxCache = new Map();   // pom path → effective-POM context (see _pomContext)
   }
 
   // ─────────────────────────────
   // PURL
-  // Omits @<version> when version is blank to avoid silent PURL collisions.
+  // Omits @<version> when the version is unknown. A trailing "@" is not a valid purl, and the
+  // engine never sends versionless purls to OSV (it would answer with every advisory ever filed
+  // for the artifact), so such components stay in the inventory but are not vulnerability-matched.
   // ─────────────────────────────
   _mavenPurl(groupId, artifactId, version) {
     const base = `pkg:maven/${groupId.toLowerCase()}/${artifactId.toLowerCase()}`;
-    return version ? `${base}@${version}` : `${base}@`;
+    return version ? `${base}@${version}` : base;
   }
 
   // ─────────────────────────────
@@ -104,12 +107,129 @@ export class JavaMavenScanner {
   // Flags with "UNRESOLVED:" prefix if a ${ref} survives after substitution so
   // callers can detect broken versions instead of emitting garbage PURLs.
   // ─────────────────────────────
+  _interpolate(value, props) {
+    let out = String(value ?? "");
+    // Several passes: a property may itself reference another (${a} → ${b}.1 → 2.1).
+    for (let i = 0; i < 10 && out.includes("${"); i++) {
+      const next = out.replace(/\$\{([^}]+)\}/g, (m, key) => (props.has(key) ? props.get(key) : m));
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  }
+
+  // Unknown placeholders are left in place (not replaced by "", which used to turn "${x}.1"
+  // into ".1"), so a version that cannot be fully resolved is reported as unknown ("").
   _resolveVersion(version, props) {
     if (!version) return "";
-    const resolved = version.replace(/\$\{([^}]+)\}/g, (_, key) => props.get(key) ?? "");
-    // If an unresolved placeholder remains, mark it explicitly
-    if (resolved.includes("${")) return "";   // treat as unknown version
-    return resolved;
+    const resolved = this._interpolate(version, props).trim();
+    return resolved.includes("${") ? "" : resolved;
+  }
+
+  // ─────────────────────────────
+  // Effective-POM context: properties, <dependencyManagement> versions and the project's own
+  // coordinates, inherited through the <parent> chain when the parent pom is on disk (default
+  // ../pom.xml or <relativePath>). Parents that only exist in a remote repository cannot be
+  // read, so versions they manage stay unresolved.
+  // ─────────────────────────────
+  _readPom(pomFile) {
+    try {
+      return fs.readFileSync(pomFile, "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    } catch {
+      return null;
+    }
+  }
+
+  _parentBlock(xml) {
+    const m = xml.match(/<parent>([\s\S]*?)<\/parent>/i);
+    if (!m) return null;
+    const block = m[1];
+    const one = (tag) => this._extractTag(block, tag)[0] ?? "";
+    let relativePath = "../pom.xml";                        // Maven's default
+    if (/<relativePath\s*\/>/i.test(block)) relativePath = ""; // explicitly "look in the repository"
+    else if (this._extractTag(block, "relativePath").length) relativePath = this._extractTag(block, "relativePath")[0];
+    return { groupId: one("groupId"), artifactId: one("artifactId"), version: one("version"), relativePath };
+  }
+
+  // The project's own groupId / artifactId / version (falling back to the parent's, as Maven does).
+  _pomCoords(xml, parent) {
+    let own = xml;
+    for (const tag of ["parent", "dependencyManagement", "dependencies", "build", "profiles",
+                       "reporting", "properties", "repositories", "pluginRepositories", "distributionManagement"]) {
+      own = own.replace(new RegExp(`<${tag}[\\s>][\\s\\S]*?<\\/${tag}>`, "gi"), "");
+    }
+    const one = (tag) => this._extractTag(own, tag)[0] ?? "";
+    return {
+      groupId:    one("groupId")    || parent?.groupId || "",
+      artifactId: one("artifactId"),
+      version:    one("version")    || parent?.version || "",
+    };
+  }
+
+  // <dependencyManagement><dependencies><dependency> entries → [{ groupId, artifactId, version }]
+  _parseManagedDeps(xml) {
+    const out = [];
+    const mgmt = xml.match(/<dependencyManagement>([\s\S]*?)<\/dependencyManagement>/i);
+    if (!mgmt) return out;
+    const blockRe = /<dependency>([\s\S]*?)<\/dependency>/gi;
+    let m;
+    while ((m = blockRe.exec(mgmt[1])) !== null) {
+      const g = this._extractTag(m[1], "groupId")[0] ?? "";
+      const a = this._extractTag(m[1], "artifactId")[0] ?? "";
+      const v = this._extractTag(m[1], "version")[0] ?? "";
+      if (g && a && v) out.push({ groupId: g, artifactId: a, version: v });
+    }
+    return out;
+  }
+
+  _emptyContext(coords = {}) {
+    return { props: new Map(), managed: new Map(), coords };
+  }
+
+  _pomContext(pomFile, seen = new Set()) {
+    const key = path.resolve(pomFile);
+    if (this._ctxCache.has(key)) return this._ctxCache.get(key);
+    if (seen.has(key) || seen.size > 10) return this._emptyContext();   // cyclic / absurdly deep chain
+    seen.add(key);
+
+    const xml = this._readPom(key);
+    if (xml == null) return this._emptyContext();
+
+    // Parent first, so the child's own properties and managed versions override it.
+    const par = this._parentBlock(xml);
+    let parentCtx = this._emptyContext(par ? { groupId: par.groupId, version: par.version } : {});
+    if (par && par.relativePath !== "") {
+      let target = path.resolve(path.dirname(key), par.relativePath);
+      try { if (fs.statSync(target).isDirectory()) target = path.join(target, "pom.xml"); } catch { /* missing */ }
+      if (fs.existsSync(target) && path.resolve(target) !== key) {
+        const ctx = this._pomContext(target, seen);
+        if (!par.artifactId || ctx.coords.artifactId === par.artifactId) parentCtx = ctx;
+      }
+    }
+
+    const props = new Map(parentCtx.props);
+    for (const [k, v] of this._parsePomProperties(xml)) props.set(k, v);
+
+    const coords = this._pomCoords(xml, parentCtx.coords);
+    for (const [name, val] of [
+      ["project.groupId", coords.groupId], ["pom.groupId", coords.groupId],
+      ["project.artifactId", coords.artifactId], ["pom.artifactId", coords.artifactId],
+      ["project.version", coords.version], ["pom.version", coords.version], ["version", coords.version],
+      ["project.parent.version", par?.version], ["project.parent.groupId", par?.groupId],
+    ]) {
+      if (val && !props.has(name)) props.set(name, val);
+    }
+
+    // Raw (uninterpolated) managed versions: they are resolved against the *requesting* project's
+    // properties, so a child that overrides ${foo.version} changes what the parent manages.
+    const managed = new Map(parentCtx.managed);
+    for (const d of this._parseManagedDeps(xml)) {
+      managed.set(`${this._interpolate(d.groupId, props)}:${this._interpolate(d.artifactId, props)}`, d.version);
+    }
+
+    const ctx = { props, managed, coords };
+    this._ctxCache.set(key, ctx);
+    return ctx;
   }
 
   // ─────────────────────────────
@@ -202,7 +322,9 @@ export class JavaMavenScanner {
     // Remove XML comments to avoid false matches
     xml = xml.replace(/<!--[\s\S]*?-->/g, "");
 
-    const props      = this._parsePomProperties(xml);
+    // Properties + managed versions, including those inherited from on-disk parent poms.
+    const ctx        = this._pomContext(pomPath);
+    const props      = ctx.props;
     const components = [];
 
     // Prefer pre-generated dependency tree if available
@@ -213,10 +335,13 @@ export class JavaMavenScanner {
     if (treeDeps.length) {
       deps = treeDeps;
     } else {
-      deps = this._parsePomDeps(xml).map(d => ({
-        ...d,
-        version: this._resolveVersion(d.version, props)
-      }));
+      deps = this._parsePomDeps(xml).map(d => {
+        const groupId    = this._interpolate(d.groupId, props).trim();
+        const artifactId = this._interpolate(d.artifactId, props).trim();
+        // No <version> of its own → the one <dependencyManagement> (here or in a parent) assigns.
+        const raw        = d.version || ctx.managed.get(`${groupId}:${artifactId}`) || "";
+        return { ...d, groupId, artifactId, version: this._resolveVersion(raw, props) };
+      }).filter(d => !d.groupId.includes("${") && !d.artifactId.includes("${"));
     }
 
     for (const dep of deps) {
@@ -235,7 +360,7 @@ export class JavaMavenScanner {
         type:         "library",
         license:      "unknown",
         ecosystem:    "java",
-        state:        version ? "undetermined" : "undetermined",
+        state:        "undetermined",
         scopes:       [scope],
         dependencies: [],
         paths:        [projectRoot],
@@ -280,6 +405,7 @@ export class JavaMavenScanner {
   // ─────────────────────────────
   async getInstalled(startDir) {
     this.inventoryData = [];
+    this._ctxCache = new Map();
 
     const visited = new Set();
     const raw     = [];

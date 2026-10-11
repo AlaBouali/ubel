@@ -4,7 +4,7 @@ import https   from "https";
 import http, { get }    from "http";
 import { fileURLToPath } from "url";
 import { NodeManager }          from "./node_runner.js";
-import { processVulnerability } from "./cvss_parser.js";
+import { processVulnerability, cvssMethodFromVector } from "./cvss_parser.js";
 import { evaluatePolicy }       from "./policy.js";
 import {TOOL_NAME, TOOL_LICENSE, TOOL_VERSION }   from "./info.js";
 import { dictToStr }            from "./utils.js";
@@ -2820,8 +2820,11 @@ export function getFix(vuln) {
   vuln.fixes                 = remediations;
   vuln.has_fix               = vuln.fixed_versions.length > 0;
   vuln.description           = (vuln.description || vuln.details || vuln.summary || "").trim();
+  // `summary` is the advisory's one-line title (OSV `summary`); reports use it as the short
+  // description, so keep it. `details` is folded into `description` above and is dropped.
+  const _summary = typeof vuln.summary === "string" ? vuln.summary.trim() : "";
+  if (_summary) vuln.summary = _summary; else delete vuln.summary;
   delete vuln.details;
-  delete vuln.summary;
 
   // Ranked fix versions for the modal upgrade table
   const _vrEco = _vr_purlToEcosystem(vuln.affected_package_id || "");
@@ -2899,11 +2902,18 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
 // ── Inventory helpers ─────────────────────────────────────────────────────────
 function matchDependenciesWithInventory(inventory) {
   const purls = inventory.map((c) => c.id);
+  const known = new Set(purls);
   for (const item of inventory) {
     const depKeys = item.dependencies || [];
-    item.dependencies = depKeys.map((key) =>
-      purls.find((p) => p.startsWith(key)) || null
-    ).filter(Boolean);
+    // A dependency key is either a full purl or a "pkg:type/name@" prefix. Prefer an exact
+    // match, otherwise the first prefix match that is not the component itself — a package
+    // never depends on itself, and letting it resolve to its own purl put self-loops in the
+    // dependency graph (SBOM dependencies[], introduced_by chains).
+    const resolved = depKeys.map((key) => {
+      if (known.has(key)) return key;
+      return purls.find((p) => p !== item.id && p.startsWith(key)) || null;
+    }).filter((p) => p && p !== item.id);
+    item.dependencies = [...new Set(resolved)];
   }
 }
 
@@ -3719,11 +3729,15 @@ export class UbelEngineInstance {
         reportContent = {};
       }
 
-      for (const purl of purls) {
-        if (purl.split("@")[1] === "") {
-          purls = purls.filter(p => p !== purl);
-        }
-      }
+      // A purl without a version ("pkg:npm/foo@" or "pkg:maven/g/a") can't be matched against
+      // an advisory database — OSV would answer with every advisory ever filed for the package —
+      // so it is never queried. Non-pkg: ids (CPEs) are handled separately and kept as-is.
+      const hasVersion = (p) => {
+        const body = p.split("?")[0].split("#")[0];
+        const at   = body.lastIndexOf("@");
+        return at > body.lastIndexOf("/") && at < body.length - 1;
+      };
+      purls = purls.filter(p => !p.startsWith("pkg:") || hasVersion(p));
       purls = [...new Set(purls)];
 
       let inventory = [...manager.inventoryData];
@@ -3768,6 +3782,9 @@ export class UbelEngineInstance {
             processVulnerability(v);
             if (v.severity_score  == null) v.severity_score  = nvdScore;
             if (v.severity_vector == null) v.severity_vector = nvdVector;
+            // processVulnerability() only understands OSV's severity[] array and just reset
+            // cvss_method to null for these NVD records, so derive it from the restored vector.
+            v.cvss_method = cvssMethodFromVector(v.severity_vector);
             v.severity = scoreToSeverity(v.severity_score);
             getFix(v);
             for (const key of ["database_specific", "affected", "schema_version"]) {
@@ -4036,7 +4053,7 @@ export class UbelEngineInstance {
         version: manager.engineVersion,
       };
 
-      const git_metadata = getGitMetadata();
+      const git_metadata = getGitMetadata(projectRoot);
 
       // ── Build final JSON ───────────────────────────────────────────────────
       const findingsSummary = summarizeVulnerabilities(vulnerabilities, inventory);
@@ -4250,19 +4267,25 @@ export class UbelEngineInstance {
       atomicWriteFile(latestPath, jsonReportString);
 
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
-      const sbomBuilder = new CycloneDXBuilder(finalJson);
-      const sbomData    = sbomBuilder.generate();
+      // SBOM: SCA scans only — the health scan ("sca") and firewall check/install runs
+      // ("sca_<engine>"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
+      const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
+      // SARIF: the SCA health scan only (report tag "sca"). Firewall check/install runs get
+      // the JSON, HTML and SBOM but no SARIF; license and secrets scans get neither.
+      const writeSarif  = reportTag === "sca";
+      const sbomString  = writeSbom
+        ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
+        : null;
+      const sarifString = writeSarif
+        ? redact(safeJsonString(new SarifBuilder(finalJson).generate(), 1000))
+        : null;
 
-      const sarifBuilder = new SarifBuilder(finalJson);
-      const sarifData    = sarifBuilder.generate();
-
-      const sbomString  = redact(safeJsonString(sbomData, 1000));
-      const sarifString = redact(safeJsonString(sarifData, 1000));
-
-      const latestSbom  = path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"));
-      const latestSarif = path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"));
-      atomicWriteFile(latestSbom, sbomString);
-      atomicWriteFile(latestSarif, sarifString);
+      if (writeSbom) {
+        atomicWriteFile(path.join(latestDir, reportFileName("latest", reportTag, "cdx.json")), sbomString);
+      }
+      if (writeSarif) {
+        atomicWriteFile(path.join(latestDir, reportFileName("latest", reportTag, "sarif.json")), sarifString);
+      }
 
       // ── Timestamped bundle ──────────────────────────────────────────────────
       // json/html/sbom/sarif used to be written out as four separate files
@@ -4278,8 +4301,8 @@ export class UbelEngineInstance {
       atomicWriteFile(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
-        { name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString },
-        { name: reportFileName("report", reportTag, "sarif.json"), data: sarifString },
+        ...(writeSbom  ? [{ name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString  }] : []),
+        ...(writeSarif ? [{ name: reportFileName("report", reportTag, "sarif.json"), data: sarifString }] : []),
       ]));
       // latest_reports/<mode>/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
       updateLatestReportZip(zipPath, reportTag);

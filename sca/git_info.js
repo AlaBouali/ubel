@@ -10,12 +10,13 @@ OUTPUT:
 }
 */
 
-function run(cmd) {
+function run(cmd, cwd) {
   try {
     return execSync(cmd, {
       shell: true,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
+      stdio: ["ignore", "pipe", "ignore"],
+      ...(cwd ? { cwd } : {})
     }).trim();
   } catch {
     return "";
@@ -67,9 +68,13 @@ export function getGitVersion() {
   return run("git --version").split("\n")[0].replace("git version ", "");
 }
 
-export function getGitMetadata() {
+/**
+ * @param {string} [cwd] directory to inspect (the scanned project root). Defaults to the
+ *   process cwd, which is only right when the scan was started from inside the project.
+ */
+export function getGitMetadata(cwd) {
   // check if inside a git repo
-  const inside = run("git rev-parse --is-inside-work-tree");
+  const inside = run("git rev-parse --is-inside-work-tree", cwd);
   if (inside !== "true") {
     return {
       version: getGitVersion(),
@@ -80,7 +85,7 @@ export function getGitMetadata() {
   }
 
   // remote URL (origin)
-  let url = run("git config --get remote.origin.url");
+  let url = run("git config --get remote.origin.url", cwd);
 
   // normalize ssh → https (optional but cleaner)
   if (url && url.startsWith("git@")) {
@@ -92,15 +97,15 @@ export function getGitMetadata() {
   }
 
   // branch
-  let branch = run("git rev-parse --abbrev-ref HEAD");
+  let branch = run("git rev-parse --abbrev-ref HEAD", cwd);
 
   // detached HEAD fix → use fallback
   if (branch === "HEAD") {
-    branch = run("git branch --show-current") || undefined;
+    branch = run("git branch --show-current", cwd) || undefined;
   }
 
   // latest commit
-  const latest_commit = run("git rev-parse HEAD");
+  const latest_commit = run("git rev-parse HEAD", cwd);
 
   return {
     version: getGitVersion(),

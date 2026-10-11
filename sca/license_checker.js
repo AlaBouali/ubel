@@ -613,8 +613,18 @@ function isOsiApproved(rawLicense) {
   return classifyLicense(rawLicense).osi_approved;
 }
 
+/**
+ * True when a raw license value is missing or one of the "no information" placeholders
+ * ("unknown", "none", "n/a", …) — i.e. there is nothing worth recording as a license name.
+ */
+function isNoLicenseValue(rawLicense) {
+  const str = coerceToString(rawLicense);
+  return str === null || EMPTY_SENTINELS.has(str.trim().toLowerCase());
+}
+
 export {
   classifyLicense,
+  isNoLicenseValue,
   enrichInventoryWithLicenseRisk,
   isOsiApproved,
   LICENSE_TABLE,

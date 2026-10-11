@@ -1,9 +1,43 @@
 // sarif_builder.js — SARIF 2.1.0 generator (fixes SARIF1004)
 
+import fs from "fs";
 import path from "path";
 import { isNotAffected, notAffectedJustification } from "./vex.js";
 import crypto from "crypto";
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
+import { cvssMethodFromVector } from "./cvss_parser.js";
+
+// GitHub code scanning truncates/rejects rule descriptions longer than this.
+const GITHUB_DESCRIPTION_MAX = 1024;
+
+// SARIF results should point at a file in the repository, not at an install directory. For each
+// purl type: the lock files (they list every resolved package, direct and transitive) and the
+// manifests (what a developer edits) a package can be traced back to. Lock files are preferred.
+const PROJECT_FILES = {
+  npm:      { locks: ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"],
+              manifests: ["package.json"] },
+  pypi:     { locks: ["poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock"],
+              manifests: ["requirements.txt", "requirements-dev.txt", "requirements_dev.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg"] },
+  conda:    { locks: ["conda-lock.yml"], manifests: ["environment.yml", "environment.yaml"] },
+  maven:    { locks: ["gradle.lockfile"], manifests: ["pom.xml", "build.gradle", "build.gradle.kts"] },
+  golang:   { locks: [], manifests: ["go.mod", "go.sum"] },
+  cargo:    { locks: ["Cargo.lock"], manifests: ["Cargo.toml"] },
+  composer: { locks: ["composer.lock"], manifests: ["composer.json"] },
+  gem:      { locks: ["Gemfile.lock"], manifests: ["Gemfile"] },
+  nuget:    { locks: ["packages.lock.json"], manifests: ["packages.config"], manifestPattern: /\.(cs|fs|vb)proj$/i },
+  pub:      { locks: ["pubspec.lock"], manifests: ["pubspec.yaml"] },
+  swift:    { locks: ["Package.resolved"], manifests: ["Package.swift"] },
+};
+
+// Folders package managers install into: a path inside one belongs to the project that contains
+// it (…/node_modules/a/node_modules/b → the folder holding the outer node_modules), never to the
+// package's own package.json / composer.json.
+const INSTALL_DIR_NAMES = new Set(["node_modules", "site-packages", "dist-packages", "vendor"]);
+
+// CVSS score assumed for a rule whose advisory carries a severity label but no numeric score,
+// so GitHub can still bucket it (it reads `security-severity`: >=9 critical, 7-8.9 high,
+// 4-6.9 medium, <4 low).
+const SECURITY_SEVERITY_BY_LABEL = { critical: 9.5, high: 8.0, medium: 5.5, moderate: 5.5, low: 2.0 };
 
 /**
  * Convert UBEL final JSON into a SARIF 2.1.0 document.
@@ -37,6 +71,51 @@ export class SarifBuilder {
       .split(/\s+/)
       .slice(0, words_count)
       .join(" ");
+  }
+
+  /**
+   * Cut `text` to at most `max` characters INCLUDING the ellipsis (unlike _truncate(), which
+   * appends a marker after `max`). Never leaves half of a surrogate pair at the cut.
+   */
+  _clip(text, max) {
+    const s = String(text || "");
+    if (s.length <= max) return s;
+    let cut = s.slice(0, max - 1).trimEnd();
+    if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+    return `${cut}\u2026`;
+  }
+
+  /** CVSS version of a vulnerability: the recorded method, else the one its vector states. */
+  _cvssMethod(v) {
+    return v.cvss_method || cvssMethodFromVector(v.severity_vector) || null;
+  }
+
+  /**
+   * GitHub's `security-severity`: a CVSS-style 0.0–10.0 score as a string. The advisory's own
+   * score when it has one, otherwise a representative score for its severity label. null (omit
+   * the property) when neither exists.
+   */
+  _securitySeverity(v) {
+    const score = Number(v.severity_score);
+    if (v.severity_score != null && v.severity_score !== "" && isFinite(score) && score >= 0 && score <= 10) {
+      return score.toFixed(1);
+    }
+    if (v.is_infection) return SECURITY_SEVERITY_BY_LABEL.critical.toFixed(1);
+    const byLabel = SECURITY_SEVERITY_BY_LABEL[String(v.severity || "").trim().toLowerCase()];
+    return byLabel === undefined ? null : byLabel.toFixed(1);
+  }
+
+  /** One-line rule title: the advisory summary, else a title, else the description's first sentence. */
+  _shortDescription(v, advisoryId) {
+    const oneLine = (x) => String(x || "").replace(/\s+/g, " ").trim();
+    const explicit = oneLine(v.summary) || oneLine(v.title);
+    if (explicit) return explicit;
+    const desc = oneLine(v.description);
+    if (desc) {
+      const m = desc.match(/^(.{20,}?[.!?])(?:\s|$)/);
+      return m ? m[1] : desc;
+    }
+    return advisoryId;
   }
 
   /** Clamp giant advisory texts (reduced to 10k for safety) */
@@ -105,52 +184,116 @@ export class SarifBuilder {
     return `file://${normalized}`;
   }
 
+  /** True when `p` is `root` or lies inside it (path-segment aware, so /proj-x is not inside /proj). */
+  _isInside(root, p) {
+    const rel = path.relative(root, p);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+  }
+
+  _isFile(p) {
+    try { return fs.statSync(p).isFile(); } catch { return false; }
+  }
+
+  _isDir(p) {
+    try { return fs.statSync(p).isDirectory(); } catch { return false; }
+  }
+
+  /** First lock file (or manifest, when `wantLock` is false) of this purl type found directly in `dir`. */
+  _projectFileIn(dir, type, wantLock) {
+    const spec = PROJECT_FILES[type];
+    if (!spec) return null;
+    const cacheKey = `${dir}\0${type}\0${wantLock}`;
+    if (!this._projectFileCache) this._projectFileCache = new Map();
+    if (this._projectFileCache.has(cacheKey)) return this._projectFileCache.get(cacheKey);
+
+    let hit = null;
+    for (const name of (wantLock ? spec.locks : spec.manifests)) {
+      const f = path.join(dir, name);
+      if (this._isFile(f)) { hit = f; break; }
+    }
+    if (!hit && !wantLock && spec.manifestPattern) {
+      try {
+        const name = fs.readdirSync(dir).sort().find(e => spec.manifestPattern.test(e));
+        if (name) hit = path.join(dir, name);
+      } catch { /* unreadable dir */ }
+    }
+    this._projectFileCache.set(cacheKey, hit);
+    return hit;
+  }
+
   /**
-   * Convert absolute filesystem path
-   * into repository-relative SARIF URI
+   * The lock file or manifest a package (purl) traces back to, starting from one of its recorded
+   * paths (an install directory, a project root, or already a file). Walks up from the project
+   * that owns the path to the scan root and returns the nearest lock file, else the nearest
+   * manifest. null when the path is outside the scan root, the ecosystem has no project files
+   * (OS packages, CPEs, …), or none exists.
    */
-  _toRepoRelativeUri(rawPath) {
-    if (!rawPath) {
-      return null;
+  _projectFileFor(rawPath, purl) {
+    const type = /^pkg:([^/@]+)\//.exec(String(purl || ""))?.[1];
+    if (!type || !PROJECT_FILES[type] || rawPath == null || rawPath === "") return null;
+
+    const root = path.resolve(this.projectRoot);
+    const abs = path.resolve(root, String(rawPath));
+    if (!this._isInside(root, abs)) return null;
+
+    // A path inside an install folder belongs to the project holding that folder.
+    const segs = path.relative(root, abs).split(path.sep).filter(Boolean);
+    const cut = segs.findIndex(seg => INSTALL_DIR_NAMES.has(seg));
+    let start;
+    if (cut >= 0) start = path.join(root, ...segs.slice(0, cut));
+    else if (this._isFile(abs)) return abs;           // already points at a file
+    else start = this._isDir(abs) ? abs : path.dirname(abs);
+
+    for (const wantLock of [true, false]) {
+      for (let dir = start; ; dir = path.dirname(dir)) {
+        const hit = this._projectFileIn(dir, type, wantLock);
+        if (hit) return hit;
+        if (dir === root || !this._isInside(root, path.dirname(dir)) || path.dirname(dir) === dir) break;
+      }
     }
+    return null;
+  }
 
-    const normalized =
-      this._normalizeUri(rawPath);
+  /** Repo-relative, forward-slash URI for an absolute path inside the scan root. */
+  _repoRelativeUri(absPath) {
+    const rel = path.relative(path.resolve(this.projectRoot), absPath).split(path.sep).join("/");
+    return rel || ".";
+  }
 
-    const cwd =
-      this._normalizeUri(
-        this.projectRoot
-      );
+  /** SARIF location pointing at line 1 of a repo-relative file. */
+  _fileLocation(uri) {
+    return {
+      physicalLocation: {
+        artifactLocation: { uri, uriBaseId: "%SRCROOT%" },
+        region: { startLine: 1, startColumn: 1 },
+      },
+    };
+  }
 
-    const lowerPath =
-      normalized.toLowerCase();
-
-    const lowerCwd =
-      cwd.toLowerCase();
-
-    // inside repository (case-insensitive for Windows)
-    if (
-      lowerPath.startsWith(lowerCwd)
-    ) {
-      let relative =
-        normalized.slice(cwd.length);
-
-      relative =
-        relative.replace(/^\/+/, "");
-
-      return relative || ".";
+  /**
+   * SARIF locations for a package: the manifest / lock file(s) that declare it, one per distinct
+   * file however many install paths the package has. Falls back to a lock file or manifest at the
+   * scan root, and finally to the root itself ("."), for packages that have none to point at.
+   */
+  _locationsForPackage(purl, rawPaths) {
+    const uris = new Set();
+    for (const raw of rawPaths) {
+      const file = this._projectFileFor(raw, purl);
+      if (file) uris.add(this._repoRelativeUri(file));
     }
-
-    // already relative
-    if (
-      !/^[a-zA-Z]:\//.test(normalized) &&
-      !normalized.startsWith("/")
-    ) {
-      return normalized;
+    if (!uris.size) {
+      const rootFile = this._projectFileFor(this.projectRoot, purl);
+      uris.add(rootFile ? this._repoRelativeUri(rootFile) : ".");
     }
+    return [...uris].map(uri => this._fileLocation(uri));
+  }
 
-    // fallback
-    return path.basename(normalized);
+  /** Inventory item by purl (built once). */
+  _inventoryById() {
+    if (!this._invById) {
+      this._invById = new Map((this.data.inventory || []).map(i => [i.id, i]));
+    }
+    return this._invById;
   }
 
   /**
@@ -232,102 +375,27 @@ export class SarifBuilder {
   }
 
   /**
-   * Build SARIF locations
+   * Build SARIF locations: the manifest / lock file(s) of the affected package (see
+   * _locationsForPackage), not the install directories it was found in.
    */
   _buildLocations(v) {
-    const locations = [];
-
-    const seen = new Set();
-
-    const addLocation = rawUri => {
-      const relativeUri =
-        this._toRepoRelativeUri(
-          rawUri
-        );
-
-      if (
-        !relativeUri ||
-        seen.has(relativeUri)
-      ) {
-        return;
-      }
-
-      seen.add(relativeUri);
-
-      locations.push({
-        physicalLocation: {
-          artifactLocation: {
-            uri: relativeUri,
-            uriBaseId: "%SRCROOT%",
-          },
-
-          region: {
-            startLine: 1,
-            startColumn: 1,
-          },
-        },
-      });
-    };
-
     // lazy init
     if (!this._purlLocationIndex) {
-      this._purlLocationIndex =
-        this._buildPurlLocationIndex();
+      this._purlLocationIndex = this._buildPurlLocationIndex();
     }
 
-    const affectedPurl =
-      String(
-        v.affected_package_id || ""
-      ).trim();
+    const affectedPurl = String(v.affected_package_id || "").trim();
+    const rawPaths = [];
+    const pathText = p => (p && typeof p === "object" ? p.text : p);
 
-    // purl-derived runtime paths
-    if (
-      affectedPurl &&
-      this._purlLocationIndex.has(
-        affectedPurl
-      )
-    ) {
-      for (
-        const loc of this
-          ._purlLocationIndex
-          .get(affectedPurl)
-      ) {
-        addLocation(loc);
-      }
-    }
+    // the package's own inventory paths (exact purl), then the findings-based index
+    for (const p of (this._inventoryById().get(affectedPurl)?.paths || [])) rawPaths.push(pathText(p));
+    for (const loc of (this._purlLocationIndex.get(affectedPurl) || [])) rawPaths.push(loc);
+    // explicit paths / file on the vulnerability record
+    if (Array.isArray(v.paths)) for (const p of v.paths) rawPaths.push(pathText(p));
+    if (v.file) rawPaths.push(v.file);
 
-    // explicit paths
-    if (Array.isArray(v.paths)) {
-      for (const p of v.paths) {
-        if (typeof p === "string") {
-          addLocation(p);
-        }
-      }
-    }
-
-    // explicit file
-    if (v.file) {
-      addLocation(v.file);
-    }
-
-    // GHAS fallback
-    if (!locations.length) {
-      locations.push({
-        physicalLocation: {
-          artifactLocation: {
-            uri: ".",
-            uriBaseId: "%SRCROOT%",
-          },
-
-          region: {
-            startLine: 1,
-            startColumn: 1,
-          },
-        },
-      });
-    }
-
-    return locations;
+    return this._locationsForPackage(affectedPurl, rawPaths.filter(p => typeof p === "string"));
   }
 
   /**
@@ -407,6 +475,8 @@ export class SarifBuilder {
 
   /** Deduplicate SARIF rules */
   buildRules() {
+    if (this._rules) return this._rules;
+
     // Pre-build a taxon index: cweInt -> taxon array index (within the taxa array)
     const allCwes     = [...this._collectAllCwes()].sort((a, b) => a - b);
     const taxonIndex  = new Map(allCwes.map((c, i) => [c, i]));
@@ -423,15 +493,13 @@ export class SarifBuilder {
       const advisoryId =
         String(v.id || "UBEL-UNKNOWN");
 
-      const summary =
-        v.summary ||
-        v.title ||
-        advisoryId;
+      const summary = this._shortDescription(v, advisoryId);
 
-      const description =
+      const description = String(
         v.description ||
         v.summary ||
-        "No description provided.";
+        "No description provided."
+      );
 
       const fixes = Array.isArray(v.fixes)
         ? v.fixes
@@ -463,21 +531,26 @@ export class SarifBuilder {
         name: advisoryId,
 
         shortDescription: {
-          text: this._truncate(summary, 300),
+          text: this._clip(summary, 300),
         },
 
+        // GitHub rejects rule descriptions over 1024 characters, so fullDescription is clipped to
+        // that. Anything cut off is not lost: it is appended to `help` below.
         fullDescription: {
-          text: this._truncate(
-            description,
-            10000
-          ),
+          text: this._clip(description, GITHUB_DESCRIPTION_MAX),
         },
 
         help: {
-          text: this._truncate(
-            remediation,
+          text: this._clip(
+            description.length > GITHUB_DESCRIPTION_MAX
+              ? `${remediation}\n\n${description}`
+              : remediation,
             4000
           ),
+        },
+
+        defaultConfiguration: {
+          level: this._severityToLevel(v.severity, !!v.is_infection),
         },
 
         helpUri: this._helpUri(v),
@@ -496,7 +569,7 @@ export class SarifBuilder {
             v.severity_vector || null,
 
           cvss_method:
-            v.cvss_method || null,
+            this._cvssMethod(v),
 
           cwes:
             ruleCwes,
@@ -518,12 +591,20 @@ export class SarifBuilder {
         },
       };
 
-      // Searchable tags (shown by GitHub code scanning and the SARIF viewer).
+      // Searchable tags (shown by GitHub code scanning and the SARIF viewer). "security" marks the
+      // rule as a security alert; external/cwe/cwe-N is GitHub's convention for linking a CWE.
       {
-        const tags = [];
+        const tags = ["security"];
+        for (const c of ruleCwes) tags.push(`external/cwe/cwe-${c}`);
         if (v.is_kev === true) tags.push("kev", "known-exploited");
         if (typeof v.epss_score === "number") tags.push("epss");
-        if (tags.length) rule.properties.tags = tags;
+        rule.properties.tags = tags;
+      }
+
+      // GitHub's severity bucket (Critical/High/Medium/Low) comes from this property.
+      {
+        const securitySeverity = this._securitySeverity(v);
+        if (securitySeverity !== null) rule.properties["security-severity"] = securitySeverity;
       }
 
       if (relationships.length) {
@@ -554,7 +635,8 @@ export class SarifBuilder {
       rulesMap.set(ruleId, rule);
     }
 
-    return [...rulesMap.values()];
+    this._rules = [...rulesMap.values()];
+    return this._rules;
   }
 
   /** Build SARIF results */
@@ -660,6 +742,9 @@ export class SarifBuilder {
           vector:
             v.severity_vector || null,
 
+          cvss_method:
+            this._cvssMethod(v),
+
           package:
             v.affected_dependency || null,
 
@@ -711,7 +796,7 @@ export class SarifBuilder {
             this._suggestedFixFor(v)?.version ?? null,
 
           suggested_fixes:
-            this._invById.get(v.affected_package_id)?.suggested_fixes ?? null,
+            this._inventoryById().get(v.affected_package_id)?.suggested_fixes ?? null,
 
           // Exploit intelligence: CISA KEV + FIRST EPSS (null = unknown).
           ...ti,
@@ -857,31 +942,35 @@ export class SarifBuilder {
       this.data.git_metadata || {};
 
     const repoUri =
-      git.url && git.url !== ""
-        ? git.url
-        : this._toFileUri(this.projectRoot);
+      this._stripUrlCredentials(git.url) ||
+      this._toFileUri(this.projectRoot);
 
-    const revisionId =
-      git.latest_commit ||
-      this._uuidFromString(repoUri);
+    // Only what git actually reported: SARIF treats revisionId / branch as optional, and a
+    // placeholder ("unknown", or an id derived from the URL) would be read as a real revision.
+    const details = { repositoryUri: repoUri };
 
-    return [
-      {
-        repositoryUri: repoUri,
+    if (git.latest_commit) {
+      details.revisionId = git.latest_commit;
+    }
 
-        revisionId,
+    if (git.branch) {
+      details.branch = git.branch;
+    }
 
-        branch:
-          git.branch || "unknown",
+    details.mappedTo = { uriBaseId: "%SRCROOT%" };
 
-        mappedTo: {
-          uriBaseId: "%SRCROOT%",
-        },
-      },
-    ];
+    return [details];
   }
 
-  /** Deterministic UUIDv5-like generator */
+  /** Remove "user:token@" from a remote URL so credentials never reach a shared report. */
+  _stripUrlCredentials(url) {
+    if (!url || typeof url !== "string") {
+      return "";
+    }
+
+    return url.trim().replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1");
+  }
+
   /**
    * Deterministic, content-addressed vuln ID.
    *
@@ -915,40 +1004,14 @@ export class SarifBuilder {
     ].join("-");
   }
 
-  _uuidFromString(input) {
-    const hash = crypto
-      .createHash("sha1")
-      .update(String(input))
-      .digest("hex");
-
-    return [
-      hash.slice(0, 8),
-      hash.slice(8, 12),
-      `5${hash.slice(13, 16)}`,
-      `${(
-        (
-          parseInt(
-            hash.slice(16, 17),
-            16
-          ) & 0x3
-        ) | 0x8
-      ).toString(16)}${hash.slice(
-        17,
-        20
-      )}`,
-      hash.slice(20, 32),
-    ].join("-");
-  }
-
   /** Stable SARIF rule id: the advisory id itself (GHSA-…, CVE-…, RUSTSEC-…), readable in code-scanning UIs. */
   _ruleId(v) {
     return String(v?.id || v?.ghsa || v?.cve || "UBEL-UNKNOWN");
   }
 
   /** Build optional artifacts section (improves some consumers) */
-  buildArtifacts() {
+  buildArtifacts(results = this.buildResults()) {
     const artifactUris = new Set();
-    const results = this.buildResults();
 
     for (const result of results) {
       for (const loc of result.locations || []) {
@@ -1099,54 +1162,23 @@ export class SarifBuilder {
 
   /**
    * Build SARIF locations for a license finding from an inventory item's
-   * install paths. Separate from _buildLocations(v) above, which is keyed
-   * off findings_summary (vulnerability-only) data — license findings need
-   * every flagged package's own paths, not just vulnerable/infected ones.
+   * install paths, resolved to the manifest / lock file that declares it.
+   * Separate from _buildLocations(v) above, which is keyed off findings_summary
+   * (vulnerability-only) data — license findings need every flagged package's
+   * own paths, not just vulnerable/infected ones.
    */
   _buildLicenseLocations(item) {
-    const locations = [];
-    const seen = new Set();
-
-    const addLocation = rawUri => {
-      const relativeUri = this._toRepoRelativeUri(rawUri);
-      if (!relativeUri || seen.has(relativeUri)) return;
-      seen.add(relativeUri);
-      locations.push({
-        physicalLocation: {
-          artifactLocation: { uri: relativeUri, uriBaseId: "%SRCROOT%" },
-          region: { startLine: 1, startColumn: 1 },
-        },
-      });
-    };
-
-    const paths = Array.isArray(item.paths) ? item.paths : [];
-    for (const p of paths) {
-      const text = p && typeof p === "object" ? p.text : p;
-      if (typeof text === "string") addLocation(text);
+    const rawPaths = [];
+    for (const p of (Array.isArray(item.paths) ? item.paths : [])) {
+      rawPaths.push(p && typeof p === "object" ? p.text : p);
     }
-    if (item.path) {
-      const text = typeof item.path === "object" ? item.path.text : item.path;
-      if (typeof text === "string") addLocation(text);
-    }
-
-    if (!locations.length) {
-      locations.push({
-        physicalLocation: {
-          artifactLocation: { uri: ".", uriBaseId: "%SRCROOT%" },
-          region: { startLine: 1, startColumn: 1 },
-        },
-      });
-    }
-
-    return locations;
+    if (item.path) rawPaths.push(typeof item.path === "object" ? item.path.text : item.path);
+    return this._locationsForPackage(String(item.id || ""), rawPaths.filter(p => typeof p === "string"));
   }
 
   /** Suggested fix entry ({version, count}) covering vulnerability `v`, if any. */
   _suggestedFixFor(v) {
-    if (!this._invById) {
-      this._invById = new Map((this.data.inventory || []).map(i => [i.id, i]));
-    }
-    const sf = this._invById.get(v.affected_package_id)?.suggested_fixes;
+    const sf = this._inventoryById().get(v.affected_package_id)?.suggested_fixes;
     if (!sf || !Array.isArray(sf.fixes)) return null;
     const hit = sf.fixes.find(f => (f.vulnerabilities || []).some(x => x.id === v.id));
     return hit ? { version: hit.version, count: hit.count } : null;
@@ -1223,7 +1255,7 @@ export class SarifBuilder {
         level,
         message: {
           text: this._truncate(
-            `${item.name || item.id}@${item.version || ""} — ${label}: ${info.reason || "requires manual compliance review"}`,
+            `${item.name || item.id}${item.version ? "@" + item.version : ""} — ${label}: ${info.reason || "requires manual compliance review"}`,
             2000
           ),
         },
@@ -1312,6 +1344,7 @@ export class SarifBuilder {
     }
 
     const taxonomies = this.buildTaxonomies();
+    const results = this.buildResults();
 
     const run = {
       tool:
@@ -1333,11 +1366,10 @@ export class SarifBuilder {
       invocations:
         this.buildInvocations(),
 
-      results:
-        this.buildResults(),
+      results,
 
       artifacts:
-        this.buildArtifacts(),
+        this.buildArtifacts(results),
 
       properties: {
         ...this._assetProps(),

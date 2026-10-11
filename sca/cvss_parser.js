@@ -193,6 +193,30 @@ function roundUp(value) {
   return (Math.floor(int / 10000) + 1) / 10;
 }
 
+/**
+ * Name the CVSS version a vector (or an OSV severity `type`) belongs to.
+ *
+ *   CVSS:4.0/…  → "CVSSv4.0"      CVSS:3.1/… → "CVSSv3.1"
+ *   CVSS:3.0/…  → "CVSSv3.0"      AV:…/Au:… → "CVSSv2"
+ *
+ * The vector states its own version, so it wins; the OSV `type` ("CVSS_V3",
+ * "CVSS_V4", "CVSS_V2") is only consulted when the vector is not parseable
+ * (e.g. a bare numeric score) and carries no minor version, so it maps to the
+ * major version alone. Returns null when nothing identifies a CVSS version
+ * (Ubuntu labels, missing data) — callers keep that as "unknown", not a guess.
+ */
+export function cvssMethodFromVector(vector, type) {
+  const v = typeof vector === "string" ? vector.trim() : "";
+  const m = v.match(/^CVSS:(\d)\.(\d)\//i);
+  if (m) return `CVSSv${m[1]}.${m[2]}`;
+  if (/^\(?AV:[LAN]\/AC:[HML]\/Au:[MSN]\//.test(v)) return "CVSSv2";
+  const t = String(type || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (t === "CVSSV4") return "CVSSv4";
+  if (t === "CVSSV3") return "CVSSv3";
+  if (t === "CVSSV2") return "CVSSv2";
+  return null;
+}
+
 // ── Main mutation helper (mirrors Python process_vulnerability) ───────────────
 export function processVulnerability(vuln) {
   const severityList = vuln["severity"];
@@ -207,6 +231,7 @@ export function processVulnerability(vuln) {
       vuln["severity"]        = vector;
       vuln["severity_score"]  = null;
       vuln["severity_vector"] = null;
+      vuln["cvss_method"]     = null;
       return;
     }
 
@@ -215,6 +240,7 @@ export function processVulnerability(vuln) {
     vuln["severity"]        = severity;
     vuln["severity_score"]  = parseFloat(score) || null;
     vuln["severity_vector"] = vector;
+    vuln["cvss_method"]     = cvssMethodFromVector(vector, first["type"]);
 
     // Fallback: if severity still unknown but we have a numeric score, bucket it
     if ((severity === "unknown" || severity === null) && score !== null) {
@@ -226,4 +252,5 @@ export function processVulnerability(vuln) {
   vuln["severity"]        = "unknown";
   vuln["severity_score"]  = null;
   vuln["severity_vector"] = null;
+  vuln["cvss_method"]     = null;
 }
