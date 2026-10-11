@@ -561,6 +561,7 @@ function buildMethodology(report, ctx) {
     step: "Policy check",
     detail: `Findings were compared with the configured security policy: block at severity “${policy.severity_threshold ?? "not set"}” or above; ` +
       `unrated issues ${policy.block_unknown_vulnerabilities === true ? "block" : policy.block_unknown_vulnerabilities === false ? "do not block" : "not configured"}` +
+      `; components that could not be checked at all (no version, or a git / URL / local source) ${policy.block_undetermined === true ? "block" : "do not block"}` +
       `; weaknesses on the CISA known-exploited catalog ${policy.block_kev === false ? "do not block" : "block"}` +
       `; exploit-likelihood forecasts ${epssT.enforced ? `block at ${fmtPct(epssT.value)} or above` : "do not block"}` +
       (lic ? `; license risk ${!policy.license_risk_threshold || policy.license_risk_threshold === "none" ? "does not block" : `blocks at “${policy.license_risk_threshold}” or above`}; components with unrecognized licenses ${policy.block_unknown_license_risk === true ? "block" : "do not block"}` : "") +

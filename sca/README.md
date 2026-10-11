@@ -147,12 +147,12 @@ ubel-pip   install-hook                # works on pip/pipx/uv/conda/cargo/compos
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
                                [--license-risk <level>] [--license-block-unknown [true|false]]
                                [--block-kev [true|false]] [--epss-threshold <fraction|percent|none>]
-                               [--reachable-only [true|false]]
+                               [--block-undetermined [true|false]] [--reachable-only [true|false]]
 ```
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only seven modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`, `reachable-only`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only eight modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`, `block-undetermined`, `reachable-only`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
 
 ---
 
@@ -654,6 +654,19 @@ ubel-npm license-block-unknown false   # default
 
 ---
 
+### `block-undetermined`
+
+**All engines.** Blocks the scan when any component is left `undetermined` — it has no version, or it was resolved from git, a tarball URL or a local path (or is a non-Python conda package), so it was never matched against a vulnerability database. See [Policy](#policy) for the full semantics.
+
+```bash
+ubel-npm block-undetermined true
+ubel-npm block-undetermined false   # default
+```
+
+Off by default, because conda and VCS/URL dependencies are common and a fresh scan would otherwise block on them. Turn it on where "could not be checked" should be a failure rather than a warning — typically the install firewall. The block reason names the offending components.
+
+---
+
 ### `reachable-only`
 
 **All engines.** Controls whether the vulnerability policy rules apply to every vulnerability or only to *reachable* ones — see [Policy](#policy) for the full semantics.
@@ -681,6 +694,7 @@ Every policy field that has a mode can also be passed as a flag on `health`, `ch
 | `--license-block-unknown [true\|false]` | `block_unknown_license_risk` | `true` \| `false` (bare flag = `true`) | npm/pnpm/bun/yarn/composer |
 | `--block-kev [true\|false]` | `block_kev` | `true` \| `false` (bare flag = `true`) | all |
 | `--epss-threshold <value>` | `epss_threshold` | a fraction in (0, 1] (`0.1`), a percentage (`10%`), or `none` | all |
+| `--block-undetermined [true\|false]` | `block_undetermined` | `true` \| `false` (bare flag = `true`) | all |
 | `--reachable-only [true\|false]` | `reachable_only` | `true` \| `false` (bare flag = `true`) | all |
 
 Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/conda/cargo/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
@@ -725,6 +739,7 @@ Default policy created on first run:
     "block_unknown_vulnerabilities": true,
     "license_risk_threshold": "none",
     "block_unknown_license_risk": false,
+    "block_undetermined": false,
     "block_kev": true,
     "epss_threshold": 0.1,
     "reachable_only": false
@@ -738,6 +753,8 @@ Default policy created on first run:
 **License risk threshold** — packages whose license risk is at or above this level cause a block. Risk order: `low → medium → high`. Defaults to `"none"` (disabled) — unlike the vulnerability gates above, this is opt-in even when license classification runs, because license detection has real gaps (free-text licenses, missing metadata) and legal risk tolerance for e.g. weak copyleft varies by organization. This threshold never blocks on `unknown` regardless of how strict it's set — see `block_unknown_license_risk` below. This gate is also a no-op outside `health`-mode scans, since `license_stats` is only populated there — see [License Compliance](#license-compliance).
 
 **Block unknown license risk** — separately controls whether packages whose license couldn't be classified at all cause a block. Defaults to `false`, for the same reason `license_risk_threshold` excludes `unknown` from its ordered levels: an unclassified license is more often a detection gap than a real finding. Same `health`-mode-only scope.
+
+**Block undetermined** — when `true`, any component whose state is `undetermined` causes a block: a component with no version, one resolved from git, a tarball URL or a local path (the lockfile parser marks these with a `vcs_url` / `download_url` / `file` purl qualifier), or a non-Python conda package. None of these is matched against OSV/NVD, so a clean result says nothing about them. Defaults to `false`; the block reason lists the component names. It is not affected by `reachable_only`, since there is no vulnerability to be unreachable. Set it persistently with `ubel-npm block-undetermined true`, or for one run with `--block-undetermined`.
 
 **Block KEV** — when `true` (the default), any vulnerability listed in the CISA Known Exploited Vulnerabilities catalog causes a block, regardless of its severity. Policy files created before this field existed pick up the default automatically.
 

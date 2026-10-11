@@ -838,6 +838,7 @@ async function generateHTMLReport(data) {
             const epssT = parseFloat(pol.epss_threshold);
             document.getElementById('policy-epss').textContent = (epssT > 0 && epssT <= 1) ? ('block >= ' + parseFloat((epssT * 100).toFixed(2)) + '%') : 'off';
             document.getElementById('policy-reachable-only').textContent = pol.reachable_only === true ? 'on' : 'off';
+            document.getElementById('policy-block-undetermined').textContent = pol.block_undetermined === true ? 'block' : 'allow';
             const tiWarnings = (reportData.threat_intel && Array.isArray(reportData.threat_intel.warnings)) ? reportData.threat_intel.warnings : [];
             if (tiWarnings.length) {
                 const tiEl = document.getElementById('threat-intel-warning');
@@ -1791,7 +1792,7 @@ async function generateHTMLReport(data) {
             </div>
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div class="glass p-6 rounded-xl lg:col-span-2"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Severity Distribution</h3><div class="h-64"><canvas id="severityChart"></canvas></div></div>
-                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p><div id="threat-intel-warning" class="mt-3 text-xs text-yellow-400" style="display:none"></div></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr><tr><td class="pr-2">Block KEV</td><td id="policy-kev">...</td></tr><tr><td class="pr-2">EPSS Threshold</td><td id="policy-epss">...</td></tr><tr><td class="pr-2">Reachable Only</td><td id="policy-reachable-only">...</td></tr></table></div></div></div>
+                <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold mb-6 uppercase tracking-widest text-neutral-400">Decision Summary</h3><div id="decision-box" class="p-4 rounded-lg bg-neutral-800/50 border border-neutral-700"><p class="text-sm leading-relaxed" id="decision-reason">...</p><div id="threat-intel-warning" class="mt-3 text-xs text-yellow-400" style="display:none"></div></div><div class="mt-6 space-y-4"><div class="flex justify-between items-center text-sm"><span class="text-neutral-500">Policy:</span></div><div class="flex justify-between items-center text-sm"><table class="w-auto text-sm mono"><tr><td class="pr-2">Infections</td><td id="policy-infection">...</td></tr><tr><td class="pr-2">Secrets</td><td id="policy-secrets">...</td></tr><tr><td class="pr-2">Severity Threshold</td><td id="policy-threshold">...</td></tr><tr><td class="pr-2">Block Unknown</td><td id="policy-block-unknown">...</td></tr><tr><td class="pr-2">License Risk Threshold</td><td id="policy-license-risk">...</td></tr><tr><td class="pr-2">Block Unknown License</td><td id="policy-block-unknown-license">...</td></tr><tr><td class="pr-2">Block KEV</td><td id="policy-kev">...</td></tr><tr><td class="pr-2">EPSS Threshold</td><td id="policy-epss">...</td></tr><tr><td class="pr-2">Block Undetermined</td><td id="policy-block-undetermined">...</td></tr><tr><td class="pr-2">Reachable Only</td><td id="policy-reachable-only">...</td></tr></table></div></div></div>
             </div>
         </section>
         <!-- Executive Summary Section (plain-language, for non-technical readers) -->
@@ -3377,6 +3378,14 @@ export async function enrichWithThreatIntel(vulnerabilities) {
 //                                   >= this value (fraction 0-1, so 0.1 = 10%).
 //                                   Default 0.1. "none" disables. Not enforced
 //                                   for CVEs with no/unavailable EPSS score.
+//   block_undetermined            — block when any component is left "undetermined":
+//                                   no version, or resolved from git / a tarball URL /
+//                                   a local path (or a non-Python conda package), so it
+//                                   was never matched against OSV/NVD. Default false:
+//                                   conda and VCS/URL dependencies are common and a
+//                                   fresh scan would otherwise block on them. Turn it on
+//                                   to make "could not be checked" a failure rather
+//                                   than a warning. Not affected by reachable_only.
 //   reachable_only                — apply the vulnerability rules above (severity,
 //                                   unknown severity, KEV, EPSS) to REACHABLE
 //                                   vulnerabilities only. A vulnerability the
@@ -3395,6 +3404,7 @@ const DEFAULT_POLICY = {
   block_unknown_vulnerabilities: true,
   license_risk_threshold:        "none",
   block_unknown_license_risk:    false,
+  block_undetermined:            false,
   block_kev:                     true,
   epss_threshold:                0.1,
   reachable_only:                false,
@@ -3584,7 +3594,7 @@ export class UbelEngineInstance {
   /**
    * Set a single top-level policy field and persist it to disk.
    *
-   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"|"block_unknown_license_risk"|"block_kev"|"epss_threshold"} key
+   * @param {"severity_threshold"|"block_unknown_vulnerabilities"|"license_risk_threshold"|"block_unknown_license_risk"|"block_undetermined"|"block_kev"|"epss_threshold"|"reachable_only"} key
    * @param {string|boolean} value
    */
   setPolicyField(key, value) {

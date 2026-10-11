@@ -789,7 +789,12 @@ export class LinuxManagerInstance {
   runCommand(cmd) {
     const [bin, ...args] = cmd;
     try {
-      const r = spawnSync(bin, args, { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, maxBuffer: 32 * 1024 * 1024 });
+      // Pin the locale: the dnf/yum table headers ("Installing:", "Nothing to
+      // do") and apt's "N newly installed" summary are parsed as English text.
+      // LANGUAGE is cleared because gettext lets it override LC_* on some hosts.
+      const env = { ...process.env, LC_ALL: "C", LANG: "C" };
+      delete env.LANGUAGE;
+      const r = spawnSync(bin, args, { encoding: "utf8", env, timeout: SUBPROCESS_TIMEOUT, maxBuffer: 32 * 1024 * 1024 });
       if (r.error) throw r.error;
       // Mirror Python: return stdout on a clean run OR a non-zero exit that
       // still produced resolvable output (apt-get -s / dnf --assumeno exit

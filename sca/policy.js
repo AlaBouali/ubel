@@ -15,6 +15,12 @@
  *                                              // Known Exploited Vulnerabilities catalog
  *   "epss_threshold": 0.1,                     // block EPSS score >= this (fraction,
  *                                              // 0.1 = 10%); "none" disables
+ *   "block_undetermined": false,               // true = block when any component
+ *                                              // is "undetermined": no version, or
+ *                                              // a source that is not matched
+ *                                              // against any vulnerability database
+ *                                              // (git / tarball URL / local path,
+ *                                              // conda non-Python). Default false.
  *   "reachable_only": false                    // true = the vulnerability rules
  *                                              // (severity, unknown, KEV, EPSS) only
  *                                              // count REACHABLE vulnerabilities;
@@ -167,6 +173,22 @@ export function evaluatePolicy(report) {
     const unknownCount = severityCounts.unknown || 0;
     if (unknownCount > 0) {
       return [false, `Blocked by policy: ${unknownCount} unknown-severity vulnerabilities detected${reachableOnly ? " (reachable vulnerabilities only)" : ""}`];
+    }
+  }
+
+  // ── 3b. Undetermined components (opt-in) ─────────────────────────────────
+  // A component left "undetermined" was never matched against OSV/NVD (no
+  // version, or a git / tarball URL / local-path / conda source), so a clean
+  // result says nothing about it. block_undetermined turns that into a block.
+  // Not affected by reachable_only: there is no vulnerability to be unreachable.
+  if (policy.block_undetermined === true) {
+    const undet = (Array.isArray(report.inventory) ? report.inventory : [])
+      .filter(c => c && c.state === "undetermined");
+    const count = undet.length || (stats?.inventory_stats?.undetermined || 0);
+    if (count > 0) {
+      const names = [...new Set(undet.map(c => c.name || c.id).filter(Boolean))];
+      const shown = names.length > 5 ? `${names.slice(0, 5).join(", ")} and ${names.length - 5} more` : names.join(", ");
+      return [false, `Blocked by policy: ${count} component${count === 1 ? "" : "s"} could not be checked against any vulnerability database (undetermined)${shown ? `: ${shown}` : ""}`];
     }
   }
 

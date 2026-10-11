@@ -27,6 +27,10 @@
  *       Separate from license-risk above: blocks packages whose license
  *       couldn't be classified at all, rather than a specific risk level.
  *       Same health-mode-only scope. Defaults to false.
+ *     block-undetermined <true|false> — set block_undetermined (all engines, default false)
+ *       Blocks when any component is "undetermined": no version, or a git / tarball
+ *       URL / local-path source (or a non-Python conda package) that is never matched
+ *       against a vulnerability database.
  *     reachable-only <true|false> — set reachable_only (all engines, default false)
  *       When true, the vulnerability rules only apply to vulnerabilities the
  *       reachability analysis doesn't confirm unreachable.
@@ -40,6 +44,7 @@
  *     --epss-threshold <value>     — override epss_threshold: block EPSS >= value. Accepts a
  *                                    fraction (0.1), a percentage (10%), or "none" to disable.
  *                                    A bare number above 1 is rejected (ambiguous: 10 vs 10%).
+ *     --block-undetermined [true|false] — override block_undetermined (default false; bare = true)
  *     --reachable-only [true|false] — override reachable_only (default false): apply the
  *                                    vulnerability rules (severity, unknown, KEV, EPSS) to
  *                                    reachable vulnerabilities only (bare = true). Infections and
@@ -328,7 +333,7 @@ function printInitAsset(asset) {
 
 const VALID_MODES      = [
   "check", "install", "health", "init",
-  "threshold", "block-unknown", "license-risk", "license-block-unknown", "reachable-only",
+  "threshold", "block-unknown", "license-risk", "license-block-unknown", "block-undetermined", "reachable-only",
   "install-hook", "uninstall-hook",
 ];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
@@ -372,6 +377,7 @@ const POLICY_FLAGS = {
   "--license-block-unknown": { field: "block_unknown_license_risk",    type: "boolean",  license: true },
   "--block-kev":             { field: "block_kev",                       type: "boolean"  },
   "--epss-threshold":        { field: "epss_threshold",                  type: "epss"     },
+  "--block-undetermined":    { field: "block_undetermined",               type: "boolean"  },
   "--reachable-only":        { field: "reachable_only",                  type: "boolean"  },
 };
 
@@ -598,6 +604,8 @@ async function handleHookMode(engine, mode, extraArgs) {
  *   though only pip/uv/pipx's `init` actually provisions a Python venv there.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
+ * @param {boolean} [programmaticOptions.block_undetermined=false]  When true, block when any component is
+ *   "undetermined" (no version, or a git / URL / local-path source never matched against a vuln DB).
  * @param {boolean} [programmaticOptions.reachable_only=false]  When true, apply the vulnerability policy
  *   rules to reachable vulnerabilities only (unreachable ones are reported but never block).
  * @param {boolean} [programmaticOptions.scan_secrets=true]
@@ -633,6 +641,7 @@ async function main(programmaticOptions) {
       block_unknown_vulnerabilities = undefined,
       license_risk_threshold = undefined,
       block_unknown_license_risk = undefined,
+      block_undetermined = undefined,
       reachable_only = undefined,
       ...rest
     } = programmaticOptions;
@@ -700,6 +709,13 @@ async function main(programmaticOptions) {
         throw new Error(`block_unknown_license_risk must be a boolean, got ${typeof block_unknown_license_risk}`);
       }
       eng.setPolicyField("block_unknown_license_risk", block_unknown_license_risk);
+    }
+
+    if (block_undetermined !== undefined) {
+      if (typeof block_undetermined !== "boolean") {
+        throw new Error(`block_undetermined must be a boolean, got ${typeof block_undetermined}`);
+      }
+      eng.setPolicyField("block_undetermined", block_undetermined);
     }
 
     if (reachable_only !== undefined) {
@@ -831,7 +847,7 @@ async function main(programmaticOptions) {
   // dry-run mechanism differs internally (see pypi_runner.js).
   // ════════════════════════════════════════════════════════════════════════════
   if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo") {
-    const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown", "reachable-only"];
+    const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown", "block-undetermined", "reachable-only"];
     const scanScope =
       (engine === "pip" || engine === "uv" || engine === "conda" || engine === "cargo") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
@@ -920,6 +936,21 @@ async function main(programmaticOptions) {
       const value = raw === "true";
       eng.setPolicyField("block_unknown_vulnerabilities", value);
       console.log(`[+] Policy updated: block_unknown_vulnerabilities = ${value}`);
+      process.exit(0);
+    }
+
+    // ── block-undetermined <true|false> ───────────────────────────────────
+    if (effectiveMode === "block-undetermined") {
+      const raw = (extraArgs[0] || "").toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        console.error("[!] Provide true or false");
+        console.error(`[!] Example: ubel-${engine} block-undetermined true`);
+        process.exit(1);
+      }
+      const value = raw === "true";
+      eng.setPolicyField("block_undetermined", value);
+      console.log(`[+] Policy updated: block_undetermined = ${value}`);
+      console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path / non-Python conda source) blocks. Defaults to false.");
       process.exit(0);
     }
 
@@ -1072,6 +1103,21 @@ async function main(programmaticOptions) {
     eng.setPolicyField("block_unknown_license_risk", value);
     console.log(`[+] Policy updated: block_unknown_license_risk = ${value}`);
     console.log("[i] Only enforced against `health`-mode scans, and separate from license-risk — this blocks packages whose license couldn't be classified at all, not a specific risk level.");
+    process.exit(0);
+  }
+
+  // ── block-undetermined <true|false> ──────────────────────────────────────────
+  if (effectiveMode === "block-undetermined") {
+    const raw = (extraArgs[0] || "").toLowerCase();
+    if (raw !== "true" && raw !== "false") {
+      console.error("[!] Provide true or false");
+      console.error("[!] Example: ubel-npm block-undetermined true");
+      process.exit(1);
+    }
+    const value = raw === "true";
+    eng.setPolicyField("block_undetermined", value);
+    console.log(`[+] Policy updated: block_undetermined = ${value}`);
+    console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path source) blocks. Defaults to false.");
     process.exit(0);
   }
 
