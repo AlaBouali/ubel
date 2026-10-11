@@ -1382,21 +1382,21 @@ Zips written by earlier versions sit directly in `history/<mode>/` and are left 
 
 Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing the scan looked at. It is always exactly one of these seven values — never the scan mode, never `null`:
 
-| `asset_type` | What was scanned | Scans that produce it |
-|---|---|---|
-| `codebase` | A source repository or project folder: its dependencies, licenses, secrets and source code | `ubel-npm` / `-pnpm` / `-bun` / `-yarn` / `-pip` / `-pipx` / `-uv` / `-conda` / `-cargo` / `-composer` (`health`, `check`, `install`), `ubel-secrets`, `ubel-license`, `ubel-sast`, `ubel-mal`, `ubel-cicd`, and the VS Code extension's *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* |
-| `cloud` | A cloud account's configuration (AWS / GCP / Azure) | `ubel-cloud` |
-| `easm` | Externally exposed infrastructure: URLs, domains, IPs and hosts | `ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm` |
-| `machine` | A host machine: its OS packages and installed developer tools and runtimes | `ubel-apt`, `ubel-dnf`, `ubel-yum`, `ubel-platform`, and the VS Code extension's *Scan Host Platform* |
-| `agent` | An AI-agent workspace or sandbox (OS, runtimes, tools and dependencies) | `ubel-agent` |
-| `editor` | An editor's installed extensions | the VS Code extension's *Scan VS Code Extensions* |
-| `docker` | A container image | `ubel-docker` |
+| `asset_type` | What was scanned | Scan modes (history `<mode>`) | Scans that produce it |
+|---|---|---|---|
+| `codebase` | A source repository or project folder: dependencies, source code, malicious code | **`sca`, `firewall`, `sast`, `malware`** — and, because they scan the same folder with the same engine, `licenses` and `secrets` | SCA `health` and firewall `check` / `install` for `ubel-npm` / `-pnpm` / `-bun` / `-yarn` / `-pip` / `-pipx` / `-uv` / `-conda` / `-cargo` / `-composer`; `ubel-sast`; `ubel-mal`; `ubel-license`; `ubel-secrets`; `ubel-cicd`; and the VS Code extension's *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* |
+| `cloud` | A cloud account's configuration (AWS / GCP / Azure) | **`cloud`** | `ubel-cloud` |
+| `easm` | Externally exposed infrastructure: URLs, domains, IPs and hosts | **`easm`** — the EASM module's other modes `url`, `domain` and `host` too | `ubel-easm`, `ubel-url`, `ubel-domain`, `ubel-host` |
+| `machine` | A host machine: its OS packages and installed developer tools and runtimes | `os` (and `sca` health scans with scope `developer_platform`) | `ubel-apt`, `ubel-dnf`, `ubel-yum`, `ubel-platform`, and the VS Code extension's *Scan Host Platform* |
+| `agent` | An AI-agent workspace or sandbox (OS, runtimes, tools and dependencies) | `sca` with scope `agent` | `ubel-agent` |
+| `editor` | An editor's installed extensions | `sca` with scope `editor_extension` | the VS Code extension's *Scan VS Code Extensions* |
+| `docker` | A container image | `sca` with scope `container-image` | `ubel-docker` |
 
 How it is decided (`assetTypeFor()` in `sca/report_naming.js`, the only place the mapping lives):
 
 1. A scan's **`scan_scope`** wins when it names one of the special kinds: `agent` → `agent`; `editor_extension` → `editor`; `container-image` → `docker`; `developer_platform`, `cli_tool` or `linux_machine` → `machine`.
 2. Otherwise the scan's **history mode** decides: `os` → `machine`; `cloud` → `cloud`; `easm`, `host`, `domain` and `url` → `easm`.
-3. Everything else — `sca`, `firewall`, `licenses`, `secrets`, `sast`, `malware`, and the `repository` and `cicd` scopes — is `codebase`.
+3. Everything else — the `sca`, `firewall`, `sast` and `malware` scans (plus `licenses` and `secrets`, and the `repository` and `cicd` scopes) — is `codebase`.
 
 Three things to keep straight:
 

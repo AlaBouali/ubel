@@ -422,9 +422,9 @@ const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine
  *   scan_scope developer_platform / cli_tool /
  *              linux_machine, or mode "os"              → machine
  *   mode cloud                                          → cloud
- *   mode easm / host / domain / url                     → easm
- *   everything else (sca, firewall, licenses, secrets,
- *   sast, malware, CI/CD)                             → codebase
+ *   mode easm (and the EASM modes host / domain / url)  → easm
+ *   everything else: modes sca, firewall, sast, malware
+ *   (and licenses, secrets, scope cicd)                 → codebase
  *
  * The scope wins over the mode, so `ubel-agent` (history mode "sca") is an agent
  * and `ubel-platform` is a machine.
