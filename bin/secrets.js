@@ -5,11 +5,15 @@ import { runAssetCommand } from "../sca/asset_cli.js";
 const assetCmd = runAssetCommand(process.argv.slice(2), { cli: "ubel-secrets" });
 if (assetCmd !== null) process.exit(assetCmd);
 
-import { SCA_scan } from "../sca/main.js";
+import { SCA_scan, provisionAssetForSecrets } from "../sca/main.js";
 import { handleSecretsCli } from "../sca/secrets_cli.js";
 
 async function run() {
   const args = process.argv.slice(2);
+
+  // Every CLI creates its asset id if it doesn't exist — including the --history /
+  // --write-baseline / hook paths below, which never reach main().
+  provisionAssetForSecrets(args);
 
   // --history / --write-baseline (and their options) are handled by
   // secrets_cli.js: it prints its own results and sets process.exitCode

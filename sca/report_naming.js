@@ -42,7 +42,8 @@
 //
 // Asset identity: every .ubel/ folder a scan writes into holds a
 // ubel_asset.json ({ "asset_id": "<uuid>-<uuid>", "asset_name": "<readable>",
-// "created_at": "<iso>" }), created on first use; the id never changes. An id is
+// "created_at": "<iso>" }), created when a CLI starts (every ubel-* CLI creates it if it
+// doesn't exist; `ubel-* init` does so explicitly and prints it) — see provisionAsset(); the id never changes. An id is
 // two UUIDs joined by a hyphen (73 characters). Zips are filed under the asset's
 // id — history/<mode>/<asset_id>/ — so assets sharing one history folder stay
 // apart, and the id, name and type are written into each report's own metadata
@@ -301,9 +302,63 @@ export function isValidAssetId(id) {
 }
 
 /**
+ * Make sure <ubelDir>/ubel_asset.json exists — the "create one if not exists" step every
+ * ubel-* CLI runs at startup, and what `init` runs and reports. ensureAsset() does the
+ * work (existing id never changed); this adds whether the file was just created and
+ * honours --asset-id.
+ *
+ *   • --asset-id given (setRuntimeAssetId) → nothing is created or changed on disk;
+ *     returns { asset_id: <that id>, runtime: true, created: false }.
+ *   • otherwise → { asset_id, asset_name, created, runtime: false }, `created` true only
+ *     when this call minted the id.
+ *   • null when the file could not be written (read-only folder, …) — ensureAsset()
+ *     already warned; the caller carries on, like a scan always has.
+ *
+ * @param {string} ubelDir  the .ubel folder (not the folder root)
+ * @returns {{asset_id: string, asset_name: string|null, created: boolean, runtime: boolean}|null}
+ */
+export function provisionAsset(ubelDir) {
+  if (runtimeAssetId) {
+    return { asset_id: runtimeAssetId, asset_name: null, created: false, runtime: true };
+  }
+  const existed = readAssetFile(path.join(ubelDir, ASSET_FILE_NAME)) !== null;
+  const asset = ensureAsset(ubelDir);
+  return asset ? { ...asset, created: !existed, runtime: false } : null;
+}
+
+/**
+ * One-line, stderr-only notice for a freshly created asset id, so a CLI whose stdout
+ * is machine-read (JSON) is never polluted. Silent when the id already existed, was
+ * given with --asset-id, or could not be written.
+ *
+ * @param {ReturnType<typeof provisionAsset>} asset
+ * @param {string} ubelDir
+ */
+export function announceNewAsset(asset, ubelDir) {
+  if (!asset || !asset.created) return;
+  console.error(`[+] New asset id created: ${asset.asset_id}  (${asset.asset_name})  → ${path.join(ubelDir, ASSET_FILE_NAME)}`);
+}
+
+/**
+ * provisionAsset() + announceNewAsset() for a scan folder: creates
+ * <workingDir>/.ubel/ubel_asset.json if it doesn't exist (the cwd when `workingDir` is
+ * omitted). The one call the non-SCA CLIs (ubel-sast / -mal / -chunk, ubel-cloud, the EASM
+ * binaries) make at startup, with the same working directory they later report into.
+ *
+ * @param {string} [workingDir]
+ * @returns {ReturnType<typeof provisionAsset>}
+ */
+export function provisionAssetAt(workingDir) {
+  const ubelDir = path.join(path.resolve(workingDir || process.cwd()), ".ubel");
+  const asset   = provisionAsset(ubelDir);
+  announceNewAsset(asset, ubelDir);
+  return asset;
+}
+
+/**
  * Read-only lookup of <ubelDir>/ubel_asset.json. Unlike ensureAsset() this
- * never creates or repairs anything — it is what the `asset-id` command of every CLI uses, so
- * merely asking for an id can't mint one.
+ * never creates or repairs anything — it is what `set-asset-id` and the history
+ * lookups use, where minting an id as a side effect would be wrong.
  *
  * @param {string} ubelDir  the .ubel folder (not the folder root)
  * @returns {{asset_id: string, asset_name?: string, created_at?: string}|null}

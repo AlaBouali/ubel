@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -531,6 +531,11 @@ function runChunkCommand(args) {
   const root = opts.workingDir ? path.resolve(opts.workingDir) : process.cwd();
   if (!fs.existsSync(root)) { console.error(`Error: path not found — ${root}`); process.exit(1); }
 
+  // Same as analyze / malware: the scanned folder gets its asset id (and the .ubel/ ignore entries
+  // that go with creating .ubel/ there).
+  ensureUbelIgnoreFiles(root, { notify: true });
+  provisionAssetAt(root);
+
   const chunks     = buildChunks(root, opts);
   const outputPath = path.join(process.cwd(), 'sast_chunks.json');
   atomicWriteFile(outputPath, JSON.stringify(chunks, null, 2));
@@ -621,6 +626,7 @@ function runAnalyzeCommand(args) {
   // Before the first LLM call or file read: keep .ubel/ and .ubelignore out of
   // git and docker contexts (this run is about to create .ubel/ in workingDir).
   ensureUbelIgnoreFiles(opts.workingDir, { notify: true });
+  provisionAssetAt(opts.workingDir); // the asset id exists before the first LLM call, not only once the report is written
 
   analyzeSast([], opts)
     .then(results => writeAnalyzeReports(results, opts))
@@ -695,6 +701,7 @@ function runMalwareCommand(args) {
 
   // Same guard as `analyze` above: this run creates .ubel/ in workingDir too.
   ensureUbelIgnoreFiles(opts.workingDir, { notify: true });
+  provisionAssetAt(opts.workingDir);
 
   analyzeMalware([], opts)
     .then(results => writeMalwareReports(results, opts))
@@ -829,7 +836,7 @@ export async function main(programmaticOptions) {
 
     // .ubel/ is only created when reports are saved, so a caller that passes
     // save_reports: false (a pure in-memory scan) gets no changes to its tree.
-    if (save_reports) ensureUbelIgnoreFiles(opts.workingDir);
+    if (save_reports) { ensureUbelIgnoreFiles(opts.workingDir); provisionAssetAt(opts.workingDir); }
 
     if (mode === "malware") {
       const results = await analyzeMalware([], opts);

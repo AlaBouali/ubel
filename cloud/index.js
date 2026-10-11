@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -272,6 +272,7 @@ async function writeCloudReports(reporter, meta, opts) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const providers = args.provider.split(',').map((p) => p.trim().toLowerCase());
+  provisionAssetAt(args.workingDir); // asset id exists before any provider API call
   const log = args.verbose ? (msg) => console.log(msg) : () => {};
 
   if (args.profile) process.env.AWS_PROFILE = args.profile;

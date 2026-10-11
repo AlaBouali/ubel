@@ -20,8 +20,12 @@
 // ubel_asset.json, which is not created or changed. Use set-asset-id to make a
 // folder's id permanent.
 //
-// runAssetCommand() returns an exit code (0 ok, 1 "nothing found", 2 usage /
-// error) when args[0] is one of the commands, or null when it isn't — the bin
+// Every CLI creates its asset id if it doesn't exist, when it starts (for the SCA CLIs
+// that is engine.provisionAsset(), for sast/cloud/EASM report_naming.provisionAssetAt()),
+// so `asset-id` below creates one too instead of reporting "none yet". `init` creates it
+// explicitly and prints it. --asset-id and set-asset-id are the ways to NOT use a fresh id.
+//
+// runAssetCommand() returns an exit code (0 ok, 2 usage / error) when args[0] is one of the commands, or null when it isn't — the bin
 // wrapper then carries on with its normal scan. Same shape as secrets_cli.js.
 //
 // The apt/dnf/yum CLIs have no asset folder: their id is the machine tag in
@@ -32,7 +36,7 @@
 import fs from "fs";
 import path from "path";
 import {
-  ASSET_FILE_NAME, ASSET_ID_EXAMPLE, machineUbelDir, readAsset, setAssetId, historyForAsset, isValidAssetId,
+  ASSET_FILE_NAME, ASSET_ID_EXAMPLE, machineUbelDir, readAsset, ensureAsset, setAssetId, historyForAsset, isValidAssetId,
   setRuntimeAssetId,
 } from "./report_naming.js";
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
@@ -63,19 +67,21 @@ fields in the file are kept. Nothing else on disk is moved or rewritten.`;
 function showHelp(cli, machineOnly) {
   return `Usage: ${cli} asset-id ${machineOnly ? "" : "[folder] "}[options]
 
-Print the asset id stored in ${machineOnly ? "$HOME/.ubel/ubel_asset.json" : "<folder>/.ubel/ubel_asset.json"}. Read-only: it
-never creates an id (the first scan ${machineOnly ? "on this machine" : "in a folder"} does that).
+Print the asset id stored in ${machineOnly ? "$HOME/.ubel/ubel_asset.json" : "<folder>/.ubel/ubel_asset.json"}, creating it first
+if ${machineOnly ? "this machine" : "the folder"} has none yet (every ${cli.replace(/-.*/, "")}-* CLI does the same when it starts, and \`${cli} init\` does it explicitly).
 ${machineOnly ? "" : `
 Arguments:
   [folder]       asset folder (default: current directory)
 `}
 Options:
-  --json         print { asset_id, asset_name, created_at, file } as JSON
+  --json         print { asset_id, asset_name, created_at, file, created } as JSON
+                 (created: true when this call minted the id)
 ${machineOnly ? "" : `  --machine      show the machine tag ($HOME/.ubel/ubel_asset.json) used by
                  ubel-apt / ubel-dnf / ubel-yum
 `}  -h, --help     show this help
 
-Exit codes: 0 found, 1 no asset id there yet, 2 error.`;
+Exit codes: 0 ok (the id existed or was just created), 2 error (bad arguments,
+or the file could not be written).`;
 }
 
 function versionHelp(cli) {
@@ -192,11 +198,19 @@ export function showAssetIdCli(args, { cli = "ubel", machine: machineOnly = fals
   if (target.error) { console.error(`[!] ${target.error}`); return 2; }
 
   const file = path.join(target.ubelDir, ASSET_FILE_NAME);
-  const asset = readAsset(target.ubelDir);
-  if (!asset) {
-    console.error(`[!] no asset id for ${target.label} yet (${file} is missing or invalid). `
-      + `The first UBEL scan there creates one, or link it to an existing id with: ${cli} set-asset-id <asset-id>`);
-    return 1;
+  let asset = readAsset(target.ubelDir);
+  const created = !asset;
+  if (created) {
+    // Create-if-missing, like every UBEL CLI does when it starts. A folder that doesn't exist was
+    // already rejected by resolveUbelDir, so this never invents a folder.
+    ensureAsset(target.ubelDir);
+    asset = readAsset(target.ubelDir);
+    if (!asset) {
+      console.error(`[!] no asset id for ${target.label} and ${file} could not be written. `
+        + `Link it to an existing id with: ${cli} set-asset-id <asset-id>`);
+      return 2;
+    }
+    console.error(`[+] New asset id created: ${asset.asset_id}  (${asset.asset_name})  → ${file}`);
   }
 
   if (flags.json) {
@@ -205,6 +219,7 @@ export function showAssetIdCli(args, { cli = "ubel", machine: machineOnly = fals
       asset_name: asset.asset_name ?? null,
       created_at: asset.created_at ?? null,
       file,
+      created,
     }, null, 2));
   } else {
     console.log(asset.asset_id);

@@ -14,7 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -3430,6 +3430,32 @@ export class UbelEngineInstance {
 
     this.vulns_ids_found  = new Set();
 
+  }
+
+  // ── Asset identity ──────────────────────────────────────────────────────────
+
+  /**
+   * The .ubel folder whose ubel_asset.json is this scan's asset id — the same folder
+   * scan() files its report under (see assetFor() in scan()). docker passes its own
+   * (the scanned rootfs is throwaway); apt/dnf/yum resolve to $HOME/.ubel.
+   */
+  assetUbelDir(override = null) {
+    return override || path.dirname(path.dirname(this.reportsLocation));
+  }
+
+  /**
+   * Create this scan's asset id if it doesn't exist yet. Run by every CLI at startup
+   * (and by `init`, which prints the result) so the id exists even for modes that never
+   * write a report (init, threshold, block-unknown, …). No-op with --asset-id.
+   * Quiet when the id already existed; one stderr line when it was just created.
+   *
+   * @returns {{asset_id: string, asset_name: string|null, created: boolean, runtime: boolean, ubelDir: string}|null}
+   */
+  provisionAsset(override = null, { announce = true } = {}) {
+    const ubelDir = this.assetUbelDir(override);
+    const asset   = provisionAsset(ubelDir);
+    if (announce) announceNewAsset(asset, ubelDir);
+    return asset ? { ...asset, ubelDir } : null;
   }
 
   // ── Policy helpers ──────────────────────────────────────────────────────────

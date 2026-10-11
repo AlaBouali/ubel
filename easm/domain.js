@@ -37,6 +37,7 @@ import {
   printScanSummary,
   collectScanMetadata,
 } from './lib/report_output.js';
+import { provisionAssetAt } from '../sca/report_naming.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version;
@@ -324,6 +325,7 @@ async function discoverTargets(args, log) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  provisionAssetAt(args.workingDir); // asset id exists before any network traffic, not only once the report is written
   const label = describeDomains(args.domains);
 
   if (!args.quiet) {

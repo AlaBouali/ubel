@@ -94,7 +94,7 @@
  *   auto-detection between them, same one-binary-per-tool shape as
  *   npm/pnpm/bun):
  *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> [packages...]
- *     node src/main.js cargo   <health|check|install|threshold|block-unknown|install-hook|uninstall-hook> [crate[@req]...]   (no init)
+ *     node src/main.js cargo   <health|check|install|threshold|block-unknown|install-hook|uninstall-hook> [crate[@req]...]   (init only creates the asset id)
  *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> <package>
  *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]                       (no hook modes)
  *
@@ -220,10 +220,12 @@ import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
 import { ensureUbelIgnoreEntries } from "./ignore_files.js";
+import { provisionAsset, announceNewAsset, ASSET_FILE_NAME } from "./report_naming.js";
 import { installHook as installScaHook, uninstallHook as uninstallScaHook } from "./sca_hook.js";
 
 import fs from 'node:fs/promises';
 import { readFileSync, writeFileSync } from "node:fs";
+import fs_sync from "node:fs";
 
 async function createTargetPath(dirPath) {
   try {
@@ -268,6 +270,51 @@ export function ensureUbelIgnoreFilesForSecrets(argv = process.argv.slice(2)) {
   if (flags.has("--staged") || flags.has("--uninstall-hook")) return null;
   const target = argv.find(a => !a.startsWith("-")) || process.cwd();
   return ensureUbelIgnoreFiles(target, { notify: !flags.has("--json") });
+}
+
+/**
+ * `ubel-secrets` counterpart of the asset-id step main() does for every other CLI:
+ * create <target>/.ubel/ubel_asset.json if it doesn't exist yet. bin/secrets.js calls
+ * it right before handleSecretsCli(), whose --history / --write-baseline / hook flags
+ * never reach main(). Same target and the same skips as ensureUbelIgnoreFilesForSecrets
+ * (--staged runs inside `git commit`; --uninstall-hook removes things), and never on
+ * --help. A no-op with --asset-id. Never throws.
+ *
+ * @param {string[]} [argv=process.argv.slice(2)]
+ */
+export function provisionAssetForSecrets(argv = process.argv.slice(2)) {
+  const flags = new Set(argv.filter(a => a.startsWith("-")).map(a => a.split("=")[0]));
+  if (flags.has("--staged") || flags.has("--uninstall-hook") || flags.has("--help") || flags.has("-h")) return null;
+  const target = path.resolve(argv.find(a => !a.startsWith("-")) || process.cwd());
+  try {
+    if (!fs_sync.statSync(target).isDirectory()) return null;
+  } catch { return null; }
+  const ubelDir = path.join(target, ".ubel");
+  const asset   = provisionAsset(ubelDir);
+  if (!flags.has("--json")) announceNewAsset(asset, ubelDir);
+  return asset;
+}
+
+/**
+ * What `init` reports about the asset id: created now, already there, or taken from
+ * --asset-id (nothing written). stdout, since the id is init's actual result.
+ *
+ * @param {ReturnType<UbelEngineInstance["provisionAsset"]>} asset
+ * @returns {boolean} false when the id could not be written (ensureAsset already warned)
+ */
+function printInitAsset(asset) {
+  if (!asset) {
+    console.error("[!] init could not create the asset id — see the warning above.");
+    return false;
+  }
+  if (asset.runtime) {
+    console.log(`[i] Asset id (from --asset-id, nothing written): ${asset.asset_id}`);
+    return true;
+  }
+  console.log(`[+] Asset id ${asset.created ? "created" : "already exists"}: ${asset.asset_id}`);
+  if (asset.asset_name) console.log(`    name: ${asset.asset_name}`);
+  console.log(`    file: ${path.join(asset.ubelDir, ASSET_FILE_NAME)}`);
+  return true;
 }
 
 const VALID_MODES      = [
@@ -607,6 +654,10 @@ async function main(programmaticOptions) {
     if (venvDir !== undefined) eng.venvDir = venvDir;
 
     eng.initiateLocalPolicy();
+    // Create the asset id if it doesn't exist (a no-op with --asset-id). Only when reports are
+    // saved — a pure in-memory scan leaves the tree untouched, like ensureUbelIgnoreFiles above.
+    // docker passes asset_ubel_dir (its projectRoot is a throwaway rootfs).
+    if (save_reports) eng.provisionAsset(rest.asset_ubel_dir ?? null);
     // Apply policy overrides if provided
     if (severity_threshold !== undefined) {
       const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
@@ -686,6 +737,8 @@ async function main(programmaticOptions) {
       console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo");
       process.exit(1);
     }
+    // The hook belongs to the repo in the cwd, so that is where its asset id lives.
+    announceNewAsset(provisionAsset(path.join(process.cwd(), ".ubel")), path.join(process.cwd(), ".ubel"));
     await handleHookMode(engine, mode, extraArgs);
     return;
   }
@@ -784,15 +837,19 @@ async function main(programmaticOptions) {
     console.log(`Policy location: ${eng.policyDir}`);
     console.log();
 
-    // cargo has no environment to provision, so `init` is rejected outright
-    // instead of silently falling back to a health scan.
+    // cargo has no environment to provision, so there is nothing for `init` to build —
+    // but it still creates the asset id, which is what init means for every ubel-* CLI.
     if (engine === "cargo" && mode === "init") {
-      console.error("[!] ubel-cargo has no init mode — there is no environment to create. Use check | install | health.");
-      process.exit(1);
+      const asset = eng.provisionAsset(null, { announce: false });
+      console.log("[i] ubel-cargo has no environment to create; init only provisions the asset id.");
+      process.exit(printInitAsset(asset) ? 0 : 1);
     }
 
     const effectiveMode = PIP_LINUX_VALID_MODES.includes(mode) ? mode : "health";
     eng.checkMode = effectiveMode;
+
+    // Every CLI creates the asset id if it doesn't exist (init prints it below).
+    const asset = eng.provisionAsset(null, { announce: effectiveMode !== "init" });
 
     // ── init — provisions a venv regardless of engine, matching
     //    __main__.py's _run_mode(), which does the same unconditionally.
@@ -807,7 +864,7 @@ async function main(programmaticOptions) {
       } else {
         new PypiManagerInstance().initVenv(venvDir);
       }
-      process.exit(0);
+      process.exit(printInitAsset(asset) ? 0 : 1);
     }
 
     // ── threshold <level> ─────────────────────────────────────────────────
@@ -909,9 +966,13 @@ async function main(programmaticOptions) {
   const effectiveMode = VALID_MODES.includes(mode) ? mode : "health";
   eng.checkMode = effectiveMode;
 
+  // Every CLI creates the asset id if it doesn't exist (init prints it below).
+  const asset = eng.provisionAsset(null, { announce: effectiveMode !== "init" });
+
   // ── init ────────────────────────────────────────────────────────────────────
+  // Nothing to provision for the npm family, so init's job is the asset id.
   if (effectiveMode === "init") {
-    process.exit(0);
+    process.exit(printInitAsset(asset) ? 0 : 1);
   }
 
   // ── threshold <level> ───────────────────────────────────────────────────────
@@ -1067,6 +1128,13 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
   // ignore entries, and they must exist before anything is pulled or extracted.
   // No-op when the CLI branch already did it (cached per directory).
   ensureUbelIgnoreFiles(process.cwd());
+
+  // The asset id lives in the cwd's .ubel (the rootfs below is thrown away). Created before
+  // anything is pulled or extracted; the main() call further down then finds it already there.
+  {
+    const dockerAssetDir = path.join(process.cwd(), ".ubel");
+    announceNewAsset(provisionAsset(dockerAssetDir), dockerAssetDir);
+  }
 
   const scanner = new DockerImageScanner(image);
   let report;
