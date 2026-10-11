@@ -315,7 +315,7 @@ const BUSINESS_IMPACT = {
 };
 
 // ── helpers for the one-page summary ─────────────────────────────────────────
-// The report's own id (UBEL-<tag>-<asset_uuid_hash>-<uuid>, meta.report_id, made once
+// The report's own id (UBEL-<tag>-<asset_id>-<report_uuid>, meta.report_id, made once
 // per scan) is used as is; a report without one falls back to a content-derived id.
 function makeReportId(prefix, generatedAt, tool, name, ownId) {
   if (ownId) return ownId;

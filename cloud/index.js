@@ -52,7 +52,7 @@ Asset commands (run instead of a scan):
   ubel-cloud set-asset-id <id> [folder]    Link this folder to an existing asset id
   ubel-cloud version [--json]              Print the UBEL version
 
-Asset option (any command; the id is <uuid>-<uuid>):
+Asset option (any command; the id is 32 hex characters):
   --asset-id <id>                          Use this asset id for this run: it is written into the
                                            reports and the history zip; nothing is saved to disk
 

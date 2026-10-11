@@ -711,7 +711,7 @@ async function main(programmaticOptions) {
   const [, , engine, mode, ...extraArgs] = process.argv;
 
   if (!engine) {
-    console.error("Usage: ubel-<engine> <mode> [args...] [--asset-id <uuid>-<uuid>]");
+    console.error("Usage: ubel-<engine> <mode> [args...] [--asset-id <asset-id>]");
     process.exit(1);
   }
 

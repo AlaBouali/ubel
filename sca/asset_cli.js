@@ -11,7 +11,7 @@
 // in bin/ calls runAssetCommand() first, before any scan setup, so these
 // words never reach a scanner's own argument parsing.)
 //
-// An asset id is <uuid>-<uuid>.
+// An asset id is a UUID v4 without hyphens (32 hex characters).
 //
 // --asset-id <asset-id> (or --asset-id=<asset-id>) may appear anywhere on the
 // command line of any CLI. runAssetCommand() removes it from process.argv, so
@@ -52,7 +52,7 @@ asset's earlier history ($HOME/.ubel/history/<mode>/<asset-id>/) instead of
 starting a new asset. Writes ${machineOnly ? "$HOME/.ubel/ubel_asset.json" : "<folder>/.ubel/ubel_asset.json"}.
 
 Arguments:
-  <asset-id>   the id to link to, <uuid>-<uuid> (see \`${cli} asset-id\` in the original ${machineOnly ? "setup" : "folder"})
+  <asset-id>   the id to link to, 32 hex characters (see \`${cli} asset-id\` in the original ${machineOnly ? "setup" : "folder"})
 ${machineOnly ? "" : "  [folder]       asset folder (default: current directory)\n"}
 Options:
   --name <name>  also set the readable asset name (default: keep the current one)
@@ -153,7 +153,7 @@ export function setAssetIdCli(args, { cli = "ubel", machine: machineOnly = false
   if (!assetId) { console.error(`[!] missing <asset-id>\n\n${help}`); return 2; }
   if (extra.length) { console.error(`[!] unexpected argument: ${extra[0]}\n\n${help}`); return 2; }
   if (!isValidAssetId(assetId)) {
-    console.error(`[!] not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
+    console.error(`[!] not a valid asset id (expected 32 hex characters, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
     return 2;
   }
 
@@ -271,7 +271,7 @@ export function extractAssetIdFlag(args) {
       continue;
     }
     if (!isValidAssetId(value)) {
-      return { error: `not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${value}` };
+      return { error: `not a valid asset id (expected 32 hex characters, like ${ASSET_ID_EXAMPLE}): ${value}` };
     }
     assetId = value.trim().toLowerCase();
   }
@@ -298,7 +298,7 @@ export function extractAssetIdFlag(args) {
 export function runAssetCommand(args, ctx = {}) {
   const cli = ctx.cli || "ubel";
   const extracted = extractAssetIdFlag(args);
-  if (extracted.error) { console.error(`[!] ${extracted.error}\n    usage: ${cli} <args> --asset-id <uuid>-<uuid>`); return 2; }
+  if (extracted.error) { console.error(`[!] ${extracted.error}\n    usage: ${cli} <args> --asset-id <asset-id>`); return 2; }
   if (extracted.assetId) {
     setRuntimeAssetId(extracted.assetId);
     process.argv.splice(2, process.argv.length - 2, ...extracted.args);

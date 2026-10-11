@@ -69,9 +69,9 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |
 | `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of the given IPs/domains, combined sweep |
-| *every binary above* | Also accepts three commands instead of a scan: `<binary> asset-id` (show the folder's asset id, creating it if there is none yet — every binary also creates it when it starts, and `<binary> init` does so explicitly), `<binary> set-asset-id <id>` (link the folder to an existing asset id so its scans join that asset's history) and `<binary> version` — e.g. `ubel-npm version`, `ubel-sast asset-id` — and a `--asset-id <uuid>-<uuid>` flag that sets the asset id for a single run (written into the report, SBOM and SARIF, and used to file the history zip). See [Asset id](sca/README.md#asset-id-ubel_assetjson) |
+| *every binary above* | Also accepts three commands instead of a scan: `<binary> asset-id` (show the folder's asset id, creating it if there is none yet — every binary also creates it when it starts, and `<binary> init` does so explicitly), `<binary> set-asset-id <id>` (link the folder to an existing asset id so its scans join that asset's history) and `<binary> version` — e.g. `ubel-npm version`, `ubel-sast asset-id` — and a `--asset-id <uuid>` flag that sets the asset id for a single run (written into the report, SBOM and SARIF, and used to file the history zip). See [Asset id](sca/README.md#asset-id-ubel_assetjson) |
 | *every report* | Carries an `asset_type` — `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker` — saying what kind of thing was scanned (shown as *Asset type* in the HTML report). See [Asset types](sca/README.md#asset-types-asset_type) |
-| *every report* | Has a unique `report_id`, `UBEL-<tag>-<asset_uuid_hash>-<uuid>` — the same in its JSON, HTML, SBOM and SARIF. See [Report ID](sca/README.md#report-id-report_id) |
+| *every report* | Has a unique `report_id`, `UBEL-<tag>-<asset_id>-<report_uuid>` — the same in its JSON, HTML, SBOM and SARIF. See [Report ID](sca/README.md#report-id-report_id) |
 
 ## Quick start
 

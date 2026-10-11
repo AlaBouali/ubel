@@ -41,10 +41,10 @@
 // atomic rename, so a reader never sees a half-written report.
 //
 // Asset identity: every .ubel/ folder a scan writes into holds a
-// ubel_asset.json ({ "asset_id": "<uuid>-<uuid>", "asset_name": "<readable>",
+// ubel_asset.json ({ "asset_id": "<32 hex>", "asset_name": "<readable>",
 // "created_at": "<iso>" }), created when a CLI starts (every ubel-* CLI creates it if it
 // doesn't exist; `ubel-* init` does so explicitly and prints it) — see provisionAsset(); the id never changes. An id is
-// two UUIDs joined by a hyphen (73 characters). Zips are filed under the asset's
+// a random UUID v4 without hyphens (32 hex characters). Zips are filed under the asset's
 // id — history/<mode>/<asset_id>/ — so assets sharing one history folder stay
 // apart, and the id, name and type are written into each report's own metadata
 // (and into the SBOM / SARIF output) so a zip that is moved or renamed still says
@@ -71,7 +71,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { randomUUID, createHash } from "crypto";
+import { randomUUID } from "crypto";
 import { execFileSync } from "child_process";
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -158,15 +158,22 @@ export const ASSET_FILE_NAME = "ubel_asset.json";
 
 const UUID_PART = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
-/** An asset id is two UUIDs joined by a hyphen: <uuid>-<uuid>. */
-const ASSET_ID_RE = new RegExp(`^${UUID_PART}-${UUID_PART}$`, "i");
+const HEX32 = "[0-9a-f]{32}";
+
+/**
+ * An asset id is a UUID v4 without hyphens (32 hex characters). The hyphenated forms
+ * written by older versions (<uuid> and <uuid>-<uuid>) are still accepted, so existing
+ * ubel_asset.json files keep their id.
+ */
+const ASSET_ID_PART = `${HEX32}|${UUID_PART}(?:-${UUID_PART})?`;
+const ASSET_ID_RE = new RegExp(`^(?:${ASSET_ID_PART})$`, "i");
 
 /** Example id shown in help and error messages. */
-export const ASSET_ID_EXAMPLE = "3f6c2a9e-1b7d-4c58-9a42-6e0d8b5f7a13-b81e47d0-52c3-4f9a-8d16-0a7e9c2b4f65";
+export const ASSET_ID_EXAMPLE = "3f6c2a9e1b7d4c589a426e0d8b5f7a13";
 
-/** A fresh asset id: {uuid}-{uuid}. */
+/** A fresh asset id: a UUID v4 without hyphens (Python: uuid.uuid4().hex). */
 export function generateAssetId() {
-  return `${randomUUID()}-${randomUUID()}`;
+  return randomUUID().replace(/-/g, "");
 }
 
 /** $HOME/.ubel — holds the machine tag (and the OS firewall's reports). */
@@ -296,7 +303,7 @@ export function ensureAsset(ubelDir) {
   }
 }
 
-/** True when `id` is a well-formed asset id (<uuid>-<uuid>). */
+/** True when `id` is a well-formed asset id (32 hex; legacy hyphenated forms also accepted). */
 export function isValidAssetId(id) {
   return typeof id === "string" && ASSET_ID_RE.test(id.trim());
 }
@@ -405,13 +412,13 @@ export function historyForAsset(assetId) {
  *     change explicitly, so a silent no-op would be wrong.
  *
  * @param {string} ubelDir
- * @param {string} assetId  <uuid>-<uuid> (case-insensitive; stored lowercase)
+ * @param {string} assetId  32 hex (case-insensitive; stored lowercase)
  * @param {{name?: string}} [opts]
  * @returns {{asset_id: string, asset_name: string, previous_id: string|null, changed: boolean}}
  */
 export function setAssetId(ubelDir, assetId, opts = {}) {
   if (!isValidAssetId(assetId)) {
-    throw new Error(`not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
+    throw new Error(`not a valid asset id (expected 32 hex characters, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
   }
   const id = assetId.trim().toLowerCase();
   const file = path.join(ubelDir, ASSET_FILE_NAME);
@@ -447,12 +454,12 @@ let runtimeAssetId = null;
  * ubel_asset.json. Set by the `--asset-id <id>` flag (see asset_cli.js). Nothing
  * on disk is created or changed. Pass null to clear it.
  *
- * @param {string|null} id  <uuid>-<uuid>; THROWS when it is not a valid asset id
+ * @param {string|null} id  32 hex; THROWS when it is not a valid asset id
  */
 export function setRuntimeAssetId(id) {
   if (id == null) { runtimeAssetId = null; return; }
   if (!isValidAssetId(id)) {
-    throw new Error(`not a valid asset id (expected <uuid>-<uuid>, like ${ASSET_ID_EXAMPLE}): ${id}`);
+    throw new Error(`not a valid asset id (expected 32 hex characters, like ${ASSET_ID_EXAMPLE}): ${id}`);
   }
   runtimeAssetId = id.trim().toLowerCase();
 }
@@ -465,51 +472,46 @@ export function getRuntimeAssetId() {
 // ── Report id ───────────────────────────────────────────────────────────────
 // Every report (JSON, HTML, SBOM, SARIF — they share it) carries one id:
 //
-//   UBEL-<tag>-<asset_uuid_hash>-<uuid>
+//   UBEL-<tag>-<asset_id>-<report_uuid>
 //
-//   <tag>             the report's file tag (sca, sca_npm, licenses, secrets, sast,
-//                     malware, cloud, url, domain, host, easm) — see reportFileName()
-//   <asset_uuid_hash> the first 32 hex chars (128 bits) of the SHA-256 of the asset id,
-//                     so every report of one asset shares it (group by it) without the
-//                     asset id itself being in the report id; 32 zeros when the scan
-//                     has no asset id
-//   <uuid>            a fresh random UUID (v4), unique to this one report
+//   <tag>          the report's file tag (sca, sca_npm, licenses, secrets, sast,
+//                  malware, cloud, url, domain, host, easm) — see reportFileName()
+//   <asset_id>     the scan's asset id, embedded whole (32 hex, no hyphens); 32 zeros
+//                  when the scan has no asset id
+//   <report_uuid>  a fresh random UUID v4 without hyphens (32 hex), unique to this report
 //
 // Generated once per scan, where the asset is resolved, and then carried through.
 
 export const REPORT_ID_PREFIX = "UBEL";
-export const ASSET_HASH_LENGTH = 32;   // first 128 bits of the SHA-256 digest, in hex
-
-/** Hash of an asset id as it appears in a report id. */
-export function assetUuidHash(assetId) {
-  if (!assetId) return "0".repeat(ASSET_HASH_LENGTH);
-  return createHash("sha256").update(String(assetId).toLowerCase()).digest("hex").slice(0, ASSET_HASH_LENGTH);
-}
+export const NIL_ASSET_ID = "0".repeat(32);
 
 /**
- * A fresh report id: UBEL-<tag>-<asset_uuid_hash>-<uuid>.
+ * A fresh report id: UBEL-<tag>-<asset_id>-<report_uuid>, the asset id embedded whole.
  * @param {string} tag      the report's file tag (hyphens become "_", like in file names)
- * @param {string|null} assetId  <uuid>-<uuid>, or null when the scan has no asset
+ * @param {string|null} assetId  the scan's asset id, or null when the scan has no asset
  */
 export function generateReportId(tag, assetId) {
-  return `${REPORT_ID_PREFIX}-${sanitizeReportTag(tag)}-${assetUuidHash(assetId)}-${randomUUID()}`;
+  const asset = assetId ? String(assetId).trim().toLowerCase() : NIL_ASSET_ID;
+  return `${REPORT_ID_PREFIX}-${sanitizeReportTag(tag)}-${asset}-${randomUUID().replace(/-/g, "")}`;
 }
 
-const REPORT_ID_RE = new RegExp(`^${REPORT_ID_PREFIX}-[A-Za-z0-9_]+-[0-9a-f]{${ASSET_HASH_LENGTH}}-${UUID_PART}$`, "i");
+const REPORT_ID_PARTS_RE = new RegExp(
+  `^${REPORT_ID_PREFIX}-([A-Za-z0-9_]+)-(${ASSET_ID_PART})-(${HEX32})$`, "i");
 
 /** True when `id` is a well-formed report id. */
 export function isValidReportId(id) {
-  return typeof id === "string" && REPORT_ID_RE.test(id);
+  return typeof id === "string" && REPORT_ID_PARTS_RE.test(id);
 }
 
 /**
  * Split a report id into its parts, or null when it is not one.
- * @returns {{tag: string, asset_uuid_hash: string, uuid: string}|null}
+ * @returns {{tag: string, asset_id: string, uuid: string}|null}
  */
 export function parseReportId(id) {
-  if (!isValidReportId(id)) return null;
-  const m = id.match(new RegExp(`^${REPORT_ID_PREFIX}-([A-Za-z0-9_]+)-([0-9a-f]{${ASSET_HASH_LENGTH}})-(${UUID_PART})$`, "i"));
-  return { tag: m[1], asset_uuid_hash: m[2].toLowerCase(), uuid: m[3].toLowerCase() };
+  if (typeof id !== "string") return null;
+  const m = id.match(REPORT_ID_PARTS_RE);
+  if (!m) return null;
+  return { tag: m[1], asset_id: m[2].toLowerCase(), uuid: m[3].toLowerCase() };
 }
 
 /** The only values `asset_type` can take. */

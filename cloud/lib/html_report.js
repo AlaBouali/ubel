@@ -80,8 +80,8 @@ function buildStats(findings) {
  * @param {string[]} [meta.providers]   providers that were scanned (fully or partly), e.g. ['aws','gcp']
  * @param {object} [meta.regions]       { aws: string[] } — regions scanned per provider
  * @param {string} [meta.tool_version]
- * @param {string} [meta.report_id]     UBEL-cloud-<asset_uuid_hash>-<uuid>, made once per scan
- * @param {string} [meta.asset_id]      <uuid>-<uuid> from .ubel/ubel_asset.json (or --asset-id)
+ * @param {string} [meta.report_id]     UBEL-cloud-<asset_id>-<report_uuid>, made once per scan
+ * @param {string} [meta.asset_id]      32 hex from .ubel/ubel_asset.json (or --asset-id)
  * @param {string} [meta.asset_name]    readable asset name from the same file
  * @param {string} [meta.asset_type]    asset type: always "cloud" here
  * @param {Array<{provider:string,status:'scanned'|'partial'|'skipped',reason?:string}>} [meta.provider_status]

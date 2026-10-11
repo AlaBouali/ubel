@@ -174,7 +174,7 @@ const BUSINESS_IMPACT = {
 
 // ── One-page summary helpers ─────────────────────────────────────────────────
 
-// The report's own id (UBEL-cloud-<asset_uuid_hash>-<uuid>, made once per scan) is
+// The report's own id (UBEL-cloud-<asset_id>-<report_uuid>, made once per scan) is
 // used as is; a report without one falls back to a content-derived id, which is
 // deterministic so the same report shows the same ID in the JSON and HTML.
 function makeReportId(prefix, report, name) {

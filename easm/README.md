@@ -991,7 +991,7 @@ timestamp for the zip, and `report` for the files inside the zip.
 
 The zips of all four go to the shared `$HOME/.ubel/history/<mode>/` folder
 (`url`, `domain`, `host`, `easm`) that every UBEL scanner uses, each in a
-sub-folder named after `<asset_id>` — the `<uuid>-<uuid>` id in `.ubel/ubel_asset.json`
+sub-folder named after `<asset_id>` — the 32-hex id in `.ubel/ubel_asset.json`
 of the directory you ran the CLI from (created on the first run, never changed
 — see the SCA README's [Asset id](../sca/README.md#asset-id-ubel_assetjson)
 section). `asset_id`, `asset_name` and `asset_type` are also written into the report
@@ -1000,7 +1000,7 @@ for all four CLIs (see the SCA README's
 [Asset types](../sca/README.md#asset-types-asset_type)); the CLI's own mode
 (`url`, `domain`, `host`, `easm`) only names the history folder and file tag.
 Each report also has its own `report_id`,
-`UBEL-<tag>-<asset_uuid_hash>-<uuid>`, with the tag `url`, `domain`, `host` or
+`UBEL-<tag>-<asset_id>-<report_uuid>`, with the tag `url`, `domain`, `host` or
 `easm` (see the SCA README's [Report ID](../sca/README.md#report-id-report_id)).
 The asset id and name identify that folder,
 not the target — open `report.<mode>.json` (`targets`, `input_hosts`, `domain`)
