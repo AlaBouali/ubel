@@ -106,8 +106,12 @@ const isSerious = (v) => { const s = sevOf(v); return s === "critical" || s === 
 // to what a busy reader needs: the verdict, the three things that matter most,
 // the three things to do first, and four numbers.
 
-// Deterministic, so the same report shows the same ID in the JSON and HTML.
+// The report's own id (UBEL-<tag>-<asset_uuid_hash>-<uuid>, made once per scan in
+// scan_info.report_id) is used as is. Only a report built without one — an older
+// report re-summarised, say — falls back to an id derived from its content, which is
+// deterministic so the same report still shows the same ID in the JSON and HTML.
 function makeReportId(prefix, report, name) {
+  if (report?.scan_info?.report_id) return report.scan_info.report_id;
   const h = createHash("sha256")
     .update(`${report?.generated_at || ""}|${report?.tool_info?.name || ""}|${name || ""}`)
     .digest("hex");

@@ -14,7 +14,7 @@ import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
 import {
   getComplianceForSastFinding,
@@ -211,6 +211,7 @@ async function writeAnalyzeReports(results, opts) {
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
+  meta.report_id    = generateReportId(tag, asset.asset_id);
   meta.asset_id     = asset.asset_id;
   meta.asset_name   = asset.asset_name;
   meta.asset_type   = asset.asset_type;
@@ -401,6 +402,7 @@ async function writeMalwareReports(results, opts) {
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
   const meta = await collectMetadata({ ...opts, workingDir });
+  meta.report_id    = generateReportId(tag, asset.asset_id);
   meta.asset_id     = asset.asset_id;
   meta.asset_name   = asset.asset_name;
   meta.asset_type   = asset.asset_type;

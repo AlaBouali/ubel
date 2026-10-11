@@ -14,7 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -4054,6 +4054,10 @@ export class UbelEngineInstance {
       const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
       const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
       const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope);
+      // The file tag (sca, sca_npm, licenses, secrets) — also the <tag> of the report id,
+      // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
+      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope });
+      const report_id   = generateReportId(reportTag, asset.asset_id);
 
       const finalJson = {
         generated_at:      now.toISOString().replace("Z", "") + "Z",
@@ -4062,7 +4066,7 @@ export class UbelEngineInstance {
         os_metadata:       { ...os_metadata_info },
         git_metadata:      git_metadata,
         tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, ...(runtime.editor ? { editor: runtime.editor } : {}) },
+        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, report_id, asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
         vulnerabilities_ids: Array.from(this.vulns_ids_found),
         findings_summary:  findingsSummary,
@@ -4199,11 +4203,6 @@ export class UbelEngineInstance {
       //   licenses       ubel-license
       //   secrets        ubel-secrets
       // so a license or secrets run no longer overwrites the SCA report.
-      const reportTag = scaReportTag({
-        checkMode: this.checkMode,
-        engine:    this.engine,
-        scanScope: options.scan_scope,
-      });
       //
       // Derived from reportsLocation's own root (".../.ubel/local/reports" →
       // ".../.ubel/reports") rather than hardcoded to projectRoot, so that

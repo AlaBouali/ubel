@@ -999,7 +999,10 @@ JSON and shown on the HTML report's Scan Info tab. `asset_type` is always `easm`
 for all four CLIs (see the SCA README's
 [Asset types](../sca/README.md#asset-types-asset_type)); the CLI's own mode
 (`url`, `domain`, `host`, `easm`) only names the history folder and file tag.
-The id and name identify that folder,
+Each report also has its own `report_id`,
+`UBEL-<tag>-<asset_uuid_hash>-<uuid>`, with the tag `url`, `domain`, `host` or
+`easm` (see the SCA README's [Report ID](../sca/README.md#report-id-report_id)).
+The asset id and name identify that folder,
 not the target — open `report.<mode>.json` (`targets`, `input_hosts`, `domain`)
 to see what was scanned. A second run from the same folder in the same second
 gets a `_2` suffix instead of overwriting the first.

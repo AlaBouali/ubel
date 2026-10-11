@@ -100,6 +100,7 @@ export class CycloneDXBuilder {
       }],
       //lifecycles: lifecycle,
       properties: [
+        { name: "report_id", value: String(scanInfo.report_id || "") },
         { name: "asset_id", value: String(scanInfo.asset_id || "") },
         { name: "asset_name", value: String(scanInfo.asset_name || "") },
         { name: "asset_type", value: String(scanInfo.asset_type || "") },

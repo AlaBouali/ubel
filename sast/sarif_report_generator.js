@@ -525,6 +525,7 @@ export class SastSarifBuilder {
       results:                  this.buildResults(),
       artifacts:                this.buildArtifacts(),
       properties: {
+        report_id:       this.meta.report_id  || null,
         asset_id:        this.meta.asset_id   || null,
         asset_name:      this.meta.asset_name || null,
         asset_type:      this.meta.asset_type || null,

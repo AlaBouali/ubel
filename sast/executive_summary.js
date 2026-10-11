@@ -315,7 +315,10 @@ const BUSINESS_IMPACT = {
 };
 
 // ── helpers for the one-page summary ─────────────────────────────────────────
-function makeReportId(prefix, generatedAt, tool, name) {
+// The report's own id (UBEL-<tag>-<asset_uuid_hash>-<uuid>, meta.report_id, made once
+// per scan) is used as is; a report without one falls back to a content-derived id.
+function makeReportId(prefix, generatedAt, tool, name, ownId) {
+  if (ownId) return ownId;
   const h = createHash("sha256").update(`${generatedAt || ""}|${tool || ""}|${name || ""}`).digest("hex");
   return `${prefix}-${h.slice(0, 10).toUpperCase()}`;
 }
@@ -1151,7 +1154,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const cover = {
     title: mal ? "Malicious Code Scan — Executive Summary" : "Application Code Security — Executive Summary",
     subject,
-    report_id: makeReportId(mal ? "UBEL-MAL" : "UBEL-SAST", meta?.generated_at, toolName, subject),
+    report_id: makeReportId(mal ? "UBEL-MAL" : "UBEL-SAST", meta?.generated_at, toolName, subject, meta?.report_id),
     generated_at: meta?.generated_at || null,
     tool: `${toolName}${meta?.tool_version ? " " + meta.tool_version : ""}`,
     repository: git.url ? safeRemote(git.url) : null,

@@ -1369,7 +1369,7 @@ An **asset id is two UUIDs joined by a hyphen** — `<uuid>-<uuid>`, 73 characte
 - **Created on first use.** The first scan in a folder generates a random `<uuid>-<uuid>` and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `asset_id` is not a valid `<uuid>-<uuid>` is replaced with a fresh one.
 - **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
 - **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
-- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
+- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` — and a per-report [`report_id`](#report-id-report_id) — (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
 - **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
 - **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
 - **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
@@ -1403,6 +1403,28 @@ Three things to keep straight:
 - **Type is not mode.** The mode (`sca`, `os`, `url`, …) still names the history folder and the file tag; the type is what you filter on to ask "show me all cloud scans" or "all agent scans". `ubel-agent` and `ubel-platform` file under the `sca` mode but are typed `agent` and `machine`.
 - **The id belongs to the folder, the type to the scan.** `ubel_asset.json` holds only the id and name, so one folder shared by, say, `ubel-npm health` (`codebase`) and `ubel-cloud` (`cloud`) reports the same `asset_id` with two different `asset_type` values.
 - **Where it appears.** JSON report (`scan_info.asset_type` for SCA, `meta.asset_type` for SAST/malware, top-level `asset_type` for cloud and EASM), the *Asset type* row of the HTML report's scan details, the CycloneDX SBOM's `metadata.properties`, and the SARIF `properties` of every run.
+
+#### Report ID: `report_id`
+
+Every report carries its own **report id**, in this format:
+
+```
+UBEL-<tag>-<asset_uuid_hash>-<uuid>
+UBEL-sca-27539bf9cf9d1f75b70a60e2f4dc28dd-bc7a66bc-3285-4139-8ce3-4825a9bd2a16
+```
+
+| Part | What it is |
+|---|---|
+| `UBEL` | fixed prefix |
+| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
+| `<asset_uuid_hash>` | the first 32 hex characters (128 bits) of the SHA-256 of the scan's [asset id](#asset-id-ubel_assetjson). Every report of one asset has the same value, so you can group reports by asset without the asset id itself appearing in the report id. 32 zeros when the scan has no asset id |
+| `<uuid>` | a fresh random UUID (v4), different for every report |
+
+- **One id per scan, shared by every file.** It is generated once, when the scan resolves its asset, so the JSON, HTML, SBOM and SARIF of one run (all in the same zip) carry the same id. A new scan — even of the same folder, with nothing changed — gets a new id.
+- **Where it appears.** JSON report: `scan_info.report_id` (SCA), `meta.report_id` (SAST / malware), top-level `report_id` (cloud and EASM), and `executive_summary.cover.report_id` in all of them; the HTML report's *Report ID* on the executive summary cover; the CycloneDX SBOM's `metadata.properties` (`report_id`); the `properties` of every SARIF run (`report_id`).
+- **Reports without one.** A report that was built without a report id (for example an executive summary re-generated from an older report) still shows a content-derived id of the old form, `UBEL-SCA-<10 hex>` / `UBEL-SAST-…` / `UBEL-MAL-…` / `UBEL-CLOUD-…` / `UBEL-EASM-…`. Every report a current UBEL writes has the new form.
+- **Not stored anywhere else.** Unlike the asset id, the report id lives only in the reports themselves (there is no file to read it back from); it is not an input to anything.
+
 
 #### Setting the asset id for one run: `--asset-id`
 

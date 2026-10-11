@@ -1294,6 +1294,7 @@ export class SarifBuilder {
   _assetProps() {
     const si = this.data.scan_info || {};
     return {
+      report_id:  si.report_id  ?? null,
       asset_id:   si.asset_id   ?? null,
       asset_name: si.asset_name ?? null,
       asset_type: si.asset_type ?? null,

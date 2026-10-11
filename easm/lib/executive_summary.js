@@ -165,8 +165,11 @@ const BUSINESS_IMPACT = {
 // down to what a busy reader needs: the verdict, the three things that matter
 // most, the three things to do first, and four numbers.
 
-// Deterministic, so the same report shows the same ID in the JSON and HTML.
+// The report's own id (UBEL-<tag>-<asset_uuid_hash>-<uuid>, made once per scan) is
+// used as is; a report without one falls back to a content-derived id, which is
+// deterministic so the same report shows the same ID in the JSON and HTML.
 function makeReportId(prefix, report, name) {
+  if (report?.report_id) return report.report_id;
   const h = createHash("sha256")
     .update(`${report?.generated_at || ""}|${report?.tool || ""}|${name || ""}`)
     .digest("hex");

@@ -80,6 +80,7 @@ function buildStats(findings) {
  * @param {string[]} [meta.providers]   providers that were scanned (fully or partly), e.g. ['aws','gcp']
  * @param {object} [meta.regions]       { aws: string[] } — regions scanned per provider
  * @param {string} [meta.tool_version]
+ * @param {string} [meta.report_id]     UBEL-cloud-<asset_uuid_hash>-<uuid>, made once per scan
  * @param {string} [meta.asset_id]      <uuid>-<uuid> from .ubel/ubel_asset.json (or --asset-id)
  * @param {string} [meta.asset_name]    readable asset name from the same file
  * @param {string} [meta.asset_type]    asset type: always "cloud" here
@@ -99,6 +100,7 @@ function buildReportPayload(reporter, meta = {}) {
     generated_at: meta.generated_at || new Date().toISOString(),
     tool: TOOL_NAME,
     tool_version: meta.tool_version || null,
+    report_id: meta.report_id || null,
     asset_id: meta.asset_id || null,
     asset_name: meta.asset_name || null,
     asset_type: meta.asset_type || null,

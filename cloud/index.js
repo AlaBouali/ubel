@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
 import { buildZip } from '../sca/zip_writer.js';
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from '../sca/report_naming.js';
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
 import { describeRegions } from './providers/aws/ec2.js';
 import { getGcpAccessToken } from './auth/gcp-auth.js';
@@ -240,6 +240,7 @@ async function writeCloudReports(reporter, meta, opts) {
   // the exact same object — never a separately-shaped, stripped-down JSON.
   const reportPayload = buildReportPayload(reporter, {
     ...meta,
+    report_id:    generateReportId(tag, asset.asset_id),
     asset_id:     asset.asset_id,
     asset_name:   asset.asset_name,
     asset_type:   asset.asset_type,

@@ -11,7 +11,7 @@ import fs from "fs";
 import path from "path";
 import { generateHtmlReport } from "./html_report.js";
 import { buildZip } from "../../sca/zip_writer.js";
-import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor } from "../../sca/report_naming.js";
+import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from "../../sca/report_naming.js";
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
@@ -174,12 +174,22 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
 
   // Identity goes into the report itself (JSON + HTML) — on a copy, so the
   // caller's payload object is left as it was.
+  const report_id = generateReportId(tag, asset.asset_id);
   reportPayload = {
     ...reportPayload,
+    report_id,
     asset_id:     asset.asset_id,
     asset_name:   asset.asset_name,
     asset_type:   asset.asset_type,
   };
+  // The executive summary was built before the asset was known, so its cover is
+  // given the same report id (JSON, HTML and the summary must all agree).
+  if (reportPayload.executive_summary?.cover) {
+    reportPayload.executive_summary = {
+      ...reportPayload.executive_summary,
+      cover: { ...reportPayload.executive_summary.cover, report_id },
+    };
+  }
 
   const latestJson = path.join(latestDir, reportFileName("latest", tag, "json"));
   const latestHtml = path.join(latestDir, reportFileName("latest", tag, "html"));

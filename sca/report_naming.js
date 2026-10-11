@@ -70,7 +70,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { execFileSync } from "child_process";
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -405,6 +405,56 @@ export function setRuntimeAssetId(id) {
 /** The id set by --asset-id for this run, or null. */
 export function getRuntimeAssetId() {
   return runtimeAssetId;
+}
+
+// ── Report id ───────────────────────────────────────────────────────────────
+// Every report (JSON, HTML, SBOM, SARIF — they share it) carries one id:
+//
+//   UBEL-<tag>-<asset_uuid_hash>-<uuid>
+//
+//   <tag>             the report's file tag (sca, sca_npm, licenses, secrets, sast,
+//                     malware, cloud, url, domain, host, easm) — see reportFileName()
+//   <asset_uuid_hash> the first 32 hex chars (128 bits) of the SHA-256 of the asset id,
+//                     so every report of one asset shares it (group by it) without the
+//                     asset id itself being in the report id; 32 zeros when the scan
+//                     has no asset id
+//   <uuid>            a fresh random UUID (v4), unique to this one report
+//
+// Generated once per scan, where the asset is resolved, and then carried through.
+
+export const REPORT_ID_PREFIX = "UBEL";
+export const ASSET_HASH_LENGTH = 32;   // first 128 bits of the SHA-256 digest, in hex
+
+/** Hash of an asset id as it appears in a report id. */
+export function assetUuidHash(assetId) {
+  if (!assetId) return "0".repeat(ASSET_HASH_LENGTH);
+  return createHash("sha256").update(String(assetId).toLowerCase()).digest("hex").slice(0, ASSET_HASH_LENGTH);
+}
+
+/**
+ * A fresh report id: UBEL-<tag>-<asset_uuid_hash>-<uuid>.
+ * @param {string} tag      the report's file tag (hyphens become "_", like in file names)
+ * @param {string|null} assetId  <uuid>-<uuid>, or null when the scan has no asset
+ */
+export function generateReportId(tag, assetId) {
+  return `${REPORT_ID_PREFIX}-${sanitizeReportTag(tag)}-${assetUuidHash(assetId)}-${randomUUID()}`;
+}
+
+const REPORT_ID_RE = new RegExp(`^${REPORT_ID_PREFIX}-[A-Za-z0-9_]+-[0-9a-f]{${ASSET_HASH_LENGTH}}-${UUID_PART}$`, "i");
+
+/** True when `id` is a well-formed report id. */
+export function isValidReportId(id) {
+  return typeof id === "string" && REPORT_ID_RE.test(id);
+}
+
+/**
+ * Split a report id into its parts, or null when it is not one.
+ * @returns {{tag: string, asset_uuid_hash: string, uuid: string}|null}
+ */
+export function parseReportId(id) {
+  if (!isValidReportId(id)) return null;
+  const m = id.match(new RegExp(`^${REPORT_ID_PREFIX}-([A-Za-z0-9_]+)-([0-9a-f]{${ASSET_HASH_LENGTH}})-(${UUID_PART})$`, "i"));
+  return { tag: m[1], asset_uuid_hash: m[2].toLowerCase(), uuid: m[3].toLowerCase() };
 }
 
 /** The only values `asset_type` can take. */
