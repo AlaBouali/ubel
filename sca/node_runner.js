@@ -416,6 +416,38 @@ export class NodeManagerInstance {
   // Validate package arg safety
   // ─────────────────────────────
 
+  // A lockfile that parses to zero packages while package.json declares
+  // dependencies is corrupt, truncated or in a format we can't read. Scanning
+  // it would report a clean result for dependencies that were never looked at.
+  _assertLockfileUsable(lockName, raw, components, packageJsonPath) {
+    if (!raw || !raw.trim()) {
+      throw new Error(`${lockName} is empty — refusing to report a clean scan for a lockfile with no content.`);
+    }
+    if (components.length > 0) return;
+
+    let declared = 0;
+    const pkgPaths = [packageJsonPath];
+    try {
+      for (const ws of this._resolveWorkspaces(path.dirname(packageJsonPath))) {
+        pkgPaths.push(path.join(ws, "package.json"));
+      }
+    } catch { /* workspace discovery is best-effort */ }
+    for (const p of pkgPaths) {
+      try {
+        const pj = JSON.parse(fs.readFileSync(p, "utf8"));
+        for (const k of ["dependencies", "devDependencies", "optionalDependencies"]) {
+          declared += Object.keys(pj[k] || {}).length;
+        }
+      } catch { /* unreadable manifest contributes nothing */ }
+    }
+    if (declared > 0) {
+      throw new Error(
+        `${lockName} yielded no packages although package.json declares ${declared} dependenc${declared === 1 ? "y" : "ies"} — ` +
+        `the lockfile is corrupt, in an unsupported format, or out of sync. Refusing to report a clean scan.`
+      );
+    }
+  }
+
   _validatePackageArgs(args) {
     const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'\"<>]+)?$/i;
     for (const arg of args) {
@@ -568,6 +600,7 @@ export class NodeManagerInstance {
     .digest("hex");
 
   const allCandidateComponents = LockfileParser.parse(cfg.lockfile, candidateRaw);
+  this._assertLockfileUsable(cfg.lockfile, candidateRaw, allCandidateComponents, packageJsonPath);
 
   // ── 9. Diff: isolate net‑new packages ──────────────────────────────
   //

@@ -2591,28 +2591,53 @@ async function queryNvdForCpe(cpe, name, version, ecosystem, opts = {}) {
   // runs on (WordPress core, PHP, Apache... for every plugin/app CVE) — the usual source
   // of a flood of old CVEs with no fix data. noRejected: skip REJECTED records.
   // Both are valueless flags in the NVD 2.0 API.
-  const url = `${NVD_CVE_BASE}?cpeName=${encodeURIComponent(cpe)}&isVulnerable&noRejected`;
-  const res  = await fetchJSON(url, "GET", null, {
-    timeoutMs:  40_000,
-    maxRetries: 1,   // no internal backoff — submitToNvd owns retry for 429
-  });
+  // NVD caps a response at resultsPerPage (max 2000) and reports totalResults;
+  // a CPE with more CVEs than that (kernels, browsers, OS builds) was silently
+  // truncated. Page until every result has been read.
+  const PAGE_SIZE = 2000;
+  const raw = [];
+  let startIndex = 0;
+  let total = Infinity;
 
-  if (res.status === 429 || res.status === 503) {
-    return { status: res.status, vulns: [] };
+  while (startIndex < total) {
+    const url = `${NVD_CVE_BASE}?cpeName=${encodeURIComponent(cpe)}&isVulnerable&noRejected` +
+                `&resultsPerPage=${PAGE_SIZE}&startIndex=${startIndex}`;
+    const res = await fetchJSON(url, "GET", null, {
+      timeoutMs:  40_000,
+      maxRetries: 1,   // no internal backoff — submitToNvd owns retry for 429
+    });
+
+    if (res.status === 429 || res.status === 503) {
+      return { status: res.status, vulns: [] };
+    }
+
+    // NVD answers 400/404 for a cpeName it cannot resolve (e.g. one that is not
+    // in the CPE dictionary).  That is "NVD has nothing for this CPE", which is a
+    // complete answer — not a failed lookup. Only meaningful on the first page;
+    // later in a paged read it means the answer is incomplete.
+    if (res.status === 400 || res.status === 404) {
+      return startIndex === 0 ? { status: 200, vulns: [] } : { status: res.status, vulns: [] };
+    }
+
+    if (res.status !== 200) {
+      return { status: res.status, vulns: [] };
+    }
+
+    const page = res.body?.vulnerabilities || [];
+    raw.push(...page);
+    const reported = Number(res.body?.totalResults);
+    total = Number.isFinite(reported) ? reported : raw.length;
+
+    if (!page.length) {
+      // Empty page before totalResults was reached: incomplete, not clean.
+      if (raw.length < total) return { status: 502, vulns: [] };
+      break;
+    }
+    startIndex += page.length;
+    if (startIndex < total) await new Promise(r => setTimeout(r, 5_000));   // stay under the unauthenticated rate limit
   }
 
-  // NVD answers 400/404 for a cpeName it cannot resolve (e.g. one that is not
-  // in the CPE dictionary).  That is "NVD has nothing for this CPE", which is a
-  // complete answer — not a failed lookup.
-  if (res.status === 400 || res.status === 404) {
-    return { status: 200, vulns: [] };
-  }
-
-  if (res.status !== 200) {
-    return { status: res.status, vulns: [] };
-  }
-
-  const items = (res.body?.vulnerabilities || [])
+  const items = raw
     .map(item => nvdItemToOsvShape(item, cpe, name, version, ecosystem, opts))
     .filter(Boolean);
   return { status: 200, vulns: items };
@@ -2698,6 +2723,38 @@ export async function submitToNvd(inventory, opts = {}) {
 }
 
 // ── OSV querying ──────────────────────────────────────────────────────────────
+// One querybatch round-trip. OSV returns exactly one result per query, in
+// order; anything else means the answer was truncated or malformed, and indexing
+// it by position would attribute (or miss) findings against the wrong packages.
+async function osvQueryBatch(queries) {
+  let res;
+  try {
+    res = await fetchJSON(OSV_QUERYBATCH, "POST", { queries });
+  } catch (err) {
+    throw new VulnLookupError(
+      `OSV batch query could not be completed: ${err.message} — vulnerability lookup is incomplete.`,
+      { source: "osv", cause: err }
+    );
+  }
+
+  if (res.status !== 200) {
+    const detail = typeof res.body === "string" ? res.body.slice(0, 200) : JSON.stringify(res.body)?.slice(0, 200);
+    throw new VulnLookupError(
+      `OSV batch query failed: HTTP ${res.status}${detail ? ` (${detail})` : ""} — vulnerability lookup is incomplete.`,
+      { source: "osv" }
+    );
+  }
+
+  const vulnResults = res.body?.results;
+  if (!Array.isArray(vulnResults) || vulnResults.length !== queries.length) {
+    throw new VulnLookupError(
+      `OSV batch query returned ${Array.isArray(vulnResults) ? vulnResults.length : "no"} result(s) for ${queries.length} package(s) — vulnerability lookup is incomplete.`,
+      { source: "osv" }
+    );
+  }
+  return vulnResults;
+}
+
 export async function submitToOsv(purlsList) {
   // pkg:conda/ is excluded: OSV has no conda ecosystem, and a purl type it
   // can't map risks failing the whole batch (any non-200 fails the scan).
@@ -2705,47 +2762,49 @@ export async function submitToOsv(purlsList) {
   purlsList = purlsList.filter(p => p.startsWith("pkg:") && !p.startsWith("pkg:conda/"));
   if (!purlsList.length) return [];
 
-  const PAGE = 800;
+  const PAGE       = 800;
+  const MAX_ROUNDS = 100;   // safety stop for follow-up pages
   const results = [];
+  const seen    = new Set();
+
+  const collect = (purl, item) => {
+    const [dep, ver] = getDependencyFromPurl(purl);
+    for (const v of (item.vulns || [])) {
+      const k = `${purl}::${v.id}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      results.push({ purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv" });
+    }
+  };
 
   for (let offset = 0; offset < purlsList.length; offset += PAGE) {
-    const chunk   = purlsList.slice(offset, offset + PAGE);
-    const queries = chunk.map((purl) => ({ package: { purl } }));
-    let res;
-    try {
-      res = await fetchJSON(OSV_QUERYBATCH, "POST", { queries });
-    } catch (err) {
-      throw new VulnLookupError(
-        `OSV batch query could not be completed: ${err.message} — vulnerability lookup is incomplete.`,
-        { source: "osv", cause: err }
-      );
-    }
+    const chunk = purlsList.slice(offset, offset + PAGE);
+    const vulnResults = await osvQueryBatch(chunk.map((purl) => ({ package: { purl } })));
 
-    if (res.status !== 200) {
-      const detail = typeof res.body === "string" ? res.body.slice(0, 200) : JSON.stringify(res.body)?.slice(0, 200);
-      throw new VulnLookupError(
-        `OSV batch query failed: HTTP ${res.status}${detail ? ` (${detail})` : ""} — vulnerability lookup is incomplete.`,
-        { source: "osv" }
-      );
-    }
-
-    // OSV returns exactly one result per query, in order.  Anything else means
-    // the answer was truncated or malformed, and indexing it by position would
-    // attribute (or miss) findings against the wrong packages.
-    const vulnResults = res.body?.results;
-    if (!Array.isArray(vulnResults) || vulnResults.length !== chunk.length) {
-      throw new VulnLookupError(
-        `OSV batch query returned ${Array.isArray(vulnResults) ? vulnResults.length : "no"} result(s) for ${chunk.length} package(s) — vulnerability lookup is incomplete.`,
-        { source: "osv" }
-      );
-    }
+    // A package with many advisories comes back with a next_page_token and only
+    // the first page of ids. Ignoring it silently dropped the rest.
+    let pending = [];
     vulnResults.forEach((item, i) => {
-      const purl     = chunk[i];
-      const [dep, ver] = getDependencyFromPurl(purl);
-      for (const v of (item.vulns || [])) {
-        results.push({ purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv" });
-      }
+      collect(chunk[i], item);
+      if (item.next_page_token) pending.push({ purl: chunk[i], token: item.next_page_token });
     });
+
+    let rounds = 0;
+    while (pending.length) {
+      if (++rounds > MAX_ROUNDS) {
+        throw new VulnLookupError(
+          `OSV pagination did not terminate after ${MAX_ROUNDS} rounds — vulnerability lookup is incomplete.`,
+          { source: "osv" }
+        );
+      }
+      const page = await osvQueryBatch(pending.map(p => ({ package: { purl: p.purl }, page_token: p.token })));
+      const next = [];
+      page.forEach((item, i) => {
+        collect(pending[i].purl, item);
+        if (item.next_page_token) next.push({ purl: pending[i].purl, token: item.next_page_token });
+      });
+      pending = next;
+    }
   }
   return results;
 }
@@ -2918,11 +2977,19 @@ function matchDependenciesWithInventory(inventory) {
   }
 }
 
+// A package resolved from git, a tarball URL or a local path is not the
+// registry package of the same name@version. Matching it against OSV is
+// meaningless in both directions (false hits, and a vulnerable fork reported
+// "safe"), so it is not queried and stays "undetermined" — same treatment as
+// conda. The lockfile parser marks these with a purl qualifier.
+const UNVERIFIED_SOURCE_RE = /\?(?:vcs_url|download_url|file)=/;
+
 function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   for (const item of inventory) {
     // pkg:conda/ components are never matched against any database (see
     // submitToOsv) — leave them "undetermined" instead of claiming "safe".
     if (item.id.startsWith("pkg:conda/")) continue;
+    if (UNVERIFIED_SOURCE_RE.test(item.id)) continue;
     if (item.version !== ""){
     if (infectedPurls.has(item.id))   item.state = "infected";
     else if (vulnerablePurls.has(item.id)) item.state = "vulnerable";
@@ -3584,6 +3651,9 @@ export class UbelEngineInstance {
     // ubel_engine.py's validate_pkg_args (strip the allowed punctuation, what
     // remains must be alphanumeric).
     const validatePkgArgsLoose = (arg) => {
+      // Option-shaped arguments (--allow-unauthenticated, --target=..., -r...)
+      // consist only of characters stripped below, so they used to pass.
+      if (arg.startsWith("-")) return false;
       const stripped = arg.replace(/[=,._+\-@/~\[\]<>!]/g, "");
       return /^[a-z0-9]+$/i.test(stripped);
     };
@@ -3622,7 +3692,7 @@ export class UbelEngineInstance {
             ? "[!] Expected format: a crate name, optionally with a version requirement: serde or serde@1.0 (no options, paths, URLs or git sources)"
           : this.systemType === "npm"
             ? "[!] Expected format: name, name@version, or @scope/name@version"
-            : "[!] Expected format: a package name, optionally with a version/extras specifier");
+            : "[!] Expected format: a package name, optionally with a version/extras specifier (must not start with '-')");
         process.exit(1);
       }
     }
@@ -3764,6 +3834,7 @@ export class UbelEngineInstance {
         return at > body.lastIndexOf("/") && at < body.length - 1;
       };
       purls = purls.filter(p => !p.startsWith("pkg:") || hasVersion(p));
+      purls = purls.filter(p => !UNVERIFIED_SOURCE_RE.test(p));
       purls = [...new Set(purls)];
 
       let inventory = [...manager.inventoryData];
@@ -3952,6 +4023,14 @@ export class UbelEngineInstance {
       // total, consistent with their per-item state.
       const undeterminedStateCount = inventory.filter(c => c.state === "undetermined").length;
       const unmatchedCondaCount    = inventory.filter(c => c.id.startsWith("pkg:conda/")).length;
+      const unverifiedSourceCount = inventory.filter(c => UNVERIFIED_SOURCE_RE.test(c.id)).length;
+      if (unverifiedSourceCount > 0) {
+        console.warn(
+          `[!] ${unverifiedSourceCount} package(s) were resolved from git, a tarball URL or a local path rather than a registry; ` +
+          `they were NOT matched against any vulnerability database and are reported as "undetermined", not "safe".`
+        );
+        console.warn();
+      }
       if (unmatchedCondaCount > 0) {
         console.warn(
           `[!] ${unmatchedCondaCount} conda package(s) are not Python distributions and were NOT matched against any ` +

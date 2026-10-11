@@ -618,6 +618,71 @@ export default LinuxHostScanner;
 // PypiManagerInstance conventions).
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── dnf / yum transaction-table parser ───────────────────────────────────────
+// `dnf install --assumeno` / `yum install --assumeno` print a table:
+//
+//   Package      Architecture  Version          Repository   Size
+//   Installing:
+//    curl        x86_64        7.76.1-26.el9    baseos       297 k
+//   Installing dependencies:
+//    python3.11  x86_64        3.11.2-2.el9     appstream     27 k
+//
+// name, arch and version are SEPARATE columns. Very long names are printed on
+// their own line with the remaining columns on the next. Every section that
+// adds or changes packages (Installing / Upgrading / Updating / Downgrading /
+// Reinstalling, including "dependencies" and "weak dependencies") is scanned.
+// Anything inside such a section that doesn't parse throws: a package we could
+// not read is a package we could not clear.
+const RPM_ARCH_RE    = /^(noarch|x86_64|aarch64|i[3-6]86|ppc64(le)?|s390x?|armv\w+|riscv64|src)$/;
+const RPM_NAME_RE    = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
+const RPM_SECTION_RE = /^(Installing|Upgrading|Updating|Downgrading|Reinstalling)\b[^:]*:$/;
+
+export function parseRpmTransaction(output, manager = "dnf") {
+  const found = [];
+  const rejected = [];
+  let capture = false;
+  let pendingName = null;
+
+  for (const raw of String(output || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) { pendingName = null; continue; }
+    if (/^Transaction Summary/i.test(line)) break;
+    if (/^=+$/.test(line)) { capture = false; pendingName = null; continue; }
+
+    if (/:$/.test(line) && !/\s\d/.test(line)) {
+      // Section header. Module/group bookkeeping and removals carry no new code.
+      capture = RPM_SECTION_RE.test(line) && !/module|group|environment/i.test(line);
+      pendingName = null;
+      continue;
+    }
+    if (!capture) continue;
+
+    const tokens = line.split(/\s+/);
+    if (tokens[0].toLowerCase() === "replacing") continue;
+    if (tokens.length === 1) { pendingName = tokens[0]; continue; }
+
+    const row = pendingName ? [pendingName, ...tokens] : tokens;
+    pendingName = null;
+    const [name, arch, version] = row;
+    if (!RPM_NAME_RE.test(name) || !RPM_ARCH_RE.test(arch || "") || !/\d/.test(version || "")) {
+      rejected.push(line);
+      continue;
+    }
+    if (!found.some(p => p.name === name && p.version === version)) found.push({ name, version, arch });
+  }
+
+  if (rejected.length) {
+    throw new Error(
+      `Could not parse ${rejected.length} line(s) of ${manager}'s dry-run transaction table, so the resolved set is incomplete: ` +
+      rejected.slice(0, 3).join(" | ")
+    );
+  }
+  if (found.length === 0 && !/Nothing to do|already installed/i.test(output || "")) {
+    throw new Error(`${manager} dry-run produced no installable packages and no "nothing to do" message — refusing to treat that as a clean scan.`);
+  }
+  return found;
+}
+
 export class LinuxManagerInstance {
 
   /**
@@ -890,7 +955,11 @@ export class LinuxManagerInstance {
     if (this.pkgManager === "apt") {
       const output = this.runCommand(["apt-get", "-s", "--no-install-recommends", "install", ...packages]);
       // e.g. "Inst curl (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])"
-      const pattern = /^Inst\s+(\S+)\s+\(([^ ]+)/;
+      // An upgrade carries the installed version in brackets:
+      //   "Inst curl [7.81.0-1] (7.88.1-10ubuntu1 Ubuntu:22.04/jammy [amd64])"
+      // which the previous pattern did not match, so upgraded packages were
+      // silently left out of the scan.
+      const pattern = /^Inst\s+(\S+)(?:\s+\[[^\]]*\])?\s+\(([^ ]+)/;
       for (const line of output.split("\n")) {
         const m = pattern.exec(line.trim());
         if (m) {
@@ -900,26 +969,20 @@ export class LinuxManagerInstance {
           });
         }
       }
+      if (resolved.length === 0 && !/\b0 newly installed\b/.test(output) && !/\b0 upgraded, 0 newly installed\b/.test(output)) {
+        throw new Error("apt-get dry-run produced no 'Inst' lines and no '0 newly installed' summary — refusing to treat that as a clean scan (the simulation likely failed).");
+      }
       return resolved;
     }
 
     // ── DNF (RHEL 8+, AlmaLinux, Rocky) ────────────────────────────────────────
     if (this.pkgManager === "dnf") {
       const output = this.runCommand(["dnf", "install", "--assumeno", ...packages]);
-      let capture = false;
-      for (let line of output.split("\n")) {
-        line = line.trim();
-        if (line.startsWith("Installing:")) { capture = true; continue; }
-        if (capture) {
-          if (!line) break;
-          const parts = line.split(/\s+/);
-          if (parts.length >= 2) {
-            resolved.push({
-              name: parts[0].split(".")[0], version: parts[1], type: "application",
-              license: "unknown", paths: [], dependencies: [], ecosystem: osInfo.id,
-            });
-          }
-        }
+      for (const p of parseRpmTransaction(output, "dnf")) {
+        resolved.push({
+          name: p.name, version: p.version, type: "application",
+          license: "unknown", paths: [], dependencies: [], ecosystem: osInfo.id,
+        });
       }
       return resolved;
     }
@@ -928,20 +991,11 @@ export class LinuxManagerInstance {
     // this.pkgManager === "yum" — the only remaining option (validated in the
     // constructor), so no fallthrough error case is needed here anymore.
     const output = this.runCommand(["yum", "install", "--assumeno", ...packages]);
-    let capture = false;
-    for (let line of output.split("\n")) {
-      line = line.trim();
-      if (line.startsWith("Installing:")) { capture = true; continue; }
-      if (capture) {
-        if (!line) break;
-        const parts = line.split(/\s+/);
-        if (parts.length >= 2) {
-          resolved.push({
-            name: parts[0].split(".")[0], version: parts[1], type: "application",
-            ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
-          });
-        }
-      }
+    for (const p of parseRpmTransaction(output, "yum")) {
+      resolved.push({
+        name: p.name, version: p.version, type: "application",
+        ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
+      });
     }
     return resolved;
   }
@@ -965,7 +1019,12 @@ export class LinuxManagerInstance {
       ? packagesList.map(([name, version]) => `${name}=${version}`)
       : packagesList.map(([name, version]) => `${name}-${version}`);
 
-    const cmd = ["sudo", this.pkgManager, "install", "-y", ...pkgs];
+    // apt: the dry-run resolved with --no-install-recommends, so the real
+    // install must too — otherwise Recommends are installed that were never
+    // scanned. apt-get is also what the dry-run used.
+    const cmd = this.pkgManager === "apt"
+      ? ["sudo", "apt-get", "install", "-y", "--no-install-recommends", ...pkgs]
+      : ["sudo", this.pkgManager, "install", "-y", ...pkgs];
     const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
     if (r.status !== 0) {
       console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);

@@ -218,39 +218,83 @@ export function cvssMethodFromVector(vector, type) {
 }
 
 // ── Main mutation helper (mirrors Python process_vulnerability) ───────────────
+
+const SEV_RANK = { unknown: 0, low: 1, medium: 2, high: 3, critical: 4 };
+
+/** Map an advisory-database severity label (GHSA: LOW/MODERATE/HIGH/CRITICAL) to ours. */
+function labelToSeverity(label) {
+  const l = String(label ?? "").trim().toLowerCase();
+  if (l === "moderate") return "medium";
+  if (l === "negligible") return "low";
+  return Object.prototype.hasOwnProperty.call(SEV_RANK, l) ? l : "unknown";
+}
+
 export function processVulnerability(vuln) {
-  const severityList = vuln["severity"];
+  const severityList = Array.isArray(vuln["severity"]) ? vuln["severity"] : [];
 
-  if (Array.isArray(severityList) && severityList.length > 0) {
-    const first = severityList[0];
-    const vector = first["score"] || "";
-    const type   = (first["type"] || "").toLowerCase();
+  // Evaluate EVERY severity entry, not just the first: OSV commonly lists
+  // several (CVSS v3 and v4, or a distro label), and an unparseable first
+  // entry must not hide a valid later one. The most severe parseable result
+  // wins (fail toward the more cautious reading).
+  let best = null;
+  for (const entry of severityList) {
+    if (!entry || typeof entry !== "object") continue;
+    const vector = entry["score"] || "";
+    const type   = (entry["type"] || "").toLowerCase();
 
-    // Ubuntu label — no numeric score, pass string as-is
+    let cand;
     if (type === "ubuntu_cve" || type === "ubuntu") {
-      vuln["severity"]        = vector;
-      vuln["severity_score"]  = null;
-      vuln["severity_vector"] = null;
-      vuln["cvss_method"]     = null;
-      return;
+      // Distro label — no numeric score. parse() normalises negligible/untriaged,
+      // which the raw label would not have been (it fell through the policy).
+      cand = { severity: parse(vector).severity, score: null, vector: null, method: null };
+    } else {
+      const { score, severity } = parse(vector);
+      const sev = (severity === "unknown" || severity === null) && score !== null
+        ? scoreToSeverity(score) : severity;
+      cand = {
+        severity: sev || "unknown",
+        score:    parseFloat(score) || null,
+        vector,
+        method:   cvssMethodFromVector(vector, entry["type"]),
+      };
     }
-
-    const { score, severity } = parse(vector);
-
-    vuln["severity"]        = severity;
-    vuln["severity_score"]  = parseFloat(score) || null;
-    vuln["severity_vector"] = vector;
-    vuln["cvss_method"]     = cvssMethodFromVector(vector, first["type"]);
-
-    // Fallback: if severity still unknown but we have a numeric score, bucket it
-    if ((severity === "unknown" || severity === null) && score !== null) {
-      vuln["severity"] = scoreToSeverity(score);
+    if (!best
+        || SEV_RANK[cand.severity] > SEV_RANK[best.severity]
+        || (SEV_RANK[cand.severity] === SEV_RANK[best.severity] && (cand.score ?? -1) > (best.score ?? -1))) {
+      best = cand;
     }
+  }
+
+  if (best && best.severity !== "unknown") {
+    vuln["severity"]        = best.severity;
+    vuln["severity_score"]  = best.score;
+    vuln["severity_vector"] = best.vector;
+    vuln["cvss_method"]     = best.method;
+    return;
+  }
+
+  // No usable CVSS data. GHSA (and some other OSV sources) carry only a label
+  // in database_specific.severity, or in affected[].ecosystem_specific.severity.
+  // Ignoring it turned a CRITICAL advisory into "unknown".
+  const labels = [vuln["database_specific"]?.severity];
+  for (const a of (Array.isArray(vuln["affected"]) ? vuln["affected"] : [])) {
+    labels.push(a?.ecosystem_specific?.severity, a?.database_specific?.severity);
+  }
+  let labelSev = "unknown";
+  for (const l of labels) {
+    const s = labelToSeverity(l);
+    if (SEV_RANK[s] > SEV_RANK[labelSev]) labelSev = s;
+  }
+  if (labelSev !== "unknown") {
+    vuln["severity"]        = labelSev;
+    vuln["severity_score"]  = null;
+    vuln["severity_vector"] = null;
+    vuln["cvss_method"]     = null;
     return;
   }
 
   vuln["severity"]        = "unknown";
-  vuln["severity_score"]  = null;
-  vuln["severity_vector"] = null;
-  vuln["cvss_method"]     = null;
+  vuln["severity_score"]  = best?.score ?? null;
+  vuln["severity_vector"] = best?.vector ?? null;
+  vuln["cvss_method"]     = best?.method ?? null;
 }

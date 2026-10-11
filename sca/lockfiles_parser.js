@@ -170,14 +170,53 @@ export class LockfileParser {
    * Scoped packages (@scope/name) get the "@" percent-encoded so that
    * OSV batch query endpoints parse them correctly.
    */
-  static purl(name, version) {
+  static purl(name, version, source = null) {
     if (!name) return `pkg:npm/@${version ?? ""}`;
     const enc = name.startsWith("@")
       ? "%40" + name.slice(1)
       : name;
-    return version
-      ? `pkg:npm/${enc}@${version}`
-      : `pkg:npm/${enc}@`;
+    if (!version) return `pkg:npm/${enc}@`;
+    // A package that did not come from a registry (git, tarball URL, local
+    // file) is NOT the registry package of the same name@version, so its
+    // identity carries a purl qualifier. Such ids are never sent to OSV and
+    // never reported "safe" (see UNVERIFIED_SOURCE_RE in engine.js).
+    const q = source ? `?${source.key}=${encodeURIComponent(source.value)}` : "";
+    return `pkg:npm/${enc}@${version}${q}`;
+  }
+
+  /**
+   * Classify where a locked package was resolved from.
+   * Returns null for a registry tarball, otherwise { key, value } where key is
+   * the purl qualifier name (vcs_url | download_url | file).
+   *
+   * Registry tarballs (npm, yarn, private mirrors) are always served from
+   * `<registry>/<name>/-/<name>-<version>.tgz`; a bare https tarball URL
+   * (e.g. codeload.github.com) is not a registry artifact.
+   */
+  static classifySource(resolved) {
+    if (typeof resolved !== "string") return null;
+    const r = resolved.trim();
+    if (!r) return null;
+    if (/^(git\+|git:|git@|github:|gitlab:|bitbucket:|gist:|ssh:)/i.test(r) || /\.git([#?].*)?$/i.test(r)) {
+      return { key: "vcs_url", value: r };
+    }
+    if (/^file:/i.test(r)) return { key: "file", value: r };
+    if (/^https?:\/\//i.test(r)) {
+      if (/\/-\/[^/#?]+\.tgz([?#].*)?$/i.test(r)) return null;
+      return { key: "download_url", value: r };
+    }
+    return null;
+  }
+
+  /** Yarn Berry `resolution:` — registry resolutions look like name@npm:1.2.3. */
+  static classifyBerryResolution(resolution) {
+    if (typeof resolution !== "string") return null;
+    const at = resolution.indexOf("@", 1);
+    const rest = at > 0 ? resolution.slice(at + 1) : "";
+    if (/^(git\+|git:|git@|github:|gitlab:|bitbucket:|ssh:|https?:|file:)/i.test(rest)) {
+      return LockfileParser.classifySource(rest) || { key: "download_url", value: rest };
+    }
+    return null;
   }
 
   // ── Dispatcher ───────────────────────────────────────────────────────────
@@ -217,7 +256,11 @@ export class LockfileParser {
     let data = content;
     if (typeof content === "string") {
       try { data = JSON.parse(content); }
-      catch { return []; }
+      catch (e) {
+        // Fail closed: returning [] here made a corrupt lockfile scan as an
+        // empty (and therefore "clean") dependency set.
+        throw new Error(`package-lock.json is not valid JSON (${e.message}) — refusing to treat it as an empty dependency set.`);
+      }
     }
 
     // ── v2 / v3: packages map ─────────────────────────────────────────────
@@ -276,7 +319,7 @@ export class LockfileParser {
         );
 
         components.push({
-          id:           LockfileParser.purl(name, version),
+          id:           LockfileParser.purl(name, version, LockfileParser.classifySource(meta.resolved)),
           name,
           version,
           type:         "library",
@@ -311,8 +354,11 @@ export class LockfileParser {
           );
           const pkgPath = path.join(".", parentPath, name);
 
+          // v1 stores a git/URL dependency's source in `version` itself.
+          const v1Source = LockfileParser.classifySource(meta.resolved)
+            || (/^[a-z][a-z0-9+.-]*:/i.test(String(version)) ? LockfileParser.classifySource(String(version)) : null);
           components.push({
-            id:           LockfileParser.purl(name, version),
+            id:           LockfileParser.purl(name, version, v1Source),
             name,
             version,
             type:         "library",
@@ -486,7 +532,11 @@ export class LockfileParser {
       // Skip workspace packages themselves
       if (workspacePackageNames.has(name)) continue;
 
-      const key = `${name}@${version}`;
+      const ySource = fields.resolution
+        ? LockfileParser.classifyBerryResolution(fields.resolution)
+        : LockfileParser.classifySource(fields.resolved);
+
+      const key = `${name}@${version}${ySource ? "|" + ySource.value : ""}`;
       if (seen.has(key)) continue;
 
       // Collect dep PURLs from the "dependencies" sub-object
@@ -496,7 +546,7 @@ export class LockfileParser {
       // yarn.lock is a flat, root-level file — there is no per-workspace
       // attribution in the lockfile format itself.  workspace is always null.
       const comp = {
-        id:           LockfileParser.purl(name, version),
+        id:           LockfileParser.purl(name, version, ySource),
         name,
         version,
         type:         "library",
