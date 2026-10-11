@@ -267,7 +267,12 @@ export class PypiManagerInstance {
       `ubel-pip-dryrun-${process.pid}-${Date.now()}.json`
     );
 
-    const cmd = ["-m", "pip", "install", "--dry-run", "--report", reportPath, ...args];
+    // --only-binary=:all: — resolving the dependency graph must never build
+    // an sdist (setup.py / PEP 517 backend = arbitrary code at "check" time).
+    // A package with no wheel makes the dry-run fail, which fails closed.
+    // Deliberately NOT --no-deps here: the dry-run has to resolve the full
+    // transitive closure, since that closure is exactly what gets scanned.
+    const cmd = ["-m", "pip", "install", "--dry-run", "--only-binary=:all:", "--report", reportPath, ...args];
     const result = spawnSync(python, cmd, { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, maxBuffer: 32 * 1024 * 1024 });
 
     if (result.status !== 0) {
@@ -498,11 +503,12 @@ export class PypiManagerInstance {
   //     created (fresh/empty), so every requested package and its
   //     transitive deps show up as "+" lines — see _parseUvInstallDryRun().
   //
-  // One honesty note, same as pip: resolving a source-only package's
-  // metadata can require building an sdist, which can run arbitrary
-  // setup.py/build-backend code — this is inherent to how Python packaging
-  // resolution works, not something either pip's or uv's implementation
-  // can avoid. A wheel-only install doesn't have this gap.
+  // Source distributions: resolving a source-only package's metadata can
+  // require building an sdist, which runs arbitrary setup.py/build-backend
+  // code. Both the dry-run and the real install therefore pass
+  // `--only-binary=:all:`, so a package with no compatible wheel makes the
+  // command fail (closed) instead of executing build code. The cost: sdist-only
+  // packages can't be installed through this tool.
 
   _runDryRunUv(initialArgs, venvDir) {
     this.assertUvAvailable();
@@ -515,7 +521,9 @@ export class PypiManagerInstance {
 
     const args = initialArgs.filter(a => a !== "--");
 
-    const cmd = ["pip", "install", ...args, "--dry-run", "--python", python, "--color", "never"];
+    // --only-binary=:all: — same rule as the pip branch: never build an sdist
+    // while resolving. No --no-deps: the full closure is what gets scanned.
+    const cmd = ["pip", "install", ...args, "--dry-run", "--only-binary=:all:", "--python", python, "--color", "never"];
     const result = spawnSync(uvBin, cmd, {
       encoding: "utf8",
       timeout: SUBPROCESS_TIMEOUT,
@@ -627,7 +635,11 @@ export class PypiManagerInstance {
     const python = this._venvPython(venvDir);
 
     if (engine === "pip") {
-      const cmd = [python, "-m", "pip", "install", "-r", fileName];
+      // --only-binary=:all: — never build an sdist (arbitrary build code).
+      // --no-deps — fileName is the exact-pinned full closure that was
+      // scanned, so pip must install precisely that set and resolve nothing
+      // further (no extra packages, no different versions than scanned).
+      const cmd = [python, "-m", "pip", "install", "--only-binary=:all:", "--no-deps", "-r", fileName];
       const r = spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
       if (r.status !== 0) {
         console.error(`[!] Package install failed (exit ${r.status}): ${cmd.join(" ")}`);
@@ -640,7 +652,8 @@ export class PypiManagerInstance {
     if (engine === "uv") {
       this.assertUvAvailable();
       const uvBin = this._resolveUvBin();
-      const cmd = ["pip", "install", "--python", python, "-r", fileName];
+      // Same two flags as the pip branch above.
+      const cmd = ["pip", "install", "--only-binary=:all:", "--no-deps", "--python", python, "-r", fileName];
       const r = spawnSync(uvBin, cmd, { stdio: "inherit" });
       if (r.status !== 0) {
         console.error(`[!] Package install failed (exit ${r.status}): ${uvBin} ${cmd.join(" ")}`);
@@ -1144,7 +1157,10 @@ export class PypiManagerInstance {
     this.initVenv(venvDir);
     const python = this._venvPython(venvDir);
 
-    const cmd = [python, "-m", "pip", "install", "--quiet", packageSpec];
+    // --only-binary=:all: matches the dry-run (dryRunCli → runDryRun), which
+    // already refused anything that would need an sdist build. No --no-deps:
+    // packageSpec here is the user's spec, not a pinned closure.
+    const cmd = [python, "-m", "pip", "install", "--quiet", "--only-binary=:all:", packageSpec];
     const r = spawnSync(cmd[0], cmd.slice(1));
     if (r.status !== 0) {
       throw new Error(`pip install failed (exit ${r.status}): ${cmd.join(" ")}`);

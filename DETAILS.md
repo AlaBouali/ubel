@@ -32,7 +32,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | Binary | Covers | What it does |
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run. Also: `install-hook` / `uninstall-hook` to install a dependency-scan git pre-commit hook |
-| `ubel-composer` | SCA + Firewall | `health` = SCA scan of `vendor/`/`composer.lock`; `check`/`install` = firewall gate on a `composer require`/`update --no-install --no-scripts` dry-run, same lockfile-backed shape as npm/pnpm/bun. Also supports `install-hook` / `uninstall-hook` |
+| `ubel-composer` | SCA + Firewall | `health` = SCA scan of `vendor/`/`composer.lock`; `check`/`install` = firewall gate on a `composer require`/`update --no-install --no-scripts --no-plugins` dry-run, same lockfile-backed shape as npm/pnpm/bun. Also supports `install-hook` / `uninstall-hook` |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does. Both support `install-hook` / `uninstall-hook` |
 | `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions. Supports `install-hook` / `uninstall-hook` |
 | `ubel-conda` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, plus `init`. `check`/`install` resolve with `conda create --dry-run --json` against a scratch prefix that never exists (so `check` creates nothing), then a clean `install` runs `conda create`/`conda install --no-deps --file` with exact `channel::name==version=build` pins of precisely the scanned set into `./conda-env`. Only Python-distribution packages are matched against vulnerability data — see the Python section below. Supports `install-hook` / `uninstall-hook` |
@@ -101,9 +101,9 @@ A distinct mode of the same `ubel-npm` / `ubel-pnpm` / `ubel-bun` binaries: befo
 
 The same block-before-you-touch-it pattern applies to `ubel-docker`: `install` mode pulls the image, extracts its filesystem without ever running it (`docker create` + in-process tar extraction, no shell `tar`, no `ENTRYPOINT`/`CMD` execution), scans it, and removes the image again if policy blocks it.
 
-`ubel-composer` extends the same lockfile-backed pattern npm/pnpm/bun use to PHP: `composer require`/`update --no-install --no-scripts` (Composer's own equivalent of `--package-lock-only`) resolves the candidate tree and writes a candidate `composer.lock`/`composer.json` without touching `vendor/`, UBEL scans that candidate, and either proceeds via `composer install --no-scripts` or reverts both files from their on-disk backup — the same SHA-256 TOCTOU check and atomic revert as npm/pnpm/bun, just against Composer's own files. Unlike pip's dry-run below, this has no sdist-style caveat: resolving a Composer dependency graph never runs a package's own code, since build/lifecycle scripts only fire on a real `composer install`/`update`, which is exactly why `--no-scripts` covers both the dry-run and the real install.
+`ubel-composer` extends the same lockfile-backed pattern npm/pnpm/bun use to PHP: `composer require`/`update --no-install --no-scripts --no-plugins` (Composer's own equivalent of `--package-lock-only`) resolves the candidate tree and writes a candidate `composer.lock`/`composer.json` without touching `vendor/`, UBEL scans that candidate, and either proceeds via `composer install --no-scripts --no-plugins` or reverts both files from their on-disk backup — the same SHA-256 TOCTOU check and atomic revert as npm/pnpm/bun, just against Composer's own files. Lifecycle scripts are disabled with `--no-scripts` and Composer plugins (PHP code Composer loads in-process at startup, which `--no-scripts` does not cover) with `--no-plugins`, on both the dry-run and the real install.
 
-`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install -r` / `uv pip install -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. One caveat worth being upfront about, and it applies to both installers equally since it's inherent to how Python packaging resolution works: resolving a package's metadata can still need to build an sdist when no pre-built wheel is available, and building an sdist can execute arbitrary `setup.py`/build-backend code — a wheel-only install has no such gap, but a source-only package does carry it. `ubel-conda` follows the same shape with a scratch-prefix dry-run: `conda create --dry-run --json` against a prefix that never exists resolves the full closure (so a fully-satisfied target still reports everything), UBEL scans it, and only then installs exactly the scanned builds (`--no-deps` plus exact pins, spec file SHA-256-checked immediately before conda runs). As with pip, there's no lockfile, so a blocked scan just means the real install never runs. `ubel-cargo` resolves in a scratch copy of the project instead of editing it, so there's nothing to revert and `check` leaves the tree untouched: only after a clean scan are the scanned `Cargo.toml`/`Cargo.lock` written into the project (SHA-256-checked, and re-checked against the project's own files in case they changed mid-scan) and fetched with `cargo fetch --locked`. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
+`ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install --only-binary=:all: --no-deps -r` / `uv pip install --only-binary=:all: --no-deps -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. Source distributions are refused rather than built (resolving a source-only package's metadata can require building an sdist, which runs arbitrary `setup.py`/build-backend code): the dry-run and the real install both pass `--only-binary=:all:`, so a package with no compatible wheel fails closed, and the real install also passes `--no-deps` so only the scanned, pinned set is installed. `ubel-conda` follows the same shape with a scratch-prefix dry-run: `conda create --dry-run --json` against a prefix that never exists resolves the full closure (so a fully-satisfied target still reports everything), UBEL scans it, and only then installs exactly the scanned builds (`--no-deps` plus exact pins, spec file SHA-256-checked immediately before conda runs). As with pip, there's no lockfile, so a blocked scan just means the real install never runs. `ubel-cargo` resolves in a scratch copy of the project instead of editing it, so there's nothing to revert and `check` leaves the tree untouched: only after a clean scan are the scanned `Cargo.toml`/`Cargo.lock` written into the project (SHA-256-checked, and re-checked against the project's own files in case they changed mid-scan) and fetched with `cargo fetch --locked`. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
 
 ```bash
 
@@ -511,7 +511,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: composer
-    args: install                     # scan-gated `composer install --no-scripts`, resolved from composer.lock
+    args: install                     # scan-gated `composer install --no-scripts --no-plugins`, resolved from composer.lock
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
@@ -593,7 +593,7 @@ only exists where a package manager supports some form of dry-run
 resolution with no (or, for pip/uv, no *typical*) side effects — today
 that's **npm, pnpm, bun, and Docker images** via a true lockfile-only
 dry-run, **PHP (Composer)** via the same lockfile-backed mechanism
-(`composer require`/`update --no-install --no-scripts`), plus **pip/uv/pipx/conda**
+(`composer require`/`update --no-install --no-scripts --no-plugins`), plus **pip/uv/pipx/conda**
 (`pip install --dry-run` / `uv pip install --dry-run` / `conda create --dry-run --json`), **Rust (Cargo)**
 (`cargo add` + `cargo update --workspace` in a scratch copy of the project) and **Linux host
 packages** (`apt`/`dnf`/`yum`'s own native dry-run). Ruby, Go,
@@ -744,17 +744,16 @@ manifest. Not available on apt/dnf/yum (they scan the host, not a repo).
 
 Two honesty notes, both of them limits of the underlying tools rather than
 gaps in UBEL's own implementation:
-- Unlike npm's lockfile dry-run, neither pip's nor uv's dry-run is
-  unconditionally side-effect-free — if a candidate package has no
-  pre-built wheel available, resolving its metadata can require building an
-  sdist, and building an sdist can execute arbitrary `setup.py`/build-backend
-  code. This is inherent to Python packaging resolution generally — how
-  `pip`/`uv` themselves resolve source-only packages — not something a
-  scan step layered on top of either tool could close off. Wheel-only
-  installs (the common case) don't have this gap. **The pre-commit hook
-  doesn't touch this at all** — it's a `health` scan of already-installed
-  packages, so no resolution happens, no sdist is built, no side effect
-  exists to worry about.
+- Source distributions are refused rather than built: resolving a
+  source-only package's metadata can require building an sdist, which runs
+  arbitrary `setup.py`/build-backend code, so the dry-run and the real
+  install both pass `--only-binary=:all:` and a package with no compatible
+  wheel fails closed. The real install also passes `--no-deps` (it installs
+  exactly the scanned, pinned set); the dry-run does not, since it must
+  resolve the transitive closure. The cost is that sdist-only packages
+  can't be installed through these tools. **The pre-commit hook doesn't
+  touch this at all** — it's a `health` scan of already-installed
+  packages, so no resolution happens.
 - `uv`-sourced scans carry less detail than `pip`-sourced ones in one
   respect, and it traces back to what `uv pip install --dry-run` itself
   exposes rather than a choice UBEL made: its output is a flat
@@ -790,19 +789,19 @@ resolved dependency graph — one of ten ecosystems with this capability.
 
 **Firewall:** Available via `ubel-composer` — the same lockfile-backed shape
 as npm/pnpm/bun, not the simpler revert-less mechanism pip/apt/dnf/yum use.
-`composer require`/`update --no-install --no-scripts` (Composer's own
+`composer require`/`update --no-install --no-scripts --no-plugins` (Composer's own
 equivalent of `--package-lock-only`) resolves the candidate dependency tree
 and writes a candidate `composer.lock`/`composer.json` without touching
 `vendor/`; UBEL scans that candidate, and only then runs the real install —
-`composer install --no-scripts`. A policy-blocked scan reverts
+`composer install --no-scripts --no-plugins`. A policy-blocked scan reverts
 `composer.json`/`composer.lock` to their pre-scan state from an on-disk
 backup, atomically, the same `revert_lock_to_original` path npm/pnpm/bun
 use. TOCTOU is closed the same way too: SHA-256 checks on both files
-immediately before the real install. Unlike pip's dry-run, there's no
-sdist-style caveat here — resolving a Composer dependency graph never runs
-a package's own code, since Composer's lifecycle scripts only fire on an
-actual `install`/`update`, which is exactly why `--no-scripts` covers both
-the dry-run and the real install.
+immediately before the real install. There's no
+sdist-style build step here; Composer's lifecycle scripts are disabled with
+`--no-scripts` and its plugins (PHP code Composer loads in-process at
+startup, not covered by `--no-scripts`) with `--no-plugins`, on both the
+dry-run and the real install.
 
 **Pre-commit hook:** `ubel-composer install-hook` works. Fires on a commit
 that stages `composer.json` or `composer.lock`.
@@ -1348,16 +1347,12 @@ To keep this document honest rather than aspirational:
   way npm/pnpm/bun each have. That's yarn's own CLI design, not a gap in
   UBEL's implementation — there's no side-effect-free resolution step here
   to hook a scan into before something's already been written to disk.
-- pip's and uv's dry-run firewalls are the one exception with a caveat
-  rather than a clean guarantee, and that caveat is Python's own packaging
-  model, not a shortcoming in how UBEL drives either tool: resolving a
-  source-only package's metadata can require building an sdist, which can
-  run arbitrary build-backend code, and neither `pip install --dry-run`
-  nor `uv pip install --dry-run` can avoid that — it's how sdist-based
-  resolution works generally, independent of which tool triggers it.
-  Wheel-only installs don't have this gap; see the Python section above.
-  **The dependency pre-commit hook sidesteps this entirely** — it runs
-  `health`, not `check`, so no resolution happens at all.
+- pip's and uv's firewalls refuse source distributions: the dry-run and
+  the real install pass `--only-binary=:all:`, so a package with no
+  compatible wheel fails closed instead of running build-backend code. See
+  the Python section above. **The dependency pre-commit hook sidesteps
+  this entirely** — it runs `health`, not `check`, so no resolution
+  happens at all.
 - Reachability analysis's import-confirmation half covers **10 of the 10
   SCA ecosystems** — C, OS packages, Docker, Kubernetes, and IaC don't get
   it, since "is this imported by my source" isn't a meaningful question

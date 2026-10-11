@@ -23,6 +23,12 @@ import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE } from "./info.js";
 //                  install, pre/post-update, etc.) — those are arbitrary
 //                  shell commands and are exactly what a firewall dry-run
 //                  must not execute.
+//   --no-plugins : never load Composer plugins (composer-plugin packages,
+//                  already in vendor/ or declared in composer.json) —
+//                  --no-scripts does NOT cover them: a plugin is PHP code
+//                  that Composer loads and runs in-process at startup, before
+//                  any resolution happens. Applied to the dry-run AND the
+//                  real install.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ENGINE_CONFIG = {
@@ -32,9 +38,9 @@ const ENGINE_CONFIG = {
     manifest:   "composer.json",
     binary:     "composer",
     dryRunCmd:  (args) => args.length
-      ? ["require", "--no-install", "--no-scripts", "--no-interaction", "--no-ansi", ...args]
-      : ["update",  "--no-install", "--no-scripts", "--no-interaction", "--no-ansi"],
-    installCmd: ["install", "--no-scripts", "--no-interaction", "--no-ansi"],
+      ? ["require", "--no-install", "--no-scripts", "--no-plugins", "--no-interaction", "--no-ansi", ...args]
+      : ["update",  "--no-install", "--no-scripts", "--no-plugins", "--no-interaction", "--no-ansi"],
+    installCmd: ["install", "--no-scripts", "--no-plugins", "--no-interaction", "--no-ansi"],
   },
 
 };

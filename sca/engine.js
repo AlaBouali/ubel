@@ -3646,7 +3646,11 @@ export class UbelEngineInstance {
       scan_secrets = false;  // secrets scanning is only supported in health mode
     }
 
-    const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'"<>]+)?$/i;
+    // Scope and bare name must start with an alphanumeric so option-shaped
+    // args ("--force", "-g", "--legacy-peer-deps", "--") are rejected rather
+    // than passed to npm/pnpm/bun as flags. Keep in sync with
+    // _validatePackageArgs() in node_runner.js.
+    const PKG_ARG_RE = /^(@[a-z0-9][a-z0-9_.-]*\/)?[a-z0-9][a-z0-9_.-]*(@[^\s;&|`$(){}\\'"<>]+)?$/i;
 
     // Composer specifiers are always "vendor/package", optionally with a
     // ":constraint" suffix (e.g. "monolog/monolog:^3.0") — the npm-shape

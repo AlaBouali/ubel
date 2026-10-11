@@ -448,10 +448,15 @@ export class NodeManagerInstance {
     }
   }
 
+  // Both the scope and the bare name must START with an alphanumeric. The
+  // old class `[a-z0-9_.-]+` also matched option-shaped args ("--force",
+  // "-g", "--legacy-peer-deps", a lone "--"), which would have been handed
+  // to npm/pnpm/bun as flags. Real npm names never begin with "-", "." or "_".
+  // (Same pattern as PKG_ARG_RE in engine.js scan(); keep them in sync.)
   _validatePackageArgs(args) {
-    const PKG_ARG_RE = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(@[^\s;&|`$(){}\\'\"<>]+)?$/i;
+    const PKG_ARG_RE = /^(@[a-z0-9][a-z0-9_.-]*\/)?[a-z0-9][a-z0-9_.-]*(@[^\s;&|`$(){}\\'\"<>]+)?$/i;
     for (const arg of args) {
-      if (!PKG_ARG_RE.test(arg)) {
+      if (typeof arg !== "string" || arg.startsWith("-") || !PKG_ARG_RE.test(arg)) {
         throw new Error(
           `Rejected unsafe package argument: '${arg}'. ` +
           `Only package specifiers (name, name@version, @scope/name@version) are allowed.`
