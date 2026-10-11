@@ -765,8 +765,8 @@ Each feed is tried with a 15-second timeout and two retries. There is currently 
 <a id="exploit-intelligence-output"></a>
 
 - **JSON**: the five fields above on every vulnerability, plus `threat_intel` (feed status and warnings).
-- **SBOM (CycloneDX v1.6)**: on each `vulnerabilities[]` entry, the properties `kev.listed` (`true`, `false` or `unknown`), `kev.date_added` and `kev.due_date` (KEV entries only), and `epss.score` / `epss.percentile` (raw 0–1; `unknown` when no score). A KEV entry also gets an advisory link to the CISA catalog. EPSS is also added as a second `ratings[]` entry (`method: "other"`, source `FIRST EPSS`) whose `score` is the probability **in percent (0–100)**, since CycloneDX 1.6 has no EPSS method. Nothing is written when enrichment never ran. The root `properties` carry `kev_vulnerabilities` (count) and `ubel:threat_intel` (feed status as a JSON string) — read the count together with that status, because a feed outage leaves the count at 0.
-- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties` (`null` = unknown); rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100, omitted when there is no signal. A KEV result is reported at level `error` whatever its severity, unless reachability confidently ruled it out (then `none`, as for any unreachable finding). The run's `properties.threat_intel` holds the feed status.
+- **SBOM (CycloneDX v1.6)**: on each `vulnerabilities[]` entry, the properties `kev.listed` (`true`, `false` or `unknown`), `kev.date_added` and `kev.due_date` (KEV entries only), and `epss.score` / `epss.percentile` (raw 0–1; `unknown` when no score). A KEV entry also gets an advisory link to the CISA catalog. EPSS is also added as a second `ratings[]` entry (`method: "other"`, source `FIRST EPSS`) whose `score` is the raw 0–1 probability (the same scale as the `epss.score` property; the `justification` text states the percent), since CycloneDX 1.6 has no EPSS method. Nothing is written when enrichment never ran. The root `properties` carry `kev_vulnerabilities` (count) and `ubel:threat_intel` (feed status as a JSON string) — read the count together with that status, because a feed outage leaves the count at 0.
+- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties` (`null` = unknown); rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100, omitted when there is no signal. A KEV result is reported at level `error` whatever its severity — reachability never downgrades it. The run's `properties.threat_intel` holds the feed status.
 
 ---
 
@@ -1405,6 +1405,18 @@ Three things to keep straight:
 - **The id belongs to the folder, the type to the scan.** `ubel_asset.json` holds only the id and name, so one folder shared by, say, `ubel-npm health` (`codebase`) and `ubel-cloud` (`cloud`) reports the same `asset_id` with two different `asset_type` values.
 - **Where it appears.** JSON report (`scan_info.asset_type` for SCA, `meta.asset_type` for SAST/malware, top-level `asset_type` for cloud and EASM), the *Asset type* row of the HTML report's scan details, the CycloneDX SBOM's `metadata.properties`, and the SARIF `properties` of every run.
 
+#### Reachability verdicts in the SBOM and SARIF (VEX)
+
+One rule (`vex.js`) drives both formats. A finding is **not affected** only when reachability says `reachable: false` with `high` or `medium` confidence **and** it is neither an infection nor listed in CISA KEV (exploited in the wild — a static "no import found" never downgrades it).
+
+- **SBOM:** `analysis.state: "not_affected"` with a `justification` — `code_not_present` for dev/test-scoped packages, `code_not_reachable` otherwise — and no `response`. Everything else is `exploitable` (`response: ["update"]`; infections `["rollback","can_not_fix"]`).
+- **SARIF:** not-affected results keep their severity-based `level` and carry a `suppressions` entry (`kind: external`, `status: accepted`, with the justification and rationale) instead of being dropped to level `none`. `ruleId` is the advisory id (`GHSA-…`, `CVE-…`), and each message names the package (`<advisory> in <package>@<version>: …`). A result's locations are the affected package's own install paths, not those of every package on the way to it.
+- **SBOM details:** `ratings[].method` is derived from the CVSS vector when the parser did not record one (`CVSSv3`, `CVSSv31`, `CVSSv4`, `CVSSv2`); each vulnerability has a `bom-ref` (`<advisory>|<purl>` — one advisory affecting several packages is several entries, each with its own reachability analysis); the document has a `serialNumber`; components carry `hashes` where the lockfile records them (Cargo.lock `checksum` → SHA-256).
+
+#### Redacting local paths: `--redact-paths`
+
+Reports record absolute paths (the scan's cwd and each package's install path), which include the local user and folder names. `--redact-paths` (any UBEL CLI, any position; or `UBEL_REDACT_PATHS=1`) rewrites the scanned project's path to `<project>` and the home directory to `~` in the SCA JSON, HTML, SBOM and SARIF. Off by default; SAST, cloud and EASM reports are not covered.
+
 #### Report ID: `report_id`
 
 Every report carries its own **report id**, in this format:
@@ -1438,7 +1450,7 @@ ubel-cloud --asset-id 3f6c2a9e1b7d4c589a426e0d8b5f7a13
 ubel-apt check nginx --asset-id 3f6c2a9e1b7d4c589a426e0d8b5f7a13
 ```
 
-For that run the given id replaces the one in `ubel_asset.json`: it is written into the report, SBOM and SARIF, and the zip is filed under `history/<mode>/<asset_id>/` and `latest_reports/<mode>/<asset_id>/`. **Nothing is saved** — `ubel_asset.json` is neither created nor changed, so the next run without the flag uses the folder's own id again (use `set-asset-id` below to make an id permanent). `asset_name` is the one stored for that same id when there is one, otherwise it is derived as usual. An id that is not `<uuid>`, or a flag with no value, stops the CLI with exit code `2` before anything is scanned.
+For that run the given id replaces the one in `ubel_asset.json`: it is written into the report, SBOM and SARIF, and the zip is filed under `history/<mode>/<asset_id>/` and `latest_reports/<mode>/<asset_id>/`. **Nothing is saved** — `ubel_asset.json` is neither created nor changed, so the next run without the flag uses the folder's own id again (use `set-asset-id` below to make an id permanent). `asset_name` is the one stored for that same id when there is one, otherwise it is derived as usual. An id that is not 32 hex characters (or a legacy hyphenated UUID form), or a flag with no value, stops the CLI with exit code `2` before anything is scanned.
 
 #### Linking a folder to an existing asset id
 

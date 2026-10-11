@@ -1,6 +1,8 @@
 // sbom_builder.js — CycloneDX 1.6 SBOM generator (Node.js port of Python version)
 
+import { randomUUID } from "crypto";
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
+import { vexAnalysis } from "./vex.js";
 
 /**
  * Convert UBEL final JSON into a CycloneDX 1.6 SBOM document.
@@ -18,7 +20,18 @@ export class CycloneDXBuilder {
   }
 
   /** Normalise CVSS method to CycloneDX accepted values. */
-  _normaliseCvssMethod(method) {
+  _normaliseCvssMethod(method, vector) {
+    // The parsers rarely set cvss_method, but the vector string states its own version
+    // ("CVSS:3.1/AV:N/…"), so derive the method from it when none was recorded.
+    if (!method && typeof vector === "string") {
+      const m = vector.match(/^CVSS:(\d)\.(\d)\//i);
+      if (m) {
+        if (m[1] === "4") return "CVSSv4";
+        if (m[1] === "3") return m[2] === "0" ? "CVSSv3" : "CVSSv31";
+      } else if (/^AV:[LAN]\/AC:[HML]\/Au:[MSN]\//.test(vector)) {
+        return "CVSSv2";
+      }
+    }
     if (!method) return "other";
     let m = String(method).replace(/\./g, "").toUpperCase();
     if (m.includes("CVSS2")) return "CVSSv2";
@@ -157,6 +170,13 @@ export class CycloneDXBuilder {
         licenses: this._buildLicenses(item),
       };
       if (cpe) comp.cpe = cpe;
+      // Hashes the lockfile recorded for the artifact ({alg, content} pairs, see item.hashes).
+      if (Array.isArray(item.hashes) && item.hashes.length) {
+        comp.hashes = item.hashes
+          .filter(h => h && h.alg && /^[0-9a-f]+$/i.test(String(h.content || "")))
+          .map(h => ({ alg: h.alg, content: String(h.content).toLowerCase() }));
+        if (!comp.hashes.length) delete comp.hashes;
+      }
 
       const props = this._props(item, [
         "scopes", "paths", "introduced_by", "parents",
@@ -217,7 +237,7 @@ export class CycloneDXBuilder {
       const vid = v.id || "";
       const isInf = !!v.is_infection;
       const sev = this._severityToCdx(isInf ? "critical" : v.severity);
-      const method = this._normaliseCvssMethod(v.cvss_method);
+      const method = this._normaliseCvssMethod(v.cvss_method, v.severity_vector);
       const purl = v.affected_package_id || "";
 
       let sources = v.source || [];
@@ -240,32 +260,11 @@ export class CycloneDXBuilder {
       const fixes = v.fixes || [];
       const recommendation = fixes.join("\n");
 
-      // Reachability-aware VEX analysis state:
-      //   confirmed-unreachable (high/medium confidence) -> "not_affected"
-      //   reachable + import confirmed                   -> "exploitable"
-      //   reachable + low confidence / no data           -> "exploitable" (default)
+      // Reachability-aware VEX analysis (shared with the SARIF builder — see vex.js):
+      // not_affected only for confident-unreachable findings that are neither infections
+      // nor CISA KEV; everything else is exploitable.
       const reach = v.reachability || null;
-      let analysisState;
-      let analysisResponse;
-      if (isInf) {
-        analysisState    = "exploitable";
-        analysisResponse = ["rollback", "can_not_fix"];
-      } else if (
-        reach &&
-        reach.reachable === false &&
-        (reach.confidence === "high" || reach.confidence === "medium")
-      ) {
-        analysisState    = "not_affected";
-        analysisResponse = ["will_not_fix"];
-      } else {
-        analysisState    = "exploitable";
-        analysisResponse = ["update"];
-      }
-      const analysis = {
-        state:    analysisState,
-        response: analysisResponse,
-        ...(reach && reach.rationale ? { detail: reach.rationale } : {}),
-      };
+      const analysis = vexAnalysis(v);
 
       const rating = { severity: sev, method };
       const score = v.severity_score;
@@ -277,13 +276,14 @@ export class CycloneDXBuilder {
 
       const ratings = [rating];
       // EPSS as its own rating: CycloneDX 1.6 has no EPSS method, so it is
-      // method "other"; `score` is the 0-100 percent probability of
-      // exploitation in the next 30 days (raw 0-1 value is in properties).
+      // method "other"; `score` is the raw 0-1 probability of exploitation in the next
+      // 30 days — the same scale as the epss.score property (the justification text
+      // spells out the percent).
       if (typeof v.epss_score === "number") {
         const pctScore = Math.round(v.epss_score * 10000) / 100;
         ratings.push({
           source: { name: "FIRST EPSS", url: "https://www.first.org/epss/" },
-          score: pctScore,
+          score: v.epss_score,
           method: "other",
           justification:
             `EPSS: ${pctScore}% estimated probability of exploitation in the next 30 days` +
@@ -292,6 +292,9 @@ export class CycloneDXBuilder {
       }
 
       const entry = {
+        // Unique per (advisory, package): one advisory affecting several packages is
+        // several entries here because each carries its own reachability/VEX analysis.
+        "bom-ref": `${vid}|${purl}`,
         id: vid,
         source: { name: sourceName, url: sourceUrl },
         ratings,
@@ -409,6 +412,7 @@ export class CycloneDXBuilder {
     return {
       bomFormat: "CycloneDX",
       specVersion: this.CYCLONEDX_VERSION,
+      serialNumber: `urn:uuid:${randomUUID()}`,
       version: 1,
       metadata: this.buildMetadata(),
       components: this.buildComponents(),

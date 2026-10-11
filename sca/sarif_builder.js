@@ -1,6 +1,7 @@
 // sarif_builder.js — SARIF 2.1.0 generator (fixes SARIF1004)
 
 import path from "path";
+import { isNotAffected, notAffectedJustification } from "./vex.js";
 import crypto from "crypto";
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
 
@@ -201,7 +202,9 @@ export class SarifBuilder {
           continue;
         }
 
-        for (const purl of seq) {
+        // A dependency sequence is root -> … -> affected package: the installed paths
+        // belong to the last purl only, not to every package on the way to it.
+        for (const purl of seq.slice(-1)) {
           if (
             typeof purl !== "string"
           ) {
@@ -457,7 +460,7 @@ export class SarifBuilder {
       const rule = {
         id: ruleId,
 
-        name: this._toPascalCaseRuleName(this.getFirstNWords(v,10)),
+        name: advisoryId,
 
         shortDescription: {
           text: this._truncate(summary, 300),
@@ -572,24 +575,19 @@ export class SarifBuilder {
       const isInfection =
         !!v.is_infection;
 
-      // Downgrade non-infections to "none" when reachability analysis
-      // confidently determines the vulnerable code is unreachable.
-      const isUnreachable =
-        !isInfection &&
-        v.reachability &&
-        v.reachability.reachable === false &&
-        (v.reachability.confidence === "high" || v.reachability.confidence === "medium");
+      // Confidently-unreachable findings are reported as suppressed (below) rather than
+      // dropped to level "none" — see vex.js: never for infections or CISA KEV entries.
+      const isUnreachable = isNotAffected(v);
 
+      // "<advisory> in <package>@<version>: <summary>" — the raw advisory text alone
+      // never says which package the result is about.
+      const pkgLabel = v.package
+        ? `${v.package}${v.package_version ? "@" + v.package_version : ""}`
+        : String(v.affected_package_id || "").replace(/^pkg:[^/]+\//, "");
       const message =
-        v.summary ||
-        v.title ||
-        v.description ||
-        v.id ||
-        "Security issue detected.";
+        `${v.id || "Security issue"}${pkgLabel ? " in " + pkgLabel : ""}: ` +
+        (v.summary || v.title || v.description || "Security issue detected.");
 
-      // A CISA KEV entry is exploited in the wild: report it as an error
-      // however it is scored (same rule the executive summary applies),
-      // unless reachability confidently ruled it out.
       const ti = this._threatIntel(v);
       const rank = this._rank(v);
 
@@ -599,9 +597,9 @@ export class SarifBuilder {
         ruleIndex:
           ruleIndexMap.get(ruleId),
 
-        level: isUnreachable
-          ? "none"
-          : (ti.is_kev === true ? "error" : this._severityToLevel(v.severity, isInfection)),
+        level: ti.is_kev === true && !isInfection
+          ? "error"
+          : this._severityToLevel(v.severity, isInfection),
 
         message: {
           text: this._truncate(
@@ -612,6 +610,15 @@ export class SarifBuilder {
 
         locations:
           this._buildLocations(v),
+
+        ...(isUnreachable ? {
+          suppressions: [{
+            kind: "external",
+            status: "accepted",
+            justification:
+              `${notAffectedJustification(v)}: ${(v.reachability && v.reachability.rationale) || "not reachable"}`,
+          }],
+        } : {}),
 
         partialFingerprints: {
           vulnerabilityId:
@@ -933,19 +940,9 @@ export class SarifBuilder {
     ].join("-");
   }
 
-  /** Stable SARIF rule id */
+  /** Stable SARIF rule id: the advisory id itself (GHSA-…, CVE-…, RUSTSEC-…), readable in code-scanning UIs. */
   _ruleId(v) {
-    const advisory =
-      String(
-        v?.id ||
-        v?.ghsa ||
-        v?.cve ||
-        "UBEL-UNKNOWN"
-      );
-
-    return this._uuidFromString(
-      advisory
-    );
+    return String(v?.id || v?.ghsa || v?.cve || "UBEL-UNKNOWN");
   }
 
   /** Build optional artifacts section (improves some consumers) */

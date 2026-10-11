@@ -297,6 +297,13 @@ export function extractAssetIdFlag(args) {
  */
 export function runAssetCommand(args, ctx = {}) {
   const cli = ctx.cli || "ubel";
+  // --redact-paths: boolean flag, any position. Removed from argv like --asset-id and
+  // carried to the report writers as UBEL_REDACT_PATHS=1 (see redact.js).
+  if (args.includes("--redact-paths")) {
+    process.env.UBEL_REDACT_PATHS = "1";
+    args = args.filter(a => a !== "--redact-paths");
+    process.argv.splice(2, process.argv.length - 2, ...args);
+  }
   const extracted = extractAssetIdFlag(args);
   if (extracted.error) { console.error(`[!] ${extracted.error}\n    usage: ${cli} <args> --asset-id <asset-id>`); return 2; }
   if (extracted.assetId) {

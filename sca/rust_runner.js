@@ -87,7 +87,10 @@ export class RustCargoScanner {
         }
       }
 
-      packages.push({ name, version, source, dependencies: deps });
+      // Cargo.lock records the SHA-256 of the crate archive for registry packages.
+      const getSum = block.match(/^checksum\s*=\s*"([0-9a-fA-F]{64})"/m);
+
+      packages.push({ name, version, source, dependencies: deps, checksum: getSum ? getSum[1].toLowerCase() : null });
     }
 
     return packages;
@@ -373,7 +376,8 @@ export class RustCargoScanner {
         dependencies,
         paths:        [ projectRoot],
         project_root: projectRoot,
-        _source:      pkg.source
+        _source:      pkg.source,
+        ...(pkg.checksum ? { hashes: [{ alg: "SHA-256", content: pkg.checksum }] } : {}),
       });
     }
 

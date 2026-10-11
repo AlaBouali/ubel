@@ -14,6 +14,7 @@ import {filterFalsePositiveInfections} from "./filter_false_positive_infections.
 import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
+import { redactionEnabled, redactPaths } from "./redact.js";
 import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
@@ -4095,6 +4096,7 @@ export class UbelEngineInstance {
         scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, report_id, asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
         vulnerabilities_ids: Array.from(this.vulns_ids_found),
+        components_ids:       inventory.map(c => c.id),
         findings_summary:  findingsSummary,
         vulnerabilities:   sortVulnerabilities(vulnerabilities),
         inventory,
@@ -4161,8 +4163,12 @@ export class UbelEngineInstance {
         return finalJson;
       }
 
-      const htmlReport       = await generateHTMLReport(finalJson);
-      const jsonReportString = safeJsonString(finalJson, 1000);
+      // --redact-paths / UBEL_REDACT_PATHS=1: strip the local project and home paths from
+      // every serialized report (see redact.js). Off by default.
+      const redact = redactionEnabled() ? (t) => redactPaths(t, projectRoot) : (t) => t;
+
+      const htmlReport       = redact(await generateHTMLReport(finalJson));
+      const jsonReportString = redact(safeJsonString(finalJson, 1000));
 
       if (!is_script) {
         console.log();
@@ -4250,8 +4256,8 @@ export class UbelEngineInstance {
       const sarifBuilder = new SarifBuilder(finalJson);
       const sarifData    = sarifBuilder.generate();
 
-      const sbomString  = safeJsonString(sbomData, 1000);
-      const sarifString = safeJsonString(sarifData, 1000);
+      const sbomString  = redact(safeJsonString(sbomData, 1000));
+      const sarifString = redact(safeJsonString(sarifData, 1000));
 
       const latestSbom  = path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"));
       const latestSarif = path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"));
