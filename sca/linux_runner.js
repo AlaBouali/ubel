@@ -636,11 +636,18 @@ export default LinuxHostScanner;
 const RPM_ARCH_RE    = /^(noarch|x86_64|aarch64|i[3-6]86|ppc64(le)?|s390x?|armv\w+|riscv64|src)$/;
 const RPM_NAME_RE    = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
 const RPM_SECTION_RE = /^(Installing|Upgrading|Updating|Downgrading|Reinstalling)\b[^:]*:$/;
+// Section headers whose rows are not packages (module streams/profiles, group names).
+// "Installing group/module packages:" is deliberately NOT here — its rows are real rpm
+// packages (nodejs, postgresql, php ...) and must be scanned.
+const RPM_NO_ROWS_HEADER_RE = /^(Installing (module profiles|groups|environment groups)|(Enabling|Disabling|Resetting|Switching) module streams)\b/i;
+// The column header row that starts the transaction table (dnf4 "Architecture", dnf5/yum "Arch").
+const RPM_TABLE_HEADER_RE = /^Package\s+Arch\w*\s+Version\b/i;
 
 export function parseRpmTransaction(output, manager = "dnf") {
   const found = [];
   const rejected = [];
   let capture = false;
+  let inTable = false; // true once the "Package Arch Version ..." column header has been seen
   let pendingName = null;
 
   for (const raw of String(output || "").split("\n")) {
@@ -649,9 +656,18 @@ export function parseRpmTransaction(output, manager = "dnf") {
     if (/^Transaction Summary/i.test(line)) break;
     if (/^=+$/.test(line)) { capture = false; pendingName = null; continue; }
 
+    // Nothing before the table header is a package row. This also keeps dnf5's
+    // "Updating and loading repositories:" progress block (which looks like an
+    // "Updating:" section) from starting capture and failing to parse.
+    if (!inTable) {
+      if (RPM_TABLE_HEADER_RE.test(line)) inTable = true;
+      continue;
+    }
+
     if (/:$/.test(line) && !/\s\d/.test(line)) {
-      // Section header. Module/group bookkeeping and removals carry no new code.
-      capture = RPM_SECTION_RE.test(line) && !/module|group|environment/i.test(line);
+      // Section header. Only headers that carry no package rows are skipped;
+      // removals never match RPM_SECTION_RE.
+      capture = RPM_SECTION_RE.test(line) && !RPM_NO_ROWS_HEADER_RE.test(line);
       pendingName = null;
       continue;
     }
@@ -701,6 +717,7 @@ export class LinuxManagerInstance {
     this.inventoryData       = [];
     this.pkgManagerVersion   = null;
     this.engineVersion       = null; // set after resolvePackages(); mirrors NodeManagerInstance.engineVersion
+    this._lastStderr         = "";   // stderr of the most recent runCommand(), surfaced in dry-run errors
   }
 
   // ── Engine version capture (no-op) ──────────────────────────────────────────
@@ -788,6 +805,7 @@ export class LinuxManagerInstance {
 
   runCommand(cmd) {
     const [bin, ...args] = cmd;
+    this._lastStderr = "";
     try {
       // Pin the locale: the dnf/yum table headers ("Installing:", "Nothing to
       // do") and apt's "N newly installed" summary are parsed as English text.
@@ -796,6 +814,7 @@ export class LinuxManagerInstance {
       delete env.LANGUAGE;
       const r = spawnSync(bin, args, { encoding: "utf8", env, timeout: SUBPROCESS_TIMEOUT, maxBuffer: 32 * 1024 * 1024 });
       if (r.error) throw r.error;
+      this._lastStderr = (r.stderr || "").trim();
       // Mirror Python: return stdout on a clean run OR a non-zero exit that
       // still produced resolvable output (apt-get -s / dnf --assumeno exit
       // non-zero on purpose since nothing is actually installed).
@@ -803,8 +822,30 @@ export class LinuxManagerInstance {
     } catch (e) {
       console.error(`[!] Command failed: ${cmd.join(" ")}`);
       console.error(e.message);
+      this._lastStderr = e.message;
       return "";
     }
+  }
+
+  // Appends the last command's stderr (the real cause of a failed dry-run) to an error message.
+  _withStderr(message) {
+    const err = (this._lastStderr || "").trim();
+    return err ? `${message}\n[${this._pmBinary()} stderr] ${err.slice(0, 2000)}` : message;
+  }
+
+  // dnf/yum dry-run. `install --assumeno` may refuse to run unprivileged ("This command has to be
+  // run with superuser privileges"), which contradicts "no sudo needed" — so when that happens as a
+  // non-root user, retry once via non-interactive sudo and fail with the real reason if that fails too.
+  _runRpmDryRun(packages) {
+    const base = [this.pkgManager, "install", "--assumeno", ...packages];
+    let out = this.runCommand(base);
+    const notRoot = typeof process.getuid === "function" && process.getuid() !== 0;
+    if (notRoot && /superuser privileges|must be run as root|need to be root|permission denied/i.test(`${this._lastStderr}\n${out}`)) {
+      console.error(`[~] ${this.pkgManager} refused to run unprivileged — retrying the dry-run with 'sudo -n'.`);
+      // env re-pins the locale because sudo's env_reset would drop it and the table is parsed as English.
+      out = this.runCommand(["sudo", "-n", "env", "LC_ALL=C", "LANG=C", ...base]);
+    }
+    return out;
   }
 
   // ── OS detection (stdlib-equivalent — no external distro package) ───────────
@@ -897,6 +938,12 @@ export class LinuxManagerInstance {
     if (os_id.includes("rocky"))      return `pkg:rpm/rocky-linux/${pkg}@${version}`;
     if (os_id.includes("alpine"))     return `pkg:apk/alpine/${pkg}@${version}`;
 
+    // Any other rpm distro (Fedora, CentOS, Amazon Linux, Oracle Linux, ...): use the
+    // os-release ID as the purl namespace rather than refusing to scan.
+    if ((pkgManager === "dnf" || pkgManager === "yum") && /^[a-z0-9][a-z0-9._-]*$/.test(os_id)) {
+      return `pkg:rpm/${os_id}/${pkg}@${version}`;
+    }
+
     throw new Error(`Unsupported Linux distribution: id=${os_id} like=${like}`);
   }
 
@@ -975,15 +1022,18 @@ export class LinuxManagerInstance {
         }
       }
       if (resolved.length === 0 && !/\b0 newly installed\b/.test(output) && !/\b0 upgraded, 0 newly installed\b/.test(output)) {
-        throw new Error("apt-get dry-run produced no 'Inst' lines and no '0 newly installed' summary — refusing to treat that as a clean scan (the simulation likely failed).");
+        throw new Error(this._withStderr("apt-get dry-run produced no 'Inst' lines and no '0 newly installed' summary — refusing to treat that as a clean scan (the simulation likely failed)."));
       }
       return resolved;
     }
 
     // ── DNF (RHEL 8+, AlmaLinux, Rocky) ────────────────────────────────────────
     if (this.pkgManager === "dnf") {
-      const output = this.runCommand(["dnf", "install", "--assumeno", ...packages]);
-      for (const p of parseRpmTransaction(output, "dnf")) {
+      const output = this._runRpmDryRun(packages);
+      let parsed;
+      try { parsed = parseRpmTransaction(output, "dnf"); }
+      catch (e) { throw new Error(this._withStderr(e.message)); }
+      for (const p of parsed) {
         resolved.push({
           name: p.name, version: p.version, type: "application",
           license: "unknown", paths: [], dependencies: [], ecosystem: osInfo.id,
@@ -995,8 +1045,11 @@ export class LinuxManagerInstance {
     // ── YUM (RHEL 7) ────────────────────────────────────────────────────────────
     // this.pkgManager === "yum" — the only remaining option (validated in the
     // constructor), so no fallthrough error case is needed here anymore.
-    const output = this.runCommand(["yum", "install", "--assumeno", ...packages]);
-    for (const p of parseRpmTransaction(output, "yum")) {
+    const output = this._runRpmDryRun(packages);
+    let parsed;
+    try { parsed = parseRpmTransaction(output, "yum"); }
+    catch (e) { throw new Error(this._withStderr(e.message)); }
+    for (const p of parsed) {
       resolved.push({
         name: p.name, version: p.version, type: "application",
         ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],

@@ -705,12 +705,21 @@ export class PypiManagerInstance {
   _syncDependencyFiles(venvDir) {
     const projectDir = path.dirname(path.resolve(venvDir));
 
+    // The dry-run inventory marks the installer itself (pip / uv) as type:"tool".
+    // Capture those names before the re-scan below replaces inventoryData, so the
+    // installer is never written into the user's requirements.txt / pyproject.toml.
+    const toolNames = new Set(
+      (Array.isArray(this.inventoryData) ? this.inventoryData : [])
+        .filter(c => c && c.type === "tool")
+        .map(c => c.name)
+    );
+
     // Re-scan rather than trust this.inventoryData from a preceding
     // runDryRun() — dry-run reflects what WOULD be installed, this needs
     // what actually now IS. scanOs: false — health mode's OS-package sweep
     // is irrelevant to a Python requirements/pyproject sync.
     this.getInstalled(projectDir, { scanVenv: true, scanOs: false });
-    const pythonPkgs = this.inventoryData.filter(c => c.ecosystem === "python");
+    const pythonPkgs = this.inventoryData.filter(c => c.ecosystem === "python" && !toolNames.has(c.name) && c.type !== "tool");
     if (!pythonPkgs.length) return;
 
     // Component names off PythonVenvScanner are already normalized
@@ -721,7 +730,8 @@ export class PypiManagerInstance {
 
     const pyprojectSynced = this._syncPyprojectToml(projectDir, installedByName);
     if (pyprojectSynced===true) return;
-    fs.writeFileSync(path.join(projectDir, "requirements.txt"), "", { flag: "a" });
+    // _syncRequirementsTxt() no-ops when requirements.txt doesn't exist — files are
+    // updated, never created.
     this._syncRequirementsTxt(projectDir, installedByName);
   }
 
@@ -1144,7 +1154,12 @@ export class PypiManagerInstance {
 
   // ── install_cli ───────────────────────────────────────────────────────────────
 
-  installCli(packageSpec, baseDir = path.join(os.homedir(), ".ubel", "tools", "python"), binDir = null) {
+  installCli(packageSpec, baseDir = path.join(os.homedir(), ".ubel", "tools", "python"), binDir = null, requirementsFile = null) {
+    // The install must be the exact pinned closure that was scanned. Installing the bare
+    // spec would re-resolve at install time and could pull in a release published after the scan.
+    if (!requirementsFile || !fs.existsSync(requirementsFile)) {
+      throw new Error("installCli requires the pinned requirements file from the scanned dry-run (requirementsFile)");
+    }
     const { toolDir, venvDir } = this._toolDirs(packageSpec, baseDir);
 
     if (fs.existsSync(toolDir)) fs.rmSync(toolDir, { recursive: true, force: true });
@@ -1157,13 +1172,14 @@ export class PypiManagerInstance {
     this.initVenv(venvDir);
     const python = this._venvPython(venvDir);
 
-    // --only-binary=:all: matches the dry-run (dryRunCli → runDryRun), which
-    // already refused anything that would need an sdist build. No --no-deps:
-    // packageSpec here is the user's spec, not a pinned closure.
-    const cmd = [python, "-m", "pip", "install", "--quiet", "--only-binary=:all:", packageSpec];
-    const r = spawnSync(cmd[0], cmd.slice(1));
+    // Same flags as runRealInstall(): --only-binary=:all: matches the dry-run (which
+    // already refused anything needing an sdist build), and --no-deps because
+    // requirementsFile is the exact-pinned full closure that was scanned — pip must
+    // install precisely that set and resolve nothing further.
+    const cmd = [python, "-m", "pip", "install", "--quiet", "--only-binary=:all:", "--no-deps", "-r", requirementsFile];
+    const r = spawnSync(cmd[0], cmd.slice(1), { encoding: "utf8" });
     if (r.status !== 0) {
-      throw new Error(`pip install failed (exit ${r.status}): ${cmd.join(" ")}`);
+      throw new Error(`pip install failed (exit ${r.status}): ${cmd.join(" ")}${r.stderr ? `\n${String(r.stderr).trim()}` : ""}`);
     }
 
     const entryPoints = this._detectEntryPoints(packageSpec, venvDir);

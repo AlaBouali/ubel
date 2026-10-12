@@ -817,6 +817,10 @@ async function main(programmaticOptions) {
         pull: !flags.includes("--no-pull"),
         keep: flags.includes("--keep"),
       });
+      // dockerScan() has returned, so its cleanup/image-removal already ran. The engine no
+      // longer exits the process itself, so the CLI entry point does it (and with it, any
+      // lingering keep-alive sockets don't delay the exit).
+      process.exit(0);
     } catch (err) {
       if (err instanceof PolicyViolationError) {
         process.exit(1);
@@ -1202,11 +1206,12 @@ export async function scan_project(projectRoot, options = {}) {
  * (there's nothing to resolve-without-writing the way a lockfile install
  * does — the image is either on the machine or it isn't):
  *   - health  — scan only. The image is left exactly as it was found.
- *   - check   — scan, then always `docker rmi` the image afterward,
- *               regardless of the policy decision. Nothing persists locally
- *               beyond the report.
+ *   - check   — scan, then `docker rmi` the image afterward, regardless of
+ *               the policy decision — but only if this run pulled it (an
+ *               image that was already local is never removed).
  *   - install — scan, then `docker rmi` the image only if the scan resulted
- *               in a policy block. A clean scan leaves the image in place.
+ *               in a policy block (same "only if pulled" rule). A clean scan
+ *               leaves the image in place.
  *
  * @param {object}  opts
  * @param {string}  opts.image           Anything `docker pull`/`docker create` accepts,
@@ -1218,9 +1223,9 @@ export async function scan_project(projectRoot, options = {}) {
  * @param {boolean} [opts.pull=true]     Run `docker pull` first. Set false to scan an
  *                                       image that only exists locally (e.g. right
  *                                       after `docker build`, before it's pushed).
- * @param {boolean} [opts.keep=false]    Skip cleanup of the extracted rootfs, and skip
- *                                       any image removal check/install would otherwise
- *                                       do (debugging).
+ * @param {boolean} [opts.keep=false]    Skip cleanup of the extracted rootfs (debugging).
+ *                                       Does NOT affect image removal: check/install still
+ *                                       remove the image per their mode.
  * @param {"health"|"check"|"install"} [opts.mode="health"]
  * @returns {Promise<object>} same report shape main()/eng.scan() already returns.
  */
@@ -1244,6 +1249,13 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
   let report;
   let violated = false;
 
+  // Synchronous last-resort cleanup: if anything still calls process.exit()
+  // (or the process is torn down) while the scan is in flight, the container,
+  // exported tar and extracted rootfs are removed anyway. cleanup() is
+  // idempotent, so the normal finally path below and this can both run.
+  const exitCleanup = () => { if (!keep) { try { scanner.cleanup(); } catch { /* best effort */ } } };
+  process.on("exit", exitCleanup);
+
   try {
     const rootDir = await scanner.extract({ pull });
 
@@ -1257,6 +1269,9 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
         scan_os:      true,
         full_stack:   true,
         scan_scope:   "container-image",
+        // Return the report on an ALLOW instead of process.exit(0), so the
+        // finally block below (cleanup / image removal) always runs.
+        no_exit:      true,
         // The rootfs (and the .ubel inside it) is thrown away after the scan,
         // so the asset id lives in the cwd's .ubel, next to <uuid>/ scratch.
         asset_ubel_dir:   path.join(process.cwd(), ".ubel"),
@@ -1267,21 +1282,23 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
       throw err; // still propagate so the CLI's own exit-code handling fires
     }
   } finally {
+    process.removeListener("exit", exitCleanup);
+
     if (keep) {
       console.log(`[docker] --keep set, leaving extracted rootfs at ${scanner.rootDir}`);
     } else {
       scanner.cleanup();
     }
 
-    if (!keep) {
-      if (mode === "check") {
-        scanner.removeImage();
-      } else if (mode === "install" && violated) {
-        console.log("[docker] policy violation — removing image");
-        scanner.removeImage();
-      }
-      // health, or install with no violation: image stays on the machine.
+    // Image retention is independent of --keep, which only controls the
+    // scratch rootfs/tar/container above.
+    if (mode === "check") {
+      scanner.removeImage();
+    } else if (mode === "install" && violated) {
+      console.log("[docker] policy violation — removing image");
+      scanner.removeImage();
     }
+    // health, or install with no violation: image stays on the machine.
   }
 
   return report;

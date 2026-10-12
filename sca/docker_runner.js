@@ -34,6 +34,8 @@ import fs from "fs";
 import { randomUUID } from "crypto";
 import path from "path";
 import { spawnSync } from "child_process";
+import zlib from "zlib";
+import { pipeline } from "stream/promises";
 
 const SUBPROCESS_TIMEOUT = 10 * 60 * 1000; // 10 min — image pulls/exports can be slow/large
 
@@ -92,9 +94,13 @@ function readOctal(buf, start, len) {
  *
  * @param {string} tarPath  Path to the tar file on disk.
  * @param {string} destDir  Directory to extract into (must already exist).
+ * @param {object} [opts]
+ * @param {boolean} [opts.whiteouts=false]  Treat the archive as an image layer: apply
+ *                  `.wh.<name>` whiteouts (delete <name> from destDir) and `.wh..wh..opq`
+ *                  opaque markers (empty the directory) instead of writing them out.
  * @returns {{regularCount:number, dirCount:number, linkCount:number, resolvedLinks:number, skipCount:number, writeFailCount:number, writeFailures:Array<{relPath:string,reason:string}>}}
  */
-function extractTarPure(tarPath, destDir) {
+function extractTarPure(tarPath, destDir, { whiteouts = false } = {}) {
   // Stream from disk via a file descriptor instead of fs.readFileSync —
   // the old approach pulled the whole tar into memory, so peak memory
   // scaled with the size of the entire uncompressed image (multi-GB for
@@ -210,6 +216,32 @@ function extractTarPure(tarPath, destDir) {
       if (!relPath || relPath.split(/[/\\]/).includes("..")) { offset = paddedEnd; continue; }
       const destPath = path.join(destDir, relPath);
 
+      // Layer whiteouts: applied to what earlier layers left in destDir, never written out.
+      if (whiteouts) {
+        const base = path.basename(relPath);
+        if (base === ".wh..wh..opq") {
+          try {
+            const dir = path.dirname(destPath);
+            if (fs.existsSync(dir)) for (const e of fs.readdirSync(dir)) fs.rmSync(path.join(dir, e), { recursive: true, force: true });
+          } catch (err) {
+            writeFailCount++;
+            if (writeFailures.length < 20) writeFailures.push({ relPath, reason: err.message });
+          }
+          offset = paddedEnd;
+          continue;
+        }
+        if (base.startsWith(".wh.")) {
+          try {
+            fs.rmSync(path.join(path.dirname(destPath), base.slice(4)), { recursive: true, force: true });
+          } catch (err) {
+            writeFailCount++;
+            if (writeFailures.length < 20) writeFailures.push({ relPath, reason: err.message });
+          }
+          offset = paddedEnd;
+          continue;
+        }
+      }
+
       // Any single write below can fail for reasons that have nothing to do
       // with the archive being malformed: Windows rejects ':', '*', '?', '"',
       // '<', '>', '|' in filenames (Debian's man pages routinely have '::' in
@@ -246,6 +278,8 @@ function extractTarPure(tarPath, destDir) {
           }
           regularCount++;
         } else if (typeflag === "1" || typeflag === "2") {
+          // In layer mode a link replaces whatever an earlier layer put at this path.
+          if (whiteouts) fs.rmSync(destPath, { recursive: true, force: true });
           links.push({ relPath, linkname, hard: typeflag === "1" });
           linkCount++;
         } else {
@@ -376,6 +410,11 @@ export class DockerImageScanner {
     // to delete in cleanup() — a tar the caller pointed us at is their
     // file, and removing it out from under them would be a bad surprise.
     this._tarPathIsOwned = !isTarFile;
+    // true/false once extract() has checked whether the image was already
+    // local before we touched it; null = unknown. removeImage() only removes
+    // an image we know we brought in.
+    this._imageExistedBefore = null;
+    this._stagingDir = null;
   }
 
   /**
@@ -397,6 +436,11 @@ export class DockerImageScanner {
     if (this.isTarFile) {
       console.log(`[docker] Using local tar file ${this._tarPath} ...`);
     } else {
+      // Remember whether the image was already on this machine, so check/install
+      // never remove an image the user had before the scan.
+      const inspectRes = run("docker", ["image", "inspect", "--format", "{{.Id}}", "--", this.image]);
+      this._imageExistedBefore = inspectRes.status === 0;
+
       if (pull) {
         console.log(`[docker] Pulling ${this.image} ...`);
         const pullRes = run("docker", ["pull", "--", this.image], { stdio: "inherit" });
@@ -430,7 +474,12 @@ export class DockerImageScanner {
       }
 
       console.log(`[docker] Extracting to ${this.rootDir} ...`);
-      const stats = extractTarPure(this._tarPath, this.rootDir);
+      let stats = extractTarPure(this._tarPath, this.rootDir);
+      if (this.isTarFile) {
+        // `docker save` output holds layer tars, not a filesystem — flatten them.
+        const layered = await this._flattenSavedImage();
+        if (layered) stats = layered;
+      }
       console.log(
         `[docker] extracted ${stats.regularCount} files, ${stats.dirCount} dirs, ` +
         `resolved ${stats.resolvedLinks}/${stats.linkCount} symlinks/hardlinks to content copies` +
@@ -475,6 +524,80 @@ export class DockerImageScanner {
   }
 
   /**
+   * If the tar extracted into rootDir is a `docker save` archive (manifest.json
+   * listing layer tars), rebuilds rootDir as the flattened filesystem: layers are
+   * applied in manifest order, honouring `.wh.` whiteouts. Returns the summed
+   * extraction stats, or null when the tar was a plain filesystem (docker export).
+   * Throws a clear error for OCI-layout archives with no manifest.json.
+   */
+  async _flattenSavedImage() {
+    const manifestPath = path.join(this.rootDir, "manifest.json");
+    if (!fs.existsSync(manifestPath)) {
+      if (fs.existsSync(path.join(this.rootDir, "oci-layout")) && fs.existsSync(path.join(this.rootDir, "index.json"))) {
+        throw new Error(
+          "this tar is an OCI image layout without a Docker manifest.json, which is not supported — " +
+          "use `docker save` (Docker manifest format) or `docker export <container>` instead"
+        );
+      }
+      return null;
+    }
+
+    let manifest;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch { return null; }
+    if (!Array.isArray(manifest) || !manifest.length || !Array.isArray(manifest[0]?.Layers) || !manifest[0].Layers.length) return null;
+    if (manifest.length > 1) {
+      console.warn(`[docker] archive holds ${manifest.length} images — scanning the first (${(manifest[0].RepoTags || []).join(", ") || "untagged"})`);
+    }
+
+    const stagingDir = `${this.rootDir}.save`;
+    const stagingResolved = path.resolve(stagingDir);
+    const layerPaths = manifest[0].Layers.map((l) => {
+      const abs = path.resolve(stagingDir, String(l));
+      const rel = path.relative(stagingResolved, abs);
+      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`docker save manifest references a layer outside the archive: ${l}`);
+      return abs;
+    });
+
+    // Move the outer archive contents aside; rootDir becomes the flattened fs.
+    fs.renameSync(this.rootDir, stagingDir);
+    this._stagingDir = stagingDir;
+    fs.mkdirSync(this.rootDir, { recursive: true });
+
+    for (const abs of layerPaths) {
+      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+        throw new Error(`docker save archive is missing layer ${path.relative(stagingResolved, abs)}`);
+      }
+    }
+
+    const total = { regularCount: 0, dirCount: 0, linkCount: 0, resolvedLinks: 0, skipCount: 0, writeFailCount: 0, writeFailures: [], blockedTraversals: [] };
+    console.log(`[docker] docker save archive — applying ${layerPaths.length} layer(s) in order ...`);
+    for (const abs of layerPaths) {
+      let layerTar = abs;
+      let tmpTar = null;
+      const magic = Buffer.alloc(2);
+      const fd = fs.openSync(abs, "r");
+      try { fs.readSync(fd, magic, 0, 2, 0); } finally { fs.closeSync(fd); }
+      if (magic[0] === 0x1f && magic[1] === 0x8b) { // gzip-compressed layer (OCI-style blobs)
+        tmpTar = `${abs}.untar`;
+        await pipeline(fs.createReadStream(abs), zlib.createGunzip(), fs.createWriteStream(tmpTar));
+        layerTar = tmpTar;
+      }
+      try {
+        const st = extractTarPure(layerTar, this.rootDir, { whiteouts: true });
+        for (const k of ["regularCount", "dirCount", "linkCount", "resolvedLinks", "skipCount", "writeFailCount"]) total[k] += st[k];
+        total.writeFailures.push(...st.writeFailures.slice(0, Math.max(0, 20 - total.writeFailures.length)));
+        total.blockedTraversals.push(...st.blockedTraversals);
+      } finally {
+        if (tmpTar) fs.rmSync(tmpTar, { force: true });
+      }
+    }
+
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    this._stagingDir = null;
+    return total;
+  }
+
+  /**
    * Copies <rootDir>/.ubel (if the image has one) to ./ubel in the current
    * working directory, preserving the directory structure and overwriting
    * anything already there. Must run before cleanup() deletes rootDir.
@@ -508,7 +631,19 @@ export class DockerImageScanner {
       console.log(`[docker] input was a local tar file (${this._tarPath}) — no pulled image to remove, skipping docker rmi`);
       return;
     }
-    const res = run("docker", ["rmi", "-f", "--", this.image]);
+    if (this._imageExistedBefore !== false) {
+      // true: the image was already local before this scan, so it isn't ours to remove.
+      // null: we never confirmed it wasn't there, so don't guess.
+      console.log(`[docker] image '${this.image}' was already present locally before the scan — leaving it in place`);
+      return;
+    }
+    // Our scan container (if --keep skipped cleanup) would block the removal.
+    if (this.containerId) {
+      run("docker", ["rm", "-f", this.containerId]);
+      this.containerId = null;
+    }
+    // No -f: an image still used by another container or tag fails to delete instead of being forced.
+    const res = run("docker", ["rmi", "--", this.image]);
     if (res.status !== 0) {
       console.warn(`[docker] could not remove image '${this.image}': ${(res.stderr || res.stdout || "").trim()}`);
     } else {
@@ -524,6 +659,10 @@ export class DockerImageScanner {
     }
     if (this._tarPathIsOwned && this._tarPath && fs.existsSync(this._tarPath)) {
       fs.rmSync(this._tarPath, { force: true });
+    }
+    if (this._stagingDir && fs.existsSync(this._stagingDir)) {
+      fs.rmSync(this._stagingDir, { recursive: true, force: true });
+      this._stagingDir = null;
     }
     if (this.rootDir && fs.existsSync(this.rootDir)) {
       this._exportUbelDir();

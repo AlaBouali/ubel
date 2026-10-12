@@ -817,45 +817,40 @@ export class NodeManagerInstance {
         const raw = typeof this.candidate_lockfile_content === "string"
           ? this.candidate_lockfile_content
           : JSON.stringify(this.candidate_lockfile_content, null, 2);
-        fs.writeFileSync(lockfilePath, raw, "utf8");
 
-        const parsed = typeof this.candidate_lockfile_content === "string"
-          ? JSON.parse(this.candidate_lockfile_content)
-          : this.candidate_lockfile_content;
-
+        // package.json is deliberately NOT rewritten here. The dry-run
+        // (`npm install --package-lock-only`) already wrote the correct manifest, and the
+        // real install runs `npm ci` from the candidate lockfile. Rewriting `dependencies`
+        // from node_modules/<name> entries dropped every file:/link:/workspace: dependency
+        // (they have no versioned node_modules entry) and flattened every range to an exact
+        // version, while the command still exited 0.
         const packageJsonPath = path.join(projectPath, "package.json");
-        const packages        = parsed.packages || {};
-        const rootMeta        = packages[""] || {};
 
-        let pkgJson = {};
-        if (fs.existsSync(packageJsonPath)) {
-          try { pkgJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")); }
-          catch { pkgJson = {}; }
+        // TOCTOU guard: the manifest must still be byte-for-byte what was hashed right after
+        // the dry-run (step 7 of runDryRun). Nothing here changes it, so the hash is not recomputed.
+        if (this._candidatePackageJsonHash && this._candidatePackageJsonHash !== "absent") {
+          if (!fs.existsSync(packageJsonPath)) {
+            return {
+              written:  false,
+              filePath: lockfilePath,
+              reason:   "package.json integrity check FAILED — file was removed after scanning",
+            };
+          }
+          const onDisk     = fs.readFileSync(packageJsonPath, "utf8");
+          const onDiskHash = createHash("sha256").update(onDisk, "utf8").digest("hex");
+          if (onDiskHash !== this._candidatePackageJsonHash) {
+            return {
+              written:  false,
+              filePath: lockfilePath,
+              reason:   `package.json integrity check FAILED — file was modified after scanning.\n` +
+                        `  Expected : ${this._candidatePackageJsonHash}\n` +
+                        `  Got      : ${onDiskHash}\n` +
+                        `  File     : ${packageJsonPath}`,
+            };
+          }
         }
 
-        const exactDeps    = {};
-        const exactDevDeps = {};
-
-        for (const [name] of Object.entries(rootMeta.dependencies || {})) {
-          const meta = packages[`node_modules/${name}`];
-          if (meta?.version) exactDeps[name] = meta.version;
-        }
-        for (const [name] of Object.entries(rootMeta.devDependencies || {})) {
-          const meta = packages[`node_modules/${name}`];
-          if (meta?.version) exactDevDeps[name] = meta.version;
-        }
-
-        pkgJson.dependencies = exactDeps;
-        if (Object.keys(exactDevDeps).length) pkgJson.devDependencies = exactDevDeps;
-
-        fs.writeFileSync(packageJsonPath, JSON.stringify(pkgJson, null, 2), "utf8");
-
-        {
-          const written = fs.readFileSync(packageJsonPath, "utf8");
-          this._candidatePackageJsonHash = createHash("sha256")
-            .update(written, "utf8")
-            .digest("hex");
-        }
+        fs.writeFileSync(lockfilePath, raw, "utf8");
 
         return { written: true, filePath: lockfilePath, packageJsonPath };
 

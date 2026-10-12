@@ -1071,14 +1071,18 @@ via `full_stack`).
 **Firewall:** Docker gets **true pre-install (here, pre-deploy) gating**,
 with three modes controlling what happens to the image after scanning:
 - `health` — scan only, image left exactly as found.
-- `check` — scan, then always remove the image afterward (throwaway vetting).
+- `check` — scan, then remove the image afterward (throwaway vetting) — only
+  if this run pulled it; an image that was already local is never removed.
 - `install` — scan, then remove the image *only if* the scan results in a
-  policy block; a clean scan leaves it in place.
+  policy block (same rule); a clean scan leaves it in place.
+
+Removal is `docker rmi` without `-f`: an image still in use fails to delete
+instead of being forced.
 
 `--no-pull` scans an image that only exists locally (e.g., right after
 `docker build`, before it's ever pushed to a registry) — this is the
 "vet before you ship" path. `--keep` retains the extracted root filesystem
-for debugging. Pointing this at a CI-built image before push, or at a
+for debugging (it does not change image removal). Pointing this at a CI-built image before push, or at a
 third-party base image before you adopt it, is the intended pre-deploy
 firewall use.
 

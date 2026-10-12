@@ -3612,8 +3612,18 @@ export class UbelEngineInstance {
     fs.mkdirSync(depsDir, { recursive: true });
     const reqFile = path.join(depsDir, "requirements.txt");
 
+    // The dry-run inventory carries the installer itself (pip / uv) as a
+    // type:"tool" component. It is not part of what the user asked for, so it
+    // must never reach the install list or be pinned into project files.
+    const toolIds = new Set(
+      (Array.isArray(this.manager.inventoryData) ? this.manager.inventoryData : [])
+        .filter(c => c && c.type === "tool")
+        .map(c => c.id)
+    );
+
     const lines = [];
     for (const purl of purls) {
+      if (toolIds.has(purl)) continue;
       const [name, version] = getDependencyFromPurl(purl);
       if (name === TOOL_NAME && version === TOOL_VERSION) continue;
       if (name !== "unknown" && version !== "" && version !== "unknown") {
@@ -3637,6 +3647,10 @@ export class UbelEngineInstance {
       scan_scope          = "repository",
       scan_secrets        = true,
       scan_vulns          = true,
+      // When true, an allowed health/check scan returns the report instead of
+      // calling process.exit(0), so the caller's finally/cleanup blocks run
+      // (dockerScan passes this). The CLI entry point owns the process exit.
+      no_exit             = false,
     } = options;
 
     const projectRoot = this.projectRoot;
@@ -4472,6 +4486,7 @@ export class UbelEngineInstance {
       }
 
       if (this.checkMode === "health" && !is_script) {
+        if (no_exit) return finalJson;
         process.exit(0);
       }
 
@@ -4482,6 +4497,7 @@ export class UbelEngineInstance {
           manager.cleanupLockfileBackup();
           if (!is_script) console.log("[+] Backup lockfiles removed.");
         }
+        if (no_exit) return finalJson;
         process.exit(0);
       }
 
@@ -4524,7 +4540,10 @@ export class UbelEngineInstance {
             const specFile = manager.writeCondaSpecFile(purls, projectRoot);
             manager.runRealInstall(specFile, "conda", envDir);
           } else if (this.engine === "pipx") {
-            manager.installCli(args[0]);
+            // Install exactly the scanned, pinned closure — never re-resolve the
+            // user's spec, which could pick up a release published after the scan.
+            const reqFile = this._generateRequirementsFile(purls, projectRoot);
+            manager.installCli(args[0], undefined, null, reqFile);
           }
         } catch (err) {
           if (!is_script) console.error("[!] Failed to install package(s):", err.message);
