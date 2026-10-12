@@ -11,7 +11,7 @@
 // scanners never collide on disk and can be told apart without opening them:
 //
 //     sca                 .sca              (health scan of an asset: folder/host)
-//     sca / os firewall   .sca_<engine>     (check / install — npm, pip, apt, …)
+//     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …)
 //     licenses            .licenses
 //     secrets             .secrets
 //     sast                .sast             (malware scanner: .malware)
@@ -100,7 +100,7 @@ export function sanitizeReportTag(tag) {
 /**
  * <stem>.<tag>.<ext> — `ext` may be compound ("sarif.json", "cdx.json").
  * @param {string} stem  "latest", "report", or a timestamp
- * @param {string} tag   e.g. "sca", "sca_npm", "cloud"
+ * @param {string} tag   e.g. "sca", "firewall_npm", "cloud"
  * @param {string} ext   extension without the leading dot
  */
 export function reportFileName(stem, tag, ext) {
@@ -112,7 +112,7 @@ export function reportFileName(stem, tag, ext) {
  *
  *   scan_scope "license"          → licenses
  *   scan_scope "secrets"          → secrets
- *   check / install (firewall)    → sca_<engine>   (npm, pnpm, pip, apt, dnf, …)
+ *   check / install (firewall)    → firewall_<engine>   (npm, pnpm, pip, apt, dnf, …)
  *   anything else (health)        → sca
  *
  * @param {{checkMode: string, engine: string, scanScope?: string}} p
@@ -121,7 +121,7 @@ export function scaReportTag({ checkMode, engine, scanScope }) {
   if (scanScope === "license") return "licenses";
   if (scanScope === "secrets") return "secrets";
   if (checkMode === "check" || checkMode === "install") {
-    return sanitizeReportTag(`sca_${engine || "unknown"}`);
+    return sanitizeReportTag(`firewall_${engine || "unknown"}`);
   }
   return "sca";
 }
@@ -474,7 +474,7 @@ export function getRuntimeAssetId() {
 //
 //   UBEL-<tag>-<asset_id>-<report_uuid>
 //
-//   <tag>          the report's file tag (sca, sca_npm, licenses, secrets, sast,
+//   <tag>          the report's file tag (sca, firewall_npm, licenses, secrets, sast,
 //                  malware, cloud, url, domain, host, easm) — see reportFileName()
 //   <asset_id>     the scan's asset id, embedded whole (32 hex, no hyphens); 32 zeros
 //                  when the scan has no asset id
@@ -597,7 +597,7 @@ export function assetFor(mode, ubelDir, scanScope) {
  *
  * @param {string} mode        history sub-folder, e.g. "sca", "os", "url"
  * @param {string} timestamp   from reportTimestamp()
- * @param {string} tag         file-name tag, e.g. "sca", "sca_apt", "url"
+ * @param {string} tag         file-name tag, e.g. "sca", "firewall_apt", "url"
  * @param {string|null} [assetId]  asset_id from assetFor(); omitted/null = no asset folder
  * @returns {string}
  */

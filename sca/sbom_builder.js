@@ -182,7 +182,7 @@ export class CycloneDXBuilder {
 
       const props = this._props(item, [
         "scopes", "paths", "introduced_by", "parents",
-        "state", "is_policy_violation"
+        "state", "is_policy_violation", "policy_violations"
       ]);
       // License risk classification (see license_checker.js) as component
       // properties — CycloneDX's `licenses` field has no room for OSI
@@ -341,6 +341,20 @@ export class CycloneDXBuilder {
         if (ti.length) {
           entry.properties = entry.properties || [];
           entry.properties.push(...ti);
+        }
+      }
+
+      // Policy decision and the rules this vulnerability violates (see
+      // tag_vulnerabilities_with_policy_decisions in engine.js). Flat strings:
+      // the rule ids are comma-joined, the full entries JSON-encoded.
+      if (Array.isArray(v.policy_violations)) {
+        entry.properties = entry.properties || [];
+        entry.properties.push(
+          { name: "policy.decision",   value: v.policy_decision === "block" ? "block" : "allow" },
+          { name: "policy.violations", value: v.policy_violations.map(x => x.rule).join(",") },
+        );
+        if (v.policy_violations.length) {
+          entry.properties.push({ name: "policy.violations_detail", value: JSON.stringify(v.policy_violations) });
         }
       }
 

@@ -13,9 +13,9 @@
 //       { version: "4.17.21",
 //         count: 3,
 //         range: { key: "m:4.17", label: "4.17.x", scope: "minor" | "major" },
-//         vulnerabilities: [{ id, severity, severity_score, is_infection }, ...] }
+//         vulnerabilities: [{ id, finding_key, severity, severity_score, is_infection }, ...] }
 //     ],
-//     unfixed: [{ id, severity, severity_score, is_infection }, ...]   // no fix at all
+//     unfixed: [{ id, finding_key, severity, severity_score, is_infection }, ...]   // no fix at all
 //   }
 //
 // Vulnerabilities are ordered most severe first (infection, critical, high, ...).
@@ -29,6 +29,9 @@ function sevKey(v) {
 function compactVuln(v) {
   return {
     id: v.id,
+    // Unique per finding instance (advisory id + component): the same advisory id
+    // can be reported against several versions of one package.
+    finding_key: v.finding_key || `${v.id}::${v.affected_package_id || ""}`,
     severity: v.severity || "unknown",
     severity_score: v.severity_score != null && !isNaN(parseFloat(v.severity_score))
       ? parseFloat(v.severity_score) : null,

@@ -615,6 +615,77 @@ function buildMethodology(report, ctx) {
   return { steps, rating_rules: ratingRules, prioritization, timeframes, limitations };
 }
 
+// ── License coverage ─────────────────────────────────────────────────────────
+// Two different things must not be merged:
+//   • confirmed license risk — a license WAS identified and rated medium / high;
+//   • missing license evidence — no recognizable license, so nothing could be rated.
+// "Unknown" is deliberately not treated as risky (it is more often a detection
+// gap than a legal finding), but it is not cleared either, so the size of the gap
+// is reported as a coverage figure and the affected components are listed.
+//
+// Returns null when no license check ran (check / install scans), so the report
+// says nothing about licenses rather than "0 unknown".
+const LICENSE_RISKS = ["low", "medium", "high"];
+
+function buildLicenseCoverage(inventory, stats) {
+  const lic = stats?.license_stats;
+  const items = Array.isArray(inventory) ? inventory : [];
+  const hasInfo = items.some(i => i && typeof i.license_info === "object" && i.license_info !== null);
+  if (!lic && !hasInfo) return null;
+
+  const riskOf = (i) => {
+    const r = String(i?.license_info?.risk || "unknown").toLowerCase();
+    return LICENSE_RISKS.includes(r) ? r : "unknown";
+  };
+
+  const by_risk = { low: 0, medium: 0, high: 0, unknown: 0 };
+  const needs_review = [];
+  const confirmed_risk_components = [];
+  let total;
+  if (hasInfo && items.length) {
+    total = items.length;
+    for (const i of items) {
+      const r = riskOf(i);
+      by_risk[r]++;
+      if (r === "unknown") {
+        needs_review.push({
+          id: i.id,
+          name: i.name || i.id,
+          version: i.version || "",
+          direct: i.is_direct === true,
+          declared: (Array.isArray(i.license_info?.identifiers) && i.license_info.identifiers.join(", ")) || null,
+          reason: i.license_info?.reason || null,
+        });
+      } else if (r === "medium" || r === "high") {
+        confirmed_risk_components.push({
+          id: i.id, name: i.name || i.id, version: i.version || "", risk: r,
+          license: i.license_info?.spdx || (Array.isArray(i.license_info?.identifiers) && i.license_info.identifiers.join(", ")) || null,
+        });
+      }
+    }
+  } else {
+    for (const r of Object.keys(by_risk)) by_risk[r] = lic?.by_risk?.[r] || 0;
+    total = by_risk.low + by_risk.medium + by_risk.high + by_risk.unknown;
+  }
+
+  // Direct dependencies first (those are the ones a team chose), then by name.
+  needs_review.sort((a, b) => (b.direct - a.direct) || String(a.name).localeCompare(String(b.name)));
+  confirmed_risk_components.sort((a, b) => (a.risk === b.risk ? 0 : a.risk === "high" ? -1 : 1) || String(a.name).localeCompare(String(b.name)));
+
+  const identified = by_risk.low + by_risk.medium + by_risk.high;
+  const unidentified = by_risk.unknown;
+  return {
+    total,
+    identified,
+    unidentified,
+    coverage_percent: pct(identified, total),
+    by_risk,
+    confirmed_risk: { high: by_risk.high, medium: by_risk.medium },
+    confirmed_risk_components,
+    needs_review,
+  };
+}
+
 export function buildExecutiveSummary(report) {
   const vulns     = Array.isArray(report?.vulnerabilities) ? report.vulnerabilities : [];
   const inventory = Array.isArray(report?.inventory) ? report.inventory : [];
@@ -639,6 +710,12 @@ export function buildExecutiveSummary(report) {
     bySeverity[s]++;
     if (!isConfirmedUnreachable(v)) effective[s]++;
   }
+
+  // `regular.length` counts finding INSTANCES (one per affected component/version).
+  // The same advisory id can legitimately appear several times, so the number of
+  // distinct advisories is lower; it is reported alongside, never instead.
+  const uniqueAdvisories = new Set(regular.map(v => v.id)).size;
+  const licenseCoverage  = buildLicenseCoverage(inventory, stats);
 
   const withFix       = regular.filter(v => v.has_fix || (v.fixed_versions || []).length > 0).length;
   const unreachable   = regular.filter(isConfirmedUnreachable).length;
@@ -872,20 +949,27 @@ export function buildExecutiveSummary(report) {
   }
 
   const lic = stats?.license_stats;
-  if (lic && typeof lic === "object") {
-    const high = lic.by_risk?.high || 0;
-    const unk  = lic.by_risk?.unknown || 0;
-    if (high > 0 || unk > 0) {
+  // Confirmed license risk and missing license evidence are separate findings:
+  // the first is something legal found, the second is something nobody could check.
+  if (licenseCoverage) {
+    const high = licenseCoverage.by_risk.high;
+    const unk  = licenseCoverage.unidentified;
+    if (high > 0) {
       keyFindings.push({
-        severity: high > 0 ? "medium" : "low",
-        title: "Software license review needed",
-        detail:
-          (high > 0
-            ? `${count(high, "component")} ${plural(high, "uses a license", "use licenses")} with strong obligations or restrictions (such as copyleft or proprietary terms) that legal or procurement should review. `
-            : "") +
-          (unk > 0
-            ? `${count(unk, "component")} ${plural(unk, "has", "have")} no recognizable license information, so the usage terms could not be confirmed.`
-            : ""),
+        severity: "medium",
+        title: "Confirmed license risk",
+        detail: `${count(high, "component")} ${plural(high, "uses a license", "use licenses")} with strong obligations or restrictions (such as copyleft or proprietary terms) that legal or procurement should review.`,
+      });
+    }
+    if (unk > 0) {
+      // A gap this large means most of the license picture is simply unknown.
+      const share = pct(unk, licenseCoverage.total);
+      keyFindings.push({
+        severity: share >= 25 ? "medium" : "low",
+        title: `License information is missing for ${share}% of components`,
+        detail: `No recognizable license was found for ${unk} of ${count(licenseCoverage.total, "component")}, so only ${licenseCoverage.coverage_percent}% of the inventory has a confirmed license. ` +
+          "These are not counted as risky, but they are not cleared either: their terms could not be confirmed. " +
+          "They are listed under “Components needing license review”.",
       });
     }
   }
@@ -999,12 +1083,20 @@ export function buildExecutiveSummary(report) {
       owner: "Development team",
     });
   }
-  if (lic && ((lic.by_risk?.high || 0) > 0 || (lic.by_risk?.unknown || 0) > 0)) {
+  if (licenseCoverage && licenseCoverage.by_risk.high > 0) {
     actions.push({
       priority: actions.length + 1, timeframe: "Next maintenance cycle",
       action: "Ask legal or procurement to review the flagged software licenses.",
       why: "Some licenses impose conditions on how software can be distributed or sold.",
       owner: "Legal / procurement",
+    });
+  }
+  if (licenseCoverage && licenseCoverage.unidentified > 0) {
+    actions.push({
+      priority: actions.length + 1, timeframe: "Next maintenance cycle",
+      action: `Identify the license of the ${count(licenseCoverage.unidentified, "component")} with no recognizable license information.`,
+      why: `Only ${licenseCoverage.coverage_percent}% of components have a confirmed license, so the license position cannot yet be stated for the rest.`,
+      owner: "Development team / legal",
     });
   }
   if (!decision.allowed && actions.length === 0) {
@@ -1061,6 +1153,13 @@ export function buildExecutiveSummary(report) {
     notes.push("This scan did not look up vulnerabilities or malicious software. Figures for weaknesses, malicious components and fixes are shown as not checked, not as zero.");
   }
   notes.push("Compliance references are best-effort guidance and are not a substitute for a formal audit.");
+  if (vulnsChecked && regular.length > 0) {
+    notes.push(
+      `Weaknesses are counted per affected component and version: ${count(regular.length, "finding")} correspond to ${count(uniqueAdvisories, "distinct advisory", "distinct advisories")}. ` +
+      "When one advisory affects several components or versions it appears once for each, because each is a separate thing to fix; this is not double counting. " +
+      "Known-exploited weaknesses are a subset of the severity counts, not additional to them."
+    );
+  }
   if (infections.length > 0) {
     notes.push("The Vulnerabilities tab also lists advisories for malicious components. In this summary they are counted separately, so “Known weaknesses” can be lower than the tab’s total.");
   }
@@ -1072,8 +1171,10 @@ export function buildExecutiveSummary(report) {
   } else if (!secretsInfo.enabled) {
     notes.push("The search for exposed passwords and keys was not part of this scan.");
   }
-  if (!lic) {
+  if (!lic && !licenseCoverage) {
     notes.push("License checks run only on full health scans and were not part of this scan.");
+  } else if (licenseCoverage && licenseCoverage.unidentified > 0) {
+    notes.push(`License terms could not be identified for ${licenseCoverage.unidentified} of ${licenseCoverage.total} components (${pct(licenseCoverage.unidentified, licenseCoverage.total)}%). They are reported as unidentified, not as risky; the license position for them is open until they are reviewed.`);
   }
 
   const glossary = [
@@ -1082,7 +1183,12 @@ export function buildExecutiveSummary(report) {
     { term: "Malicious component", meaning: "Software built to do damage, such as stealing data. Not an accidental bug." },
     { term: "Exposed credential", meaning: "A password or access key stored in plain text where others could find it." },
     { term: "Severity", meaning: "How serious a weakness is, from Low to Critical, based on the potential damage." },
+    { term: "Finding", meaning: "One weakness in one specific component version. The same published advisory counts as a separate finding for each component or version it affects." },
+    { term: "Advisory", meaning: "A published description of a weakness, with its own identifier (for example a CVE or GHSA number). One advisory can produce several findings." },
   ];
+  if (licenseCoverage) {
+    glossary.push({ term: "License coverage", meaning: "The share of components whose license could be identified. It says how much of the license picture is known, not how risky the licenses are." });
+  }
   if (vulnsChecked) {
     glossary.push(
       { term: "Known-exploited weakness", meaning: "A weakness that the U.S. cybersecurity agency (CISA) lists as already being used in real attacks." },
@@ -1102,7 +1208,9 @@ export function buildExecutiveSummary(report) {
     components_reviewed: componentsReviewed,
     components_with_issues: nv(vulnerableComponents),
     malicious_components: nv(maliciousComponents),
+    // Finding instances (one per affected component/version) vs distinct advisory ids.
     total_vulnerabilities: nv(regular.length),
+    unique_advisories: nv(uniqueAdvisories),
     by_severity: nv(bySeverity),
     fix_available: nv(withFix),
     fix_available_percent: nv(pct(withFix, regular.length)),
@@ -1111,16 +1219,28 @@ export function buildExecutiveSummary(report) {
     blocking_policy: blocking,
     exposed_credentials: credsKnown ? secretsInfo.total : null,
     // null = the exploit feed was unavailable, not "none".
+    // A SUBSET of total_vulnerabilities (and of its severity breakdown), not an addition to it.
     known_exploited: kevValue,
+    known_exploited_is_subset_of_total: true,
     high_exploit_likelihood: epssValue,
+    // null when no license check ran (check / install scans).
+    license_coverage_percent: licenseCoverage ? licenseCoverage.coverage_percent : null,
+    components_needing_license_review: licenseCoverage ? licenseCoverage.unidentified : null,
     exploit_data_complete: vulnsChecked ? (intel.kevKnown && intel.epssKnown && !intel.epssPartial) : null,
   };
 
   // Ready-to-render figure cards. `value: null` means "not checked" and is shown
   // as n/a; `tone` is a severity key ("none" = good, "" = neutral).
-  const weaknessSub = (vulnsChecked ? (sevSummary(bySeverity) || "None found") : "Not checked in this scan") +
-    (maliciousComponents > 0 ? ` + ${count(maliciousComponents, "malicious component")}` : "") +
-    (kevCount > 0 ? ` + ${count(kevCount, "known-exploited weakness", "known-exploited weaknesses")}` : "");
+  // The severity breakdown sums to the total, and known-exploited weaknesses are
+  // already inside it, so KEV is worded as "of which", never "+". Malicious
+  // components are kept out of the weakness total, so they really are an addition.
+  const uniqueNote = uniqueAdvisories !== regular.length ? `${uniqueAdvisories} distinct advisories` : "";
+  const weaknessSub = !vulnsChecked ? "Not checked in this scan" : [
+    sevSummary(bySeverity) || "None found",
+    kevCount > 0 ? `of which ${kevCount} ${plural(kevCount, "is", "are")} known exploited` : "",
+    uniqueNote,
+    maliciousComponents > 0 ? `plus ${count(maliciousComponents, "malicious component")}, counted separately` : "",
+  ].filter(Boolean).join("; ");
   let weaknessTone = maliciousComponents > 0 ? "critical" : figureTone(worstOf(bySeverity), vulnsChecked ? regular.length : null);
   if (kevEffective.length > 0 && weaknessTone !== "critical") weaknessTone = "high";
   const credTotal = credsKnown ? secretsInfo.total : null;
@@ -1139,11 +1259,20 @@ export function buildExecutiveSummary(report) {
     { label: "Components reviewed", value: componentsReviewed, sub: undetermined > 0 ? `${count(undetermined, "component")} with unknown version` : "All had a checkable version", tone: "" },
     { label: "Components affected", value: nv(vulnerableComponents), sub: "With a known weakness or flagged as malicious", tone: figureTone("high", nv(vulnerableComponents)) },
     { label: "Malicious components", value: nv(maliciousComponents), sub: "Deliberately harmful software", tone: figureTone("critical", nv(maliciousComponents)) },
-    { label: "Known weaknesses", value: nv(regular.length), sub: vulnsChecked ? sevSummary(bySeverity) : "Not checked in this scan", tone: figureTone("medium", nv(regular.length)) },
+    { label: "Known weaknesses", value: nv(regular.length),
+      sub: vulnsChecked ? `Findings, one per affected component version: ${sevSummary(bySeverity) || "none"}` : "Not checked in this scan",
+      tone: figureTone("medium", nv(regular.length)) },
+    { label: "Distinct advisories", value: nv(uniqueAdvisories),
+      sub: vulnsChecked
+        ? (uniqueAdvisories !== regular.length
+            ? "Separate published advisories behind those findings; one advisory can affect several components or versions"
+            : "Each finding is a different advisory")
+        : "Not checked in this scan",
+      tone: "" },
     { label: "Known to be exploited", value: kevValue,
       sub: !vulnsChecked ? "Not checked in this scan"
         : kevValue == null ? "Exploit data was not available for this scan"
-        : (kevCount > 0 ? "Confirmed in real attacks (CISA catalog)" : "None are on the CISA known-exploited catalog") +
+        : (kevCount > 0 ? "Of the weaknesses above, confirmed in real attacks (CISA catalog); not additional to them" : "None are on the CISA known-exploited catalog") +
           (epssValue > 0 ? `; ${epssValue} more forecast as likely to be exploited soon` : ""),
       tone: figureTone("critical", kevValue) },
     { label: "Fix available", value: vulnsChecked ? `${pct(withFix, regular.length)}%` : null, sub: vulnsChecked ? `${withFix} of ${regular.length} can be fixed by updating` : "Not checked in this scan", tone: "" },
@@ -1151,6 +1280,32 @@ export function buildExecutiveSummary(report) {
     { label: "Blocking the policy", value: blocking, sub: "Findings the security policy blocks on", tone: blocking > 0 ? "high" : "none" },
     { label: "Exposed credentials", value: credTotal, sub: credSub, tone: figureTone("high", credTotal) },
   ];
+  if (licenseCoverage) {
+    // Insert next to the other inventory figures rather than at the very end.
+    const at = glance_cards.findIndex(c => c.label === "Malicious components");
+    glance_cards.splice(at < 0 ? glance_cards.length : at + 1, 0, {
+      label: "License coverage",
+      value: `${licenseCoverage.coverage_percent}%`,
+      sub: `${licenseCoverage.identified} of ${licenseCoverage.total} components have an identified license; ${licenseCoverage.unidentified} need review`,
+      tone: licenseCoverage.unidentified === 0 ? "none" : (pct(licenseCoverage.unidentified, licenseCoverage.total) >= 25 ? "medium" : "low"),
+    });
+  }
+
+  // Page-1 callout: how much of the license picture is actually known. Only shown
+  // when there is a gap, so a fully identified inventory adds no noise.
+  const license_callout = licenseCoverage && licenseCoverage.unidentified > 0 ? {
+    percent: licenseCoverage.coverage_percent,
+    identified: licenseCoverage.identified,
+    unidentified: licenseCoverage.unidentified,
+    total: licenseCoverage.total,
+    confirmed_risk: licenseCoverage.by_risk.high + licenseCoverage.by_risk.medium,
+    tone: pct(licenseCoverage.unidentified, licenseCoverage.total) >= 25 ? "medium" : "low",
+    statement: `License coverage is ${licenseCoverage.coverage_percent}%: ${licenseCoverage.unidentified} of ${count(licenseCoverage.total, "component")} have no identified license. ` +
+      `${licenseCoverage.by_risk.high + licenseCoverage.by_risk.medium > 0
+        ? `${count(licenseCoverage.by_risk.high + licenseCoverage.by_risk.medium, "component")} with a confirmed medium or high license risk ${plural(licenseCoverage.by_risk.high + licenseCoverage.by_risk.medium, "is", "are")} reported separately. `
+        : "No component has a confirmed license risk. "}` +
+      "Unidentified components are not treated as risky, but their license terms are unconfirmed.",
+  } : null;
 
   // ── One-page summary ─────────────────────────────────────────────────────
   const subjectInfo = buildSubject(report);
@@ -1171,6 +1326,7 @@ export function buildExecutiveSummary(report) {
     do_first: actions.filter(a => a.timeframe !== "Ongoing").slice(0, 3)
       .map(({ timeframe, action, owner }) => ({ timeframe, action, owner })),
     figures,
+    license_callout,
   };
 
   return {
@@ -1195,6 +1351,9 @@ export function buildExecutiveSummary(report) {
     recommended_actions: actions,
     recommended_actions_basis: "Actions are generated from the counts in this report. Timeframes are general defaults built into the tool, not your organization's remediation policy; adjust them to your own standards.",
     compliance_overview: complianceOverview,
+    // Confirmed license risk, license-identification coverage and the components
+    // whose license could not be identified (null when no license check ran).
+    license_review: licenseCoverage,
     scope,
     methodology: buildMethodology(report, { scan, vulns, secretsInfo, lic, componentsReviewed, vulnsChecked, undetermined, intel, epssT, regularCount: regular.length }),
     notes,
