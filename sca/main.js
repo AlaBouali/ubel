@@ -675,6 +675,17 @@ async function main(programmaticOptions) {
     // engine, since only the pypi collect/install branches read it.
     if (venvDir !== undefined) eng.venvDir = venvDir;
 
+    // A caller that passes asset_ubel_dir (docker) names the .ubel folder this scan reports
+    // into: its projectRoot is a throwaway extraction dir, so reports and policy must live in
+    // the real folder from the start. Otherwise they are written under the temp rootfs, the
+    // printed "report saved to" paths point at it, and the saved policy is never the one used.
+    // Must happen before initiateLocalPolicy(), which creates policyDir.
+    if (rest.asset_ubel_dir) {
+      const ubelDir = path.resolve(rest.asset_ubel_dir);
+      eng.reportsLocation = path.join(ubelDir, "local", "reports");
+      eng.policyDir       = path.join(ubelDir, "local", "policy");
+    }
+
     eng.initiateLocalPolicy();
     // Create the asset id if it doesn't exist (a no-op with --asset-id). Only when reports are
     // saved — a pure in-memory scan leaves the tree untouched, like ensureUbelIgnoreFiles above.

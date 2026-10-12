@@ -599,9 +599,12 @@ function buildScanRegistry(report, inventoryIndex) {
  *
  * @param {Map}    registry     - from buildScanRegistry()
  * @param {string|null} projectRoot
+ * @param {{ absolutePaths?: boolean }} [opts]  absolutePaths: treat projectRoot as a
+ *        filesystem root (e.g. an extracted container image) and record matched files
+ *        as "/"-rooted POSIX paths ("/app/server.js") instead of root-relative ones.
  * @returns {Map<string, Object>}  purl → import-scan result
  */
-function runBatchedScan(registry, projectRoot) {
+function runBatchedScan(registry, projectRoot, opts = {}) {
   const results = new Map();
 
   if (!projectRoot) {
@@ -641,7 +644,10 @@ function runBatchedScan(registry, projectRoot) {
       let content;
       try { content = fs.readFileSync(fpath, "utf8"); }
       catch { continue; }
-      const rel = path.relative(projectRoot, fpath);
+      const relNative = path.relative(projectRoot, fpath);
+      const rel = opts.absolutePaths
+        ? "/" + relNative.split(path.sep).join("/")
+        : relNative;
 
       for (const purl of purls) {
         const target = registry.get(purl);
@@ -946,13 +952,16 @@ function computeReachability(signals) {
  *
  * @param {Object}      report       - Parsed UBEL JSON report.
  * @param {string|null} projectRoot  - Optional path to project source root.
+ * @param {{ absolutePaths?: boolean }} [opts]  See runBatchedScan(): report matched
+ *        files as "/"-rooted paths (used for container-image scans, where projectRoot
+ *        is a throwaway extraction of the image's filesystem).
  * @returns {Array<{
  *   vulnId: string, affectedPackageId: string,
  *   reachable: boolean, level: string, confidence: string,
  *   signals: Object, rationale: string, tags: string[]
  * }>}
  */
-export function analyzeReachability(report, projectRoot = null) {
+export function analyzeReachability(report, projectRoot = null, opts = {}) {
   const vulnerabilities  = report.vulnerabilities  || [];
   const findingsSummary  = report.findings_summary  || {};
   const inventory        = report.inventory        || [];
@@ -964,7 +973,7 @@ export function analyzeReachability(report, projectRoot = null) {
 
   // ── Batched, single-pass import scan across every component up front ──
   const scanRegistry = buildScanRegistry(report, inventoryIndex);
-  const scanResults   = runBatchedScan(scanRegistry, projectRoot);
+  const scanResults   = runBatchedScan(scanRegistry, projectRoot, opts);
 
   return vulnerabilities.map(vuln => {
     const vulnId         = vuln.id || "unknown";
@@ -1026,10 +1035,11 @@ export function analyzeReachability(report, projectRoot = null) {
  *
  * @param {Object}      report
  * @param {string|null} projectRoot
+ * @param {{ absolutePaths?: boolean }} [opts]  Forwarded to analyzeReachability().
  * @returns {Object}
  */
-export function enrichReport(report, projectRoot = null) {
-  const results = analyzeReachability(report, projectRoot);
+export function enrichReport(report, projectRoot = null, opts = {}) {
+  const results = analyzeReachability(report, projectRoot, opts);
 
   // analyzeReachability() returns exactly one result per vulnerability, in
   // order. Match by position, NOT by vuln id: the same id (e.g. a CVE) can

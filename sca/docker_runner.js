@@ -598,9 +598,15 @@ export class DockerImageScanner {
   }
 
   /**
-   * Copies <rootDir>/.ubel (if the image has one) to ./ubel in the current
-   * working directory, preserving the directory structure and overwriting
-   * anything already there. Must run before cleanup() deletes rootDir.
+   * Copies <rootDir>/.ubel (if the image carries one of its own) to ./.ubel in
+   * the current working directory, preserving the directory structure. Must
+   * run before cleanup() deletes rootDir.
+   *
+   * The scan itself reports straight into ./.ubel (see asset_ubel_dir in
+   * dockerScan()), so by the time this runs the fresh reports and the policy
+   * already live there. Existing files are therefore NOT overwritten: an image
+   * that ships its own .ubel/reports/latest.* or policy must not replace the
+   * results of this scan.
    */
   _exportUbelDir() {
     if (!this.rootDir) return;
@@ -612,7 +618,8 @@ export class DockerImageScanner {
     // carry its own must never overwrite it.
     fs.cpSync(src, dest, {
       recursive: true,
-      force: true,
+      force: false,
+      errorOnExist: false,
       filter: (from) => path.relative(src, from) !== "ubel_asset.json",
     });
     console.log(`[docker] copied .ubel from image to ${dest}`);

@@ -127,6 +127,105 @@ function normalizeInventoryPaths(inventory) {
   }
 }
 
+// ── Container-image path rebasing ─────────────────────────────────────────────
+// A docker scan runs every scanner against an extracted copy of the image
+// (<cwd>/.ubel/<uuid>/...). Scanners therefore record host paths such as
+// "/home/me/proj/.ubel/<uuid>/usr/lib/node_modules/foo". What the report should
+// show is where the file lives INSIDE the image: "/usr/lib/node_modules/foo".
+// rebaseReportToImage() rewrites the finished report in place, once everything
+// that needs the real on-disk paths (reachability, secrets, summaries) is done.
+
+const IMAGE_PATH_KEYS = new Set(["file_path", "matched_files"]);
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build the path helpers for one extraction root.
+ *
+ *  rebase(str)       replaces any "<root>/rest" occurrence inside a string with
+ *                    "/rest" ("<root>" alone becomes "/"); other text is untouched.
+ *  toImagePath(str)  for fields known to hold a path: rebase(), then make sure the
+ *                    result is a forward-slash path rooted at "/" (scanners that
+ *                    report paths relative to the project root get a leading "/").
+ */
+export function makeImagePathRewriter(rootDir) {
+  const bases = new Set();
+  const addBase = (p) => {
+    const t = (p || "").replace(/[\\/]+$/, "");
+    if (!t) return;
+    bases.add(t);
+    if (process.platform === "win32") {
+      bases.add(t.replace(/\\/g, "/"));
+      bases.add(t.replace(/\//g, "\\"));
+    }
+  };
+  addBase(path.resolve(rootDir));
+  try { addBase(fs.realpathSync(rootDir)); } catch { /* unreadable: the resolved form is enough */ }
+
+  const alts = [...bases].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|");
+  // base, then (end | separator | whitespace/quote) so "<root>2" is not mistaken for "<root>",
+  // then the optional rest of the path.
+  const re = new RegExp(
+    `(?:${alts})(?![^\\s"'<>|\\\\/])([\\\\/][^\\s"'<>|]*)?`,
+    process.platform === "win32" ? "gi" : "g"
+  );
+
+  const rebase = (s) => s.replace(re, (_m, rest) => (rest ? rest.replace(/\\/g, "/") : "/"));
+
+  const toImagePath = (p) => {
+    if (typeof p !== "string" || !p) return p;
+    const s = rebase(p);
+    if (/^[A-Za-z]:[\\/]/.test(s)) return s;   // an absolute host path that is not under the image root: leave it
+    const posix = s.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+    return posix.startsWith("/") ? posix : "/" + posix;
+  };
+
+  return { rebase, toImagePath };
+}
+
+/**
+ * Rewrite, in place, every string in `report` that points into the extraction
+ * root so it shows the in-image path instead. `file_path` / `matched_files`
+ * values are additionally forced to image-absolute form, since scanners may
+ * report them relative to the project root.
+ */
+export function rebaseReportToImage(report, rootDir) {
+  const { rebase, toImagePath } = makeImagePathRewriter(rootDir);
+  const seen = new WeakSet();
+
+  const walk = (node) => {
+    if (!node || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        if (typeof node[i] === "string") node[i] = rebase(node[i]);
+        else walk(node[i]);
+      }
+      return;
+    }
+
+    for (const key of Object.keys(node)) {
+      const val = node[key];
+      if (typeof val === "string") {
+        node[key] = IMAGE_PATH_KEYS.has(key) ? toImagePath(val) : rebase(val);
+      } else if (Array.isArray(val) && IMAGE_PATH_KEYS.has(key)) {
+        for (let i = 0; i < val.length; i++) {
+          if (typeof val[i] === "string") val[i] = toImagePath(val[i]);
+          else walk(val[i]);
+        }
+      } else {
+        walk(val);
+      }
+    }
+  };
+
+  walk(report);
+  return report;
+}
+
 
 function escapeHTML(str) {
     if (!str || typeof str !== 'string') return str;
@@ -4342,7 +4441,7 @@ export class UbelEngineInstance {
             vulnerabilities,
             inventory,
             findings_summary: summarizeVulnerabilities(vulnerabilities, inventory),
-          }, projectRoot);
+          }, projectRoot, { absolutePaths: scan_scope === "container-image" });
           reachabilityDone = true;
         } catch (e) {
           console.warn(`[!] Reachability analysis failed (${e.message}): reachable_only was NOT applied — all vulnerabilities are evaluated against the policy.`);
@@ -4553,7 +4652,7 @@ export class UbelEngineInstance {
 
       // Reachability (already done above when reachable_only is on)
       if (!reachabilityDone) {
-        try { enrichReachability(finalJson, projectRoot); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
+        try { enrichReachability(finalJson, projectRoot, { absolutePaths: scan_scope === "container-image" }); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
       }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
@@ -4605,6 +4704,14 @@ export class UbelEngineInstance {
         finalJson.executive_summary = buildExecutiveSummary(finalJson);
       } catch (e) {
         console.warn("[~] Executive summary failed:", e.message);
+      }
+
+      // Container-image scans ran against an extracted copy of the image in a temp
+      // directory. Everything above needed the real on-disk paths; from here on the
+      // report (JSON, HTML, SBOM, SARIF, the returned object) must only show where
+      // things live inside the image, never the temp directory.
+      if (scan_scope === "container-image") {
+        rebaseReportToImage(finalJson, projectRoot);
       }
 
       if (is_script && !save_reports) {
