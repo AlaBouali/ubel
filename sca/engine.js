@@ -4795,7 +4795,7 @@ export class UbelEngineInstance {
       const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope);
       // The file tag (sca, firewall_npm, licenses, secrets) — also the <tag> of the report id,
       // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
-      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode });
+      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan });
       const report_id   = generateReportId(reportTag, asset.asset_id);
 
       const finalJson = {
@@ -4953,6 +4953,7 @@ export class UbelEngineInstance {
       // ── latest.<tag>.{json,html,cdx.json,sarif.json} ───────────────────────
       // Always points to the most recent scan OF THAT TYPE: the tag is
       //   sca            health scan
+//   os_sca         host OS health scan (Windows / Linux)
       //   firewall_<engine>  firewall (check / install): firewall_npm, firewall_pip, firewall_apt, …
       //   licenses       ubel-license
       //   secrets        ubel-secrets
@@ -4976,6 +4977,7 @@ export class UbelEngineInstance {
       // ("firewall_<engine>"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
       const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
       // SARIF: the SCA health scan only (report tag "sca", or "sca_docker" for ubel-docker health).
+      // OS health scans (report tag "os_sca", Windows / Linux) get no SARIF.
       // Firewall check/install runs (incl. "firewall_docker") get the JSON, HTML and SBOM but no
       // SARIF; license and secrets scans get neither.
       const writeSarif  = reportTag === "sca" || reportTag === "sca_docker";
@@ -5011,12 +5013,17 @@ export class UbelEngineInstance {
         ...(writeSarif ? [{ name: reportFileName("report", reportTag, "sarif.json"), data: sarifString }] : []),
       ]));
       // latest_reports/<mode>/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
-      updateLatestReportZip(zipPath, reportTag);
+      const latestZipPath = updateLatestReportZip(zipPath, reportTag);
 
-      if (!is_script) {
+      // Report locations: every scan prints where its files went. OS health scans (os_sca)
+      // print them even when run programmatically (is_script), since there is no other output.
+      if (!is_script || reportTag === "os_sca") {
         console.log(`Latest JSON report saved to: ${latestPath}`);
         console.log(`Latest HTML report saved to: ${latestHtmlPath}`);
+        if (writeSbom)  console.log(`Latest SBOM (CycloneDX) saved to: ${path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"))}`);
+        if (writeSarif) console.log(`Latest SARIF report saved to: ${path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"))}`);
         console.log(`Timestamped report bundle saved to: ${zipPath}`);
+        if (latestZipPath) console.log(`Latest report bundle saved to: ${latestZipPath}`);
         console.log();
         console.log();
       }

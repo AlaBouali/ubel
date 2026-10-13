@@ -305,6 +305,8 @@ function licenseFor(key) {
       return "LicenseRef-Docker-Desktop-EULA";
     case "cursor":
       return "LicenseRef-Proprietary";
+    case "vscodium":
+      return "MIT";
 
     default:
       return "unknown";
@@ -366,6 +368,30 @@ function runMultiEntry(componentDef) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Component catalogue
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * PowerShell snippet that reads an Electron editor's version WITHOUT executing it
+ * (running code / Code.exe can open a window). Order:
+ *   1. package.json of the install: <dir>\resources\app\ or, for the newer versioned layout,
+ *      <dir>\<hash>\resources\app\ (newest folder wins). <dir> comes from the default install
+ *      locations and from the InstallLocation of the matching Uninstall registry entry.
+ *   2. DisplayVersion of that Uninstall entry.
+ * No pipes, double quotes, ^ or % in the script: it goes through cmd.exe (shell: true).
+ */
+function editorVersionScript(installDirName, uninstallNamePrefix) {
+  const un = "\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*";
+  return [
+    `$d=@((Join-Path $env:LOCALAPPDATA 'Programs\\${installDirName}'),(Join-Path $env:ProgramFiles '${installDirName}'));`,
+    `$u=Get-ItemProperty -Path 'HKCU:${un}','HKLM:${un}','HKLM:\\Software\\WOW6432Node${un.slice("\\Software".length)}' -ErrorAction SilentlyContinue;`,
+    `foreach($i in $u){ if($i.DisplayName -like '${uninstallNamePrefix}*' -and $i.DisplayName -notlike '*Insiders*'){ if($i.InstallLocation){$d+=$i.InstallLocation}; $rv=$i.DisplayVersion } }`,
+    `foreach($b in $d){ if(-not (Test-Path -LiteralPath $b)){continue}`,
+    `$c=@(Join-Path $b 'resources\\app\\package.json'); $t=$null;`,
+    `foreach($s in (Get-ChildItem -LiteralPath $b -Directory -ErrorAction SilentlyContinue)){ if($t -eq $null -or $s.LastWriteTime -gt $t){ $t=$s.LastWriteTime; $c=@($c[0],(Join-Path $s.FullName 'resources\\app\\package.json')) } }`,
+    `[array]::Reverse($c);`,
+    `foreach($f in $c){ if(Test-Path -LiteralPath $f){ $v=(ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($f))).version; if($v){$v; exit} } } }`,
+    `if($rv){$rv}`,
+  ].join(" ");
+}
 
 const COMPONENTS = {
 
@@ -683,7 +709,7 @@ const COMPONENTS = {
   },
 
   // Visual Studio Code / Visual Studio IDE
-  // NOTE: The first exec cmd detects VS Code (code --version).
+  // NOTE: The first cmd detects VS Code (version read from its install's package.json; the editor is never run).
   // The PowerShell fallback detects full Visual Studio IDE installations.
   // Both are rolled into one component key for backwards compatibility;
   // parseResult selects the correct CPE product string based on the version shape.
@@ -691,10 +717,11 @@ const COMPONENTS = {
     cpe: "cpe:2.3:a:microsoft:visual_studio_code:", // default; overridden by parseResult
     cmds: [
       {
-        type: "exec",
-        bin: "code",
-        args: ["--version"],
-        parse: out => out.split("\n")[0].trim(),
+        // Reads the version from the install's package.json. Never executes the editor:
+        // running `code`/`Code.exe` can open a VS Code window.
+        type: "powershell",
+        script: editorVersionScript("Microsoft VS Code", "Microsoft Visual Studio Code"),
+        parse: out => out.trim() || null,
       },
       {
         type: "powershell",
@@ -733,16 +760,31 @@ const COMPONENTS = {
     cpe: "cpe:2.3:a:anysphere:cursor:",
     cmds: [
       {
-        type: "exec",
-        bin: "cursor",
-        args: ["--version"],
-        parse: out => out.split("\n")[0].trim(),
+        // Same as VS Code above: read package.json, never execute the editor.
+        type: "powershell",
+        script: editorVersionScript("cursor", "Cursor"),
+        parse: out => out.trim() || null,
       },
     ],
     parseResult: (rawVersion) => {
       return { version: rawVersion };
     },
     nameOverride: "cursor",
+    pathCmd: null,
+  },
+
+  // VSCodium (VS Code rebuild). Own CPE: NVD has no vscodium product.
+  vscodium: {
+    cpe: "cpe:2.3:a:vscodium:vscodium:",
+    cmds: [
+      {
+        type: "powershell",
+        script: editorVersionScript("VSCodium", "VSCodium"),
+        parse: out => out.trim() || null,
+      },
+    ],
+    parseResult: (rawVersion) => ({ version: rawVersion }),
+    nameOverride: "vscodium",
     pathCmd: null,
   },
 };

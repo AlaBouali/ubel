@@ -12,6 +12,7 @@
 //
 //     sca                 .sca              (health scan of an asset: folder/host)
 //     docker health       .sca_docker       (ubel-docker health)
+//     os health           .os_sca           (host OS scan on Windows / Linux; no SARIF)
 //     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …;
 //                                             docker check / install → .firewall_docker)
 //     licenses            .licenses
@@ -117,6 +118,7 @@ export function reportFileName(stem, tag, ext) {
  *   scan_scope "container-image"  → firewall_docker (docker check / install)
  *                                   sca_docker      (docker health)
  *   check / install (firewall)    → firewall_<engine>   (npm, pnpm, pip, apt, dnf, …)
+ *   health with scan_os, host is Windows or Linux → os_sca   (no SARIF)
  *   anything else (health)        → sca
  *
  * A docker scan always runs the health pipeline (checkMode "health"); the CLI
@@ -124,7 +126,7 @@ export function reportFileName(stem, tag, ext) {
  *
  * @param {{checkMode: string, engine: string, scanScope?: string, dockerMode?: string}} p
  */
-export function scaReportTag({ checkMode, engine, scanScope, dockerMode }) {
+export function scaReportTag({ checkMode, engine, scanScope, dockerMode, scanOs, platform = process.platform }) {
   if (scanScope === "license") return "licenses";
   if (scanScope === "secrets") return "secrets";
   if (scanScope === "container-image") {
@@ -133,6 +135,8 @@ export function scaReportTag({ checkMode, engine, scanScope, dockerMode }) {
   if (checkMode === "check" || checkMode === "install") {
     return sanitizeReportTag(`firewall_${engine || "unknown"}`);
   }
+  // Host OS health scan (scan_os) on Windows or Linux → its own tag, and no SARIF (see engine.js).
+  if (scanOs && (platform === "win32" || platform === "linux")) return "os_sca";
   return "sca";
 }
 

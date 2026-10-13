@@ -26,6 +26,8 @@
 // release. A fix's confidence is the LOWEST of the vulnerabilities it covers, and is forced to
 // "low" when the fix version is built for a different release than the installed one.
 
+import { dpkgCompare, rpmCompare } from "./distro_versions.js";
+
 const SEV_RANK = { infection: 0, critical: 1, high: 2, medium: 3, low: 4, unknown: 5 };
 
 function sevKey(v) {
@@ -82,13 +84,26 @@ function sortVulns(list) {
   });
 }
 
+/** Comparison scheme for a purl: "deb" | "rpm" for OS packages, otherwise "generic". */
+export function versionSchemeForPurl(purl) {
+  const p = String(purl ?? "");
+  if (p.startsWith("pkg:deb/")) return "deb";
+  if (p.startsWith("pkg:rpm/")) return "rpm";
+  return "generic";
+}
+
 /**
- * Ecosystem-agnostic version comparison (semver / PEP 440 / deb / rpm-ish).
+ * Ecosystem-agnostic version comparison (semver / PEP 440 / generic).
+ * Pass `scheme` ("deb" | "rpm", see versionSchemeForPurl) for OS packages: the generic
+ * tokenizer below drops everything after "+" as build metadata, but for Debian/Ubuntu that
+ * suffix is the security patch level (2.36-9+deb12u3 vs 2.36-9+deb12u4).
  * Numeric tokens compare numerically; a trailing alpha token (rc, beta, ...)
  * sorts BELOW the same version without it; missing tokens count as 0.
  * Returns -1 / 0 / 1.
  */
-export function compareVersions(a, b) {
+export function compareVersions(a, b, scheme = "generic") {
+  if (scheme === "deb") return dpkgCompare(a, b);
+  if (scheme === "rpm") return rpmCompare(a, b);
   a = String(a ?? "").trim().replace(/^v/i, "");
   b = String(b ?? "").trim().replace(/^v/i, "");
   const ea = /^(\d+):/.exec(a), eb = /^(\d+):/.exec(b);
@@ -119,7 +134,7 @@ export function compareVersions(a, b) {
 }
 
 /** Affected intervals for one vuln + package: [{ from, to, toInclusive }] and explicit version list. */
-function affectedIntervals(vuln) {
+function affectedIntervals(vuln, cmp = compareVersions) {
   const intervals = [];
   const versions = new Set();
   const dep = String(vuln.affected_dependency || "").toLowerCase();
@@ -134,7 +149,7 @@ function affectedIntervals(vuln) {
       const events = [...(range.events || [])].sort((x, y) => {
         const vx = x.introduced ?? x.fixed ?? x.last_affected ?? x.limit ?? "0";
         const vy = y.introduced ?? y.fixed ?? y.last_affected ?? y.limit ?? "0";
-        return compareVersions(vx === "0" ? "0" : vx, vy === "0" ? "0" : vy);
+        return cmp(vx === "0" ? "0" : vx, vy === "0" ? "0" : vy);
       });
       let start = null;
       for (const e of events) {
@@ -152,16 +167,16 @@ function affectedIntervals(vuln) {
 }
 
 /** Does installing `candidate` leave `vuln` fixed? */
-function candidateFixes(candidate, vuln, info) {
+function candidateFixes(candidate, vuln, info, cmp = compareVersions) {
   if (!info.hasRangeData) {
     // No range data to reason about branches: fixed if at/after any known fix.
-    return (vuln.fixed_versions || []).some(f => compareVersions(candidate, f) >= 0);
+    return (vuln.fixed_versions || []).some(f => cmp(candidate, f) >= 0);
   }
   if (info.versions.has(candidate)) return false;
   for (const iv of info.intervals) {
-    const afterStart = compareVersions(candidate, iv.from) >= 0;
+    const afterStart = cmp(candidate, iv.from) >= 0;
     const beforeEnd = iv.to === null ? true
-      : (iv.toInclusive ? compareVersions(candidate, iv.to) <= 0 : compareVersions(candidate, iv.to) < 0);
+      : (iv.toInclusive ? cmp(candidate, iv.to) <= 0 : cmp(candidate, iv.to) < 0);
     if (afterStart && beforeEnd) return false;
   }
   return true;
@@ -199,22 +214,24 @@ function compareRangeOrder(a, b) {
 export function computeSuggestedFixes(item, vulnerabilities) {
   const vulns = vulnerabilities.filter(v => v.affected_package_id === item.id);
   const installed = item.version || "";
+  const scheme = versionSchemeForPurl(item.id);
+  const cmp = (a, b) => compareVersions(a, b, scheme);
 
   const fixable = [];      // { vuln, info }
   const unfixed = [];
   const candidates = new Set();
 
   for (const v of vulns) {
-    const ups = (v.fixed_versions || []).filter(f => !installed || compareVersions(f, installed) > 0);
+    const ups = (v.fixed_versions || []).filter(f => !installed || cmp(f, installed) > 0);
     if (!ups.length) { unfixed.push(compactVuln(v)); continue; }
-    fixable.push({ vuln: v, info: affectedIntervals(v) });
+    fixable.push({ vuln: v, info: affectedIntervals(v, cmp) });
     ups.forEach(f => candidates.add(f));
   }
 
   // For each candidate: the set of fixable vulns it resolves.
   const cands = [...candidates].map(version => ({
     version,
-    ids: new Set(fixable.filter(f => candidateFixes(version, f.vuln, f.info)).map(f => f.vuln.id)),
+    ids: new Set(fixable.filter(f => candidateFixes(version, f.vuln, f.info, cmp)).map(f => f.vuln.id)),
   }));
 
   // Group candidates by range (minor ranges first, then major ranges).
@@ -238,7 +255,7 @@ export function computeSuggestedFixes(item, vulnerabilities) {
       for (const c of groupCands) {
         let hits = 0;
         for (const id of c.ids) if (remaining.has(id)) hits++;
-        if (hits > bestHits || (hits === bestHits && best && hits > 0 && compareVersions(c.version, best.version) > 0)) {
+        if (hits > bestHits || (hits === bestHits && best && hits > 0 && cmp(c.version, best.version) > 0)) {
           best = c; bestHits = hits;
         }
       }
@@ -273,7 +290,7 @@ export function computeSuggestedFixes(item, vulnerabilities) {
   }
 
   // Closest range first (minor ranges, then major ranges); highest version first inside a range.
-  fixes.sort((a, b) => compareRangeOrder(a, b) || compareVersions(b.version, a.version));
+  fixes.sort((a, b) => compareRangeOrder(a, b) || cmp(b.version, a.version));
   for (const f of fixes) delete f.order;
   return { fixes, unfixed: sortVulns(unfixed) };
 }

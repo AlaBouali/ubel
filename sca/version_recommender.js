@@ -2,12 +2,18 @@
 // Zero-dependency version upgrade recommender.
 // Supports semver, pub (Dart), PEP 440, Maven, and Go version schemes.
 
+import { dpkgCompare, rpmCompare } from "./distro_versions.js";
+
 const ECOSYSTEMS_VR = {
   semver: { parse: _vr_parseSemver,  gt: _vr_semverGt,  distance: _vr_semverDistance  },
   pub:    { parse: _vr_parsePub,     gt: _vr_pubGt,     distance: _vr_pubDistance     },
   pep440: { parse: _vr_parsePep440,  gt: _vr_pep440Gt,  distance: _vr_pep440Distance  },
   maven:  { parse: _vr_parseMaven,   gt: _vr_mavenGt,   distance: _vr_mavenDistance   },
   go:     { parse: _vr_parseGo,      gt: _vr_goGt,      distance: _vr_goDistance      },
+  // OS packages. `cmp` is the tie-break used when two candidates are equally "far" by
+  // major/minor/patch — i.e. same upstream version, different distro patch level.
+  dpkg:   { parse: _vr_parseDpkg,    gt: _vr_dpkgGt,    distance: _vr_distroDistance, cmp: _vr_dpkgCmp },
+  rpm:    { parse: _vr_parseRpm,     gt: _vr_rpmGt,     distance: _vr_distroDistance, cmp: _vr_rpmCmp   },
 };
 
 export function _vr_purlToEcosystem(purl) {
@@ -16,8 +22,12 @@ export function _vr_purlToEcosystem(purl) {
   if (purl.startsWith("pkg:maven/"))   return "maven";
   if (purl.startsWith("pkg:golang/"))  return "go";
   if (purl.startsWith("pkg:pub/"))     return "pub";     // Dart / Flutter
+  if (purl.startsWith("pkg:deb/"))     return "dpkg";    // Debian / Ubuntu
+  if (purl.startsWith("pkg:rpm/"))     return "rpm";     // RHEL / Alma / Rocky / Fedora ...
   // pkg:swift/ (SwiftPM, Carthage) is plain SemVer — tags are "v"-stripped by the
   // scanner and SwiftPM ignores build metadata, so the generic scheme is correct.
+  // pkg:apk/ (Alpine) still falls through to semver: "-rN" parses as a pre-release tag and
+  // letter suffixes ("1.1.1w-r1", "_p1") do not parse at all, so Alpine fix ranking is best-effort.
   return "semver"; // npm, swift, cargo, nuget, gem, composer, unknown → semver
 }
 
@@ -108,6 +118,41 @@ function _vr_semverDistance(cur, can) {
     // are valid fix candidates for a version pinned at 2.2.6.3.
     securityDiff: sp ? can.security - cur.security : can.security,
     isPreRelease: Boolean(can.pre) && !Boolean(cur.pre) };
+}
+
+// ── dpkg / rpm (OS packages) ──
+// Ordering comes from distro_versions.js (the real dpkg / rpmvercmp algorithms). The
+// distance is derived from the leading numbers of the UPSTREAM version only; the distro
+// revision ("-9+deb12u4", "-6.el8_10") is deliberately left to the `cmp` tie-break so that,
+// among fixes for the same upstream release, the lowest patch level above the installed one wins.
+function _vr_parseDistro(v) {
+  const raw = String(v ?? "").trim();
+  if (!raw) return null;
+  const e = /^(\d+):/.exec(raw);
+  const epoch = e ? parseInt(e[1], 10) : 0;
+  const body = e ? raw.slice(e[0].length) : raw;
+  const k = body.lastIndexOf("-");
+  const upstream = k < 0 ? body : body.slice(0, k);
+  const nums = (upstream.match(/\d+/g) || []).map(n => parseInt(n, 10));
+  if (!nums.length) return null;
+  return { raw, epoch, nums, tilde: upstream.includes("~") };
+}
+function _vr_parseDpkg(v) { return _vr_parseDistro(v); }
+function _vr_parseRpm(v)  { return _vr_parseDistro(v); }
+function _vr_dpkgCmp(a, b) { return dpkgCompare(a.raw, b.raw); }
+function _vr_rpmCmp(a, b)  { return rpmCompare(a.raw, b.raw); }
+function _vr_dpkgGt(a, b)  { return dpkgCompare(a.raw, b.raw) > 0; }
+function _vr_rpmGt(a, b)   { return rpmCompare(a.raw, b.raw) > 0; }
+function _vr_distroDistance(cur, can) {
+  const [cM = 0, cm = 0, cp = 0] = cur.nums, [nM = 0, nm = 0, np = 0] = can.nums;
+  const sm = nM === cM, si = sm && nm === cm;
+  return {
+    isBreaking:   can.epoch !== cur.epoch,
+    majorDiff:    nM - cM,
+    minorDiff:    sm ? nm - cm : nm,
+    patchDiff:    si ? np - cp : np,
+    isPreRelease: can.tilde && !cur.tilde,
+  };
 }
 
 // ── pub (Dart / Flutter) ──
@@ -282,9 +327,9 @@ export function findClosestFixVersions(currentVersion, candidateVersions, ecosys
   for (const raw of candidateVersions) {
     const parsed = eco.parse(raw);
     if (!parsed || !eco.gt(parsed, current)) continue;
-    ranked.push({ dist: eco.distance(current, parsed), raw });
+    ranked.push({ dist: eco.distance(current, parsed), raw, parsed });
   }
-  ranked.sort((a, b) => _vr_compareDistances(a.dist, b.dist));
+  ranked.sort((a, b) => _vr_compareDistances(a.dist, b.dist) || (eco.cmp ? eco.cmp(a.parsed, b.parsed) : 0));
   return ranked.map(({ dist, raw }, idx) => ({
     version:             raw,
     recommended:         idx === 0,
@@ -532,6 +577,52 @@ function _runTests() {
     "v1.2.4",
   );
 
+  // ── dpkg ──────────────────────────────────────────────────────────────────
+  console.log("\n[dpkg]");
+  check(
+    "deb12u3 → deb12u4 (the standard Debian security pattern)",
+    findClosestFixVersions("2.36-9+deb12u3", ["2.36-9+deb12u4"], "dpkg"),
+    "2.36-9+deb12u4",
+  );
+  checkOrder(
+    "same upstream: lowest patch level above installed wins, even listed second",
+    findClosestFixVersions("2.36-9+deb12u3", ["2.36-10+deb12u1", "2.36-9+deb12u4"], "dpkg"),
+    ["2.36-9+deb12u4", "2.36-10+deb12u1"],
+  );
+  check(
+    "epoch + 'p1' upstream (ubuntu openssh)",
+    findClosestFixVersions("1:8.9p1-3ubuntu0.4", ["1:8.9p1-3ubuntu0.5"], "dpkg"),
+    "1:8.9p1-3ubuntu0.5",
+  );
+  check(
+    "+esm1 is newer than the plain ubuntu revision",
+    findClosestFixVersions("2.4.52-1ubuntu4.6", ["2.4.52-1ubuntu4.6+esm1"], "dpkg"),
+    "2.4.52-1ubuntu4.6+esm1",
+  );
+  checkOrder(
+    "deb12u10 is newer than deb12u9 (numeric, not lexical)",
+    findClosestFixVersions("2.36-9+deb12u8", ["2.36-9+deb12u10", "2.36-9+deb12u9"], "dpkg"),
+    ["2.36-9+deb12u9", "2.36-9+deb12u10"],
+  );
+  checkOrder(
+    "older / equal candidates excluded",
+    findClosestFixVersions("2.36-9+deb12u4", ["2.36-9+deb12u3", "2.36-9+deb12u4"], "dpkg"),
+    [],
+  );
+
+  // ── rpm ───────────────────────────────────────────────────────────────────
+  console.log("\n[rpm]");
+  check(
+    "el8_9 → el8_10 (numeric compare, not string)",
+    findClosestFixVersions("4.4.20-6.el8_9", ["4.4.20-6.el8_10"], "rpm"),
+    "4.4.20-6.el8_10",
+  );
+  checkOrder(
+    "closest release first",
+    findClosestFixVersions("4.4.20-6.el8_9", ["4.4.21-1.el8_10", "4.4.20-6.el8_10"], "rpm"),
+    ["4.4.20-6.el8_10", "4.4.21-1.el8_10"],
+  );
+
   // ── purl helper ───────────────────────────────────────────────────────────
   console.log("\n[_vr_purlToEcosystem]");
   const ecoTests = [
@@ -543,6 +634,9 @@ function _runTests() {
     ["pkg:pub/http@1.2.0",       "pub"],
     ["pkg:pub/foo@1.0.0?repository_url=https%3A%2F%2Fpub.example.com", "pub"],
     ["pkg:swift/github.com/apple/swift-nio@2.0.0", "semver"],
+    ["pkg:deb/debian/libc6@2.36-9+deb12u3", "dpkg"],
+    ["pkg:deb/ubuntu/openssh-server@1:8.9p1-3ubuntu0.4", "dpkg"],
+    ["pkg:rpm/redhat/bash@5.1.8-6.el9_1", "rpm"],
     [null,                        "semver"],
   ];
   for (const [purl, expected] of ecoTests) {
