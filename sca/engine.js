@@ -4628,7 +4628,7 @@ export class UbelEngineInstance {
       const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope);
       // The file tag (sca, firewall_npm, licenses, secrets) — also the <tag> of the report id,
       // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
-      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope });
+      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode });
       const report_id   = generateReportId(reportTag, asset.asset_id);
 
       const finalJson = {
@@ -4808,9 +4808,10 @@ export class UbelEngineInstance {
       // SBOM: SCA scans only — the health scan ("sca") and firewall check/install runs
       // ("firewall_<engine>"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
       const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
-      // SARIF: the SCA health scan only (report tag "sca"). Firewall check/install runs get
-      // the JSON, HTML and SBOM but no SARIF; license and secrets scans get neither.
-      const writeSarif  = reportTag === "sca";
+      // SARIF: the SCA health scan only (report tag "sca", or "sca_docker" for ubel-docker health).
+      // Firewall check/install runs (incl. "firewall_docker") get the JSON, HTML and SBOM but no
+      // SARIF; license and secrets scans get neither.
+      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker";
       const sbomString  = writeSbom
         ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
         : null;

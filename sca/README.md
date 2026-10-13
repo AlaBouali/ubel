@@ -239,6 +239,8 @@ Build/lifecycle scripts (`scripts.pre-install-cmd`, `post-install-cmd`, etc., de
 
 `ubel-docker` scans a container image **without ever running it** – it creates a stopped container (`docker create`), exports its filesystem, and extracts the tar in‑process (no shell `tar`). This blocks path‑traversal attacks and never executes `ENTRYPOINT`/`CMD` or any scripts. The scan automatically includes OS packages (`scan_os: true`) and all application dependencies (`full_stack: true`).
 
+**Installed OS packages are read straight from the extracted filesystem** — `dpkg`, `apk` and `rpm` are never executed, in any mode, so scanning works on hosts that have none of them (including Windows). The only external binary the docker engine runs is `docker` itself, to fetch and clean up the image (`inspect`, `pull`, `create`, `export`, `rm`, and `rmi` where the mode removes the image); none of that runs when you pass a local `.tar`. See [Platform scanning (Linux)](#platform-scanning-linux) for the package databases and formats read.
+
 ```bash
 ubel-docker <health|check|install> <image|tar-path> [--no-pull] [--keep]
 ```
@@ -488,12 +490,21 @@ When invoked with `scan_os: true` on Linux, the scanner reads the host's system 
 | Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
 | Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
 | Alpine / Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
-| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
-| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
-| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
-| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| Red Hat / RHEL | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
 
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
+
+**No package-manager binaries are executed to read installed packages** (`dpkg`, `apk` and `rpm` are not required, on a live host or in a Docker image scan). The rpm database is parsed in-process (`sca/rpmdb_reader.js`), and the format is detected from the file's magic bytes rather than its name:
+
+- Berkeley DB Hash, `Packages` — RHEL/CentOS/Alma/Rocky ≤ 8, Amazon Linux 2 (little- and big-endian).
+- SQLite, `rpmdb.sqlite` — RHEL/Alma/Rocky ≥ 9, Fedora, Amazon Linux 2023, including committed but not yet checkpointed `-wal` data.
+- Searched in `/var/lib/rpm`, `/usr/lib/sysimage/rpm`, `/usr/share/rpm` (under the image root for Docker scans).
+- Not supported: NDB (`Packages.db`, SUSE) — the scan stops with a clear error.
+
+When the scan runs on Windows (e.g. `ubel-docker` against an extracted image), extracted files carry no POSIX permission bits, so whether an rpm-owned file counts as executable is taken from the mode recorded in the rpm header.
 
 #### Platform scanning (Windows)
 
@@ -1367,24 +1378,26 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 
 | Scan | `<tag>` | Example (latest) | Example (zip) |
 |---|---|---|---|
-| SCA — `health` (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
-| Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `sca_<engine>` | `latest.sca_npm.html`, `latest.sca_apt.json` | `2026_10_10__12_30_05.sca_pip.zip` |
+| SCA — `health` (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
+| Docker — `ubel-docker health` | `sca_docker` | `latest.sca_docker.json` | `2026_10_10__12_30_05.sca_docker.zip` |
+| Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `firewall_<engine>` | `latest.firewall_npm.html`, `latest.firewall_apt.json` | `2026_10_10__12_30_05.firewall_pip.zip` |
+| Docker firewall — `ubel-docker check` / `install` | `firewall_docker` | `latest.firewall_docker.json` | `2026_10_10__12_30_05.firewall_docker.zip` |
 | Licenses — `ubel-license` | `licenses` | `latest.licenses.json` | `2026_10_10__12_30_05.licenses.zip` |
 | Secrets — `ubel-secrets` | `secrets` | `latest.secrets.json` | `2026_10_10__12_30_05.secrets.zip` |
 
-`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`). The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `firewall_docker` gets the JSON, HTML and SBOM but no SARIF; `sca_docker` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`). The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
 
 ### History: `$HOME/.ubel/history/<mode>/`
 
 Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip` (see [Asset id](#asset-id-ubel_assetjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
 
-The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<asset_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
+The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_docker.zip`, `latest.firewall_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<asset_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
 
 Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.ubel/reports/`, the timestamped history zips and the `latest_reports/` copy — is written the same way, for every scanner (SCA, firewall, OS, licenses, secrets, SAST, malware, cloud, EASM): the content goes to a temp file in the same folder and is then renamed over the target in one step. A script, CI step or browser tab that reads `latest.<tag>.json` / `.html` / `.zip` while a scan is finishing sees either the complete previous file or the complete new one, never a partial file. If a write fails, the temp file is removed, the previous file is left as it was, and the scan reports the error.
 
 | `<mode>` folder | Holds |
 |---|---|
-| `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-docker`, …) |
+| `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, …) and every `ubel-docker` scan (`health`, `check`, `install`) |
 | `firewall` | `check` / `install` for npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo |
 | `os` | `check` / `install` for apt, dnf, yum |
 | `licenses` | `ubel-license` |

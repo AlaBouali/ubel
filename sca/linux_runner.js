@@ -1,8 +1,9 @@
 // linux_host_scanner.js
 //
 // Mirrors the output of package_scanner.py → scan_host() but runs entirely
-// in Node.js using child_process.  Supports Debian/Ubuntu (dpkg), Alpine
-// (apk), and RedHat/AlmaLinux/RockyLinux (rpm).
+// in Node.js.  Supports Debian/Ubuntu (dpkg), Alpine (apk), and
+// RedHat/AlmaLinux/RockyLinux (rpm).  All package databases are read directly
+// from disk (no dpkg/apk/rpm binaries required).
 //
 // Output format per package:
 // {
@@ -21,7 +22,8 @@
 import fs            from "fs";
 import path          from "path";
 import os            from "os";
-import { execFileSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
+import { readRpmDb } from "./rpmdb_reader.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -229,59 +231,30 @@ function parseDpkgStatus(content) {
 }
 
 /**
- * Build a Map<pkgName, licenseString> by scanning /usr/share/doc/<pkg>/copyright
- * files with awk.  Returns an empty Map on any failure so the caller can
- * use it as a best-effort overlay without aborting the scan.
+ * Build a Map<pkgName, licenseString> from /usr/share/doc/<pkg>/copyright.
+ * Pure JS (no awk): takes the first token after the first "License:" line,
+ * same as the old `/^License:/ {print pkg, $2}` script.  Best-effort overlay —
+ * returns whatever it managed to read and never aborts the scan.
  */
 function readDpkgLicenses(rootDir = "") {
-  // execFileSync / shell glob never expand wildcards — enumerate files in JS.
-  // We also:
-  //   • Filter with statSync().isFile() because glob / readdirSync can surface
-  //     dangling symlinks that make mawk abort with exit 2, silently skipping
-  //     all subsequent files in the same invocation.
-  //   • Use spawnSync (not execFileSync) so we always read stdout even when awk
-  //     exits non-zero due to a missing file mid-run.
-  //   • Chunk to 200 files to stay under ARG_MAX.
   const licenses = new Map();
   const docDir = rootDir ? path.join(rootDir, "/usr/share/doc") : "/usr/share/doc";
-  if (!fs.existsSync(docDir)) return licenses;
 
-  const files = [];
-  try {
-    for (const entry of fs.readdirSync(docDir)) {
-      const cp = path.join(docDir, entry, "copyright");
-      try {
-        if (fs.statSync(cp).isFile()) files.push(cp);
-      } catch { /* dangling symlink or permission error — skip */ }
-    }
-  } catch { return licenses; }
+  let entries;
+  try { entries = fs.readdirSync(docDir); } catch { return licenses; }
 
-  if (!files.length) return licenses;
+  for (const entry of entries) {
+    const cp = path.join(docDir, entry, "copyright");
+    let content;
+    try {
+      // statSync follows symlinks and throws on dangling ones — skip those.
+      if (!fs.statSync(cp).isFile()) continue;
+      content = fs.readFileSync(cp, "utf8");
+    } catch { continue; }
 
-  // The gsub pattern strips the docDir prefix from awk's FILENAME so we get
-  // back a bare package name — docDir now varies (rootDir-prefixed or not),
-  // so it's escaped and built dynamically instead of hardcoded.
-  const escapedDocDir = docDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const AWK_SCRIPT =
-    String.raw`/^License:/ {pkg=FILENAME; gsub(/^` + escapedDocDir + String.raw`\/|\/copyright$/, "", pkg); print pkg, $2}`;
-
-  const CHUNK = 200;
-  for (let i = 0; i < files.length; i += CHUNK) {
-    const chunk = files.slice(i, i + CHUNK);
-    const result = spawnSync(
-      "awk",
-      [AWK_SCRIPT, ...chunk],
-      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, maxBuffer: 10 * 1024 * 1024 },
-    );
-    const out = result.stdout ?? "";
-    for (const line of out.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const sp = trimmed.indexOf(" ");
-      if (sp === -1) continue;
-      const pkg = trimmed.slice(0, sp).trim();
-      const lic = trimmed.slice(sp + 1).trim();
-      if (pkg && lic && !licenses.has(pkg)) licenses.set(pkg, lic);
+    for (const line of content.split("\n")) {
+      const m = /^License:[ \t]+(\S+)/.exec(line);
+      if (m) { licenses.set(entry, m[1]); break; }
     }
   }
   return licenses;
@@ -440,114 +413,51 @@ function scanApk(ecosystem, rootDir = "") {
 // ─────────────────────────────────────────────────────────────────────────────
 // RPM scanner  (RedHat / AlmaLinux / RockyLinux)
 //
-// Strategy mirrors package_scanner.py exactly:
-//   Pass 1 — rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{LICENSE}\t[%{REQUIRENAME},]\n'
-//   Pass 2 — rpm -ql --qf '[%{=NAME}\t%{FILENAMES}\n]' <all packages>
+// Reads the rpm database (BDB Packages or rpmdb.sqlite) directly via
+// rpmdb_reader.js — no `rpm` binary needed, works on Windows and on extracted
+// image rootfs trees.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const RPM_QA_QF  = "%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{LICENSE}\\t[%{REQUIRENAME},]\\n";
-const RPM_QL_QF  = "[%{=NAME}\\t%{FILENAMES}\\n]";
+const S_IFMT = 0o170000, S_IFLNK = 0o120000;
 
-function rpmQueryAll(rootDir = "") {
-  const args = rootDir
-    ? ["--root", rootDir, "-qa", "--qf", RPM_QA_QF]
-    : ["-qa", "--qf", RPM_QA_QF];
-  let out;
-  try {
-    out = execFileSync(
-      "rpm",
-      args,
-      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (e) {
-    if (e.code === "ENOENT") throw new Error("rpm binary not found");
-    throw new Error(`rpm -qa failed: ${e.stderr ?? e.message}`);
+/**
+ * Is `filepath` (logical in-image path) an executable file on disk?
+ * `hdrMode` is the mode recorded in the rpm header.  On Windows the extracted
+ * tree carries no POSIX permission bits, so the header mode is used instead.
+ */
+function isExecutableRpmFile(realPath, hdrMode) {
+  let st;
+  try { st = fs.statSync(realPath); } catch { return false; }
+  if (!st.isFile()) return false;
+  if (process.platform === "win32") {
+    if (typeof hdrMode !== "number") return true;
+    return (hdrMode & S_IFMT) === S_IFLNK || (hdrMode & 0o111) !== 0;
   }
-
-  const pkgs = new Map();
-  for (const line of out.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const parts = trimmed.split("\t");
-    const [name, version, license_, rawDeps = ""] = parts;
-    if (!name || !version) continue;
-    pkgs.set(name, {
-      version,
-      license: license_?.trim() || "unknown",
-      deps:    cleanRpmDeps(rawDeps),
-    });
-  }
-  return pkgs;
-}
-
-function* rpmQueryFilesChunk(pkgNames, rootDir = "") {
-  const args = rootDir
-    ? ["--root", rootDir, "-ql", "--qf", RPM_QL_QF, ...pkgNames]
-    : ["-ql", "--qf", RPM_QL_QF, ...pkgNames];
-  let out;
-  try {
-    out = execFileSync(
-      "rpm",
-      args,
-      { encoding: "utf8", timeout: SUBPROCESS_TIMEOUT, stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (e) {
-    if (e.code === "ENOENT") throw new Error("rpm binary not found");
-    // Non-zero exit is common when some packages have no files; still parse stdout
-    out = e.stdout ?? "";
-  }
-
-  for (const line of out.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed === "(contains no files)") continue;
-    const tab = trimmed.indexOf("\t");
-    if (tab === -1) continue;
-    const pkgName  = trimmed.slice(0, tab);
-    const filepath = trimmed.slice(tab + 1).trim();
-    if (filepath) yield { pkgName, filepath };
-  }
-}
-
-const RPM_CHUNK_SIZE = 200;
-
-function* rpmQueryFiles(pkgNames, rootDir = "") {
-  if (!pkgNames.length) return;
-  for (let i = 0; i < pkgNames.length; i += RPM_CHUNK_SIZE) {
-    yield* rpmQueryFilesChunk(pkgNames.slice(i, i + RPM_CHUNK_SIZE), rootDir);
-  }
+  return (st.mode & 0o111) !== 0;
 }
 
 function scanRpm(ecosystem, rootDir = "") {
-  const pkgs = rpmQueryAll(rootDir);
+  const pkgs = new Map();            // name → record (last wins, like before)
+  for (const p of readRpmDb(rootDir)) pkgs.set(p.name, p);
 
   const purls = new Map();
   for (const [name, { version }] of pkgs.entries()) {
     purls.set(name, makePurl(ecosystem, name, version));
   }
 
-  const pathsByPkg = new Map();
-  for (const { pkgName, filepath } of rpmQueryFiles([...pkgs.keys()], rootDir)) {
-    if (!isExecutablePath(filepath)) continue;
-    // Verify the execute bit on the real filesystem. rpm --root reports
-    // filepath as the logical in-image path, so the on-disk check needs the
-    // rootDir prefix while the recorded path stays logical.
-    const realPath = rootDir ? path.join(rootDir, filepath) : filepath;
-    try {
-      const stat = fs.statSync(realPath);
-      if (!stat.isFile() || !(stat.mode & 0o111)) continue;
-    } catch { continue; }
-
-    if (!pathsByPkg.has(pkgName)) pathsByPkg.set(pkgName, []);
-    pathsByPkg.get(pkgName).push(filepath);
-  }
-
   const result = [];
-  for (const [name, { version, license: lic, deps }] of pkgs.entries()) {
+  for (const [name, { version, license, requires, files }] of pkgs.entries()) {
+    const paths = [];
+    for (const { path: fp, mode } of files) {
+      if (!isExecutablePath(fp)) continue;
+      // fp is the logical in-image path (recorded as-is); only the on-disk
+      // check needs the rootDir prefix.
+      const realPath = rootDir ? path.join(rootDir, fp) : fp;
+      if (isExecutableRpmFile(realPath, mode)) paths.push(fp);
+    }
     result.push(buildPackage(
-      ecosystem, name, version, lic,
-      pathsByPkg.get(name) ?? [],
-      deps,
-      purls,
+      ecosystem, name, version, license || "unknown", paths,
+      cleanRpmDeps(requires.join(",")), purls,
     ));
   }
   return result;

@@ -1113,8 +1113,9 @@ export class SarifBuilder {
     const secrets = this.data.secrets;
     if (!secrets || secrets.enabled === false || !secrets.count) return null;
 
-    const cwd = this._normalizeUri(this.projectRoot);
-    let baseUri = this._toFileUri(cwd);
+    // Pass projectRoot raw: pre-normalizing "/" (a docker scan's rebased root)
+    // yields "", which _toFileUri treats as "no path" and returns undefined.
+    let baseUri = this._toFileUri(this.projectRoot);
     if (!baseUri.endsWith("/")) baseUri += "/";
 
     return {
@@ -1296,8 +1297,9 @@ export class SarifBuilder {
     const results = this.buildLicenseResults();
     if (!results.length) return null;
 
-    const cwd = this._normalizeUri(this.projectRoot);
-    let baseUri = this._toFileUri(cwd);
+    // Pass projectRoot raw: pre-normalizing "/" (a docker scan's rebased root)
+    // yields "", which _toFileUri treats as "no path" and returns undefined.
+    let baseUri = this._toFileUri(this.projectRoot);
     if (!baseUri.endsWith("/")) baseUri += "/";
 
     return {
@@ -1332,13 +1334,10 @@ export class SarifBuilder {
 
   /** Generate full SARIF document */
   generate() {
-    const cwd =
-      this._normalizeUri(
-        this.projectRoot
-      );
-
-    // SARIF requires base URI to end with a slash
-    let baseUri = this._toFileUri(cwd);
+    // SARIF requires base URI to end with a slash.
+    // projectRoot is passed raw: pre-normalizing "/" (a docker scan's rebased
+    // root) yields "", which _toFileUri treats as "no path" and returns undefined.
+    let baseUri = this._toFileUri(this.projectRoot);
     if (!baseUri.endsWith("/")) {
       baseUri += "/";
     }

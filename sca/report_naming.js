@@ -11,7 +11,9 @@
 // scanners never collide on disk and can be told apart without opening them:
 //
 //     sca                 .sca              (health scan of an asset: folder/host)
-//     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …)
+//     docker health       .sca_docker       (ubel-docker health)
+//     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …;
+//                                             docker check / install → .firewall_docker)
 //     licenses            .licenses
 //     secrets             .secrets
 //     sast                .sast             (malware scanner: .malware)
@@ -112,14 +114,22 @@ export function reportFileName(stem, tag, ext) {
  *
  *   scan_scope "license"          → licenses
  *   scan_scope "secrets"          → secrets
+ *   scan_scope "container-image"  → firewall_docker (docker check / install)
+ *                                   sca_docker      (docker health)
  *   check / install (firewall)    → firewall_<engine>   (npm, pnpm, pip, apt, dnf, …)
  *   anything else (health)        → sca
  *
- * @param {{checkMode: string, engine: string, scanScope?: string}} p
+ * A docker scan always runs the health pipeline (checkMode "health"); the CLI
+ * mode it was invoked with arrives as `dockerMode`.
+ *
+ * @param {{checkMode: string, engine: string, scanScope?: string, dockerMode?: string}} p
  */
-export function scaReportTag({ checkMode, engine, scanScope }) {
+export function scaReportTag({ checkMode, engine, scanScope, dockerMode }) {
   if (scanScope === "license") return "licenses";
   if (scanScope === "secrets") return "secrets";
+  if (scanScope === "container-image") {
+    return dockerMode === "check" || dockerMode === "install" ? "firewall_docker" : "sca_docker";
+  }
   if (checkMode === "check" || checkMode === "install") {
     return sanitizeReportTag(`firewall_${engine || "unknown"}`);
   }

@@ -1068,6 +1068,14 @@ via the Linux host scanner *and* every application-level ecosystem's
 dependencies found inside the image (Node, Python, PHP, etc., all at once,
 via `full_stack`).
 
+Installed OS packages are read directly from the extracted filesystem (dpkg
+`status`, apk `installed`, and the rpm database — Berkeley DB `Packages` or
+`rpmdb.sqlite`, parsed in-process) in every mode, so no `dpkg`/`apk`/`rpm`
+binary is ever run and the scan works on hosts without them, including
+Windows. The only binary executed is `docker`, to pull/create/export the
+image and remove it when the mode calls for it (skipped entirely for a local
+`.tar`). SUSE's NDB rpm format is not supported.
+
 **Firewall:** Docker gets **true pre-install (here, pre-deploy) gating**,
 with three modes controlling what happens to the image after scanning:
 - `health` — scan only, image left exactly as found.
@@ -1130,7 +1138,10 @@ the actual state of running resources.
 **SCA:** `LinuxHostScanner` inventories installed OS packages and matches
 them against CPE/CVE data — this is what backs both the standalone
 `ubel-platform` host scan and the OS-package half of every Docker image
-scan.
+scan. Installed packages are read straight from the package databases
+(dpkg `status`, apk `installed`, rpm `Packages`/`rpmdb.sqlite`) without
+running any package-manager binary to do so; only `check`/`install` call
+`apt`/`dnf`/`yum`, for the dry-run resolution.
 
 **Firewall:** Available via three separate binaries — `ubel-apt`,
 `ubel-dnf`, `ubel-yum` — each bound to exactly one native package manager,
