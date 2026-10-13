@@ -38,6 +38,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
 - **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
+- **OS package release matching** — advisories for the host's OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
 
 ---
@@ -155,16 +156,17 @@ Every detected component carries its actual license or vendor EULA — proprieta
 |---|---|---|---|
 | Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
 | Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
-| Alpine | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
-| Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpaquita/` |
-| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
-| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
-| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
-| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| Alpine / Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
+| Red Hat / RHEL | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
 
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
-> On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
+**No package-manager binaries are executed** to read installed packages (`dpkg`, `apk` and `rpm` are not required): the rpm database is parsed in-process and its format is detected from the file's magic bytes — Berkeley DB `Packages` (RHEL/CentOS/Alma/Rocky ≤ 8, Amazon Linux 2) and SQLite `rpmdb.sqlite` (RHEL/Alma/Rocky ≥ 9, Fedora, Amazon Linux 2023). NDB (`Packages.db`, SUSE) is not supported and stops the scan with a clear error.
+
+Each package is also tagged with the distro release it was read from (e.g. `almalinux-8.10`), which UBEL uses to match advisories to that release — see [OS Package Release Matching](#os-package-release-matching).
 
 **Report location**
 
@@ -309,7 +311,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | **Dashboard** | Vulnerability counts by severity, policy decision summary (including threat-intel feed warnings), license-risk stats card, scan metadata |
 | **Executive Summary** | Plain-language risk rating, policy verdict, key findings, components to fix first, and suggested actions for non-technical readers, printable as a PDF — see [Executive Summary](#executive-summary) |
 | **Secrets** | Exposed secrets by category, severity, file/line, and redacted match preview |
-| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS score/percentile, KEV badge, severity, fix version, reachability level, and policy decision. Click any row for a detail modal (CVSS vector, fix recommendations, OSV/NVD references, compliance frameworks) |
+| **Vulnerabilities** | Full list of matched CVEs with CVSS score, EPSS score/percentile, KEV badge, severity, fix version, reachability level, and policy decision. Click any row for a detail modal (CVSS vector, fix recommendations, OSV/NVD references, compliance frameworks, and — for OS packages — the release match) |
 | **Inventory** | Every scanned package with version, PURL, CPE, ecosystem, state (safe / vulnerable / infected / undetermined), license risk (OSI-approved status, risk level), and vulnerability count. Click a package for its detail modal, which includes **Suggested Fixes** — see [Recommended Package Fixes](#recommended-package-fixes) |
 | **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
@@ -440,6 +442,7 @@ Open the **Inventory** tab and click a package: its detail modal has a **Suggest
 
 - A table with one row per suggested version — **Range** (label plus *minor range* / *major range*), **Suggested version** (with "fixes N"), and **Vulnerabilities fixed**, each with its severity badge. Click any vulnerability to jump to its detail modal.
 - Below it, **Vulnerabilities with no fix (N)** — ID, severity, and score for everything no suggested version resolves.
+- For OS packages, a **Release match** badge on each suggested version (and on the unfixed list) shows how sure UBEL is that it is for your distro release — see [OS Package Release Matching](#os-package-release-matching).
 - Malicious (infection) entries are shown with an `infection` badge. If nothing can be fixed by upgrading, the modal says so; if the package has no suggestion data, it says that instead.
 
 **Ordering.** Vulnerabilities inside every group are ordered most severe first: malicious (infection), then critical, high, medium, low, unknown; ties are broken by CVSS score, then ID.
@@ -480,9 +483,66 @@ Each inventory item in the JSON report carries a `suggested_fixes` object:
 | `fixes[].count` | How many of the package's vulnerabilities that version resolves |
 | `fixes[].range` | The range the version belongs to: `scope` is `minor` (same major as installed) or `major` (higher major); `label` is e.g. `4.17.x` or `5.x` |
 | `fixes[].vulnerabilities` | The vulnerabilities resolved, most severe first |
+| `fixes[].release_confidence`, `fixes[].release_confidence_reason` | OS packages only: how sure UBEL is that the version is built for the installed distro release (lowest of the vulnerabilities it covers; `low` if the version is visibly for another release). `unfixed[]` entries carry `release_confidence` too — see [OS Package Release Matching](#os-package-release-matching) |
 | `unfixed` | Vulnerabilities no suggested version resolves |
 
 If suggestions can't be computed for a package, its `suggested_fixes` carries an `error` message with empty `fixes`/`unfixed`, and the rest of the report is unaffected. Suggestions are computed once per scan, right after vulnerabilities are matched, and before the executive summary is built.
+
+## OS Package Release Matching
+
+An OS package (`pkg:deb/…`, `pkg:rpm/…`, `pkg:apk/…`) is only affected by advisories issued for the distro release it is installed on — an AlmaLinux 8 package is not vulnerable to an AlmaLinux 9 erratum whose fixed version is `…el9_8`. OSV's PURL lookup returns advisories for every release of a distro, so UBEL checks the release itself and reports how sure it is. In the extension this applies to the OS packages found by **UBEL: Scan Host Platform** on Linux; project and extension scans contain no OS packages, and application packages (npm, PyPI, …) are unaffected. Docker image scans and the apt/dnf/yum firewall use the same logic in the CLI (see the [CLI docs](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#os-package-release-matching)).
+
+**How it works**
+
+1. **Release detection.** Every OS package is tagged with a `distro` value — the scanned system's `os-release` `ID` and `VERSION_ID`, e.g. `almalinux-8.10`, `debian-12`, `alpine-3.22.2`. It is metadata only: the package's PURL and `id` are unchanged. A system with no `VERSION_ID` (e.g. Debian testing/sid) gets no `distro`.
+2. **Lookup.** The value is added to the OSV query as a PURL `distro` qualifier (`pkg:rpm/almalinux/acl@2.4.0-1.el8_10?distro=almalinux-8.10`); results are still reported under the plain PURL. UBEL does not rely on OSV honouring the qualifier.
+3. **Response check.** Each advisory names its release in `affected[].package.ecosystem` (e.g. `AlmaLinux:9`). UBEL compares it with the installed release and **drops the advisory only when it names the same distro family for that package but never the installed release**. Anything ambiguous is kept (see the confidence levels below), so a doubtful case adds a finding rather than hiding one. The scan log reports how many were dropped (`Dropped N OS advisories that apply to a different distro release than the one scanned.`). An advisory that covers several releases is kept but trimmed to the matching entries, so its fixed versions and fix recommendations describe only your release.
+
+A release matches when it equals the installed version or is its leading dotted part, so `8` matches `8.10` but not `10` or `18`.
+
+**Distros matched**
+
+| Distro (`os-release` `ID`) | Advisory ecosystem matched | Example |
+|---|---|---|
+| Debian | `Debian:<major>` | `debian-12` ↔ `Debian:12` |
+| Ubuntu | `Ubuntu:<VERSION_ID>` (including the `:LTS` suffix and `Ubuntu:Pro:…`) | `ubuntu-24.04` ↔ `Ubuntu:24.04:LTS` |
+| Alpine | `Alpine:v<major.minor>` | `alpine-3.22.2` ↔ `Alpine:v3.22` |
+| AlmaLinux | `AlmaLinux:<major>` | `almalinux-8.10` ↔ `AlmaLinux:8` |
+| Rocky Linux | `Rocky Linux:<major>` | `rocky-9.3` ↔ `Rocky Linux:9` |
+
+Every other distro — Red Hat / RHEL, CentOS, Fedora, Amazon Linux, Oracle Linux, and derivatives such as Linux Mint, Kali or Raspbian (their own `os-release` `ID` isn't one of the above) — is **not filtered**: all advisories are kept, with `low` confidence. Rocky Linux (`ID=rocky`) is detected as Rocky Linux (`pkg:rpm/rocky-linux/`), not as Red Hat.
+
+**Release confidence**
+
+Each OS-package vulnerability gets a `release_confidence` and a one-line `release_confidence_reason`:
+
+| Level | Meaning |
+|---|---|
+| `high` | The advisory explicitly names the installed release (e.g. `AlmaLinux:8` for `almalinux-8.10`) |
+| `medium` | Same distro family, but the advisory names no release (e.g. a bare `Debian`), so it could not be confirmed |
+| `low` | Nothing to verify against: the distro isn't in the table above, its release is unknown, or the advisory has no entry for the family — it may belong to another release |
+
+**Fixes.** A suggested version's confidence is the **lowest** of the vulnerabilities it covers, and is forced to `low` when the version is visibly built for another release than the installed one (installed `2.4.0-1.el8_10`, fix `2.4.0-1.el10_2`; `+deb12u1` vs `+deb11u3`). The same level is attached to every entry of a vulnerability's ranked fix versions (`fix_versions_ranked[]`).
+
+Confidence is **informational** — it never changes the policy decision. Application packages (npm, PyPI, …) carry no confidence fields: the concept only applies to distro releases.
+
+**Where it appears**
+
+- **JSON**: `release_confidence` and `release_confidence_reason` on each OS-package vulnerability, on every `fix_versions_ranked[]` entry and on every `suggested_fixes.fixes[]` entry; `release_confidence` on `suggested_fixes.unfixed[]` entries and in `findings_summary`.
+- **HTML report**: a *Release match* badge (reason on hover) in the package's Suggested Fixes table and its unfixed list; a *Release match* line in the vulnerability detail modal and a column in its fix-version table.
+- **SBOM (CycloneDX v1.6)**: the vulnerability properties `os.release_confidence` and `os.release_confidence_reason`.
+
+```json
+{
+  "id": "ALSA-XXXX:NNNN",
+  "affected_package_id": "pkg:rpm/almalinux/acl@2.4.0-1.el8_10",
+  "release_confidence": "high",
+  "release_confidence_reason": "Advisory ecosystem AlmaLinux:8 matches the installed almalinux-8.10.",
+  "fix_versions_ranked": [
+    { "version": "2.4.0-1.el8_10.1", "release_confidence": "high", "release_confidence_reason": "…" }
+  ]
+}
+```
 
 ---
 
@@ -818,16 +878,17 @@ Detected by reading the system package database directly.
 |---|---|---|---|
 | Ubuntu | dpkg | `/var/lib/dpkg/status` | `pkg:deb/ubuntu/` |
 | Debian | dpkg | `/var/lib/dpkg/status` | `pkg:deb/debian/` |
-| Alpine | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
-| Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpaquita/` |
-| Red Hat / RHEL | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
-| AlmaLinux | rpm | `rpm -qa` | `pkg:rpm/almalinux/` |
-| Rocky Linux | rpm | `rpm -qa` | `pkg:rpm/rocky-linux/` |
-| CentOS / Fedora | rpm | `rpm -qa` | `pkg:rpm/redhat/` |
+| Alpine / Alpaquita | apk | `/lib/apk/db/installed` | `pkg:apk/alpine/` |
+| Red Hat / RHEL | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
+| AlmaLinux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/almalinux/` |
+| Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
+| CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
 
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
-> On RPM-based systems, `rpm -qa` may return partial results depending on SELinux policy if run without elevated privileges.
+**No package-manager binaries are executed** to read installed packages (`dpkg`, `apk` and `rpm` are not required): the rpm database is parsed in-process and its format is detected from the file's magic bytes — Berkeley DB `Packages` (RHEL/CentOS/Alma/Rocky ≤ 8, Amazon Linux 2) and SQLite `rpmdb.sqlite` (RHEL/Alma/Rocky ≥ 9, Fedora, Amazon Linux 2023). NDB (`Packages.db`, SUSE) is not supported and stops the scan with a clear error.
+
+Each package is also tagged with the distro release it was read from (e.g. `almalinux-8.10`), which UBEL uses to match advisories to that release — see [OS Package Release Matching](#os-package-release-matching).
 
 ---
 

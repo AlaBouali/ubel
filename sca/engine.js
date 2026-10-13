@@ -19,7 +19,7 @@ import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZ
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
-import { attachSuggestedFixes } from "./suggested_fixes.js";
+import { attachSuggestedFixes, fixReleaseConfidence } from "./suggested_fixes.js";
 import { buildExecutiveSummary } from "./executive_summary.js";
 import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
 import { getComplianceForVulnerability, getComplianceForSecret, summarizeCompliance } from "./compliance_mappings.js";
@@ -1542,6 +1542,16 @@ async function generateHTMLReport(data) {
             });
         }
 
+        // Release-match confidence for OS packages (deb/rpm/apk): how sure we are an advisory / fix is
+        // for the installed distro release. Informational only; policy is not affected.
+        function releaseConfBadge(level, reason) {
+            if (!level) return '<span class="text-neutral-600">—</span>';
+            const cls = level === 'high' ? 'text-green-400 border-green-400'
+                      : level === 'medium' ? 'text-yellow-400 border-yellow-400'
+                      : 'text-red-400 border-red-400';
+            return '<span title="' + escapeHtml(String(reason || '')) + '" class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold ' + cls + '">' + escapeHtml(String(level)) + '</span>';
+        }
+
         // Suggested-fixes tables for the package modal (see suggested_fixes.js).
         // Built with string concatenation (no nested template literals).
         function renderSuggestedFixes(sf) {
@@ -1563,11 +1573,13 @@ async function generateHTMLReport(data) {
                 const rangeRows = {};
                 fixes.forEach(function(f) { const k = f.range ? f.range.key : ''; rangeRows[k] = (rangeRows[k] || 0) + 1; });
                 const rangeSeen = {};
+                const anyConf = fixes.some(function(f) { return !!f.release_confidence; });
                 html += '<div class="rounded-lg border border-neutral-800 overflow-auto max-h-96">' +
                     '<table class="w-full min-w-full text-xs text-left border-collapse">' +
                     '<thead class="bg-neutral-800 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr>' +
                     '<th class="px-3 py-2 whitespace-nowrap w-px">Range</th>' +
                     '<th class="px-3 py-2 whitespace-nowrap w-px">Suggested version</th>' +
+                    (anyConf ? '<th class="px-3 py-2 whitespace-nowrap w-px" title="Confidence that this version is for the installed distro release">Release match</th>' : '') +
                     '<th class="px-3 py-2">Vulnerabilities fixed</th>' +
                     '</tr></thead><tbody>' +
                     fixes.map(function(f) {
@@ -1583,6 +1595,7 @@ async function generateHTMLReport(data) {
                             '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' +
                             '<span class="mono text-sm font-bold text-green-400">' + escapeHtml(String(f.version)) + '</span>' +
                             '<span class="ml-2 text-[10px] text-neutral-500">fixes ' + f.count + '</span></td>' +
+                            (anyConf ? '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' + releaseConfBadge(f.release_confidence, f.release_confidence_reason) + '</td>' : '') +
                             '<td class="px-3 py-2 align-top border-t border-l border-neutral-800"><div class="flex flex-wrap gap-x-4 gap-y-1.5">' +
                             (f.vulnerabilities || []).map(function(v) {
                                 return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1" onclick="' + openVuln(v) + '">' +
@@ -1599,12 +1612,13 @@ async function generateHTMLReport(data) {
             if (unfixed.length) {
                 html += '<div class="rounded-lg border border-neutral-800 overflow-auto max-h-48">' +
                     '<table class="w-full text-xs text-left">' +
-                    '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Severity</th><th class="px-3 py-2 text-right">Score</th></tr></thead>' +
+                    '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Severity</th>' + (unfixed.some(function(v) { return !!v.release_confidence; }) ? '<th class="px-3 py-2">Release match</th>' : '') + '<th class="px-3 py-2 text-right">Score</th></tr></thead>' +
                     '<tbody class="divide-y divide-neutral-800">' +
                     unfixed.map(function(v) {
                         return '<tr class="cursor-pointer hover:bg-neutral-800/40" onclick="' + openVuln(v) + '">' +
                             '<td class="px-3 py-2 mono text-white">' + escapeHtml(String(v.id)) + '</td>' +
                             '<td class="px-3 py-2">' + sevBadge(v) + '</td>' +
+                            (v.release_confidence ? '<td class="px-3 py-2">' + releaseConfBadge(v.release_confidence, '') + '</td>' : (unfixed.some(function(u) { return !!u.release_confidence; }) ? '<td class="px-3 py-2">—</td>' : '')) +
                             '<td class="px-3 py-2 mono text-neutral-400 text-right">' + (v.severity_score != null ? Number(v.severity_score).toFixed(1) : '—') + '</td></tr>';
                     }).join('') +
                     '</tbody></table></div>';
@@ -1735,6 +1749,7 @@ async function generateHTMLReport(data) {
                                 <h2 class="text-2xl font-bold mono"><a href="\${v.url}" target="_blank" class="text-white hover:text-blue-400">\${v.id}</a></h2>
                             </div>
                             <p class="text-neutral-400 text-sm">Package: <span class="text-white font-medium">\${v.affected_dependency}</span> (\${v.affected_dependency_version})</p>
+                            \${v.release_confidence ? '<p class="text-[11px] text-neutral-500 mt-1">Release match: ' + releaseConfBadge(v.release_confidence, v.release_confidence_reason) + ' <span class="ml-1">' + escapeHtmlClient(v.release_confidence_reason || '') + '</span></p>' : ''}
                         </div>
                         <div class="text-right"><p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest">CVSS Score</p>\${cvssBlock}</div>
                     </div>
@@ -1758,6 +1773,7 @@ async function generateHTMLReport(data) {
                                 <tr>
                                     <th class="px-4 py-2">Version</th>
                                     <th class="px-4 py-2">Compatibility</th>
+                                    \${v.release_confidence ? '<th class="px-4 py-2" title="Confidence that this version is for the installed distro release">Release match</th>' : ''}
                                     <th class="px-4 py-2">Recommended</th>
                                 </tr>
                             </thead>
@@ -1772,6 +1788,7 @@ async function generateHTMLReport(data) {
                                                                                   'text-red-400 border-red-400'
                                         }">\${r.compatibility_level}</span>
                                     </td>
+                                    \${v.release_confidence ? '<td class="px-4 py-2">' + releaseConfBadge(r.release_confidence, r.release_confidence_reason) + '</td>' : ''}
                                     <td class="px-4 py-2">
                                         \${r.recommended
                                             ? \`<span class="flex items-center gap-1 text-green-400 font-semibold"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg> Yes</span>\`
@@ -2507,6 +2524,8 @@ export function getEcosystemFromPurl(purl) {
   if (purl.startsWith("pkg:deb/ubuntu/"))   return "ubuntu";
   if (purl.startsWith("pkg:deb/debian/"))   return "debian";
   if (purl.startsWith("pkg:rpm/redhat/"))   return "redhat";
+  if (purl.startsWith("pkg:rpm/almalinux/")) return "almalinux";
+  if (purl.startsWith("pkg:rpm/rocky-linux/")) return "rockylinux";
   if (purl.startsWith("pkg:apk/alpine/"))   return "alpine";
   return "unknown";
 }
@@ -3020,7 +3039,35 @@ async function osvQueryBatch(queries) {
   return vulnResults;
 }
 
-export async function submitToOsv(purlsList) {
+// OS-package PURL types. These are the only ones the `distro` qualifier applies to.
+const OS_PURL_RE = /^pkg:(deb|rpm|apk)\//;
+
+/**
+ * Returns `purl` with a `distro` qualifier appended ("...?distro=ubuntu-24.04") so OSV only
+ * matches advisories for that release. No-op for non-OS purls, an empty distro, or a purl
+ * that already carries a distro qualifier. Used for the OSV *query* only — inventory ids
+ * and `affected_package_id` keep the unqualified purl.
+ */
+export function withDistroQualifier(purl, distro) {
+  if (!distro || typeof purl !== "string" || !OS_PURL_RE.test(purl)) return purl;
+  const [base, frag] = purl.split("#");
+  const [, qs = ""] = base.split(/\?(.*)/s);
+  if (/(^|&)distro=/.test(qs)) return purl;
+  const joined = `${base}${base.includes("?") ? "&" : "?"}distro=${encodeURIComponent(distro)}`;
+  return frag === undefined ? joined : `${joined}#${frag}`;
+}
+
+/**
+ * @param {string[]} purlsList
+ * @param {object}   [opts]
+ * @param {Map<string,string>} [opts.distroByPurl]  purl → distro ("ubuntu-24.04"). OS packages
+ *   listed here are queried with `?distro=<value>`; results are still reported under the
+ *   original (unqualified) purl.
+ */
+export async function submitToOsv(purlsList, opts = {}) {
+  const distroByPurl = opts.distroByPurl instanceof Map ? opts.distroByPurl : new Map();
+  const queryPurl = (p) => withDistroQualifier(p, distroByPurl.get(p));
+
   // pkg:conda/ is excluded: OSV has no conda ecosystem, and a purl type it
   // can't map risks failing the whole batch (any non-200 fails the scan).
   // Python conda packages are emitted as pkg:pypi/ by conda_runner.js instead.
@@ -3038,13 +3085,16 @@ export async function submitToOsv(purlsList) {
       const k = `${purl}::${v.id}`;
       if (seen.has(k)) continue;
       seen.add(k);
-      results.push({ purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv" });
+      results.push({
+        purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv",
+        ...(distroByPurl.get(purl) ? { distro: distroByPurl.get(purl) } : {}),
+      });
     }
   };
 
   for (let offset = 0; offset < purlsList.length; offset += PAGE) {
     const chunk = purlsList.slice(offset, offset + PAGE);
-    const vulnResults = await osvQueryBatch(chunk.map((purl) => ({ package: { purl } })));
+    const vulnResults = await osvQueryBatch(chunk.map((purl) => ({ package: { purl: queryPurl(purl) } })));
 
     // A package with many advisories comes back with a next_page_token and only
     // the first page of ids. Ignoring it silently dropped the rest.
@@ -3062,7 +3112,7 @@ export async function submitToOsv(purlsList) {
           { source: "osv" }
         );
       }
-      const page = await osvQueryBatch(pending.map(p => ({ package: { purl: p.purl }, page_token: p.token })));
+      const page = await osvQueryBatch(pending.map(p => ({ package: { purl: queryPurl(p.purl) }, page_token: p.token })));
       const next = [];
       page.forEach((item, i) => {
         collect(pending[i].purl, item);
@@ -3156,13 +3206,99 @@ export function getFix(vuln) {
   vuln.fix_versions_ranked = vuln.fixed_versions.length > 0
     ? findClosestFixVersions(vuln.affected_dependency_version || "", vuln.fixed_versions, _vrEco)
     : [];
+  // OS packages: each ranked fix inherits the advisory's release confidence, lowered when the fix
+  // version is built for a different release than the installed one (e.g. ...el9 vs ...el8).
+  if (vuln.release_confidence) {
+    for (const r of vuln.fix_versions_ranked) {
+      const fc = fixReleaseConfidence(vuln.affected_dependency_version, r.version, vuln.release_confidence, vuln.release_confidence_reason);
+      r.release_confidence        = fc.confidence;
+      r.release_confidence_reason = fc.reason;
+    }
+  }
   // Last-affected ranked table — shown only when no fixed versions exist
   vuln.last_affected_ranked = !vuln.has_fix && vuln.last_affected_versions.length > 0
     ? findClosestFixVersions(vuln.affected_dependency_version || "", vuln.last_affected_versions, _vrEco)
     : [];
 }
 
-export async function getVulnById({ vulnerability_id, purl, dependency, affected_version }) {
+// ── Release scoping for OS-package advisories ────────────────────────────────
+// OSV answers a deb/rpm/apk purl query with advisories for EVERY release of the distro
+// (it ignores a `?distro=` qualifier), so an AlmaLinux 8 package is also "matched" by
+// AlmaLinux 9/10 errata whose fixed versions (…el9_8, …el10_2) mean nothing for it.
+// Each advisory names its release in affected[].package.ecosystem ("AlmaLinux:9",
+// "Debian:12", "Alpine:v3.22", "Ubuntu:24.04:LTS", "Rocky Linux:8"), so the match is
+// verified here, on the response.
+//
+// Drop rule (conservative): an advisory is dropped ONLY when it positively names the same
+// distro family for this package but never the installed release. Unknown distro family,
+// no entry for the family, or an ecosystem with no release ("Debian") all keep the finding.
+const DISTRO_ID_TO_OSV_FAMILY = {
+  debian:     "Debian",
+  ubuntu:     "Ubuntu",
+  alpine:     "Alpine",
+  almalinux:  "AlmaLinux",
+  rocky:      "Rocky Linux",
+};
+
+// "almalinux-8.10" → { family: "AlmaLinux", version: "8.10" }; null when unmapped.
+function parseDistro(distro) {
+  const m = /^(.+?)-(\d.*)$/.exec(String(distro || ""));
+  if (!m) return null;
+  const family = DISTRO_ID_TO_OSV_FAMILY[m[1].toLowerCase()];
+  return family ? { family, version: m[2] } : null;
+}
+
+// "Ubuntu:Pro:22.04:LTS" → { family: "Ubuntu", release: "22.04" }; release is "" when absent.
+function parseOsvOsEcosystem(eco) {
+  const seg = String(eco || "").split(":");
+  const family = seg[0];
+  let release = (family === "Ubuntu" && seg[1] === "Pro") ? seg[2] : seg[1];
+  release = String(release || "").replace(/^v(?=\d)/, "");   // Alpine "v3.22"
+  return { family, release };
+}
+
+const releaseMatches = (release, version) =>
+  !release || version === release || version.startsWith(`${release}.`);
+
+/**
+ * Decides whether an OS-package advisory applies to the installed release, and how sure we are.
+ *
+ * @returns {{ applicable: boolean, affected: object[], confidence: "high"|"medium"|"low", reason: string }}
+ *   `affected` has entries for other releases of the same family removed (so fixed_versions /
+ *   fixes only describe this release). `confidence` is only meaningful when `applicable`:
+ *     high   — the advisory explicitly names the installed release (e.g. "AlmaLinux:8" for almalinux-8.10)
+ *     medium — same distro family, but the advisory names no release, so it could not be confirmed
+ *     low    — nothing to verify against (distro unknown/unmapped, no affected data, no entry for the
+ *              family): the advisory may belong to another release
+ */
+export function scopeAffectedToDistro(affected, dependency, distro) {
+  const keep = (confidence, reason, list = affected) => ({ applicable: true, affected: list, confidence, reason });
+
+  if (!distro) return keep("low", "The installed distro release could not be determined, so the advisory's release was not verified.");
+  const d = parseDistro(distro);
+  if (!d) return keep("low", `Distro "${distro}" has no OSV ecosystem mapping, so the advisory's release was not verified.`);
+  if (!Array.isArray(affected) || !affected.length) return keep("low", "The advisory lists no affected packages to verify the release against.");
+
+  const dep      = String(dependency || "").toLowerCase();
+  const named    = affected.filter(e => String(e?.package?.name || "").toLowerCase() === dep);
+  const relevant = named.length ? named : affected;
+
+  const sameFamily = relevant.filter(e => parseOsvOsEcosystem(e?.package?.ecosystem).family === d.family);
+  if (!sameFamily.length) return keep("low", `The advisory names no ${d.family} entry for this package, so its release was not verified.`);
+
+  const matches = (e) => releaseMatches(parseOsvOsEcosystem(e.package.ecosystem).release, d.version);
+  const matched = sameFamily.filter(matches);
+  if (!matched.length) return { applicable: false, affected: [], confidence: "low", reason: "Advisory is for a different release." };
+
+  const wrong  = new Set(sameFamily.filter(e => !matches(e)));
+  const pruned = affected.filter(e => !wrong.has(e));
+
+  const explicit = matched.find(e => parseOsvOsEcosystem(e.package.ecosystem).release);
+  if (explicit) return keep("high", `Advisory ecosystem ${explicit.package.ecosystem} matches the installed ${distro}.`, pruned);
+  return keep("medium", `Advisory names ${d.family} without a release, so ${distro} could not be confirmed.`, pruned);
+}
+
+export async function getVulnById({ vulnerability_id, purl, dependency, affected_version, distro }) {
   let res;
   try {
     res = await fetchJSON(`${OSV_VULN_BASE}/${vulnerability_id}`);
@@ -3184,6 +3320,17 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
   }
 
   const data = res.body;
+
+  // OS packages: keep only advisories for the installed release, and scope fixed_versions /
+  // fixes to it. null = "not applicable to this release" (deliberate — not a failed lookup,
+  // which always throws above).
+  let release = null;
+  if (OS_PURL_RE.test(purl || "")) {
+    release = scopeAffectedToDistro(data.affected, dependency, distro);
+    if (!release.applicable) return null;
+    data.affected = release.affected;
+  }
+
   processVulnerability(data);
 
   data.affected_package_id              = purl;
@@ -3192,6 +3339,13 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
   data.ecosystem                = getEcosystemFromPurl(purl);
   data.url                        = `https://osv.dev/vulnerability/${vulnerability_id}`;
   data.is_infection               = (data.id || "").startsWith("MAL-");
+
+  // OS packages: how sure we are the advisory is for the installed release. Informational only —
+  // it does not change policy decisions. Set before getFix() so the fix tables inherit it.
+  if (release) {
+    data.release_confidence        = release.confidence;
+    data.release_confidence_reason = release.reason;
+  }
 
   getFix(data);
 
@@ -3428,6 +3582,7 @@ function summarizeVulnerabilities(vulnerabilities,inventory) {
       fixes:          v.fixes || [],
       fixed_versions: v.fixed_versions || [],
       is_policy_violation: v.policy_decision === "block",
+      ...(v.release_confidence ? { release_confidence: v.release_confidence } : {}),
     };
 
     packages[pkg].vulnerabilities.push(vulnObj);
@@ -4239,9 +4394,16 @@ export class UbelEngineInstance {
       // OSV/NVD network calls are made, and vulnerabilities stays empty.
       let vulnerabilities = [];
       if (scan_vulns) {
-        const vuln_ids = await submitToOsv(purls);
+        // OS packages (deb/rpm/apk) are queried with ?distro=<id>-<version_id> so they are
+        // matched against their own release's advisories. Ids/results keep the plain purl.
+        const distroByPurl = new Map();
+        for (const c of inventory) {
+          if (c && typeof c.id === "string" && c.distro) distroByPurl.set(c.id, c.distro);
+        }
+        const vuln_ids = await submitToOsv(purls, { distroByPurl });
 
         // ── Enrich vulnerabilities concurrently ─────────────────────────────
+        let notApplicable = 0;
         const CONCURRENCY = 40;
         for (let i = 0; i < vuln_ids.length; i += CONCURRENCY) {
           const batch   = vuln_ids.slice(i, i + CONCURRENCY);
@@ -4256,9 +4418,14 @@ export class UbelEngineInstance {
               { source: "osv-vuln", cause: failed[0].reason }
             );
           }
-          for (const r of results) {
+          for (let j = 0; j < results.length; j++) {
+            const r = results[j];
             if (r.value) vulnerabilities.push(r.value);
+            else if (batch[j]?.distro) notApplicable++;   // advisory is for another release
           }
+        }
+        if (notApplicable) {
+          console.log(`[*] Dropped ${notApplicable} OS advisor${notApplicable === 1 ? "y" : "ies"} that apply to a different distro release than the one scanned.`);
         }
 
         // ── NVD query for CPE-based inventory items ──────────────────────────

@@ -335,6 +335,15 @@ export class CycloneDXBuilder {
         ];
       }
 
+      // OS packages: confidence that the advisory is for the installed distro release.
+      if (v.release_confidence) {
+        entry.properties = entry.properties || [];
+        entry.properties.push(
+          { name: "os.release_confidence",        value: String(v.release_confidence) },
+          { name: "os.release_confidence_reason", value: String(v.release_confidence_reason || "") },
+        );
+      }
+
       // Exploit intelligence (CISA KEV + FIRST EPSS).
       {
         const ti = this._threatIntelProps(v);

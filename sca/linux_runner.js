@@ -12,6 +12,8 @@
 //   version:      "5.2.21",
 //   type:         "library",
 //   ecosystem:    "ubuntu",        // canonical distro id
+//   distro:       "ubuntu-24.04",  // PURL `distro` qualifier value (os-release ID-VERSION_ID);
+//                                  // used only when querying OSV — never part of `id`
 //   license:      "unknown",
 //   paths:        ["/usr/bin/bash"],
 //   dependencies: ["pkg:deb/ubuntu/libc6@2.39"],
@@ -34,10 +36,12 @@ const SUBPROCESS_TIMEOUT = 120_000;   // ms
 const ALLOWED_ECOSYSTEMS = new Set([
   "debian", "ubuntu", "redhat", "almalinux", "rockylinux", "alpine",
   "rhel", "centos", "fedora",
+  "rocky",   // os-release ID for Rocky Linux is "rocky", not "rockylinux"
 ]);
 
 // Map ID_LIKE tokens that aren't direct ecosystem names to canonical ones
 const ECOSYSTEM_ALIAS = {
+  rocky:   "rockylinux",   // without this, Rocky fell through ID_LIKE=rhel and was scanned as Red Hat
   rhel:    "redhat",
   centos:  "redhat",
   fedora:  "redhat",
@@ -56,7 +60,7 @@ const PURL_TYPE = {
 // PURL helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function makePurl(ecosystem, name, version) {
+export function makePurl(ecosystem, name, version) {
   const type = PURL_TYPE[ecosystem] ?? ecosystem;
   if (ecosystem === "rockylinux") {
     ecosystem = "rocky-linux";
@@ -64,11 +68,29 @@ function makePurl(ecosystem, name, version) {
   return `pkg:${type}/${ecosystem}/${name}@${version ?? ""}`;
 }
 
+/**
+ * PURL `distro` qualifier value, per the PURL spec convention
+ * "<os-release ID>-<VERSION_ID>" (e.g. "debian-12", "ubuntu-24.04", "alpine-3.22.2",
+ * "rocky-9.3"). Sent with OSV queries so an OS package is matched against advisories
+ * for the release it is actually installed on, not every release of the distro.
+ *
+ * Only VERSION_ID is used (never the free-text VERSION, which has spaces/parentheses).
+ * Returns "" when either part is missing (e.g. Debian testing/sid has no VERSION_ID),
+ * in which case the PURL is queried without a distro filter.
+ */
+export function makeDistro(id, versionId) {
+  const i = String(id ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  const v = String(versionId ?? "").trim().replace(/\s+/g, "");
+  if (!i || !v) return "";
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(i) || !/^[A-Za-z0-9][A-Za-z0-9._~+-]*$/.test(v)) return "";
+  return `${i}-${v}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OS detection  (/etc/os-release or /usr/lib/os-release)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function parseOsRelease(content) {
+function parseOsReleaseData(content) {
   const data = {};
   for (const raw of content.split("\n")) {
     const line = raw.trim();
@@ -78,6 +100,11 @@ function parseOsRelease(content) {
     const val  = line.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
     data[key]  = val;
   }
+  return data;
+}
+
+export function parseOsRelease(content) {
+  const data = parseOsReleaseData(content);
 
   const normalise = v => v.toLowerCase().replace(/[\s-]/g, "");
   const candidates = [];
@@ -98,6 +125,22 @@ function detectHostEcosystem(rootDir = "") {
   throw new Error(
     `Cannot detect OS ecosystem: no os-release file found${rootDir ? ` under ${rootDir}` : ""}`
   );
+}
+
+/**
+ * `distro` qualifier value for the host / extracted rootfs ("ubuntu-24.04"), or "" if
+ * os-release carries no ID/VERSION_ID. Uses the real os-release ID (e.g. "rocky",
+ * "rhel"), not the canonical ecosystem name, since that is what the PURL spec calls for.
+ */
+function detectHostDistro(rootDir = "") {
+  for (const p of ["/etc/os-release", "/usr/lib/os-release"]) {
+    const fullPath = rootDir ? path.join(rootDir, p) : p;
+    if (fs.existsSync(fullPath)) {
+      const data = parseOsReleaseData(fs.readFileSync(fullPath, "utf8"));
+      return makeDistro(data.ID, data.VERSION_ID);
+    }
+  }
+  return "";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -506,6 +549,11 @@ export class LinuxHostScanner {
       throw new Error(`No scanner implemented for ecosystem: ${ecosystem}`);
     }
 
+    // Tag every package with the release it was read from, so the OSV lookup can filter
+    // by `?distro=` (see engine.js submitToOsv). `id` itself is left untouched.
+    const distro = detectHostDistro(this.rootDir);
+    if (distro) for (const p of packages) p.distro = distro;
+
     // Sort by name for deterministic output — mirrors to_package_list()
     packages.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -797,6 +845,11 @@ export class LinuxManagerInstance {
     };
   }
 
+  // PURL `distro` qualifier value for this host ("ubuntu-24.04"), or "" when unknown.
+  getDistro(osInfo = this.getOsInfo()) {
+    return makeDistro(osInfo.id, osInfo.version_id);
+  }
+
   // ── Package manager availability ────────────────────────────────────────────
   // apt-get is what's actually invoked for resolution/version probing even
   // when this.pkgManager === "apt" — apt's own CLI output is explicitly
@@ -877,6 +930,7 @@ export class LinuxManagerInstance {
       dependencies: pkg.dependencies || [],
       paths:        pkg.paths || [],
       ecosystem:    pkg.ecosystem,
+      ...(pkg.distro ? { distro: pkg.distro } : {}),
       state:        "undetermined",
     }));
 
@@ -893,6 +947,7 @@ export class LinuxManagerInstance {
       const kernelComponent = {
         id: kernelPurl, name: "linux", version: kernelVersion, type: "application",
         license: "unknown", paths: [], dependencies: [], ecosystem: systemInfo.id,
+        ...(this.getDistro(systemInfo) ? { distro: this.getDistro(systemInfo) } : {}),
         state: "undetermined", dependency_sequences: [],
       };
       components.push(kernelComponent);
@@ -910,6 +965,7 @@ export class LinuxManagerInstance {
     this.assertAvailable();
     const osInfo = this.getOsInfo();
     this.pkgManagerVersion = this.getPkgManagerVersion();
+    const distroField = this.getDistro(osInfo) ? { distro: this.getDistro(osInfo) } : {};
 
     const resolved = [];
 
@@ -928,6 +984,7 @@ export class LinuxManagerInstance {
           resolved.push({
             name: m[1], version: m[2], type: "application",
             ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
+            ...distroField,
           });
         }
       }
@@ -947,6 +1004,7 @@ export class LinuxManagerInstance {
         resolved.push({
           name: p.name, version: p.version, type: "application",
           license: "unknown", paths: [], dependencies: [], ecosystem: osInfo.id,
+          ...distroField,
         });
       }
       return resolved;
@@ -963,6 +1021,7 @@ export class LinuxManagerInstance {
       resolved.push({
         name: p.name, version: p.version, type: "application",
         ecosystem: osInfo.id, license: "unknown", paths: [], dependencies: [],
+        ...distroField,
       });
     }
     return resolved;
@@ -973,7 +1032,10 @@ export class LinuxManagerInstance {
   getPackagesPurls(packages) {
     const resolved   = this.resolvePackages(packages);
     const systemInfo = this.getOsInfo();
-    const identified = resolved.map(pkg => ({ id: this.packageToPurl(systemInfo, pkg.name, pkg.version) }));
+    const identified = resolved.map(pkg => ({
+      id: this.packageToPurl(systemInfo, pkg.name, pkg.version),
+      ...(pkg.distro ? { distro: pkg.distro } : {}),
+    }));
     this.inventoryData = identified;
     return identified.map(pkg => pkg.id);
   }

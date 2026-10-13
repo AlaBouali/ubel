@@ -13,17 +13,48 @@
 //       { version: "4.17.21",
 //         count: 3,
 //         range: { key: "m:4.17", label: "4.17.x", scope: "minor" | "major" },
-//         vulnerabilities: [{ id, finding_key, severity, severity_score, is_infection }, ...] }
+//         vulnerabilities: [{ id, finding_key, severity, severity_score, is_infection }, ...],
+//         release_confidence?, release_confidence_reason? }   // OS packages only, see below
 //     ],
 //     unfixed: [{ id, finding_key, severity, severity_score, is_infection }, ...]   // no fix at all
 //   }
 //
 // Vulnerabilities are ordered most severe first (infection, critical, high, ...).
+//
+// OS packages (deb/rpm/apk) also carry `release_confidence` ("high" | "medium" | "low"): how sure
+// we are that the advisory — and therefore the suggested version — is for the installed distro
+// release. A fix's confidence is the LOWEST of the vulnerabilities it covers, and is forced to
+// "low" when the fix version is built for a different release than the installed one.
 
 const SEV_RANK = { infection: 0, critical: 1, high: 2, medium: 3, low: 4, unknown: 5 };
 
 function sevKey(v) {
   return v.is_infection ? "infection" : String(v.severity || "unknown").toLowerCase();
+}
+
+const CONF_RANK = { low: 0, medium: 1, high: 2 };
+
+/** Release a package version is built for, when the version string says so ("el8", "deb12"); else null. */
+function releaseTag(version) {
+  const v = String(version ?? "");
+  const el  = /\.el(\d+)(?![\d])/.exec(v);   if (el)  return `el${el[1]}`;       // rpm: 4.4.20-6.el8_10
+  const deb = /\+deb(\d+)u\d+/.exec(v);       if (deb) return `deb${deb[1]}`;      // deb: 1.2-1+deb12u1
+  return null;
+}
+
+/**
+ * Release confidence of ONE upgrade version for an installed OS package.
+ * Starts from the advisory's confidence and drops to "low" if the fix version is visibly built for
+ * another release (installed 2.4.0-1.el8_10, fix 2.4.0-1.el10_2). Returns null when there is no
+ * base confidence (non-OS packages).
+ */
+export function fixReleaseConfidence(installed, fixVersion, baseConfidence, baseReason) {
+  if (!baseConfidence) return null;
+  const a = releaseTag(installed), b = releaseTag(fixVersion);
+  if (a && b && a !== b) {
+    return { confidence: "low", reason: `Fix ${fixVersion} is built for ${b}, but the installed package is ${a}.` };
+  }
+  return { confidence: baseConfidence, reason: baseReason || "" };
 }
 
 function compactVuln(v) {
@@ -36,6 +67,7 @@ function compactVuln(v) {
     severity_score: v.severity_score != null && !isNaN(parseFloat(v.severity_score))
       ? parseFloat(v.severity_score) : null,
     is_infection: !!v.is_infection,
+    ...(v.release_confidence ? { release_confidence: v.release_confidence } : {}),
   };
 }
 
@@ -198,6 +230,7 @@ export function computeSuggestedFixes(item, vulnerabilities) {
   // be fixed in that range.
   const fixes = [];
   const coveredAnywhere = new Set();
+  const remainingAll = new Map(fixable.map(f => [f.vuln.id, f.vuln]));   // id → full vuln (for reasons)
   for (const { range, cands: groupCands } of groups.values()) {
     const remaining = new Map(fixable.map(f => [f.vuln.id, f.vuln]));
     while (remaining.size) {
@@ -214,12 +247,22 @@ export function computeSuggestedFixes(item, vulnerabilities) {
       for (const id of best.ids) {
         if (remaining.has(id)) { covered.push(compactVuln(remaining.get(id))); remaining.delete(id); coveredAnywhere.add(id); }
       }
+      // Lowest release confidence among the vulns this version covers (OS packages only).
+      let lowest = null;
+      for (const c of covered) {
+        if (c.release_confidence && (!lowest || CONF_RANK[c.release_confidence] < CONF_RANK[lowest.release_confidence])) lowest = c;
+      }
+      const fc = lowest
+        ? fixReleaseConfidence(installed, best.version, lowest.release_confidence,
+            (remainingAll.get(lowest.id) || {}).release_confidence_reason)
+        : null;
       fixes.push({
         version: best.version,
         count: covered.length,
         range: { key: range.key, label: range.label, scope: range.scope },
         order: range.order,
         vulnerabilities: sortVulns(covered),
+        ...(fc ? { release_confidence: fc.confidence, release_confidence_reason: fc.reason } : {}),
       });
     }
   }
