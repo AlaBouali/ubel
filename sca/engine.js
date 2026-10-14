@@ -5015,17 +5015,28 @@ export class UbelEngineInstance {
       // latest_reports/<mode>/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
       const latestZipPath = updateLatestReportZip(zipPath, reportTag);
 
-      // Report locations: every scan prints where its files went. OS health scans (os_sca)
-      // print them even when run programmatically (is_script), since there is no other output.
-      if (!is_script || reportTag === "os_sca") {
-        console.log(`Latest JSON report saved to: ${latestPath}`);
-        console.log(`Latest HTML report saved to: ${latestHtmlPath}`);
-        if (writeSbom)  console.log(`Latest SBOM (CycloneDX) saved to: ${path.join(latestDir, reportFileName("latest", reportTag, "cdx.json"))}`);
-        if (writeSarif) console.log(`Latest SARIF report saved to: ${path.join(latestDir, reportFileName("latest", reportTag, "sarif.json"))}`);
-        console.log(`Timestamped report bundle saved to: ${zipPath}`);
-        if (latestZipPath) console.log(`Latest report bundle saved to: ${latestZipPath}`);
-        console.log();
-        console.log();
+      // Report locations: every scan that saves reports says where they went.
+      // CLI (!is_script) prints to stdout; programmatic callers (agent, platform, VS Code
+      // extension, MCP) get the same lines on stderr — stdout may carry their protocol — and the
+      // paths are also attached to the returned / thrown report as `report_locations`.
+      const locations = {
+        json:   latestPath,
+        html:   latestHtmlPath,
+        ...(writeSbom  ? { sbom:  path.join(latestDir, reportFileName("latest", reportTag, "cdx.json")) }   : {}),
+        ...(writeSarif ? { sarif: path.join(latestDir, reportFileName("latest", reportTag, "sarif.json")) } : {}),
+        bundle: zipPath,
+        ...(latestZipPath ? { latest_bundle: latestZipPath } : {}),
+      };
+      finalJson.report_locations = locations;   // set after serialization: not part of the saved files
+      {
+        const out = is_script ? console.error : console.log;
+        out(`Latest JSON report saved to: ${locations.json}`);
+        out(`Latest HTML report saved to: ${locations.html}`);
+        if (locations.sbom)  out(`Latest SBOM (CycloneDX) saved to: ${locations.sbom}`);
+        if (locations.sarif) out(`Latest SARIF report saved to: ${locations.sarif}`);
+        out(`Timestamped report bundle saved to: ${locations.bundle}`);
+        if (locations.latest_bundle) out(`Latest report bundle saved to: ${locations.latest_bundle}`);
+        if (!is_script) { console.log(); console.log(); }
       }
 
       if (!allowed) {
