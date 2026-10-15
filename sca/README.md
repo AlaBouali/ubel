@@ -23,7 +23,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `agent_sca` for `ubel-agent`, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker` / `agent_sca` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -1409,7 +1409,8 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 | Scan | `<tag>` | Example (latest) | Example (zip) |
 |---|---|---|---|
 | SCA — `health` (`ubel-npm health`, `ubel-pip health`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
-| Host OS — `health` with `scan_os` on Linux or Windows (`ubel-platform`, `ubel-agent`, `ubel-cicd`) | `os_sca` | `latest.os_sca.json` | `2026_10_10__12_30_05.os_sca.zip` |
+| Host OS — `health` with `scan_os` on Linux or Windows (`ubel-platform`, `ubel-cicd`) | `os_sca` | `latest.os_sca.json` | `2026_10_10__12_30_05.os_sca.zip` |
+| Agent — `ubel-agent` | `agent_sca` | `latest.agent_sca.json` | `2026_10_10__12_30_05.agent_sca.zip` |
 | Editor extensions — the VS Code extension's *Scan VS Code Extensions* (one tag per editor) | `vscode_sca`, `cursor_sca`, `vscodium_sca` | `latest.cursor_sca.json` | `2026_10_10__12_30_05.cursor_sca.zip` |
 | Docker — `ubel-docker health` | `sca_docker` | `latest.sca_docker.json` | `2026_10_10__12_30_05.sca_docker.zip` |
 | Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `firewall_<engine>` | `latest.firewall_npm.html`, `latest.firewall_apt.json` | `2026_10_10__12_30_05.firewall_pip.zip` |
@@ -1423,7 +1424,7 @@ Which files each tag gets:
 
 | Tag | JSON | HTML | SBOM (`.cdx.json`) | SARIF (`.sarif.json`) |
 |---|:---:|:---:|:---:|:---:|
-| `sca`, `sca_docker`, `<editor>_sca` | ✅ | ✅ | ✅ | ✅ |
+| `sca`, `sca_docker`, `agent_sca`, `<editor>_sca` | ✅ | ✅ | ✅ | ✅ |
 | `os_sca` | ✅ | ✅ | ✅ | ❌ |
 | `firewall_<engine>` (incl. `firewall_docker`) | ✅ | ✅ | ✅ | ❌ |
 | `licenses`, `secrets` | ✅ | ✅ | ❌ | ❌ |
@@ -1556,7 +1557,7 @@ UBEL-sca-3f6c2a9e1b7d4c589a426e0d8b5f7a13-bc7a66bc328541398ce34825a9bd2a16
 | Part | What it is |
 |---|---|
 | `UBEL` | fixed prefix |
-| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `vscode_sca` / `cursor_sca` / `vscodium_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
+| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `agent_sca`, `vscode_sca` / `cursor_sca` / `vscodium_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
 | `<asset_id>` | the scan's [asset id](#asset-id-ubel_assetjson), embedded whole (32 hex). Every report of one asset has the same value, so you can group reports by asset. 32 zeros when the scan has no asset id |
 | `<report_uuid>` | a fresh random UUID (v4) without hyphens (32 hex), different for every report |
 

@@ -11,6 +11,7 @@
 // scanners never collide on disk and can be told apart without opening them:
 //
 //     sca                 .sca              (health scan of an asset: folder/host)
+//     agent               .agent_sca        (ubel-agent)
 //     editor extensions   .<editor>_sca     (vscode_sca, cursor_sca, vscodium_sca — the scan
 //                                            of an editor's extensions directory)
 //     docker health       .sca_docker       (ubel-docker health)
@@ -131,9 +132,12 @@ export function editorScaTag(editorKind) {
   return sanitizeReportTag(`${kind}_sca`);
 }
 
+/** Report tag of an agent scan (ubel-agent), whatever the host OS. */
+export const AGENT_SCA_TAG = "agent_sca";
+
 /** True for the report tags of editor-extension scans (vscode_sca, cursor_sca, vscodium_sca, …). */
 export function isEditorScaTag(tag) {
-  return typeof tag === "string" && /^[a-z0-9]+_sca$/.test(tag) && tag !== "os_sca";
+  return typeof tag === "string" && /^[a-z0-9]+_sca$/.test(tag) && tag !== "os_sca" && tag !== AGENT_SCA_TAG;
 }
 
 /**
@@ -141,6 +145,7 @@ export function isEditorScaTag(tag) {
  *
  *   scan_scope "license"          → licenses
  *   scan_scope "secrets"          → secrets
+ *   scan_scope "agent"            → agent_sca
  *   scan_scope "editor_extension" → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca)
  *   scan_scope "container-image"  → firewall_docker (docker check / install)
  *                                   sca_docker      (docker health)
@@ -156,6 +161,8 @@ export function isEditorScaTag(tag) {
 export function scaReportTag({ checkMode, engine, scanScope, dockerMode, scanOs, editorKind, platform = process.platform }) {
   if (scanScope === "license") return "licenses";
   if (scanScope === "secrets") return "secrets";
+  // Agent scan (ubel-agent) → agent_sca, on every platform.
+  if (scanScope === "agent") return AGENT_SCA_TAG;
   // Scan of an editor's extensions directory → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca).
   if (scanScope === "editor_extension") return editorScaTag(editorKind);
   if (scanScope === "container-image") {

@@ -15,7 +15,7 @@ import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
 import { redactionEnabled, redactPaths } from "./redact.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset, isEditorScaTag } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset, isEditorScaTag, AGENT_SCA_TAG } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -4962,6 +4962,7 @@ export class UbelEngineInstance {
       // Always points to the most recent scan OF THAT TYPE: the tag is
       //   sca            health scan
 //   os_sca         host OS health scan (Windows / Linux)
+      //   agent_sca      ubel-agent scan
       //   <editor>_sca   editor-extensions scan: vscode_sca, cursor_sca, vscodium_sca
       //   firewall_<engine>  firewall (check / install): firewall_npm, firewall_pip, firewall_apt, …
       //   licenses       ubel-license
@@ -4990,7 +4991,7 @@ export class UbelEngineInstance {
       // OS health scans (report tag "os_sca", Windows / Linux) get no SARIF.
       // Firewall check/install runs (incl. "firewall_docker") get the JSON, HTML and SBOM but no
       // SARIF; license and secrets scans get neither.
-      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker" || isEditorScaTag(reportTag);
+      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker" || reportTag === AGENT_SCA_TAG || isEditorScaTag(reportTag);
       const sbomString  = writeSbom
         ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
         : null;
