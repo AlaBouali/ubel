@@ -277,8 +277,12 @@ function activate(context) {
 
     const platformRoot = os.homedir();
 
+    // The host-OS scan (scan_os) has its own report tag on Windows and Linux
+    // (`os_sca`, see sca/report_naming.js → scaReportTag); on any other
+    // platform the tag stays `sca`.
+    const platformTag = (process.platform === "win32" || process.platform === "linux") ? "os_sca" : "sca";
     const reportUri = vscode.Uri.file(
-      path.join(platformRoot, ".ubel", "reports", "latest.sca.html")
+      path.join(platformRoot, ".ubel", "reports", `latest.${platformTag}.html`)
     );
 
     // Detect editor so the report can surface it as the host environment.

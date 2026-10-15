@@ -31,11 +31,11 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, live Stripe restricted keys, URL-embedded git credentials, database connection strings with embedded passwords, and more). Findings can be suppressed with a `.ubelignore` file or inline `ubel:ignore` markers (see [Suppressing findings](#suppressing-findings)). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
 - Dependency graph with introduced-by and parent tracking (Swift and Flutter/Dart lockfiles don't record a dependency graph, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` — the tag (`sca`, `secrets` or `licenses`) says which command produced the file (e.g. `latest.sca.json`, `latest.secrets.html`, `latest.licenses.sarif.json`), plus `latest.<tag>.*` convenience copies. For historic tracking, a zipped snapshot of each scan's reports is saved too, and the newest zip of each tag is also kept at a fixed path in a separate `latest_reports` folder. Every report file is written atomically, so a script or CI step reading a `latest.*` file mid-scan never sees a half-written one
+- Automatic report generation: **JSON** + **HTML** per scan, plus a **SBOM** (CycloneDX) and **SARIF** where the scan type supports them, named `<file_name>.<tag>.<ext>` — the tag (`sca`, `os_sca`, `secrets` or `licenses`) says which command produced the file (e.g. `latest.sca.json`, `latest.os_sca.html`, `latest.secrets.html`), plus `latest.<tag>.*` convenience copies. Project and extension scans (`sca`) write all four formats; the host-platform scan on Windows/Linux (`os_sca`) writes JSON, HTML and SBOM but no SARIF; the secrets and license scans write JSON and HTML only (see [Reports](#reports)) For historic tracking, a zipped snapshot of each scan's reports is saved too, and the newest zip of each tag is also kept at a fixed path in a separate `latest_reports` folder. Every report file is written atomically, so a script or CI step reading a `latest.*` file mid-scan never sees a half-written one
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
-- **Reachability analysis** — each vulnerability is annotated with a reachability level (`total` / `high` / `medium` / `low`) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
+- **Reachability analysis** — each vulnerability is annotated with a reachability verdict (a `reachable` flag plus a `critical` / `high` / `medium` / `low` level) derived from package type, scope, dependency depth, attack vector, and import-scan confirmation across all supported ecosystems
 - **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **OS package release matching** — advisories for the host's OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
@@ -48,7 +48,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 | Command | Shortcut (Win/Linux) | Shortcut (Mac) | What it scans |
 |---|---|---|---|
 | **UBEL: Scan Project** | `Ctrl+Alt+U` | `Cmd+Alt+U` | All ecosystems inside the open workspace folder (includes secrets by default) |
-| **UBEL: Scan Code Editor's Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | npm packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` |
+| **UBEL: Scan Code Editor's Extensions** | `Ctrl+Alt+X` | `Cmd+Alt+X` | Packages inside `~/.vscode/extensions` or `~/.vscode-oss/extensions` or `~/.cursor/extensions` (full-stack walk of the extensions directory, plus the secrets pass) |
 | **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
 | **UBEL: Scan project for Exposed Secrets** | `Ctrl+Alt+S` | `Cmd+Alt+S` | Secrets-only pass over the open workspace folder — no dependency resolution |
 | **UBEL: Scan project for License Compliance** | `Ctrl+Alt+L` | `Cmd+Alt+L` | License-only pass over the open workspace folder — full dependency resolution, no vulnerability lookups, no secrets scan |
@@ -60,7 +60,7 @@ All five commands are also accessible via the Command Palette (`Ctrl+Shift+P` / 
 | Command | Dependency resolution | Host OS / dev tools | Vulnerability lookups (OSV / NVD) | KEV / EPSS enrichment | Secrets scan | License classification |
 |---|---|---|---|---|---|---|
 | Scan Project | ✅ every ecosystem | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Scan Code Editor's Extensions | ✅ npm packages | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Scan Code Editor's Extensions | ✅ every ecosystem found in the extensions directory (mostly npm) | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Scan Host Platform | ❌ | ✅ | ✅ (CPE / NVD) | ✅ | ❌ | ✅ |
 | Scan project for Exposed Secrets | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
 | Scan project for License Compliance | ✅ every ecosystem | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -94,13 +94,15 @@ Scans every ecosystem present anywhere inside the currently open workspace folde
 | Node.js (npm, pnpm, yarn, bun) | `node_modules/` on-disk walk |
 | Python | `.venv/`, `venv/`, virtual environment directories |
 | PHP | `vendor/`, `composer.lock` |
-| Rust | `Cargo.lock` |
-| Go | `go.sum` |
-| C#/.NET | `packages.lock.json`, `obj/project.assets.json` |
-| Java | `pom.xml` resolved dependencies |
-| Ruby | `Gemfile.lock` |
+| Rust | `Cargo.lock` (next to a `Cargo.toml`; workspace members are followed) |
+| Go | `go.mod` (module-root marker and selected versions), cross-referenced with `go.sum` when present |
+| C#/.NET | `packages.lock.json`, falling back to `obj/project.assets.json`; project root = a `*.csproj` / `*.fsproj` / `*.vbproj` |
+| Java | `pom.xml` declarations (parent poms on disk, `<dependencyManagement>`, `${…}` properties and `<modules>` followed); the full transitive tree when `.ubel/maven-deps.txt` exists. Gradle is not read |
+| Ruby | `Gemfile.lock` (requires a `Gemfile` alongside) |
 | Swift | `Package.resolved` (SwiftPM v1/v2/v3, incl. Xcode workspaces), `.build/workspace-state.json` fallback, `Cartfile.resolved` (Carthage) |
 | Flutter / Dart | `pubspec.lock`, or `.dart_tool/package_config.json` when no lockfile is committed |
+
+Go, Java, Ruby and .NET read manifests/lockfiles rather than an installed tree, so no build is needed — except that a .NET project with neither `packages.lock.json` nor `obj/project.assets.json` reports nothing (run `dotnet restore` first), and a Maven project only gets transitive dependencies if you generate `.ubel/maven-deps.txt` with `mvn dependency:tree -DoutputFile=.ubel/maven-deps.txt`. Versions a Maven parent pom outside the workspace would manage stay unresolved (reported `undetermined`, not sent to OSV). None of these four records license data, so their packages show license `unknown`.
 
 **Report location**
 
@@ -147,7 +149,7 @@ Every detected component carries its actual license or vendor EULA — proprieta
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, Visual Studio, VS Code, Cursor, Claude Code |
+| Developer tools | Git, Docker Desktop, Visual Studio Code / Visual Studio IDE, Cursor, VSCodium, Claude Code |
 | Shell | PowerShell |
 
 **Linux** — reads the system package database directly, works as a standard user on most distributions:
@@ -162,6 +164,8 @@ Every detected component carries its actual license or vendor EULA — proprieta
 | Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
 | CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
 
+The distribution is read from `/etc/os-release` (`/usr/lib/os-release` as a fallback): `ID` is tried first, then each `ID_LIKE` token, so derivatives such as Amazon Linux (`ID_LIKE="centos rhel fedora"`) resolve to their parent family. A distribution that matches none of the above (e.g. SUSE, Arch) stops the scan with an "Unsupported OS ecosystem" error rather than guessing.
+
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
 **No package-manager binaries are executed** to read installed packages (`dpkg`, `apk` and `rpm` are not required): the rpm database is parsed in-process and its format is detected from the file's magic bytes — Berkeley DB `Packages` (RHEL/CentOS/Alma/Rocky ≤ 8, Amazon Linux 2) and SQLite `rpmdb.sqlite` (RHEL/Alma/Rocky ≥ 9, Fedora, Amazon Linux 2023). NDB (`Packages.db`, SUSE) is not supported and stops the scan with a clear error.
@@ -170,11 +174,13 @@ Each package is also tagged with the distro release it was read from (e.g. `alma
 
 **Report location**
 
-The report is always written to `~/.ubel/reports/latest.sca.*`, independent of any open workspace.
+The report is always written under `~/.ubel/reports/`, independent of any open workspace. On Windows and Linux the host-OS scan has its own tag, so the files are `latest.os_sca.*` (JSON, HTML and SBOM — no SARIF); on any other platform the tag stays `sca`.
 
 ```
-~/.ubel/reports/latest.sca.*
+~/.ubel/reports/latest.os_sca.*
 ```
+
+Because the home directory is not a project, this scan does not add `.ubel/` entries to any `.gitignore` / `.dockerignore`.
 
 ---
 
@@ -205,7 +211,7 @@ The ruleset is a generated snapshot of Trivy's, regenerated from upstream when i
 
 Match previews shown in every report are redacted — the raw secret value is never written to disk, in this report or any other.
 
-In the other report formats, secrets are exposed as a `ubel:secrets` entry in the SBOM's root `properties`, and as their own `run` in the SARIF file (separate tool driver and rule set from the dependency-vulnerability run).
+In the other report formats of a regular project/extension scan (`sca`), secrets are exposed as a `ubel:secrets` entry in the SBOM's root `properties`, and as their own `run` in the SARIF file (separate tool driver and rule set from the dependency-vulnerability run). The standalone secrets command (`secrets` tag) writes JSON and HTML only — no SBOM or SARIF.
 
 **This scan also runs automatically** as part of **UBEL: Scan Project** (`Ctrl+Alt+U`) — this command exists for when you want a fast, dependency-resolution-free pass, e.g. before a commit.
 
@@ -576,7 +582,7 @@ Each feed is tried with a 15-second timeout and two retries. There is currently 
 **Other report formats**
 
 - **SBOM (CycloneDX v1.6)**: each `vulnerabilities[]` entry gets the properties `kev.listed` (`true`, `false` or `unknown`), `kev.date_added`, `kev.due_date`, `epss.score` and `epss.percentile`; KEV entries also get an advisory link to the CISA catalog, and EPSS is added as a second `ratings[]` entry (source `FIRST EPSS`, score in percent). The root `properties` carry `kev_vulnerabilities` and `ubel:threat_intel` — read the count together with the feed status, since an outage leaves the count at 0.
-- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties`; rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100. A KEV result is reported at level `error` whatever its severity, unless reachability confidently ruled it out.
+- **SARIF 2.1.0**: rules and results carry `is_kev`, `kev_added`, `kev_deadline`, `epss_score` and `epss_percentile` in `properties`; rules get the tags `kev` / `known-exploited` / `epss` where they apply. Each result gets a `rank` (0–100): 100 for a KEV entry, otherwise the EPSS probability ×100. A KEV result is reported at level `error` whatever its severity; reachability analysis never downgrades it.
 
 ---
 
@@ -588,19 +594,19 @@ The goal is prioritization: to separate vulnerabilities in packages your code ac
 
 ### Decision ladder
 
-Signals are evaluated in strict priority order. The first matching rule wins.
+Signals are evaluated in strict priority order. The first matching rule wins. Each rung yields a `reachable` flag and a `level`; unconditional reachability is reported as `level: "critical"`.
 
-| Priority | Signal | Reachability | Confidence |
+| Priority | Signal | Result | Confidence |
 |---|---|---|---|
-| 0a | Vuln ID starts with `MAL-` | `total` | high |
-| 0b | Package scope includes `env` | `total` | high |
-| 1 | Package type is non-library (app, framework, plugin, OS package, …) | `total` | high |
-| 2 | Scope is `dev` or `test` | `unreachable` | high |
-| 3 | Import scan: package imported in source files | `high` or `medium` | high |
-| 4a | Import scan: direct import absent, but importing parent found | `medium` or `low` | medium |
-| 4b | Import scan: no direct or parent import found | `unreachable` | medium |
-| 5 | Orphan tool (no dependents in graph, no import scan available) | `unreachable` | medium |
-| 6 | Depth + attack vector heuristics | `medium` or `low` | low |
+| 0a | Vuln ID starts with `MAL-` | reachable · `critical` | high |
+| 0b | Package scope includes `env` | reachable · `critical` | high |
+| 1 | Package type is non-library (app, framework, plugin, OS package, …) | reachable · `critical` | high |
+| 2 | Scope is `dev` or `test` | unreachable · `low` | high |
+| 3 | Import scan: package imported in source files | reachable · `high` or `medium` | high |
+| 4a | Import scan: direct import absent, but importing parent found | reachable · `medium` or `low` | medium |
+| 4b | Import scan: no direct or parent import found | unreachable · `low` | medium |
+| 5 | Orphan tool (no dependents in graph, no import scan available) | unreachable · `low` | medium |
+| 6 | Depth + attack vector heuristics | reachable (`high` / `medium`), or unreachable · `low` | low |
 
 **Priority 0a (MAL-)** — Malware advisories represent active supply-chain infections. The vulnerable code *is* the infection vector; reachability is unconditional regardless of how or whether the package is imported.
 
@@ -614,7 +620,7 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 
 **Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools included in the environment but not called by application code.
 
-**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. Network-reachable (`AV:N`) and shallow (`depth ≤ 1`) packages score higher.
+**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. A root package (depth 0) with a network attack vector is reachable · `high`; a root with a local/physical vector, a transitive package with a network vector, or an unknown vector is reachable · `medium`; only a transitive package with a local/physical vector is unreachable · `low`.
 
 ### Import scan coverage
 
@@ -625,7 +631,7 @@ Source files are scanned for ecosystem-appropriate import patterns:
 | Node.js | `.js` `.ts` `.mjs` `.cjs` `.jsx` `.tsx` | `require('<pkg>')`, `from '<pkg>'` |
 | Python | `.py` | `import <pkg>`, `from <pkg>` |
 | Java / Kotlin | `.java` `.kt` `.groovy` `.scala` | `import <group>.<artifact>` |
-| C# / .NET | `.cs` `.vb` `.fs` | `using <Namespace>` |
+| C# / .NET | `.cs` `.vb` `.fs` `.fsx` | `using <Namespace>` |
 | PHP | `.php` | `use <Vendor>\\`, `require '<pkg>'` |
 | Go | `.go` | `"<module-path>"` |
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
@@ -669,7 +675,7 @@ Reachability results appear in the **Vulnerabilities** tab of the HTML report an
 | Field | Description |
 |---|---|
 | `reachable` | `true` if the vulnerable code is considered reachable from production |
-| `level` | `total`, `high`, `medium`, or `low` |
+| `level` | `critical`, `high`, `medium`, or `low` (`critical` = unconditionally reachable) |
 | `confidence` | `high`, `medium`, or `low` — how much evidence backs the verdict |
 | `rationale` | Human-readable explanation of which signal drove the decision |
 | `tags` | Machine-readable labels for the signals that fired (e.g. `import_confirmed`, `dev_scope`, `malware`, `env_scope`) |
@@ -728,6 +734,8 @@ The top-level `stats.license_stats` field summarizes the whole inventory:
 ```
 
 - **HTML report**: the **Inventory** tab and the per-package detail modal render `license_info` as a risk-badged license table (SPDX id, identifiers, OSI-approved, risk, category, reason) rather than a bare string, and the Dashboard carries a license-risk stats card.
+
+The SBOM and SARIF outputs below are produced by regular project and extension scans (`sca` tag); the standalone license command (`licenses` tag) writes JSON and HTML only.
 
 - **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name`; OSI status, risk, category, and reason are added as component `properties`, and the root `properties` carry the OSI/unknown counts.
 - **SARIF 2.1.0**: a dedicated `ubel-license-compliance` run, separate from the vulnerability and secrets runs. Only packages that need review are reported — any package with `risk: "high"`, or `osi_approved` not equal to `true` — so a fully permissively-licensed tree produces no findings. Result `level` maps from risk (`high` → `error`, `medium` → `warning`, `low` → `note`).
@@ -816,7 +824,9 @@ The extension has no `threshold` / `block-unknown` / per-run-flag commands (thos
   "license_risk_threshold": "none",
   "block_unknown_license_risk": false,
   "block_kev": true,
-  "epss_threshold": 0.1
+  "epss_threshold": 0.1,
+  "block_undetermined": false,
+  "reachable_only": false
 }
 ```
 
@@ -828,6 +838,8 @@ The extension has no `threshold` / `block-unknown` / per-run-flag commands (thos
 | `block_unknown_license_risk` | `true` `false` | `false` | Separately block packages whose license couldn't be classified at all |
 | `block_kev` | `true` `false` | `true` | Block any vulnerability listed in the CISA KEV catalog, regardless of severity |
 | `epss_threshold` | fraction in (0, 1], or `"none"` | `0.1` | Block any vulnerability whose EPSS score is at or above this value (`0.1` = 10%), regardless of severity |
+| `block_undetermined` | `true` `false` | `false` | Block when any component's state is `undetermined` — no version, resolved from git / a tarball URL / a local path, or a non-Python conda package. These aren't matched against OSV/NVD, so a clean result says nothing about them. Not affected by `reachable_only` |
+| `reachable_only` | `true` `false` | `false` | Apply the severity / unknown-severity / KEV / EPSS rules to **reachable vulnerabilities only**. One the [reachability analysis](#reachability-analysis) confirms is unreachable is still listed in the report but marked `allow` (`policy_exempt: "unreachable"`) and never blocks; one with no reachability result is not exempted. By default reachability is informational and does not change the verdict |
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
 The severity threshold is inclusive — `high` blocks both `high` and `critical`. KEV and EPSS blocking apply on top of it: a Low-severity vulnerability that is known to be exploited, or whose EPSS score is at or above the threshold, still blocks. Both rules need data from an external feed; if it couldn't be fetched, that rule can't fire for the run (see [Exploit Intelligence](#exploit-intelligence-kev--epss)), and a passing verdict says so. Policy files created before these fields existed pick up the defaults automatically. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every extension scan runs in `health` mode, where these two gates are active.
@@ -867,7 +879,7 @@ Detected via registry probes and PowerShell — no elevated privileges required.
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, Visual Studio, VS Code, Cursor, Claude Code |
+| Developer tools | Git, Docker Desktop, Visual Studio Code / Visual Studio IDE, Cursor, VSCodium, Claude Code |
 | Shell | PowerShell |
 
 ### Linux
@@ -884,6 +896,8 @@ Detected by reading the system package database directly.
 | Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
 | CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
 
+The distribution is read from `/etc/os-release` (`/usr/lib/os-release` as a fallback): `ID` is tried first, then each `ID_LIKE` token, so derivatives such as Amazon Linux (`ID_LIKE="centos rhel fedora"`) resolve to their parent family. A distribution that matches none of the above (e.g. SUSE, Arch) stops the scan with an "Unsupported OS ecosystem" error rather than guessing.
+
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database.
 
 **No package-manager binaries are executed** to read installed packages (`dpkg`, `apk` and `rpm` are not required): the rpm database is parsed in-process and its format is detected from the file's magic bytes — Berkeley DB `Packages` (RHEL/CentOS/Alma/Rocky ≤ 8, Amazon Linux 2) and SQLite `rpmdb.sqlite` (RHEL/Alma/Rocky ≥ 9, Fedora, Amazon Linux 2023). NDB (`Packages.db`, SUSE) is not supported and stops the scan with a clear error.
@@ -899,11 +913,11 @@ Each package is also tagged with the distro release it was read from (e.g. `alma
 | **Node.js** | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
 | **Python** | pip / virtualenv | `.venv`, `venv`, virtual environment directories |
 | **PHP** | Composer | `vendor/`, `composer.lock` |
-| **Rust** | Cargo | `Cargo.lock` |
-| **Go** | Go Modules | `go.sum` |
-| **C#/.NET** | NuGet | `packages.lock.json` / `obj/project.assets.json` |
-| **Java/Kotlin** | Maven | `pom.xml` resolved dependencies |
-| **Ruby** | Bundler | `Gemfile.lock` |
+| **Rust** | Cargo | `Cargo.lock` (next to a `Cargo.toml`; workspace members are followed) |
+| **Go** | Go Modules | `go.mod` (module root and selected versions) cross-referenced with `go.sum` (optional) |
+| **C#/.NET** | NuGet | `packages.lock.json`, falling back to `obj/project.assets.json` |
+| **Java** | Maven | `pom.xml` declarations (parent poms, `<dependencyManagement>`, properties and modules followed); full transitive tree from `.ubel/maven-deps.txt` when present. Gradle is not read |
+| **Ruby** | Bundler | `Gemfile.lock` (with a `Gemfile` alongside) |
 | **Swift** | SwiftPM, Carthage | `Package.resolved` / `.build/workspace-state.json` / `Cartfile.resolved` |
 | **Flutter/Dart** | pub | `pubspec.lock` / `.dart_tool/package_config.json` |
 
@@ -913,13 +927,16 @@ Each package is also tagged with the distro release it was read from (e.g. `alma
 
 ## Reports
 
-Every scan writes a self-contained interactive **HTML** report plus machine-readable **JSON**, **SBOM**, and **SARIF** files. A scan-type **tag** sits between the file name and the extension (`<file_name>.<tag>.<extension>`), so each command keeps its own set of files:
+Every scan writes a self-contained interactive **HTML** report plus a machine-readable **JSON** file, and — depending on the scan type — a **SBOM** and **SARIF** file. A scan-type **tag** sits between the file name and the extension (`<file_name>.<tag>.<extension>`), so each command keeps its own set of files:
 
-| Command | `<tag>` |
-|---|---|
-| Scan Project / Scan VS Code Extensions / Scan Host Platform | `sca` |
-| Scan project for Exposed Secrets | `secrets` |
-| Scan project for License Compliance | `licenses` |
+| Command | `<tag>` | JSON | HTML | SBOM | SARIF |
+|---|---|---|---|---|---|
+| Scan Project / Scan VS Code Extensions | `sca` | ✅ | ✅ | ✅ | ✅ |
+| Scan Host Platform (Windows / Linux) | `os_sca` | ✅ | ✅ | ✅ | ❌ |
+| Scan project for Exposed Secrets | `secrets` | ✅ | ✅ | ❌ | ❌ |
+| Scan project for License Compliance | `licenses` | ✅ | ✅ | ❌ | ❌ |
+
+On a platform other than Windows or Linux, Scan Host Platform falls back to the `sca` tag.
 
 | File (SCA scans shown) | Format | Notes |
 |---|---|---|
@@ -928,7 +945,7 @@ Every scan writes a self-contained interactive **HTML** report plus machine-read
 | `latest.sca.cdx.json` | CycloneDX v1.6 SBOM | Components, dependency graph, and vulnerabilities as VEX; secrets, license, KEV/EPSS, and suggested-fix data in `properties` |
 | `latest.sca.sarif.json` | SARIF 2.1.0 | Separate runs for dependency vulnerabilities, secrets, and license compliance |
 
-For the other two commands, swap the tag: `latest.secrets.html`, `latest.licenses.json`, and so on. **Open Report** in each notification opens that command's own `latest.<tag>.html`.
+For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html`, `latest.licenses.json`, and so on (only the formats marked ✅ above exist for that tag). **Open Report** in each notification opens that command's `latest.<tag>.html`.
 
 | Scan target | Report path |
 |---|---|
@@ -936,13 +953,13 @@ For the other two commands, swap the tag: `latest.secrets.html`, `latest.license
 | Secrets-only scan | `<project-root>/.ubel/reports/latest.secrets.*` |
 | License-only scan | `<project-root>/.ubel/reports/latest.licenses.*` |
 | VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.sca.*` or `~/.cursor/extensions/.ubel/reports/latest.sca.*` |
-| Host platform | `~/.ubel/reports/latest.sca.*` (machine tag: `~/.ubel/ubel_asset.json`) |
+| Host platform | `~/.ubel/reports/latest.os_sca.*` on Windows / Linux, `latest.sca.*` elsewhere (machine tag: `~/.ubel/ubel_asset.json`) |
 
 **Written atomically.** Every report file UBEL writes — the `latest.<tag>.*` files above, the timestamped history zips and the `latest_reports` copy below — is first written to a temporary file in the same folder and then renamed over the target in one step. A script, CI job, or browser tab that reads `latest.sca.json` / `latest.sca.html` while a scan is finishing therefore gets either the complete previous report or the complete new one, never a partial file. If a write fails, the temporary file is removed, the previous file is left as it was, and the scan reports the error (on Windows, replacing a report can fail while another program holds it open — close it and scan again).
 
-Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, `report.<tag>.cdx.json`, `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
+Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, and, where the scan type produces them, `report.<tag>.cdx.json` and `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
-- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform
+- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform (the host-platform zips are named `<timestamp>.os_sca.zip` on Windows / Linux)
 - `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
 - `~/.ubel/history/licenses/` — Scan project for License Compliance
 
@@ -962,11 +979,12 @@ The newest scan of each tag is also kept in a folder of its own, apart from the 
 
 | Command | Latest zip |
 |---|---|
-| Scan Project / Scan VS Code Extensions / Scan Host Platform | `~/.ubel/latest_reports/sca/<asset_id>/latest.sca.zip` |
+| Scan Project / Scan VS Code Extensions | `~/.ubel/latest_reports/sca/<asset_id>/latest.sca.zip` |
+| Scan Host Platform (Windows / Linux) | `~/.ubel/latest_reports/sca/<asset_id>/latest.os_sca.zip` |
 | Scan project for Exposed Secrets | `~/.ubel/latest_reports/secrets/<asset_id>/latest.secrets.zip` |
 | Scan project for License Compliance | `~/.ubel/latest_reports/licenses/<asset_id>/latest.licenses.zip` |
 
-It is a copy of the zip the scan just wrote and has the same contents (`report.<tag>.json`, `.html`, `.cdx.json`, `.sarif.json`). It is refreshed after every scan, so a script can read the newest scan of a project from one fixed path without sorting timestamps, while `history/` holds only timestamped zips and is never touched by this. The `asset_id` is the one in that folder's `ubel_asset.json`. The CLI uses the same folders, so the extension and the CLI share one history and one `latest_reports` tree.
+It is a copy of the zip the scan just wrote and has the same contents (`report.<tag>.json`, `.html`, and `.cdx.json` / `.sarif.json` where applicable). It is refreshed after every scan, so a script can read the newest scan of a project from one fixed path without sorting timestamps, while `history/` holds only timestamped zips and is never touched by this. The `asset_id` is the one in that folder's `ubel_asset.json`. The CLI uses the same folders, so the extension and the CLI share one history and one `latest_reports` tree.
 
 - Projects scanned before this was added get their `latest_reports` zip on their next scan; nothing is moved or deleted from `history/`.
 - If the copy can't be written (for example a read-only home directory), the scan still completes with a warning and the history zip is unaffected; the previous latest zip, if any, is left in place.
