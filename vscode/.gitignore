@@ -1,0 +1,3 @@
+# ubel: reports directory and local suppression file
+.ubel/
+.ubelignore

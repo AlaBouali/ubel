@@ -4,6 +4,9 @@
 //
 //   ubel-<cli> asset-id [folder] [--json] [--machine]
 //   ubel-<cli> set-asset-id <asset-id> [folder] [--name <name>] [--machine]
+//   ubel-<cli> get-machine-id [--json]
+//   ubel-<cli> set-machine-id <asset-id> [--name <name>]
+//   ubel-<cli> get-asset-id [folder] [--json]
 //   ubel-<cli> version [--json]
 //   ubel-<cli> <anything> --asset-id <asset-id>     (this run only, see below)
 //
@@ -12,6 +15,11 @@
 // words never reach a scanner's own argument parsing.)
 //
 // An asset id is a UUID v4 without hyphens (32 hex characters).
+//
+// get-machine-id / set-machine-id are asset-id / set-asset-id pinned to the machine
+// tag ($HOME/.ubel/ubel_asset.json); they take no folder and no --machine.
+// get-asset-id is asset-id pinned to a folder (default: current directory); it
+// rejects --machine, and on the apt/dnf/yum CLIs (no asset folder) it is a usage error.
 //
 // --asset-id <asset-id> (or --asset-id=<asset-id>) may appear anywhere on the
 // command line of any CLI. runAssetCommand() removes it from process.argv, so
@@ -42,17 +50,20 @@ import {
 import { TOOL_NAME, TOOL_VERSION } from "./info.js";
 
 /** The words that are commands rather than scan arguments. */
-export const ASSET_COMMAND_NAMES = ["asset-id", "set-asset-id", "version"];
+export const ASSET_COMMAND_NAMES = [
+  "asset-id", "set-asset-id", "version",
+  "get-machine-id", "set-machine-id", "get-asset-id",
+];
 
-function setHelp(cli, machineOnly) {
-  return `Usage: ${cli} set-asset-id <asset-id> ${machineOnly ? "" : "[folder] "}[options]
+function setHelp(cli, cmd, machineOnly, getCmd) {
+  return `Usage: ${cli} ${cmd} <asset-id> ${machineOnly ? "" : "[folder] "}[options]
 
 Connect ${machineOnly ? "this machine" : "a folder"} to an existing UBEL asset id, so its scans are filed with the
 asset's earlier history ($HOME/.ubel/history/<mode>/<asset-id>/) instead of
 starting a new asset. Writes ${machineOnly ? "$HOME/.ubel/ubel_asset.json" : "<folder>/.ubel/ubel_asset.json"}.
 
 Arguments:
-  <asset-id>   the id to link to, 32 hex characters (see \`${cli} asset-id\` in the original ${machineOnly ? "setup" : "folder"})
+  <asset-id>   the id to link to, 32 hex characters (see \`${cli} ${getCmd}\` in the original ${machineOnly ? "setup" : "folder"})
 ${machineOnly ? "" : "  [folder]       asset folder (default: current directory)\n"}
 Options:
   --name <name>  also set the readable asset name (default: keep the current one)
@@ -64,8 +75,8 @@ Only the id (and, with --name, the name) is changed; created_at and any other
 fields in the file are kept. Nothing else on disk is moved or rewritten.`;
 }
 
-function showHelp(cli, machineOnly) {
-  return `Usage: ${cli} asset-id ${machineOnly ? "" : "[folder] "}[options]
+function showHelp(cli, cmd, machineOnly, allowMachineFlag) {
+  return `Usage: ${cli} ${cmd} ${machineOnly ? "" : "[folder] "}[options]
 
 Print the asset id stored in ${machineOnly ? "$HOME/.ubel/ubel_asset.json" : "<folder>/.ubel/ubel_asset.json"}, creating it first
 if ${machineOnly ? "this machine" : "the folder"} has none yet (every ${cli.replace(/-.*/, "")}-* CLI does the same when it starts, and \`${cli} init\` does it explicitly).
@@ -76,7 +87,7 @@ Arguments:
 Options:
   --json         print { asset_id, asset_name, created_at, file, created } as JSON
                  (created: true when this call minted the id)
-${machineOnly ? "" : `  --machine      show the machine tag ($HOME/.ubel/ubel_asset.json) used by
+${machineOnly || !allowMachineFlag ? "" : `  --machine      show the machine tag ($HOME/.ubel/ubel_asset.json) used by
                  ubel-apt / ubel-dnf / ubel-yum
 `}  -h, --help     show this help
 
@@ -121,11 +132,11 @@ function parseArgs(args, { bools = [], values = [] }) {
 }
 
 /** Resolve the .ubel folder a command acts on, or return { error }. */
-function resolveUbelDir(cli, folderArg, machine, machineOnly) {
+function resolveUbelDir(cli, cmd, folderArg, machine, machineOnly) {
   if (machine) {
     if (folderArg) {
       return { error: machineOnly
-        ? `${cli} has no asset folder — its id is the machine tag in ${path.join(machineUbelDir(), ASSET_FILE_NAME)}, so no folder argument is accepted`
+        ? `${cli} ${cmd} acts on the machine tag in ${path.join(machineUbelDir(), ASSET_FILE_NAME)}, so no folder argument is accepted`
         : "--machine and a folder are mutually exclusive" };
     }
     return { ubelDir: machineUbelDir(), label: "this machine" };
@@ -141,11 +152,19 @@ function resolveUbelDir(cli, folderArg, machine, machineOnly) {
  * @typedef {object} CliContext
  * @property {string}  [cli="ubel"]    command name shown in help/messages, e.g. "ubel-npm"
  * @property {boolean} [machine=false] true for ubel-apt / ubel-dnf / ubel-yum: act on the machine tag
+ *
+ * Internal, set by the command table (not by bin wrappers):
+ * @property {string}  [cmd]           command word shown in help/messages (default: asset-id / set-asset-id)
+ * @property {boolean} [forceMachine]  act on the machine tag regardless of --machine (get/set-machine-id)
+ * @property {boolean} [forbidMachine] reject --machine (get-asset-id)
  */
 
-export function setAssetIdCli(args, { cli = "ubel", machine: machineOnly = false } = {}) {
-  const help = setHelp(cli, machineOnly);
-  const { flags, positionals, error } = parseArgs(args, { bools: ["machine"], values: ["name"] });
+export function setAssetIdCli(args, ctx = {}) {
+  const { cli = "ubel", cmd = "set-asset-id" } = ctx;
+  const machineOnly = !!(ctx.machine || ctx.forceMachine);
+  const getCmd = machineOnly ? "get-machine-id" : "asset-id";
+  const help = setHelp(cli, cmd, machineOnly, getCmd);
+  const { flags, positionals, error } = parseArgs(args, { bools: machineOnly ? [] : ["machine"], values: ["name"] });
   if (error) { console.error(`[!] ${error}\n\n${help}`); return 2; }
   if (flags.help) { console.log(help); return 0; }
 
@@ -157,7 +176,7 @@ export function setAssetIdCli(args, { cli = "ubel", machine: machineOnly = false
     return 2;
   }
 
-  const target = resolveUbelDir(cli, folderArg, machineOnly || flags.machine, machineOnly);
+  const target = resolveUbelDir(cli, cmd, folderArg, machineOnly || flags.machine, machineOnly);
   if (target.error) { console.error(`[!] ${target.error}`); return 2; }
 
   let result;
@@ -187,14 +206,19 @@ export function setAssetIdCli(args, { cli = "ubel", machine: machineOnly = false
   return 0;
 }
 
-export function showAssetIdCli(args, { cli = "ubel", machine: machineOnly = false } = {}) {
-  const help = showHelp(cli, machineOnly);
-  const { flags, positionals, error } = parseArgs(args, { bools: ["json", "machine"] });
+export function showAssetIdCli(args, ctx = {}) {
+  const { cli = "ubel", cmd = "asset-id" } = ctx;
+  const machineOnly = !!(ctx.machine || ctx.forceMachine);
+  const allowMachineFlag = !ctx.forbidMachine;
+  const help = showHelp(cli, cmd, machineOnly, allowMachineFlag);
+  const { flags, positionals, error } = parseArgs(args, {
+    bools: machineOnly || !allowMachineFlag ? ["json"] : ["json", "machine"],
+  });
   if (error) { console.error(`[!] ${error}\n\n${help}`); return 2; }
   if (flags.help) { console.log(help); return 0; }
   if (positionals.length > 1) { console.error(`[!] unexpected argument: ${positionals[1]}\n\n${help}`); return 2; }
 
-  const target = resolveUbelDir(cli, positionals[0], machineOnly || flags.machine, machineOnly);
+  const target = resolveUbelDir(cli, cmd, positionals[0], machineOnly || flags.machine, machineOnly);
   if (target.error) { console.error(`[!] ${target.error}`); return 2; }
 
   const file = path.join(target.ubelDir, ASSET_FILE_NAME);
@@ -207,7 +231,7 @@ export function showAssetIdCli(args, { cli = "ubel", machine: machineOnly = fals
     asset = readAsset(target.ubelDir);
     if (!asset) {
       console.error(`[!] no asset id for ${target.label} and ${file} could not be written. `
-        + `Link it to an existing id with: ${cli} set-asset-id <asset-id>`);
+        + `Link it to an existing id with: ${cli} ${machineOnly ? "set-machine-id" : "set-asset-id"} <asset-id>`);
       return 2;
     }
     console.error(`[+] New asset id created: ${asset.asset_id}  (${asset.asset_name})  → ${file}`);
@@ -245,9 +269,19 @@ export function versionCli(args, { cli = "ubel" } = {}) {
 }
 
 const HANDLERS = {
-  "asset-id":     showAssetIdCli,
-  "set-asset-id": setAssetIdCli,
-  "version":      versionCli,
+  "asset-id":       showAssetIdCli,
+  "set-asset-id":   setAssetIdCli,
+  "version":        versionCli,
+  "get-machine-id": (args, ctx) => showAssetIdCli(args, { ...ctx, cmd: "get-machine-id", forceMachine: true }),
+  "set-machine-id": (args, ctx) => setAssetIdCli(args, { ...ctx, cmd: "set-machine-id", forceMachine: true }),
+  "get-asset-id": (args, ctx) => {
+    const cli = ctx.cli || "ubel";
+    if (ctx.machine) {
+      console.error(`[!] ${cli} has no asset folder — use ${cli} get-machine-id for its machine tag`);
+      return 2;
+    }
+    return showAssetIdCli(args, { ...ctx, cmd: "get-asset-id", forbidMachine: true });
+  },
 };
 
 /**
