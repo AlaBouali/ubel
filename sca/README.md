@@ -3,7 +3,7 @@
 
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
+This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. `health` scans additionally read **Go, Java (Maven), Ruby (Bundler), C# / .NET (NuGet), Swift (SwiftPM / Carthage) and Flutter / Dart (pub)** projects when run full-stack (the default for `health` on npm/pnpm/bun/yarn/composer, and always for `ubel-docker`, `ubel-agent`, `ubel-cicd` and `ubel-license`) — see [Full-stack monorepo scanning](#full-stack-monorepo-scanning); those ecosystems have no firewall (`check` / `install`). The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section.
 
 ---
 
@@ -23,7 +23,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca`, `sca_<engine>` for firewall runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -54,7 +54,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-yarn` | yarn — `health` mode only, no firewall (`check`/`install`) coverage; see note below |
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
 | `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
-| `ubel-conda` | conda — same six modes as `ubel-pip`; `check`/`install` driven by `conda create --dry-run`; see note below and [Firewall Mechanics § conda](#conda) |
+| `ubel-conda` | conda — same eight modes as `ubel-pip`; `check`/`install` driven by `conda create --dry-run`; see note below and [Firewall Mechanics § conda](#conda) |
 | `ubel-cargo` | Cargo (Rust) — `health`/`check`/`install` plus `threshold`/`block-unknown` (`init` only creates the [asset id](#asset-id-ubel_assetjson)); `check`/`install` resolve in a scratch copy of the project; see note below and [Firewall Mechanics § cargo](#cargo) |
 | `ubel-pipx` | pip, CLI-tool isolation mode — installs into a dedicated per-tool venv with a global shim, same idea as upstream `pipx`, now scan-gated |
 | `ubel-apt` | apt (Debian/Ubuntu) |
@@ -72,9 +72,9 @@ After installation, the following entry-point binaries are available:
 >
 > **composer** gets the same lockfile-backed firewall treatment as npm/pnpm/bun — see [Firewall Mechanics § composer](#composer) — via `composer require`/`update --no-install --no-scripts --no-plugins`, Composer's own equivalent of `--package-lock-only`. It needs the `composer` binary itself on `PATH`, separate from PHP — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`.
 >
-> **uv** shares `ubel-pip`'s six modes, requirements.txt/pyproject.toml fallback, generated-requirements-file real install, and post-install manifest sync, but its dry-run mechanism is internally different (`uv pip install --dry-run`, not `pip install --dry-run --report`) since uv has no equivalent JSON install report — see [Firewall Mechanics § uv](#uv) for the honest difference this creates (no dependency-graph provenance from uv's resolution).
+> **uv** shares `ubel-pip`'s eight modes, requirements.txt/pyproject.toml fallback, generated-requirements-file real install, and post-install manifest sync, but its dry-run mechanism is internally different (`uv pip install --dry-run`, not `pip install --dry-run --report`) since uv has no equivalent JSON install report — see [Firewall Mechanics § uv](#uv) for the honest difference this creates (no dependency-graph provenance from uv's resolution).
 >
-> **conda** shares `ubel-pip`'s six modes and its `check`/`install` shape, but resolves with `conda create --dry-run --json` against a scratch prefix (so `check` creates nothing) and installs the exact scanned builds with `--no-deps`. OSV has no conda ecosystem, so only conda packages that are Python distributions are matched against it (as PyPI packages) — see [Firewall Mechanics § conda](#conda) for exactly what that does and doesn't cover. It needs the `conda` binary itself on `PATH` (or via `$CONDA_EXE`, or in a default install location); `mamba`/`micromamba` aren't driven directly.
+> **conda** shares `ubel-pip`'s eight modes and its `check`/`install` shape, but resolves with `conda create --dry-run --json` against a scratch prefix (so `check` creates nothing) and installs the exact scanned builds with `--no-deps`. OSV has no conda ecosystem, so only conda packages that are Python distributions are matched against it (as PyPI packages) — see [Firewall Mechanics § conda](#conda) for exactly what that does and doesn't cover. It needs the `conda` binary itself on `PATH` (or via `$CONDA_EXE`, or in a default install location); `mamba`/`micromamba` aren't driven directly.
 >
 > **cargo** gates installs by resolving in a **scratch copy of the project** — `cargo add <crate>` (only if packages were given) then `cargo update --workspace`, both of which read the registry index only and never run build scripts — so `check` never modifies your tree. A clean `install` then writes the scanned `Cargo.toml`/`Cargo.lock` and runs `cargo fetch --locked`. Only crates.io crates are matched against vulnerability data; git and alternative-registry dependencies are listed in a warning but not scanned, and `build.rs`/proc-macros still run later at `cargo build`, outside the firewall — see [Firewall Mechanics § cargo](#cargo). It needs the `cargo` binary itself (found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`); `init` has no environment to build, so it only creates the [asset id](#asset-id-ubel_assetjson).
 >
@@ -103,6 +103,9 @@ After installation, the following entry-point binaries are available:
 | `UBEL_HOOK_STRICT` | unset | When set to `1`, the pre-commit hook **blocks the commit** if a ubel binary cannot be found on `PATH`, instead of warning and letting it through; it also turns the "staged file larger than the scan cap" warning into a failed scan. Useful in locked-down environments where a "tool missing" state should fail closed. |
 | `UBEL_HOOK_SCA` | `always` | When the pre-commit hook runs its dependency scan: `always` = on every commit (default), `auto` = only when a manifest/lockfile is staged, `off` = never. The secrets scan is not affected. |
 | `UBEL_STAGED_MAX_FILE_MB` | `128` | Per-file cap, in MB of added content, for `ubel-secrets --staged`. Past it the scan of that file stops and a warning is printed (nothing is dropped silently below it). |
+| `UBEL_NO_IGNORE_FILES` | unset | When set to `1`, UBEL does not add `.ubel/` and `.ubelignore` to the working directory's `.gitignore` / `.dockerignore` before writing reports (see [Keeping UBEL's own files out of git and Docker](#keeping-ubels-own-files-out-of-git-and-docker)). |
+| `UBEL_REDACT_PATHS` | unset | When set to `1`, same as passing `--redact-paths` — local project and home paths are stripped from reports (see [Redacting local paths](#redacting-local-paths---redact-paths)). |
+| `UBEL_API_KEY` + `UBEL_ASSET_ID` | unset | Reserved for a remote mode that is **not implemented** in the Node CLI: if both are set (in the environment or a `.env` in the working directory), the pip/uv/pipx/conda/cargo/apt/dnf/yum and npm-family scans exit `1` with "Remote mode … is not yet implemented". Leave at most one of them set. (`UBEL_ENDPOINT` is read alongside them and is likewise unused.) |
 
 Both `UBEL_OSV_ENDPOINT` and `UBEL_NVD_ENDPOINT` are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
@@ -129,10 +132,10 @@ ubel-bun   <mode> [packages...]
 ubel-composer <mode> [packages...]
 ubel-yarn  health              # health only — check/install unsupported, see below
 
-ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown
-ubel-uv    <mode> [packages...]        # same six modes, same shape as ubel-pip
-ubel-conda <mode> [packages...]        # same six modes; check/install driven by conda
-ubel-cargo <mode> [crate[@req]...]     # health | check | install | threshold | block-unknown | init (asset id only)
+ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown | block-undetermined | reachable-only
+ubel-uv    <mode> [packages...]        # same eight modes, same shape as ubel-pip
+ubel-conda <mode> [packages...]        # same eight modes; check/install driven by conda
+ubel-cargo <mode> [crate[@req]...]     # health | check | install | threshold | block-unknown | block-undetermined | reachable-only | init (asset id only)
 ubel-pipx  <mode> [package]
 
 ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
@@ -189,7 +192,7 @@ ubel-cargo install-hook
 ### What the hook does — and, importantly, what it doesn't
 
 - **Dependency scan only, no OS scan.** The hook runs `<engine> health`, whose CLI path forces `scan_os: false`. It never touches the host's package database.
-- **Both steps run on every commit.** The secrets step always runs. The dependency step runs on every commit too, once an engine has run `install-hook`. If a full `health` scan is too slow for your repo, set `UBEL_HOOK_SCA=auto` to run it only when a dependency file is staged (the hook lists the staged paths with `git -c core.quotepath=off diff --cached --name-only -z`, so paths with non-ASCII characters match, and looks for a manifest/lockfile anywhere in the tree: `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `bun.lock(b)`, `yarn.lock`, `composer.json`/`.lock`, `requirements*.txt`/`.in` (including `requirements_dev.txt` and anything under `requirements/`), `constraints*.txt`, `pyproject.toml`, `Pipfile(.lock)`, `setup.py`/`.cfg`, `poetry.lock`, `uv.lock`, `pdm.lock`, `conda-lock.yml`, `environment.yml`/`.yaml`, `Cargo.toml`/`.lock`, `go.mod`/`.sum`/`.work`, `pom.xml`, `build.gradle(.kts)`, `gradle.lockfile`, `libs.versions.toml`, `Gemfile(.lock)`, `Package.swift`/`.resolved`, `Cartfile(.resolved)`, `Podfile(.lock)`, `pubspec.yaml`/`.lock`, `packages.config`, `packages.lock.json`, `Directory.Packages.props`, `*.csproj`), or `UBEL_HOOK_SCA=off` to skip it.
+- **Both steps run on every commit.** The secrets step always runs. The dependency step runs on every commit too, once an engine has run `install-hook`. If a full `health` scan is too slow for your repo, set `UBEL_HOOK_SCA=auto` to run it only when a dependency file is staged (the hook lists the staged paths with `git -c core.quotepath=off diff --cached --name-only -z`, so paths with non-ASCII characters match, and looks for a manifest/lockfile anywhere in the tree: `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `bun.lock(b)`, `yarn.lock`, `composer.json`/`.lock`, `requirements*.txt`/`.in` (including `requirements_dev.txt` and anything under `requirements/`), `constraints*.txt`, `pyproject.toml`, `Pipfile(.lock)`, `setup.py`/`.cfg`, `poetry.lock`, `uv.lock`, `pdm.lock`, `conda-lock.yml`, `environment.yml`/`.yaml`, `Cargo.toml`/`.lock`, `go.mod`/`.sum`/`.work`, `pom.xml`, `build.gradle(.kts)`, `gradle.lockfile`, `libs.versions.toml`, `Gemfile(.lock)`, `Package.swift`/`.resolved`, `Cartfile(.resolved)`, `Podfile(.lock)`, `pubspec.yaml`/`.lock`, `packages.config`, `packages.lock.json`, `Directory.Packages.props`, `*.csproj`), or `UBEL_HOOK_SCA=off` to skip it.
 - **Exit codes are told apart.** A dependency policy violation (exit `1`) prints "dependency policy violation"; a scan that did not complete — OSV unreachable, a crash — exits `2` and prints "scan did not complete". Both block the commit.
 - **No lockfile mutation.** It's a `health` scan, not a `check` scan — nothing is dry-run, no lockfile is written or reverted. A broken scan can never leave the working tree half-mutated.
 - **`health` scans the *installed* dependency graph**, so it catches what's currently on disk. If you've staged a `package.json` change but haven't yet run `install`, the new (potentially vulnerable) dependency won't be in the installed tree yet — the hook still runs, but it's scanning the previous state. For the fully accurate check of the *staged* dependency graph, run `ubel-<engine> check` yourself or in CI.
@@ -288,7 +291,7 @@ A successful **Clean** install additionally syncs whichever of `requirements.txt
 
 ### uv
 
-`ubel-uv` is `ubel-pip`'s sibling — same six modes, same requirements.txt/pyproject.toml fallback, same post-install manifest sync — driven by [uv](https://docs.astral.sh/uv/) instead of pip. It's implemented differently internally, though, for reasons worth explaining rather than glossing over.
+`ubel-uv` is `ubel-pip`'s sibling — same eight modes, same requirements.txt/pyproject.toml fallback, same post-install manifest sync — driven by [uv](https://docs.astral.sh/uv/) instead of pip. It's implemented differently internally, though, for reasons worth explaining rather than glossing over.
 
 `ubel-uv` uses `uv pip install --dry-run`: confirmed by testing directly against uv 0.11.7, it writes a flat `+ name==version` list to **stderr**, with no dependency relationships between packages, and — like pip's own `--dry-run --report` — it only reports what would *change*, so a fully-satisfied target prints nothing at all. That last part is a non-issue in practice here specifically because `ubel-uv` always runs this against a venv it just created/reused via `initUvVenv()` (see below), never one with unrelated packages already sitting in it, so every requested package and its transitive dependencies reliably show up as `+` lines. What doesn't come back, unlike `pip`'s report or the dependency-annotated resolution an earlier version of `ubel-uv` used (`uv pip compile`, which this replaced): any parent/child relationship between packages. Every uv-resolved component is reported as its own root — see the honesty note below for exactly what that costs downstream.
 
@@ -446,7 +449,7 @@ This protection also extends to the backup manifest files created earlier before
 
 ### `health`
 
-Scans the current project's installed dependency graph without running any install. For npm/pnpm/bun/yarn/composer this reads the existing lockfile directly (`composer.lock` for composer); `ubel-pip` walks the target venv directly instead (see [Full-stack monorepo scanning](#full-stack-monorepo-scanning) below); `ubel-apt`/`ubel-dnf`/`ubel-yum` read the host's own package database. All of them submit the resolved packages to OSV.dev and NVD's APIs (or your configured mirrors — see [Environment Variables](#environment-variables)).
+Scans the current project's installed dependency graph without running any install. For npm/pnpm/bun/yarn this walks the on-disk `node_modules/` tree (so it reflects what is really installed, not just what a lockfile declares); composer reads `vendor/composer/installed.json`, falling back to `composer.lock`; cargo reads `Cargo.lock`; `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda` walk the target venv / conda environments directly instead (see [Full-stack monorepo scanning](#full-stack-monorepo-scanning) below); `ubel-apt`/`ubel-dnf`/`ubel-yum` read the host's own package database. Lockfiles (npm v1–v3, pnpm v5/v6/v9, yarn classic and berry, bun `bun.lock`/`bun.lockb`) are parsed for the candidate resolution in `check`/`install`. All of them submit the resolved packages to OSV.dev and NVD's APIs (or your configured mirrors — see [Environment Variables](#environment-variables)).
 
 This is also the mode the [pre-commit hook](#pre-commit-hook) runs — dependency scan only, no OS scan.
 
@@ -470,15 +473,23 @@ When invoked programmatically with `full_stack: true`, `health` walks the entire
 | Node.js | npm, pnpm, yarn, bun | `node_modules/` (on-disk walk) |
 | Python | pip / virtualenv | `.venv`, `venv`, virtualenv directories |
 | PHP | Composer | `vendor/`, `composer.lock` |
-| Rust | Cargo | `Cargo.lock` |
-| Go | Go Modules | `go.sum` |
-| C# / .NET | NuGet | `packages.lock.json` / `obj/project.assets.json` |
-| Java | Maven | `pom.xml` resolved dependencies |
-| Ruby | Bundler | `Gemfile.lock` |
+| Rust | Cargo | `Cargo.lock` (next to a `Cargo.toml`; workspace members are followed) |
+| Go | Go Modules | `go.mod` (the module-root marker and selected versions) cross-referenced with `go.sum` (optional) |
+| C# / .NET | NuGet | `packages.lock.json`, falling back to `obj/project.assets.json`; project root = a `*.csproj` / `*.fsproj` / `*.vbproj` |
+| Java | Maven | `pom.xml` dependency declarations (parent poms on disk, `<dependencyManagement>`, `${…}` properties and `<modules>` followed); the full transitive tree when `.ubel/maven-deps.txt` exists |
+| Ruby | Bundler | `Gemfile.lock` (requires a `Gemfile` alongside; the `Gemfile` supplies dev/test groups) |
 | Swift | SwiftPM, Carthage | `Package.resolved` (also inside `.xcworkspace` / `.xcodeproj`), `.build/workspace-state.json` fallback, `Cartfile.resolved` |
 | Flutter / Dart | pub | `pubspec.lock`, falling back to `.dart_tool/package_config.json` |
 
 Each discovered package is deduplicated by PURL before submission, so packages shared across sub-projects are scanned exactly once.
+
+**Go, Java, Ruby and .NET notes.** These four read manifests/lockfiles rather than an installed tree, so none of them needs a build, but each has limits worth knowing:
+
+- **Go** — PURLs are `pkg:golang/<module-path>@<version>`. `go.mod` marks the module root and its `require` versions win over stale `go.sum` entries for other versions; `go.sum` may be absent or empty. Escaped module paths (`!azure`) are restored to their canonical form.
+- **Java (Maven)** — only `pom.xml` is read (Gradle is not). Declared dependencies are resolved against `<properties>`, `<dependencyManagement>` and on-disk parent poms (`../pom.xml` or `<relativePath>`); a parent that exists only in a remote repository can't be read, so versions it manages stay unresolved. Unresolved versions are inventoried without a version, stay `undetermined`, and are not sent to OSV. Optional dependencies are skipped. Transitive dependencies are **not** resolved from `pom.xml` alone: generate the full tree with `mvn dependency:tree -DoutputFile=.ubel/maven-deps.txt` and UBEL uses it in preference to the declarations. Maven scopes map to `dev` (`test`) or `prod` (everything else).
+- **Ruby** — a directory counts only when it has both `Gemfile` and `Gemfile.lock`; gems come from the lockfile's resolved graph, `Gemfile` groups only decide dev/test/prod scope.
+- **C# / .NET** — nothing is reported for a project that has neither `packages.lock.json` nor `obj/project.assets.json` (run `dotnet restore` first). Each target framework's graph is kept separate, so dependency edges aren't collapsed across TFMs; versions always come from the lock/assets file (the resolved graph), and `<PackageReference>` entries in the project file seed the scopes, propagated down the graph (a `Condition` mentioning `debug`/`test` marks a package `dev`; anything unscoped defaults to `prod`).
+- None of the four records license data, so every package here has license `unknown`.
 
 **Swift and Flutter/Dart notes.** PURLs are `pkg:swift/<host>/<owner>/<repo>@<version>` (OSV ecosystem `SwiftURL`) and `pkg:pub/<name>@<version>`, with `?repository_url=` / `?vcs_url=` qualifiers on pub packages from a non-pub.dev registry or a git repository. Local packages (SwiftPM `fileSystem` / `localSourceControl`, pub `path`) and pub `sdk` packages are skipped, and CocoaPods (`Podfile.lock`) is intentionally not scanned because OSV has no CocoaPods ecosystem. A SwiftPM pin on a branch or bare commit is inventoried with an empty version and dropped from OSV queries. Scopes: Swift lockfiles carry no dev/prod signal, so every Swift package is `prod`; for pub, `direct dev` → `dev` and everything else → `prod` (a transitive dependency's origin isn't recorded), and the `package_config.json` fallback reports `prod`. Neither lockfile records a dependency graph or license data, so these packages have no introduced-by/parent edges and their license is `unknown`. Neither ecosystem has firewall (`check` / `install`).
 
@@ -495,6 +506,8 @@ When invoked with `scan_os: true` on Linux, the scanner reads the host's system 
 | AlmaLinux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/almalinux/` |
 | Rocky Linux | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/rocky-linux/` |
 | CentOS / Fedora | rpm | rpm database (`rpmdb.sqlite` or `Packages`) | `pkg:rpm/redhat/` |
+
+The distribution is read from `/etc/os-release` (`/usr/lib/os-release` as a fallback; under the image root for Docker scans): `ID` is tried first, then each `ID_LIKE` token, so derivatives such as Amazon Linux (`ID_LIKE="centos rhel fedora"`) resolve to their parent family. A distribution that matches none of Debian, Ubuntu, Alpine, Red Hat, AlmaLinux or Rocky (e.g. SUSE, Arch) stops the OS scan with an "Unsupported OS ecosystem" error rather than guessing.
 
 Each package entry includes its binary install paths and direct dependency edges as reported by the package database. Each package is also tagged with the distro release it was read from (`almalinux-8.10`, …), which UBEL uses to match advisories to that release — see [OS Package Release Matching](#os-package-release-matching).
 
@@ -518,7 +531,7 @@ When invoked with `scan_os: true` on Windows, the scanner probes the registry an
 | Runtimes | Node.js, Python, PHP, Go, Rust, Ruby, JRE, JDK |
 | .NET | All installed .NET Core / Desktop / ASP.NET runtimes (multi-version) |
 | Browsers | Chrome, Firefox, Microsoft Edge |
-| Developer tools | Git, Docker Desktop, Visual Studio, Cursor, Claude Code |
+| Developer tools | Git, Docker Desktop, Visual Studio Code / Visual Studio IDE, Cursor, VSCodium, Claude Code |
 | Shell | PowerShell |
 
 Each component is reported with its actual license or vendor EULA (see [License Compliance](#license-compliance)) — proprietary Microsoft/vendor components (Windows itself, Defender, Edge, VS Code/Visual Studio IDE, Chrome, Docker Desktop, Cursor, Claude Code) resolve to a `LicenseRef-*` identifier rather than `unknown`; open-source runtimes and tools resolve to their real SPDX id (e.g. `MIT` for Node.js/.NET, `PSF-2.0` for Python, `GPL-2.0-only WITH Classpath-exception-2.0` for JRE/JDK).
@@ -591,7 +604,7 @@ ubel-pip init
 
 ### `install-hook` / `uninstall-hook`
 
-Install / remove the single ubel git pre-commit hook: a secrets scan on every commit, plus `<engine> health` — a **dependency scan only**, no OS scan — whenever a commit stages a package manifest or lockfile. See [Pre-commit Hook](#pre-commit-hook) above for the full behavior, chaining rules, and file patterns.
+Install / remove the single ubel git pre-commit hook: a secrets scan on every commit, plus `<engine> health` — a **dependency scan only**, no OS scan — on every commit too (set `UBEL_HOOK_SCA=auto` to run it only when a commit stages a package manifest or lockfile, or `off` to skip it). See [Pre-commit Hook](#pre-commit-hook) above for the full behavior, chaining rules, and file patterns.
 
 ```bash
 ubel-npm install-hook              # install the pre-commit hook (secrets + dependency scan)
@@ -645,7 +658,7 @@ Like `threshold`, this is persisted. For a one-off run use [`--block-unknown`](#
 
 ### `license-risk`
 
-**npm/pnpm/bun/yarn/composer only** — not exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower six-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`). Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
+**npm/pnpm/bun/yarn/composer only** — not exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower eight-mode surface (`health`/`check`/`install`/`init`/`threshold`/`block-unknown`/`block-undetermined`/`reachable-only`) — `ubel-cargo` shares it too, but its `init` only creates the asset id. Sets the license risk level at or above which a `health` scan is blocked. Accepts `none`, `low`, `medium`, or `high`. Order: `low → medium → high`.
 
 ```bash
 ubel-npm license-risk high     # block only high-risk licenses (e.g. GPL/AGPL, proprietary EULAs)
@@ -833,7 +846,7 @@ Each feed is tried with a 15-second timeout and two retries. There is currently 
 |---|---|---|---|---|---|
 | `ubel-agent` | `process.cwd()` | ✅ | ✅ | default | `agent` |
 | `ubel-cicd` | `process.cwd()` | ✅ | ✅ | default | `cicd` |
-| `ubel-platform` | home directory (`os.homedir()`) | ✅ | ❌ | default | `developer_platform` |
+| `ubel-platform` | home directory (`os.homedir()`) | ✅ | ❌ | ❌ (forced off) | `developer_platform` |
 | `ubel-secrets` | `process.cwd()` | ❌ | ❌ | ✅ (forced on; `scan_os`/`scan_node` forced off) | `secrets` |
 | `ubel-license` | `process.cwd()` | ❌ | ✅ (full-stack) | ❌ (forced off; `scan_vulns` also forced off) | `license` |
 
@@ -868,17 +881,19 @@ By default reachability is informational and does not change the policy verdict.
 
 Signals are evaluated in strict priority order. The first matching rule wins.
 
-| Priority | Signal | Reachability | Confidence |
+Each rung yields a `reachable` flag and a `level`. Unconditional reachability is reported as `level: "critical"` (the standalone analyzer's console summary labels these "Total").
+
+| Priority | Signal | Verdict (`reachable` · `level`) | Confidence |
 |---|---|---|---|
-| 0a | Vuln ID starts with `MAL-` | `total` | high |
-| 0b | Package scope includes `env` | `total` | high |
-| 1 | Package type is non-library (app, framework, plugin, OS package, …) | `total` | high |
-| 2 | Scope is `dev` or `test` | `unreachable` | high |
-| 3 | Import scan: package imported in source files | `high` or `medium` | high |
-| 4a | Import scan: direct import absent, but importing parent found | `medium` or `low` | medium |
-| 4b | Import scan: no direct or parent import found | `unreachable` | medium |
-| 5 | Orphan tool (no dependents in graph, no import scan available) | `unreachable` | medium |
-| 6 | Depth + attack vector heuristics | `medium` or `low` | low |
+| 0a | Vuln ID starts with `MAL-` | reachable · `critical` | high |
+| 0b | Package scope includes `env` | reachable · `critical` | high |
+| 1 | Package type is non-library (app, framework, plugin, OS package, …) | reachable · `critical` | high |
+| 2 | Scope is `dev` or `test` | unreachable · `low` | high |
+| 3 | Import scan: package imported in source files | reachable · `high` or `medium` | high |
+| 4a | Import scan: direct import absent, but importing parent found | reachable · `medium` or `low` | medium |
+| 4b | Import scan: no direct or parent import found | unreachable · `low` | medium |
+| 5 | Orphan tool (no dependents in graph, no import scan available) | unreachable · `low` | medium |
+| 6 | Depth + attack vector heuristics | reachable (`high`/`medium`) or unreachable (`low`) | low |
 
 **Priority 0a (MAL-)** — Malware advisories represent active supply-chain infections. The vulnerable code *is* the infection vector; reachability is unconditional regardless of how or whether the package is imported.
 
@@ -892,7 +907,7 @@ Signals are evaluated in strict priority order. The first matching rule wins.
 
 **Priority 5 (orphan tool)** — Root packages with no dependents and no import scan result are most likely standalone CLI tools included in the environment but not called by application code.
 
-**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. Network-reachable (`AV:N`) and shallow (`depth ≤ 1`) packages score higher.
+**Priority 6 (heuristics)** — When no higher-priority signal is available, depth in the dependency tree and the CVSS attack vector are used as weak proxies. A root dependency (depth 0) with a network vector is `high`, with a local/physical vector `medium`; a transitive dependency (depth ≥ 1) with a network vector is `medium`, while a transitive one with only a local/physical vector is judged unreachable (`low`). Any other vector (adjacent, or unknown) falls back to reachable · `medium`.
 
 ### Import scan coverage
 
@@ -903,7 +918,7 @@ Source files are scanned for ecosystem-appropriate import patterns:
 | Node.js | `.js` `.ts` `.mjs` `.cjs` `.jsx` `.tsx` | `require('<pkg>')`, `from '<pkg>'` |
 | Python | `.py` | `import <pkg>`, `from <pkg>` |
 | Java / Kotlin | `.java` `.kt` `.groovy` `.scala` | `import <group>.<artifact>` |
-| C# / .NET | `.cs` `.vb` `.fs` | `using <Namespace>` |
+| C# / .NET | `.cs` `.vb` `.fs` `.fsx` | `using <Namespace>` |
 | PHP | `.php` | `use <Vendor>\\`, `require '<pkg>'` |
 | Go | `.go` | `"<module-path>"` |
 | Rust | `.rs` | `use <crate>::`, `extern crate <crate>` |
@@ -950,7 +965,7 @@ Each vulnerability record in the enriched report includes a `reachability` objec
 | Field | Description |
 |---|---|
 | `reachable` | `true` if the vulnerable code is considered reachable from production |
-| `level` | `total`, `high`, `medium`, or `low` |
+| `level` | `critical` (unconditional reachability), `high`, `medium`, or `low` |
 | `confidence` | `high`, `medium`, or `low` — reflects how much evidence backs the verdict |
 | `rationale` | Human-readable explanation of which signal drove the decision |
 | `tags` | Machine-readable labels identifying which signals fired (e.g. `import_confirmed`, `dev_scope`, `malware`, `env_scope`) |
@@ -1123,6 +1138,8 @@ UBEL writes `.ubel/` (reports, policy, extracted images, dependency scratch spac
 
 ### Output
 
+The SBOM and SARIF bullets below describe the secrets pass inside a regular `health` scan (`sca` / `sca_docker` reports); a standalone `ubel-secrets` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
+
 - **HTML report**: a dedicated Secrets tab (category, severity, file/line, redacted match preview — the raw secret value is never written to any report or log).
 - **SBOM (CycloneDX v1.6)**: exposed as a `ubel:secrets` entry in the root `properties` array, as a JSON-string value. Not a top-level `x-`-prefixed key — CycloneDX's root schema sets `additionalProperties: false`, so a custom root key would fail strict schema validation; the `properties` array is the schema's actual documented extension point.
 - **SARIF 2.1.0**: its own `run`, with a dedicated `tool.driver` and rule set, kept separate from the dependency-vulnerability run.
@@ -1201,6 +1218,8 @@ The top-level `stats.license_stats` field summarizes the whole inventory:
 ```
 
 ### Output
+
+The SBOM and SARIF bullets below apply to the license classification inside a regular `health` scan (`sca` / `sca_docker` reports, plus the SBOM of `os_sca`); a standalone `ubel-license` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
 
 - **HTML report**: the inventory table and per-package detail modal render `license_info` as a risk-badged license table (SPDX id, identifiers, OSI-approved, risk, category, reason) rather than a bare string.
 - **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name` otherwise; `license.osi_approved` / `license.risk` / `license.category` / `license.reason` are added as component `properties`. Root-level `properties` include `license_osi_approved` / `license_not_osi_approved` / `license_unknown` counts.
@@ -1334,6 +1353,16 @@ const report = await SCA_scan({
 // report is the full finalJson object (inventory, vulnerabilities, decision, …)
 ```
 
+Further options, all optional:
+
+| Option | Default | Effect |
+|---|---|---|
+| `packages` | `[]` | Package specifiers for `check` / `install` |
+| `scan_secrets` | `true` | Run the secrets pass (only ever runs on `health`; `ubel-platform` turns it off) |
+| `scan_vulns` | `true` | `false` skips every OSV/NVD lookup — inventory and license classification only, as `ubel-license` does |
+| `severity_threshold`, `block_unknown_vulnerabilities`, `license_risk_threshold`, `block_unknown_license_risk`, `block_undetermined`, `reachable_only` | unset | Policy overrides, validated like the CLI modes of the same name. Unlike the per-run CLI flags these are **written to the saved policy file** (`setPolicyField`), so they persist for later scans. `block_kev` / `epss_threshold` can't be passed this way — edit `config.json` |
+| `scan_scope` | `"repository"` | Also accepts `license` and `secrets` (the scopes `ubel-license` / `ubel-secrets` use) |
+
 Two additional options only apply to the pypi-family engines (`engine: "pip"`, `"uv"` or `"conda"`):
 
 ```js
@@ -1379,14 +1408,26 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 
 | Scan | `<tag>` | Example (latest) | Example (zip) |
 |---|---|---|---|
-| SCA — `health` (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
+| SCA — `health` (`ubel-npm health`, `ubel-pip health`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
+| Host OS — `health` with `scan_os` on Linux or Windows (`ubel-platform`, `ubel-agent`, `ubel-cicd`) | `os_sca` | `latest.os_sca.json` | `2026_10_10__12_30_05.os_sca.zip` |
 | Docker — `ubel-docker health` | `sca_docker` | `latest.sca_docker.json` | `2026_10_10__12_30_05.sca_docker.zip` |
 | Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `firewall_<engine>` | `latest.firewall_npm.html`, `latest.firewall_apt.json` | `2026_10_10__12_30_05.firewall_pip.zip` |
 | Docker firewall — `ubel-docker check` / `install` | `firewall_docker` | `latest.firewall_docker.json` | `2026_10_10__12_30_05.firewall_docker.zip` |
 | Licenses — `ubel-license` | `licenses` | `latest.licenses.json` | `2026_10_10__12_30_05.licenses.zip` |
 | Secrets — `ubel-secrets` | `secrets` | `latest.secrets.json` | `2026_10_10__12_30_05.secrets.zip` |
 
-`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `firewall_docker` gets the JSON, HTML and SBOM but no SARIF; `sca_docker` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`). The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `firewall_docker` gets the JSON, HTML and SBOM but no SARIF; `sca_docker` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`).
+
+Which files each tag gets:
+
+| Tag | JSON | HTML | SBOM (`.cdx.json`) | SARIF (`.sarif.json`) |
+|---|:---:|:---:|:---:|:---:|
+| `sca`, `sca_docker` | ✅ | ✅ | ✅ | ✅ |
+| `os_sca` | ✅ | ✅ | ✅ | ❌ |
+| `firewall_<engine>` (incl. `firewall_docker`) | ✅ | ✅ | ✅ | ❌ |
+| `licenses`, `secrets` | ✅ | ✅ | ❌ | ❌ |
+
+So the secrets and license findings carried in SBOM/SARIF (see [Secrets Detection](#secrets-detection) and [License Compliance](#license-compliance)) are those of a regular `sca` / `sca_docker` `health` scan; standalone `ubel-secrets` and `ubel-license` runs write JSON and HTML only. The History zip contains exactly the files its tag gets. `os_sca` is chosen from the platform the scan runs on (Linux or Windows); on any other platform the tag stays `sca`. A Docker image scan is never `os_sca` — it uses `sca_docker` / `firewall_docker`. The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
 
 ### History: `$HOME/.ubel/history/<mode>/`
 
@@ -1409,7 +1450,7 @@ The `<mode>` is a filing label, not the report's [`asset_type`](#asset-types-ass
 
 One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<mode>/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
-For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.sca_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.sca_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.firewall_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.firewall_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
 ### Asset id: `ubel_asset.json`
 
@@ -1488,7 +1529,7 @@ UBEL-sca-3f6c2a9e1b7d4c589a426e0d8b5f7a13-bc7a66bc328541398ce34825a9bd2a16
 | Part | What it is |
 |---|---|
 | `UBEL` | fixed prefix |
-| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
+| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
 | `<asset_id>` | the scan's [asset id](#asset-id-ubel_assetjson), embedded whole (32 hex). Every report of one asset has the same value, so you can group reports by asset. 32 zeros when the scan has no asset id |
 | `<report_uuid>` | a fresh random UUID (v4) without hyphens (32 hex), different for every report |
 
@@ -1902,7 +1943,7 @@ ubel-npm health
 ubel-npm health
 
 # Install a pre-commit hook that runs a dependency scan on every commit
-# that stages a manifest/lockfile
+# (UBEL_HOOK_SCA=auto: only commits that stage a manifest/lockfile)
 ubel-npm install-hook
 
 # Same workflows with pnpm and bun

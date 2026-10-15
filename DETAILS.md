@@ -11,7 +11,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 - **Executive summary & suggested fixes** — every SCA and EASM report opens with a plain-language executive summary for non-technical readers (risk rating, key findings, recommended actions, methodology; SCA adds the policy verdict), where known-exploited and likely-exploited issues raise the rating and the priority order. Each package also gets per-release-line upgrade suggestions (the fewest, highest versions that clear the most vulnerabilities, branch-aware), listed per component in the summary and carried in the JSON, SBOM and SARIF. See the SCA and EASM READMEs.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe live restricted keys, and URL-embedded git credentials for GitHub, GitLab, Bitbucket, Azure DevOps and other git hosts, among others). Runs standalone via `ubel-secrets`, or as part of any `health`-mode SCA scan.
-- **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every SCA/firewall scan by default — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
+- **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every `health` scan by default (never on `check`/`install`) — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs). Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
@@ -32,7 +32,8 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | Binary | Covers | What it does |
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run. Also: `install-hook` / `uninstall-hook` to install a dependency-scan git pre-commit hook |
-| `ubel-composer` | SCA + Firewall | `health` = SCA scan of `vendor/`/`composer.lock`; `check`/`install` = firewall gate on a `composer require`/`update --no-install --no-scripts --no-plugins` dry-run, same lockfile-backed shape as npm/pnpm/bun. Also supports `install-hook` / `uninstall-hook` |
+| `ubel-yarn` | SCA | `health` only — yarn has no side-effect-free dry-run, so `check`/`install` exit non-zero with a clear "not supported" message instead of silently doing nothing. Supports `install-hook` / `uninstall-hook` (the hook only needs a `health` scan) |
+| `ubel-composer` | SCA + Firewall | `health` = SCA scan of `vendor/composer/installed.json` (falling back to `composer.lock`); `check`/`install` = firewall gate on a `composer require`/`update --no-install --no-scripts --no-plugins` dry-run, same lockfile-backed shape as npm/pnpm/bun. Also supports `install-hook` / `uninstall-hook` |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does. Both support `install-hook` / `uninstall-hook` |
 | `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions. Supports `install-hook` / `uninstall-hook` |
 | `ubel-conda` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, plus `init`. `check`/`install` resolve with `conda create --dry-run --json` against a scratch prefix that never exists (so `check` creates nothing), then a clean `install` runs `conda create`/`conda install --no-deps --file` with exact `channel::name==version=build` pins of precisely the scanned set into `./conda-env`. Only Python-distribution packages are matched against vulnerability data — see the Python section below. Supports `install-hook` / `uninstall-hook` |
@@ -40,10 +41,10 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | SCA + Firewall | Same `health`/`check`/`install` split, one binary per native package manager (no auto-detection between them, same as npm/pnpm/bun). Reports and policy live under `~/.ubel/local` so routine use never needs `sudo` — only the real package-manager install does. No `install-hook` / `uninstall-hook` — they scan the host, not a repo |
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation. No `install-hook` / `uninstall-hook` |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls. Also scans git history (`--history`) and staged changes (`--staged`), installs a pre-commit hook, and baselines findings |
-| `ubel-license` | SCA | Standalone inventory + license-compliance scan — no vulnerability lookups (OSV/NVD), no secrets scan |
-| `ubel-agent` | SCA | AI-agent workspace scan (OS, runtimes, tools, dependencies) |
-| `ubel-cicd` | SCA | Post-install CI/CD scan of the final built workspace (OS, runtimes, tools, dependencies) |
-| `ubel-platform` | SCA | Host platform scan (OS, runtimes, tools) |
+| `ubel-license` | SCA | Standalone inventory + license-compliance scan — no vulnerability lookups (OSV/NVD), no secrets scan; writes JSON + HTML reports (no SBOM/SARIF) |
+| `ubel-agent` | SCA | AI-agent workspace scan (OS, runtimes, tools, dependencies, secrets) |
+| `ubel-cicd` | SCA | Post-install CI/CD scan of the final built workspace (OS, runtimes, tools, dependencies, secrets) |
+| `ubel-platform` | SCA | Host platform scan (OS, runtimes, tools) — no application dependency resolution and no secrets pass. Defaults to the home directory |
 | `ubel-sast` | SAST | Static analysis for accidental vulnerabilities (injection, XSS, insecure deserialization, hardcoded secrets, …) |
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Utility with no LLM cost to preview how a codebase will be chunked |
@@ -228,13 +229,13 @@ Secrets findings are also included in every `health`-mode SCA scan by default (`
 
 ## License Compliance
 
-Every scanned package's declared license — whatever form it arrives in (an SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an `OR`/`AND` SPDX expression, or missing entirely) — is normalized into a canonical SPDX identifier, checked against the OSI-approved license list, and assigned a risk rating (`low` / `medium` / `high` / `unknown`) based on license category (permissive, weak-copyleft, strong-copyleft, proprietary, public-domain, unrecognized). Included in every SCA/firewall scan by default.
+Every scanned package's declared license — whatever form it arrives in (an SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an `OR`/`AND` SPDX expression, or missing entirely) — is normalized into a canonical SPDX identifier, checked against the OSI-approved license list, and assigned a risk rating (`low` / `medium` / `high` / `unknown`) based on license category (permissive, weak-copyleft, strong-copyleft, proprietary, public-domain, unrecognized). Included in every `health` scan by default (license classification never runs on `check`/`install`).
 
 ```bash
 # Standalone inventory + license scan — resolves dependencies (full-stack,
 # every ecosystem present in the repo) and classifies licenses only; no
-# OSV/NVD calls, no secrets scan. Same JSON, HTML, CycloneDX SBOM, and
-# SARIF 2.1.0 outputs as any other SCA scan.
+# OSV/NVD calls, no secrets scan. Writes JSON and HTML reports (no SBOM or
+# SARIF — those come from `health` scans, which also carry the license data).
 ubel-license /path/to/project
 ```
 
@@ -614,13 +615,13 @@ below.
 | Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Python (pip/uv/pipx/conda/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Ruby (Bundler) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Go (modules) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Java / Kotlin (Maven) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| C# / .NET (NuGet) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | ❌ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ❌ | ✅ (misconfig) | — | — | — | ✅ |
@@ -631,7 +632,7 @@ below.
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
-> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where the engine's CLI doesn't yet expose the mode (Go/Maven/NuGet/Ruby/Swift/pub are read via full-stack `health` only — there's no per-engine binary yet to attach `install-hook` to). The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
+> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where there's no per-engine binary to attach `install-hook` to: Go/Maven/NuGet/Ruby/Swift/pub have none of their own, so they show ⚠️ — a hook installed from an npm-family engine or `ubel-composer` runs a **full-stack** `health` scan, which also reads those ecosystems' manifests/lockfiles in the repo (their files are in the hook's `auto`-mode trigger list too), but there is no `ubel-go`/`ubel-maven`/… hook of their own. The pip/uv/pipx/conda/cargo hooks run a single-ecosystem `health`. The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
@@ -669,9 +670,13 @@ since neither has a lockfile to roll back.)
 
 **Pre-commit hook:** `ubel-npm install-hook`, `ubel-pnpm install-hook`,
 `ubel-bun install-hook`, and `ubel-yarn install-hook` all work. The hook
-runs `<engine> health` on any commit that stages `package.json`,
-`package-lock.json`, `pnpm-lock.yaml`, `bun.lock`/`bun.lockb`, or
-`yarn.lock` (anywhere in the tree, so monorepo sub-packages count). It
+runs `<engine> health` on every commit by default (a full-stack scan, so
+it also reads any Go/Maven/NuGet/Ruby/Swift/pub/Cargo manifests in the
+repo). With `UBEL_HOOK_SCA=auto` it runs only when a commit stages
+`package.json`, `package-lock.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `bun.lock`/`bun.lockb`, or `yarn.lock` (or any
+other recognised manifest/lockfile), anywhere in the tree, so monorepo
+sub-packages count; `UBEL_HOOK_SCA=off` skips it. It
 reads the installed dependency graph — no `node_modules` mutation, no
 lockfile dry-run, no network call other than OSV/NVD lookups against what's
 already there.
@@ -737,10 +742,11 @@ not just an interpreter uv happens to be pointed at via `--python`.
 
 **Pre-commit hook:** `ubel-pip install-hook`, `ubel-uv install-hook`,
 `ubel-pipx install-hook`, and `ubel-conda install-hook` all work. The hook
-runs `<engine> health` (dependency scan only) when a commit stages
-`requirements*.txt`, `pyproject.toml`, `Pipfile`/`Pipfile.lock`,
-`setup.py`, `setup.cfg`, `environment.yml`/`environment.yaml`, or a conda
-manifest. Not available on apt/dnf/yum (they scan the host, not a repo).
+runs `<engine> health` (dependency scan only) on every commit by default;
+with `UBEL_HOOK_SCA=auto`, only when a commit stages `requirements*.txt`,
+`constraints*.txt`, `pyproject.toml`, `Pipfile`/`Pipfile.lock`,
+`setup.py`, `setup.cfg`, `poetry.lock`, `uv.lock`, `pdm.lock`,
+`conda-lock.yml`, or `environment.yml`/`environment.yaml`. Not available on apt/dnf/yum (they scan the host, not a repo).
 
 Two honesty notes, both of them limits of the underlying tools rather than
 gaps in UBEL's own implementation:
@@ -803,8 +809,9 @@ sdist-style build step here; Composer's lifecycle scripts are disabled with
 startup, not covered by `--no-scripts`) with `--no-plugins`, on both the
 dry-run and the real install.
 
-**Pre-commit hook:** `ubel-composer install-hook` works. Fires on a commit
-that stages `composer.json` or `composer.lock`.
+**Pre-commit hook:** `ubel-composer install-hook` works. Runs `health` on
+every commit by default; with `UBEL_HOOK_SCA=auto`, only when a commit
+stages `composer.json` or `composer.lock`.
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -817,15 +824,20 @@ as every other reachability-covered ecosystem.
 
 ## Ruby — Bundler
 
-**SCA:** Resolves from `Gemfile.lock`.
+**SCA:** Resolves from `Gemfile.lock` (a directory counts only when it has
+both a `Gemfile` and a `Gemfile.lock`); the `Gemfile` is read only to
+classify gems as dev/test/prod. Gems are reported as `pkg:gem/<name>@<version>`
+with license `unknown`.
 
 **Firewall:** Not available — same reasoning as Go/Java/.NET below: no
 side-effect-free dry-run install path in Bundler for UBEL to hook into.
 
-**Pre-commit hook:** Not available today — there's no per-engine
-`ubel-bundler` binary yet to attach `install-hook` to (Ruby is read via
-`full_stack: true` monorepo scanning, not a dedicated CLI). When such a
-binary exists, the hook would run `health`.
+**Pre-commit hook:** Partial — there's no per-engine `ubel-bundler` binary
+to attach `install-hook` to (Ruby is read via `full_stack: true` monorepo
+scanning, not a dedicated CLI), but a hook installed from an npm-family
+engine or `ubel-composer` runs a full-stack `health` that includes
+`Gemfile.lock`, and `Gemfile`/`Gemfile.lock` are in the hook's
+`UBEL_HOOK_SCA=auto` trigger list.
 
 **SAST / Malware SAST:** Full coverage, `.rb` chunking.
 
@@ -852,8 +864,9 @@ and the project's own files are re-checked in case they changed while the
 scan ran; if the fetch fails, the originals are restored. With no arguments
 the scanned set is the project's current lockfile.
 
-**Pre-commit hook:** `ubel-cargo install-hook` works. Fires on a commit
-that stages `Cargo.toml` or `Cargo.lock`.
+**Pre-commit hook:** `ubel-cargo install-hook` works. Runs `health` on
+every commit by default; with `UBEL_HOOK_SCA=auto`, only when a commit
+stages `Cargo.toml` or `Cargo.lock`.
 
 Honest limits:
 - Only **crates.io** crates are matched against vulnerability data. Workspace
@@ -885,15 +898,20 @@ Honest limits:
 
 ## Go — modules
 
-**SCA:** Resolves from `go.sum`, which pins exact versions and hashes
-already, giving high-confidence version matching against OSV.
+**SCA:** A directory is a module root when it has a `go.mod`; versions come
+from `go.mod`'s `require` entries cross-referenced with `go.sum` (which pins
+exact versions and hashes, and may be absent or empty). The version in
+`go.mod` wins over stale `go.sum` entries for other versions, and
+`!`-escaped module paths are restored — giving high-confidence version
+matching against OSV. License is `unknown`.
 
 **Firewall:** Not available.
 
-**Pre-commit hook:** Not available today — there's no dedicated
-`ubel-go` binary to attach `install-hook` to (Go is read via
-`full_stack: true` monorepo scanning, not a dedicated CLI). When one exists,
-the hook would run `health` and fire on `go.mod`/`go.sum`.
+**Pre-commit hook:** Partial — there's no dedicated `ubel-go` binary to
+attach `install-hook` to (Go is read via `full_stack: true` monorepo
+scanning, not a dedicated CLI), but a hook installed from an npm-family
+engine or `ubel-composer` runs a full-stack `health` that includes it, and
+`go.mod`/`go.sum`/`go.work` are in the `UBEL_HOOK_SCA=auto` trigger list.
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -903,13 +921,23 @@ the hook would run `health` and fire on `go.mod`/`go.sum`.
 
 ## Java / Kotlin — Maven
 
-**SCA:** Resolves the dependency tree from `pom.xml`, following transitive
-Maven resolution.
+**SCA:** Reads the dependencies declared in `pom.xml`, resolving `${…}`
+properties and `<dependencyManagement>` versions (including from parent poms
+that exist on disk — `../pom.xml` or `<relativePath>`) and following
+`<modules>` in multi-module projects. Optional dependencies are skipped;
+Maven's `test` scope maps to `dev`, everything else to `prod`. Transitive
+dependencies are **not** resolved from `pom.xml` alone: run
+`mvn dependency:tree -DoutputFile=.ubel/maven-deps.txt` and UBEL uses that
+tree in preference to the declarations. Versions that can't be resolved
+(e.g. managed by a remote-only parent) are inventoried without a version and
+not sent to OSV. License is `unknown`.
 
 **Firewall:** Not available.
 
-**Pre-commit hook:** Not available today — no dedicated `ubel-maven`
-binary to attach `install-hook` to.
+**Pre-commit hook:** Partial — no dedicated `ubel-maven` binary to attach
+`install-hook` to, but a full-stack `health` (from a hook installed via an
+npm-family engine or `ubel-composer`) includes it; `pom.xml`, `build.gradle`,
+`gradle.lockfile` and `libs.versions.toml` are in the `auto`-mode trigger list.
 
 **SAST / Malware SAST:** Full coverage; Java and Kotlin are tracked as
 separate language families in the catalog, so idioms specific to each
@@ -920,22 +948,30 @@ ruleset.
 **Reachability analysis:** Fully covered — `.java`, `.kt`, `.groovy`, and
 `.scala` files are all scanned under the same `maven` reachability key.
 
-**Note:** Gradle-based projects aren't mentioned as a separately-resolved
-build system — Maven-style resolution is the documented path for this
-ecosystem today.
+**Note:** Gradle is **not** resolved — only `pom.xml` is read, so a
+Gradle-only project yields no Java inventory.
 
 ---
 
 ## C# / .NET — NuGet
 
-**SCA:** Resolves from `packages.lock.json` where present, falling back to
-`obj/project.assets.json` (the MSBuild-generated resolved graph) when a
-project doesn't use lock-file mode.
+**SCA:** A project root is a directory with a `*.csproj`, `*.fsproj` or
+`*.vbproj`. Packages come from `packages.lock.json` where present, falling
+back to `obj/project.assets.json` (the MSBuild-generated resolved graph) when
+a project doesn't use lock-file mode; with neither file (no
+`dotnet restore` yet) nothing is reported. Each target framework's graph is
+kept separate so edges aren't collapsed across TFMs. Scopes are seeded from
+the project file's `<PackageReference>` entries (a `Condition` mentioning
+`debug`/`test` marks `dev`) and propagated down the graph. License is
+`unknown`.
 
 **Firewall:** Not available.
 
-**Pre-commit hook:** Not available today — no dedicated `ubel-nuget`
-binary to attach `install-hook` to.
+**Pre-commit hook:** Partial — no dedicated `ubel-nuget` binary to attach
+`install-hook` to, but a full-stack `health` (from a hook installed via an
+npm-family engine or `ubel-composer`) includes it; `packages.lock.json`,
+`packages.config`, `Directory.Packages.props` and `*.csproj` are in the
+`auto`-mode trigger list.
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -974,12 +1010,16 @@ Swift package is reported as `prod`.
 
 **Firewall:** Not available — Swift is SCA-only today.
 
-**Pre-commit hook:** Not available today — no dedicated `ubel-swift`
-binary to attach `install-hook` to.
+**Pre-commit hook:** Partial — no dedicated `ubel-swift` binary to attach
+`install-hook` to, but a full-stack `health` (from a hook installed via an
+npm-family engine or `ubel-composer`) includes it; `Package.swift`,
+`Package.resolved`, `Cartfile(.resolved)` and `Podfile(.lock)` are in the
+`auto`-mode trigger list.
 
-**SAST / Malware SAST:** Not covered — Swift isn't one of the language
-families in the SAST or malware catalogs. `.swift` files are still included
-in Secrets detection.
+**SAST / Malware SAST:** Covered — Swift is its own language family in both
+the vulnerability and malware catalogs (with dedicated mobile classes:
+local storage, TLS/pinning, WebView bridges, deep links, biometric gates).
+`.swift` files are also included in Secrets detection.
 
 **Reachability analysis:** Covered — `.swift` files (plus `.m`/`.mm`/`.h`) are
 scanned for `import <Module>` / `@import` / `#import <Module/…>` references,
@@ -1026,11 +1066,14 @@ stop the OSV lookup.
 
 **Firewall:** Not available — Flutter/Dart is SCA-only today.
 
-**Pre-commit hook:** Not available today — no dedicated `ubel-pub`
-binary to attach `install-hook` to.
+**Pre-commit hook:** Partial — no dedicated `ubel-pub` binary to attach
+`install-hook` to, but a full-stack `health` (from a hook installed via an
+npm-family engine or `ubel-composer`) includes it; `pubspec.yaml` /
+`pubspec.lock` are in the `auto`-mode trigger list.
 
-**SAST / Malware SAST:** Not covered — Dart isn't one of the language
-families in the SAST or malware catalogs.
+**SAST / Malware SAST:** Covered — Dart/Flutter is its own language family
+in both the vulnerability and malware catalogs (with the same dedicated
+mobile classes as Swift).
 
 **Reachability analysis:** Covered — `.dart` files are scanned for
 `import`/`export 'package:<name>/…'` references, including conditional-import
@@ -1141,7 +1184,13 @@ them against CPE/CVE data — this is what backs both the standalone
 scan. Installed packages are read straight from the package databases
 (dpkg `status`, apk `installed`, rpm `Packages`/`rpmdb.sqlite`) without
 running any package-manager binary to do so; only `check`/`install` call
-`apt`/`dnf`/`yum`, for the dry-run resolution.
+`apt`/`dnf`/`yum`, for the dry-run resolution. The distribution is taken from
+`os-release` (`ID`, then each `ID_LIKE` token), so derivatives such as Amazon
+Linux resolve to their parent family; Debian, Ubuntu, Alpine, Red Hat,
+AlmaLinux and Rocky are supported, and anything else (e.g. SUSE, Arch) stops
+the OS scan with an "Unsupported OS ecosystem" error. Each package is tagged
+with its distro release (`almalinux-8.10`, …) so advisories are matched to
+that release, not to other releases of the same distro.
 
 **Firewall:** Available via three separate binaries — `ubel-apt`,
 `ubel-dnf`, `ubel-yum` — each bound to exactly one native package manager,
@@ -1178,7 +1227,14 @@ isn't a separate, lesser pipeline for OS packages.
 ## Windows host
 
 **SCA:** `WindowsHostScanner` mirrors the Linux host scanner's role for
-Windows — installed software/package inventory matched against CPE/CVE.
+Windows — installed software inventory matched against CPE/CVE. It probes the
+registry and known binary paths (no elevated privileges) for: Windows 10/11
+(build-accurate CPE), Windows Defender, PowerShell, runtimes (Node.js,
+Python, PHP, Go, Rust, Ruby, JRE, JDK), every installed .NET
+Core/Desktop/ASP.NET runtime, browsers (Chrome, Firefox, Edge) and developer
+tools (Git, Docker Desktop, Visual Studio Code / Visual Studio IDE, Cursor,
+VSCodium, Claude Code). Host-OS health scans on Windows and Linux are filed
+under the `os_sca` report tag (JSON, HTML and SBOM; no SARIF).
 
 **Firewall:** Not available. Unlike Linux's `apt-get -s`/`dnf --assumeno`,
 there's no equivalent dry-run resolution UBEL can hook into for Windows'
@@ -1189,7 +1245,9 @@ installed.
 **Pre-commit hook:** Not available — same reason (host scan, not repo).
 
 **License compliance:** Fully applied, via its own `licenseFor()` mapping
-feeding the same classification pipeline as every other ecosystem.
+feeding the same classification pipeline as every other ecosystem —
+proprietary Microsoft/vendor components resolve to a `LicenseRef-*`
+identifier, open-source runtimes and tools to their real SPDX id.
 
 ---
 
@@ -1272,7 +1330,9 @@ then `<engine> health` — a dependency scan (no OS scan).
   (they scan the host, not a repo). Ecosystems that are only reachable
   through full-stack `health` scanning — Go, Maven/Kotlin, NuGet,
   Bundler, SwiftPM, pub — have no per-engine binary to attach the hook
-  to yet, so their SCA coverage doesn't translate to a hook today.
+  to, but are still scanned when the hook was installed from an
+  npm-family engine or `ubel-composer`, whose `health` is full-stack
+  (the pip/uv/pipx/conda/cargo hooks scan only their own ecosystem).
 
 ### License Compliance — every ecosystem, including OS packages
 
@@ -1286,9 +1346,13 @@ SPDX identifier, checks it against a curated OSI-approved license table,
 and assigns a risk tier (permissive → weak copyleft → strong copyleft /
 proprietary / unrecognized). It's applied once, uniformly, to the entire
 unified scan inventory — Node, Python, PHP, Ruby, Rust, Go, Java/Kotlin,
-C#, Swift, Flutter/Dart, and Linux/Windows OS packages alike (Swift and pub
-lockfiles record no license data, so those packages come through as
-`unknown`). The only true exception is C (no
+C#, Swift, Flutter/Dart, and Linux/Windows OS packages alike. Real license
+data exists where the package metadata carries it — Node, Python, PHP and the
+OS-package scanners (rpm metadata, dpkg `copyright`, apk) and Windows
+components (a built-in vendor/EULA mapping); the Ruby, Rust, Go, Java/Kotlin,
+C#, Swift and Flutter/Dart inventories read only a lockfile or
+manifest with no license field, so their packages come through as
+`unknown`. The only true exception is C (no
 package manager/manifest exists to read a license from in the first
 place). Policy supports both a `license-risk` threshold
 and a separate `license-block-unknown` flag for licenses that couldn't be
@@ -1320,6 +1384,12 @@ not treated as an afterthought bolted onto the dependency scanner.
 
 ### Compliant, Standardized Outputs
 
+- **Which report gets which format** — JSON and HTML on every SCA run;
+  the CycloneDX SBOM on `health`, host-OS (`os_sca`) and firewall
+  (`check`/`install`) runs; SARIF on `health` scans only (`sca`,
+  `sca_docker`). Standalone `ubel-license` and `ubel-secrets` write JSON and
+  HTML only, and firewall runs write no SARIF. See the report file-naming
+  table in [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#file-naming-the-tag).
 - **SARIF 2.1.0** — full-fidelity output (deterministic SHA-256
   fingerprints, not random UUIDs, so the same finding produces the same ID
   run over run) that plugs directly into GitHub code scanning and any
@@ -1379,15 +1449,19 @@ To keep this document honest rather than aspirational:
   clusters running on them — is covered separately by `ubel-cloud`, via
   each provider's own API; see the Cloud section above.)
 - Every ecosystem here — including the OS-level ones (apt/dnf/yum and
-  Windows) — gets full SCA **and** license compliance regardless of
-  firewall status (Swift and Flutter/Dart licenses report as `unknown`,
-  since their lockfiles carry no license data); firewalling and inventory/license coverage are tracked
+  Windows) — gets full SCA regardless of firewall status, and runs through
+  the license-classification layer, but only Node, Python, PHP, and the OS
+  scanners actually carry license data; Ruby, Rust, Go, Java, C#, Swift,
+  Flutter/Dart packages report license `unknown` because their
+  manifests/lockfiles have no license field (hence ❌ in the matrix's
+  License column); firewalling and inventory/license coverage are tracked
   and reported independently.
 - **Pre-commit hook coverage matches SCA coverage *among engines that
   have a dedicated binary*.** Go, Maven/Kotlin, NuGet, Bundler, SwiftPM,
   and pub are all SCA-covered via full-stack `health`, but there's no
-  per-engine CLI to attach `install-hook` to yet, so their SCA coverage
-  doesn't translate to a hook. Docker and apt/dnf/yum have no hook at all
+  per-engine CLI to attach `install-hook` to, so they're only covered
+  indirectly (⚠️): a hook installed from an npm-family engine or
+  `ubel-composer` scans them as part of its full-stack `health`. Docker and apt/dnf/yum have no hook at all
   — Docker has no repo checkout, and apt/dnf/yum scan the host. The
   secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate
   hook, separate feature, and separate scope (staged source files, not
