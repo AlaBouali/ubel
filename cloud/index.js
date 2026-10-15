@@ -28,7 +28,7 @@ Usage:
                     [--verbose] [--quiet]
 
 Every run bundles a report.cloud.json + report.cloud.html into a timestamped zip under
-$HOME/.ubel/history/cloud/<timestamp>.cloud.zip, and
+$HOME/.ubel/history/<asset_id>/<timestamp>.cloud.zip, and
 also writes plain, always-overwritten "latest" copies to
 .ubel/reports/latest.cloud.json and .ubel/reports/latest.cloud.html.
 
@@ -209,7 +209,7 @@ async function resolveAwsRegions(args, creds, log) {
 /**
  * Shared report writer — mirrors ubel-sast's writeAnalyzeReports /
  * writeMalwareReports: a timestamped report.json + report.html bundled
- * into one zip under $HOME/.ubel/history/cloud/, plus fixed
+ * into one zip under $HOME/.ubel/history/<asset_id>/, plus fixed
  * "latest" plain-file copies under .ubel/reports/ that always get
  * overwritten. Never calls process.exit — the caller decides what to do
  * with the exit code.
@@ -223,10 +223,10 @@ async function writeCloudReports(reporter, meta, opts) {
   const latestDir = path.join(workingDir, '.ubel', 'reports');
   fs.mkdirSync(latestDir, { recursive: true });
 
-  // <timestamp>.cloud.zip (in $HOME/.ubel/history/cloud/), latest.cloud.<ext>, and report.cloud.<ext> inside the zip.
+  // <timestamp>.cloud.zip (in $HOME/.ubel/history/<asset_id>/), latest.cloud.<ext>, and report.cloud.<ext> inside the zip.
   const tag     = 'cloud';
   const asset   = assetFor('cloud', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('cloud', ts, tag, asset.asset_id);
+  const zipPath = historyZipPath(ts, tag, asset.asset_id);
 
   const latestJson = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml = path.join(latestDir, reportFileName('latest', tag, 'html'));

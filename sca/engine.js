@@ -4274,7 +4274,7 @@ export class UbelEngineInstance {
     
 
     // The timestamped zip is named <timestamp>.<tag>.zip and lands in
-    // $HOME/.ubel/history/<mode>/ (see report_naming.js) — it is created at
+    // $HOME/.ubel/history/<asset_id>/ (see report_naming.js) — it is created at
     // write time, once the scan has actually produced reports.
     const now       = new Date();
     const timestamp = reportTimestamp(now);
@@ -4801,7 +4801,7 @@ export class UbelEngineInstance {
       const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
       const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
       const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope, { machineTag: this.systemType === "linux" });
-      // The file tag (sca, firewall_npm, licenses, secrets) — also the <tag> of the report id,
+      // The file tag (sca, npm_firewall, licenses, secrets) — also the <tag> of the report id,
       // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
       const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan, editorKind: options.editor_kind });
       const report_id   = generateReportId(reportTag, asset.asset_id);
@@ -4964,7 +4964,7 @@ export class UbelEngineInstance {
 //   os_sca         host OS health scan (Windows / Linux)
       //   agent_sca      ubel-agent scan
       //   <editor>_sca   editor-extensions scan: vscode_sca, cursor_sca, vscodium_sca
-      //   firewall_<engine>  firewall (check / install): firewall_npm, firewall_pip, firewall_apt, …
+      //   <engine>_firewall  firewall (check / install): npm_firewall, pip_firewall, apt_firewall, …
       //   licenses       ubel-license
       //   secrets        ubel-secrets
       // so a license or secrets run no longer overwrites the SCA report.
@@ -4984,14 +4984,14 @@ export class UbelEngineInstance {
 
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       // SBOM: SCA scans only — the health scan ("sca") and firewall check/install runs
-      // ("firewall_<engine>"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
+      // ("<engine>_firewall"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
       const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
-      // SARIF: the SCA health scan only (report tag "sca", "sca_docker" for ubel-docker health, or
+      // SARIF: the SCA health scan only (report tag "sca", "docker_sca" for ubel-docker health, or
       // "<editor>_sca" — vscode_sca, cursor_sca, vscodium_sca — for an editor-extensions scan).
       // OS health scans (report tag "os_sca", Windows / Linux) get no SARIF.
-      // Firewall check/install runs (incl. "firewall_docker") get the JSON, HTML and SBOM but no
+      // Firewall check/install runs (incl. "docker_firewall") get the JSON, HTML and SBOM but no
       // SARIF; license and secrets scans get neither.
-      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker" || reportTag === AGENT_SCA_TAG || isEditorScaTag(reportTag);
+      const writeSarif  = reportTag === "sca" || reportTag === "docker_sca" || reportTag === AGENT_SCA_TAG || isEditorScaTag(reportTag);
       const sbomString  = writeSbom
         ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
         : null;
@@ -5009,21 +5009,21 @@ export class UbelEngineInstance {
       // ── Timestamped bundle ──────────────────────────────────────────────────
       // json/html/sbom/sarif used to be written out as four separate files
       // per scan alongside each other; they're now bundled into a single
-      // <timestamp>.<tag>.zip under $HOME/.ubel/history/<mode>/ to cut down on
+      // <timestamp>.<tag>.zip under $HOME/.ubel/history/<asset_id>/ to cut down on
       // file count and storage as reports accumulate over time. <mode> is
       // sca | firewall | os | licenses | secrets. Inside, every entry is named
       // "report" (report.<tag>.json, …) regardless of timestamp. The "latest"
       // copies above are intentionally left as plain files, unzipped.
-      // Filed under the asset: history/<mode>/<asset_id>/<timestamp>.<tag>.zip
+      // Filed under the asset: history/<asset_id>/<timestamp>.<tag>.zip
       // (asset and historyMode were resolved above, before the report was built).
-      const zipPath = historyZipPath(historyMode, timestamp, reportTag, asset.asset_id);
+      const zipPath = historyZipPath(timestamp, reportTag, asset.asset_id);
       atomicWriteFile(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
         ...(writeSbom  ? [{ name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString  }] : []),
         ...(writeSarif ? [{ name: reportFileName("report", reportTag, "sarif.json"), data: sarifString }] : []),
       ]));
-      // latest_reports/<mode>/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
+      // latest_reports/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
       const latestZipPath = updateLatestReportZip(zipPath, reportTag);
 
       // Report locations: every scan that saves reports says where they went.

@@ -23,7 +23,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `agent_sca` for `ubel-agent`, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker` / `agent_sca` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `docker_sca` for `health` scans, `os_sca` for host-OS health scans, `agent_sca` for `ubel-agent`, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `<engine>_firewall` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `docker_sca` / `agent_sca` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -209,7 +209,7 @@ Earlier versions installed the secrets hook and the dependency hook as two separ
 
 - The hook itself, at `<hooks-dir>/pre-commit`.
 - A chained foreign hook, at `<hooks-dir>/pre-commit.local` (only when `--force` was used and there was a foreign hook).
-- Nothing else. Reports still go to the usual `<project>/.ubel/reports/latest.<tag>.*` copies and the `$HOME/.ubel/history/<mode>/` zip when the hook actually runs a scan that produces one.
+- Nothing else. Reports still go to the usual `<project>/.ubel/reports/latest.<tag>.*` copies and the `$HOME/.ubel/history/<asset_id>/` zip when the hook actually runs a scan that produces one.
 
 ---
 
@@ -1138,7 +1138,7 @@ UBEL writes `.ubel/` (reports, policy, extracted images, dependency scratch spac
 
 ### Output
 
-The SBOM and SARIF bullets below describe the secrets pass inside a regular `health` scan (`sca` / `sca_docker` reports); a standalone `ubel-secrets` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
+The SBOM and SARIF bullets below describe the secrets pass inside a regular `health` scan (`sca` / `docker_sca` reports); a standalone `ubel-secrets` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
 
 - **HTML report**: a dedicated Secrets tab (category, severity, file/line, redacted match preview — the raw secret value is never written to any report or log).
 - **SBOM (CycloneDX v1.6)**: exposed as a `ubel:secrets` entry in the root `properties` array, as a JSON-string value. Not a top-level `x-`-prefixed key — CycloneDX's root schema sets `additionalProperties: false`, so a custom root key would fail strict schema validation; the `properties` array is the schema's actual documented extension point.
@@ -1219,7 +1219,7 @@ The top-level `stats.license_stats` field summarizes the whole inventory:
 
 ### Output
 
-The SBOM and SARIF bullets below apply to the license classification inside a regular `health` scan (`sca` / `sca_docker` reports, plus the SBOM of `os_sca`); a standalone `ubel-license` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
+The SBOM and SARIF bullets below apply to the license classification inside a regular `health` scan (`sca` / `docker_sca` reports, plus the SBOM of `os_sca`); a standalone `ubel-license` run writes JSON and HTML only (see [File naming](#file-naming-the-tag)).
 
 - **HTML report**: the inventory table and per-package detail modal render `license_info` as a risk-badged license table (SPDX id, identifiers, OSI-approved, risk, category, reason) rather than a bare string.
 - **SBOM (CycloneDX v1.6)**: `components[].licenses` uses the normalized SPDX `expression` form when a usable identifier was found, falling back to free-text `license.name` otherwise; `license.osi_approved` / `license.risk` / `license.category` / `license.reason` are added as component `properties`. Root-level `properties` include `license_osi_approved` / `license_not_osi_approved` / `license_unknown` counts.
@@ -1394,7 +1394,7 @@ Every scan overwrites the `latest.<tag>.*` convenience links for its scan type a
 .ubel/reports/latest.<tag>.sarif.json    ← always current
 .ubel/ubel_asset.json                  ← this asset's id and name (id created once, never changed)
 
-$HOME/.ubel/history/<mode>/<asset_id>/
+$HOME/.ubel/history/<asset_id>/
     <timestamp>.<tag>.zip                ← YYYY_MM_DD__HH_MM_SS (UTC)
         report.<tag>.json
         report.<tag>.html
@@ -1412,26 +1412,28 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 | Host OS — `health` with `scan_os` on Linux or Windows (`ubel-platform`, `ubel-cicd`) | `os_sca` | `latest.os_sca.json` | `2026_10_10__12_30_05.os_sca.zip` |
 | Agent — `ubel-agent` | `agent_sca` | `latest.agent_sca.json` | `2026_10_10__12_30_05.agent_sca.zip` |
 | Editor extensions — the VS Code extension's *Scan VS Code Extensions* (one tag per editor) | `vscode_sca`, `cursor_sca`, `vscodium_sca` | `latest.cursor_sca.json` | `2026_10_10__12_30_05.cursor_sca.zip` |
-| Docker — `ubel-docker health` | `sca_docker` | `latest.sca_docker.json` | `2026_10_10__12_30_05.sca_docker.zip` |
-| Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `firewall_<engine>` | `latest.firewall_npm.html`, `latest.firewall_apt.json` | `2026_10_10__12_30_05.firewall_pip.zip` |
-| Docker firewall — `ubel-docker check` / `install` | `firewall_docker` | `latest.firewall_docker.json` | `2026_10_10__12_30_05.firewall_docker.zip` |
+| Docker — `ubel-docker health` | `docker_sca` | `latest.docker_sca.json` | `2026_10_10__12_30_05.docker_sca.zip` |
+| Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `<engine>_firewall` | `latest.npm_firewall.html`, `latest.apt_firewall.json` | `2026_10_10__12_30_05.pip_firewall.zip` |
+| Docker firewall — `ubel-docker check` / `install` | `docker_firewall` | `latest.docker_firewall.json` | `2026_10_10__12_30_05.docker_firewall.zip` |
 | Licenses — `ubel-license` | `licenses` | `latest.licenses.json` | `2026_10_10__12_30_05.licenses.zip` |
 | Secrets — `ubel-secrets` | `secrets` | `latest.secrets.json` | `2026_10_10__12_30_05.secrets.zip` |
 
-`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `firewall_docker` gets the JSON, HTML and SBOM but no SARIF; `sca_docker` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`).
+`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `docker_firewall` gets the JSON, HTML and SBOM but no SARIF; `docker_sca` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`).
+
+**Tag shape.** A tag is either a bare scanner name (`sca`, `licenses`, `secrets`, `sast`, `malware`, `cloud`, `url`, `domain`, `host`, `easm`) or `<qualifier>_<scanner>`, with the qualifier first and the scanner last: `os_sca`, `agent_sca`, `docker_sca`, `<editor>_sca`, `<engine>_firewall`, `docker_firewall`.
 
 Which files each tag gets:
 
 | Tag | JSON | HTML | SBOM (`.cdx.json`) | SARIF (`.sarif.json`) |
 |---|:---:|:---:|:---:|:---:|
-| `sca`, `sca_docker`, `agent_sca`, `<editor>_sca` | ✅ | ✅ | ✅ | ✅ |
+| `sca`, `docker_sca`, `agent_sca`, `<editor>_sca` | ✅ | ✅ | ✅ | ✅ |
 | `os_sca` | ✅ | ✅ | ✅ | ❌ |
-| `firewall_<engine>` (incl. `firewall_docker`) | ✅ | ✅ | ✅ | ❌ |
+| `<engine>_firewall` (incl. `docker_firewall`) | ✅ | ✅ | ✅ | ❌ |
 | `licenses`, `secrets` | ✅ | ✅ | ❌ | ❌ |
 
-So the secrets and license findings carried in SBOM/SARIF (see [Secrets Detection](#secrets-detection) and [License Compliance](#license-compliance)) are those of a regular `sca` / `sca_docker` `health` scan; standalone `ubel-secrets` and `ubel-license` runs write JSON and HTML only. The History zip contains exactly the files its tag gets. `os_sca` is chosen from the platform the scan runs on (Linux or Windows); on any other platform the tag stays `sca`.
+So the secrets and license findings carried in SBOM/SARIF (see [Secrets Detection](#secrets-detection) and [License Compliance](#license-compliance)) are those of a regular `sca` / `docker_sca` `health` scan; standalone `ubel-secrets` and `ubel-license` runs write JSON and HTML only. The History zip contains exactly the files its tag gets. `os_sca` is chosen from the platform the scan runs on (Linux or Windows); on any other platform the tag stays `sca`.
 
-A Docker image scan is never `os_sca` — it uses `sca_docker` / `firewall_docker`. The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+A Docker image scan is never `os_sca` — it uses `docker_sca` / `docker_firewall`. The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
 
 **Editor-extension tags (`<editor>_sca`)** — the VS Code extension's *Scan VS Code Extensions*:
 
@@ -1441,11 +1443,11 @@ A Docker image scan is never `os_sca` — it uses `sca_docker` / `firewall_docke
 - They get JSON, HTML, SBOM and SARIF, like `sca`.
 
 
-### History: `$HOME/.ubel/history/<mode>/`
+### History: `$HOME/.ubel/history/<asset_id>/`
 
-Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the scan mode and then after the id of the project it came from — `$HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip` (see [Asset id](#asset-id-ubel_assetjson)). The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
+Every timestamped zip — from every project and every scanner on the machine — is kept in one place, in a sub-folder named after the id of the asset it came from — `$HOME/.ubel/history/<asset_id>/<timestamp>.<tag>.zip` (see [Asset id](#asset-id-ubel_assetjson)). There is no mode folder: the tag in the file name already says what produced the zip. The `latest.<tag>.*` copies stay per project under `<project>/.ubel/reports/`.
 
-The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.sca_docker.zip`, `latest.firewall_npm.zip`, `latest.secrets.zip`) — using the same `<mode>/<asset_id>` layout as `history/`. It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this.
+The newest zip of each tag is also kept in a folder of its own, apart from the history — **`$HOME/.ubel/latest_reports/<asset_id>/latest.<tag>.zip`** (e.g. `latest.sca.zip`, `latest.docker_sca.zip`, `latest.npm_firewall.zip`, `latest.secrets.zip`) — one folder per asset, with no mode folder (the tag in the file name says what produced each zip). It is a copy of the zip just written, refreshed after every scan: written to a temp file and renamed into place, so it is never half-written. `history/` itself holds only timestamped zips and is never touched by this. Zips filed by earlier versions under `history/<mode>/<asset_id>/` are left where they are.
 
 Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.ubel/reports/`, the timestamped history zips and the `latest_reports/` copy — is written the same way, for every scanner (SCA, firewall, OS, licenses, secrets, SAST, malware, cloud, EASM): the content goes to a temp file in the same folder and is then renamed over the target in one step. A script, CI step or browser tab that reads `latest.<tag>.json` / `.html` / `.zip` while a scan is finishing sees either the complete previous file or the complete new one, never a partial file. If a write fails, the temp file is removed, the previous file is left as it was, and the scan reports the error.
 
@@ -1460,9 +1462,9 @@ Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.u
 
 The `<mode>` is a filing label, not the report's [`asset_type`](#asset-types-asset_type): `ubel-agent` and `ubel-platform` file under `sca` but are typed `agent` and `machine`, and `ubel-docker` is typed `docker`.
 
-One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<mode>/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
+One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
-For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.firewall_apt.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.firewall_apt.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.apt_firewall.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.apt_firewall.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
 
 ### Asset id: `ubel_asset.json`
 
@@ -1480,16 +1482,16 @@ An **asset id is a random UUID v4 without hyphens** — 32 hex characters (case-
 
 - **Created on first use.** The first scan in a folder generates a random 32-hex id and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `asset_id` is not a valid `<uuid>` is replaced with a fresh one.
 - **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name (an editor's extensions folder is named `<editor>_extensions`). Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
-- **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
+- **Files the history.** Zips go under `$HOME/.ubel/history/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
 - **Written into every report.** The JSON report carries `asset_id`, `asset_name`, `asset_type` and the scanning machine's [`machine_id`](#machine-id-ubel_machinejson) — and a per-report [`report_id`](#report-id-report_id) — (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
 - **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
 - **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
 - **Every CLI creates it if it doesn't exist, when it starts** — before any network call, install or LLM request, and for every mode, including ones that never write a report (`init`, `threshold`, `block-unknown`, `install-hook`, …) and `asset-id` itself. A new id is announced with one line on **stderr** (`[+] New asset id created: …`), so JSON on stdout stays clean; nothing is printed when it already existed. `--help` and `version` create nothing, and neither does a run with `--asset-id` (see below). `ubel-<cli> init` does the same explicitly and prints the id on stdout.
 - **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
 - **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no asset folder, so they use `$HOME/.ubel/ubel_machine.json` instead — the id of *that machine*, shared by every OS scan on it, and used as the `os/<asset_id>/` folder the same way. See [Machine id](#machine-id-ubel_machinejson). (A host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*, is a normal folder asset with its own `ubel_asset.json`.)
-- If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report's `asset_id` / `asset_name` are `null`, and that zip is written straight into `history/<mode>/` without an asset folder.
+- If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report's `asset_id` / `asset_name` are `null`, and that zip is written straight into `history/` without an asset folder.
 
-Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are. A `ubel_project.json` left by an earlier version is no longer read: the next scan creates a `ubel_asset.json` with a new id.
+Zips written by earlier versions sit in `history/<mode>/<asset_id>/` (or directly in `history/<mode>/`) and are left where they are. A `ubel_project.json` left by an earlier version is no longer read: the next scan creates a `ubel_asset.json` with a new id.
 
 ### Machine id: `ubel_machine.json`
 
@@ -1503,7 +1505,7 @@ Every report also says **which machine produced it**. `$HOME/.ubel/ubel_machine.
 - **Written into every report, of every scanner** (SCA, SAST/malware, cloud, EASM, licenses, secrets, docker): `machine_id` in the JSON (SCA: `scan_info`; SAST/malware: `meta`; cloud and EASM: top level), a `machine_id` property in the SBOM `metadata.properties` and the SARIF run `properties`, and *Machine ID* in the HTML scan-info panel. File names never contain it.
 - **Not the asset id.** The asset id says *what* was scanned, the machine id *where* the scan ran. Only `ubel-apt` / `ubel-dnf` / `ubel-yum` use the machine id as their asset id as well.
 - **Commands (every CLI):** `get-machine-id [--json]` prints it (creating it if missing); `set-machine-id <id>` links the machine to an existing id (e.g. a reinstalled machine); `asset-id --machine` / `set-asset-id --machine` do the same.
-- **Upgrading:** earlier versions kept the machine tag in `$HOME/.ubel/ubel_asset.json`. If there is no `ubel_machine.json` yet, its id is copied over once, so existing `history/os/<id>/` zips stay with the same machine.
+- **Upgrading:** earlier versions kept the machine tag in `$HOME/.ubel/ubel_asset.json`. If there is no `ubel_machine.json` yet, its id is copied over once, so existing OS zips (`history/os/<id>/` from earlier versions) stay with the same machine.
 - If the file can't be written, the scan still runs and the reports' `machine_id` is `null`.
 
 
@@ -1557,7 +1559,7 @@ UBEL-sca-3f6c2a9e1b7d4c589a426e0d8b5f7a13-bc7a66bc328541398ce34825a9bd2a16
 | Part | What it is |
 |---|---|
 | `UBEL` | fixed prefix |
-| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `agent_sca`, `vscode_sca` / `cursor_sca` / `vscodium_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
+| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `docker_sca`, `os_sca`, `agent_sca`, `vscode_sca` / `cursor_sca` / `vscodium_sca`, `<engine>_firewall` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
 | `<asset_id>` | the scan's [asset id](#asset-id-ubel_assetjson), embedded whole (32 hex). Every report of one asset has the same value, so you can group reports by asset. 32 zeros when the scan has no asset id |
 | `<report_uuid>` | a fresh random UUID (v4) without hyphens (32 hex), different for every report |
 
@@ -1578,7 +1580,7 @@ ubel-cloud --asset-id 3f6c2a9e1b7d4c589a426e0d8b5f7a13
 ubel-apt check nginx --asset-id 3f6c2a9e1b7d4c589a426e0d8b5f7a13
 ```
 
-For that run the given id replaces the one in `ubel_asset.json`: it is written into the report, SBOM and SARIF, and the zip is filed under `history/<mode>/<asset_id>/` and `latest_reports/<mode>/<asset_id>/`. **Nothing is saved** — `ubel_asset.json` is neither created nor changed, so the next run without the flag uses the folder's own id again (use `set-asset-id` below to make an id permanent). `asset_name` is the one stored for that same id when there is one, otherwise it is derived as usual. An id that is not 32 hex characters (or a legacy hyphenated UUID form), or a flag with no value, stops the CLI with exit code `2` before anything is scanned.
+For that run the given id replaces the one in `ubel_asset.json`: it is written into the report, SBOM and SARIF, and the zip is filed under `history/<asset_id>/` and `latest_reports/<asset_id>/`. **Nothing is saved** — `ubel_asset.json` is neither created nor changed, so the next run without the flag uses the folder's own id again (use `set-asset-id` below to make an id permanent). `asset_name` is the one stored for that same id when there is one, otherwise it is derived as usual. An id that is not 32 hex characters (or a legacy hyphenated UUID form), or a flag with no value, stops the CLI with exit code `2` before anything is scanned.
 
 #### Linking a folder to an existing asset id
 

@@ -221,7 +221,7 @@ In the other report formats of a regular project/extension scan (`sca`), secrets
 <project-root>/.ubel/reports/latest.secrets.*
 ```
 
-> **UBEL: Scan Project** (which also runs the secrets pass) writes `latest.sca.*`, while this command writes its own `latest.secrets.*`, so the two never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/secrets/`, and the newest one is also kept in `~/.ubel/latest_reports/secrets/` (see [Reports](#reports)).
+> **UBEL: Scan Project** (which also runs the secrets pass) writes `latest.sca.*`, while this command writes its own `latest.secrets.*`, so the two never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/<asset_id>/`, and the newest one is also kept in `~/.ubel/latest_reports/<asset_id>/` (see [Reports](#reports)).
 
 ### What gets scanned
 
@@ -274,7 +274,7 @@ See [License Compliance](#license-compliance) below for how licenses are normali
 <project-root>/.ubel/reports/latest.licenses.*
 ```
 
-> **UBEL: Scan Project** writes `latest.sca.*`, **UBEL: Scan project for Exposed Secrets** writes `latest.secrets.*`, and this command writes `latest.licenses.*` — the three never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/licenses/`, and the newest one is also kept in `~/.ubel/latest_reports/licenses/` (see [Reports](#reports)).
+> **UBEL: Scan Project** writes `latest.sca.*`, **UBEL: Scan project for Exposed Secrets** writes `latest.secrets.*`, and this command writes `latest.licenses.*` — the three never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/<asset_id>/`, and the newest one is also kept in `~/.ubel/latest_reports/<asset_id>/` (see [Reports](#reports)).
 
 ---
 
@@ -960,11 +960,9 @@ For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html
 
 Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, and, where the scan type produces them, `report.<tag>.cdx.json` and `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
-- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform (the host-platform zips are named `<timestamp>.os_sca.zip` on Windows / Linux, `<timestamp>.<editor>_sca.zip` for extensions)
-- `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
-- `~/.ubel/history/licenses/` — Scan project for License Compliance
+Every command files its zip in the same place — `~/.ubel/history/<asset_id>/`. There is no per-command folder; the tag in the file name tells them apart: `sca` (Scan Project), `<editor>_sca` (Scan VS Code Extensions), `os_sca` on Windows / Linux (Scan Host Platform), `secrets` (Scan project for Exposed Secrets) and `licenses` (Scan project for License Compliance).
 
-All projects and commands share this one folder, but each asset's zips live in a sub-folder named after its asset id — `~/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/sca/3f6c2a9e1b7d4c589a426e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_asset.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_asset.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
+All projects and commands share this one folder, but each asset's zips live in a sub-folder named after its asset id — `~/.ubel/history/<asset_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/3f6c2a9e1b7d4c589a426e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_asset.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_asset.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
 
 ```json
 { "asset_id": "3f6c2a9e1b7d4c589a426e0d8b5f7a13", "asset_name": "shop", "created_at": "2026-10-10T12:30:05.000Z" }
@@ -972,19 +970,19 @@ All projects and commands share this one folder, but each asset's zips live in a
 
 `asset_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Asset** and **Asset ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from. Each report also carries an **`asset_type`** (shown as **Asset type**), which depends on the command: *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* are `codebase`, *Scan VS Code Extensions* is `editor` (and gets one asset id per editor), and *Scan Host Platform* is `machine` — see [Asset types](../sca/README.md#asset-types-asset_type) in the CLI docs. The type is not stored in `ubel_asset.json`; it is set per scan. Every report also has its own **`report_id`**, `UBEL-<tag>-<asset_id>-<uuid>` (for example `UBEL-sca-…` for *Scan Project*), the same in the report's JSON, HTML, SBOM and SARIF — see [Report ID](../sca/README.md#report-id-report_id).
 
-**Scan Host Platform** scans your home directory, so its asset id is the one in `~/.ubel/ubel_asset.json`. Separately, **every** report carries a `machine_id` (shown as **Machine ID** in the HTML) from `~/.ubel/ubel_machine.json` — the id of this machine, an id only, no name; the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use it as their asset id. If a `ubel_asset.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/<mode>/` and the latest zip into `~/.ubel/latest_reports/<mode>/`. Zips from earlier versions stay where they are, directly in that folder. If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
+**Scan Host Platform** scans your home directory, so its asset id is the one in `~/.ubel/ubel_asset.json`. Separately, **every** report carries a `machine_id` (shown as **Machine ID** in the HTML) from `~/.ubel/ubel_machine.json` — the id of this machine, an id only, no name; the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use it as their asset id. If a `ubel_asset.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/` and the latest zip into `~/.ubel/latest_reports/`. Zips from earlier versions stay where they are (`~/.ubel/history/<mode>/<asset_id>/`). If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
 
 #### Latest zip per scan type (`latest_reports`)
 
-The newest scan of each tag is also kept in a folder of its own, apart from the history — `~/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip`, the same `<mode>/<asset_id>` layout as `history/`:
+The newest scan of each tag is also kept in a folder of its own, apart from the history — `~/.ubel/latest_reports/<asset_id>/latest.<tag>.zip` (one folder per asset, no mode folder):
 
 | Command | Latest zip |
 |---|---|
-| Scan Project | `~/.ubel/latest_reports/sca/<asset_id>/latest.sca.zip` |
-| Scan VS Code Extensions | `~/.ubel/latest_reports/sca/<asset_id>/latest.<editor>_sca.zip` (`vscode_sca`, `cursor_sca` or `vscodium_sca`) |
-| Scan Host Platform (Windows / Linux) | `~/.ubel/latest_reports/sca/<asset_id>/latest.os_sca.zip` |
-| Scan project for Exposed Secrets | `~/.ubel/latest_reports/secrets/<asset_id>/latest.secrets.zip` |
-| Scan project for License Compliance | `~/.ubel/latest_reports/licenses/<asset_id>/latest.licenses.zip` |
+| Scan Project | `~/.ubel/latest_reports/<asset_id>/latest.sca.zip` |
+| Scan VS Code Extensions | `~/.ubel/latest_reports/<asset_id>/latest.<editor>_sca.zip` (`vscode_sca`, `cursor_sca` or `vscodium_sca`) |
+| Scan Host Platform (Windows / Linux) | `~/.ubel/latest_reports/<asset_id>/latest.os_sca.zip` |
+| Scan project for Exposed Secrets | `~/.ubel/latest_reports/<asset_id>/latest.secrets.zip` |
+| Scan project for License Compliance | `~/.ubel/latest_reports/<asset_id>/latest.licenses.zip` |
 
 It is a copy of the zip the scan just wrote and has the same contents (`report.<tag>.json`, `.html`, and `.cdx.json` / `.sarif.json` where applicable). It is refreshed after every scan, so a script can read the newest scan of a project from one fixed path without sorting timestamps, while `history/` holds only timestamped zips and is never touched by this. The `asset_id` is the one in that folder's `ubel_asset.json`. The CLI uses the same folders, so the extension and the CLI share one history and one `latest_reports` tree.
 

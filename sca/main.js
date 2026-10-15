@@ -1281,7 +1281,7 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
         full_stack:   true,
         scan_scope:   "container-image",
         // The pipeline below always runs as `health`; the CLI mode only picks the
-        // report tag (sca_docker for health, firewall_docker for check/install).
+        // report tag (docker_sca for health, docker_firewall for check/install).
         docker_mode:  mode,
         // Return the report on an ALLOW instead of process.exit(0), so the
         // finally block below (cleanup / image removal) always runs.

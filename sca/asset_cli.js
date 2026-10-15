@@ -60,7 +60,7 @@ function setHelp(cli, cmd, machineOnly, getCmd) {
   return `Usage: ${cli} ${cmd} <asset-id> ${machineOnly ? "" : "[folder] "}[options]
 
 Connect ${machineOnly ? "this machine" : "a folder"} to an existing UBEL ${machineOnly ? "machine" : "asset"} id, so its scans are filed with the
-${machineOnly ? "machine" : "asset"}'s earlier history ($HOME/.ubel/history/<mode>/<asset-id>/) instead of
+${machineOnly ? "machine" : "asset"}'s earlier history ($HOME/.ubel/history/<asset-id>/) instead of
 starting a new ${machineOnly ? "machine id" : "asset"}. Writes ${machineOnly ? "$HOME/.ubel/ubel_machine.json" : "<folder>/.ubel/ubel_asset.json"}.
 
 Arguments:

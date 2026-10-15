@@ -14,10 +14,11 @@
 //     agent               .agent_sca        (ubel-agent)
 //     editor extensions   .<editor>_sca     (vscode_sca, cursor_sca, vscodium_sca — the scan
 //                                            of an editor's extensions directory)
-//     docker health       .sca_docker       (ubel-docker health)
+//     docker health       .docker_sca       (ubel-docker health)
 //     os health           .os_sca           (host OS scan on Windows / Linux; no SARIF)
-//     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …;
-//                                             docker check / install → .firewall_docker)
+//     firewall / os fw    .<engine>_firewall (check / install — npm_firewall, pip_firewall,
+//                                             apt_firewall, …; docker check / install →
+//                                             .docker_firewall)
 //     licenses            .licenses
 //     secrets             .secrets
 //     sast                .sast             (malware scanner: .malware)
@@ -28,7 +29,8 @@
 //     latest.sca.json   latest.sca.html   latest.sca.cdx.json   latest.sca.sarif.json
 //
 // History: every timestamped zip, from every scanner and every asset, is
-// kept in one place — $HOME/.ubel/history/<mode>/ — where <mode> is
+// kept in one place — $HOME/.ubel/history/<asset_id>/ — no mode folder, the tag in the
+// file name says what produced it. <mode> (used by latest_reports/ and asset_type) is
 //
 //     sca  firewall  os  licenses  secrets  sast  malware  cloud  easm  host  domain  url
 //
@@ -37,8 +39,8 @@
 // per-asset under <asset folder>/.ubel/reports/.
 //
 // The newest zip of each tag is also kept, apart from the history, in
-// $HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip — the same
-// <mode>/<asset_id> layout as history, in a folder of its own. It is
+// $HOME/.ubel/latest_reports/<asset_id>/latest.<tag>.zip — one folder per asset,
+// no mode folder, apart from the history. It is
 // refreshed after every scan, so it always holds the most recent scan of that
 // tag for the asset, and history/ holds nothing but timestamped zips.
 //
@@ -51,7 +53,7 @@
 // "created_at": "<iso>" }), created when a CLI starts (every ubel-* CLI creates it if it
 // doesn't exist; `ubel-* init` does so explicitly and prints it) — see provisionAsset(); the id never changes. An id is
 // a random UUID v4 without hyphens (32 hex characters). Zips are filed under the asset's
-// id — history/<mode>/<asset_id>/ — so assets sharing one history folder stay
+// id — history/<asset_id>/ — so assets sharing one history folder stay
 // apart, and the id, name and type are written into each report's own metadata
 // (and into the SBOM / SARIF output) so a zip that is moved or renamed still says
 // where it came from. Every scanner gets one — SCA, SAST/malware, secrets,
@@ -74,8 +76,8 @@
 //
 // Where the tag is used:
 //   • "latest" copies   .ubel/reports/latest.<tag>.<ext>
-//   • timestamped zip   $HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip
-//   • latest zip        $HOME/.ubel/latest_reports/<mode>/<asset_id>/latest.<tag>.zip
+//   • timestamped zip   $HOME/.ubel/history/<asset_id>/<timestamp>.<tag>.zip
+//   • latest zip        $HOME/.ubel/latest_reports/<asset_id>/latest.<tag>.zip
 //   • entries in a zip  report.<tag>.<ext>  (always "report", never the
 //                       timestamp or "latest")
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,7 +114,7 @@ export function sanitizeReportTag(tag) {
 /**
  * <stem>.<tag>.<ext> — `ext` may be compound ("sarif.json", "cdx.json").
  * @param {string} stem  "latest", "report", or a timestamp
- * @param {string} tag   e.g. "sca", "firewall_npm", "cloud"
+ * @param {string} tag   e.g. "sca", "npm_firewall", "cloud"
  * @param {string} ext   extension without the leading dot
  */
 export function reportFileName(stem, tag, ext) {
@@ -124,12 +126,13 @@ export const EDITOR_KINDS = Object.freeze(["vscode", "cursor", "vscodium"]);
 
 /**
  * Report tag of an editor-extensions scan: "<editor>_sca". An unknown / missing editor
- * falls back to "vscode", like the engine's editor_kind default.
+ * falls back to "vscode", like the engine's editor_kind default (so a tag can never
+ * collide with os_sca / agent_sca / docker_sca).
  * @param {string} [editorKind]  "vscode" | "cursor" | "vscodium"
  */
 export function editorScaTag(editorKind) {
-  const kind = String(editorKind ?? "vscode").toLowerCase().replace(/-/g, "_").replace(/[^a-z0-9_]/g, "") || "vscode";
-  return sanitizeReportTag(`${kind}_sca`);
+  const kind = String(editorKind ?? "").toLowerCase();
+  return `${EDITOR_KINDS.includes(kind) ? kind : "vscode"}_sca`;
 }
 
 /** Report tag of an agent scan (ubel-agent), whatever the host OS. */
@@ -137,7 +140,7 @@ export const AGENT_SCA_TAG = "agent_sca";
 
 /** True for the report tags of editor-extension scans (vscode_sca, cursor_sca, vscodium_sca, …). */
 export function isEditorScaTag(tag) {
-  return typeof tag === "string" && /^[a-z0-9]+_sca$/.test(tag) && tag !== "os_sca" && tag !== AGENT_SCA_TAG;
+  return typeof tag === "string" && EDITOR_KINDS.some((k) => tag === `${k}_sca`);
 }
 
 /**
@@ -147,9 +150,9 @@ export function isEditorScaTag(tag) {
  *   scan_scope "secrets"          → secrets
  *   scan_scope "agent"            → agent_sca
  *   scan_scope "editor_extension" → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca)
- *   scan_scope "container-image"  → firewall_docker (docker check / install)
- *                                   sca_docker      (docker health)
- *   check / install (firewall)    → firewall_<engine>   (npm, pnpm, pip, apt, dnf, …)
+ *   scan_scope "container-image"  → docker_firewall (docker check / install)
+ *                                   docker_sca      (docker health)
+ *   check / install (firewall)    → <engine>_firewall   (npm_firewall, pip_firewall, apt_firewall, …)
  *   health with scan_os, host is Windows or Linux → os_sca   (no SARIF)
  *   anything else (health)        → sca
  *
@@ -166,10 +169,10 @@ export function scaReportTag({ checkMode, engine, scanScope, dockerMode, scanOs,
   // Scan of an editor's extensions directory → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca).
   if (scanScope === "editor_extension") return editorScaTag(editorKind);
   if (scanScope === "container-image") {
-    return dockerMode === "check" || dockerMode === "install" ? "firewall_docker" : "sca_docker";
+    return dockerMode === "check" || dockerMode === "install" ? "docker_firewall" : "docker_sca";
   }
   if (checkMode === "check" || checkMode === "install") {
-    return sanitizeReportTag(`firewall_${engine || "unknown"}`);
+    return sanitizeReportTag(`${engine || "unknown"}_firewall`);
   }
   // Host OS health scan (scan_os) on Windows or Linux → its own tag, and no SARIF (see engine.js).
   if (scanOs && (platform === "win32" || platform === "linux")) return "os_sca";
@@ -343,7 +346,7 @@ const writeAtomic = atomicWriteFile;
  *
  * Never throws — a scan must not fail because this file can't be written
  * (read-only folder, …). On failure it warns on stderr and returns null; the
- * history zip then lands directly in history/<mode>/ without an asset folder.
+ * history zip then lands directly in history/ without an asset folder.
  *
  * @param {string} ubelDir  the .ubel folder (not the folder root)
  * @param {typeof ASSET_SPEC} [spec]  ASSET_SPEC (ubel_asset.json, default) or MACHINE_IDENTITY (ubel_machine.json)
@@ -482,26 +485,31 @@ export function readAsset(ubelDir, spec = ASSET_SPEC) {
 }
 
 /**
- * History modes under $HOME/.ubel/history that already hold zips for an asset
- * id (i.e. the id was used by earlier scans on this machine). Used to tell the
- * user whether an id they are linking a folder to is one UBEL has seen here.
+ * Tags of the zips in $HOME/.ubel/history/<asset_id>/ — i.e. what earlier scans on this
+ * machine filed for an asset id. Used to tell the user whether an id they are linking a
+ * folder to is one UBEL has seen here. (Zips filed by earlier versions under
+ * history/<mode>/<asset_id>/ are counted too.)
  *
  * @param {string} assetId
- * @returns {{mode: string, zips: number}[]}
+ * @returns {{mode: string, zips: number}[]}  `mode` is the zip's file tag (sca, cursor_sca, npm_firewall, …)
  */
 export function historyForAsset(assetId) {
   const id = String(assetId).toLowerCase();
-  const out = [];
-  let modes = [];
-  try { modes = fs.readdirSync(historyRoot(), { withFileTypes: true }); } catch { return out; }
-  for (const m of modes) {
-    if (!m.isDirectory()) continue;
-    try {
-      const zips = fs.readdirSync(path.join(historyRoot(), m.name, id)).filter((f) => f.endsWith(".zip")).length;
-      if (zips > 0) out.push({ mode: m.name, zips });
-    } catch { /* no folder for this id under this mode */ }
-  }
-  return out;
+  const counts = new Map();
+  const count = (dir) => {
+    let files = [];
+    try { files = fs.readdirSync(dir); } catch { return; }
+    for (const f of files) {
+      if (!f.endsWith(".zip")) continue;
+      const tag = f.split(".")[1] || "zip";           // <timestamp>.<tag>.zip
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  };
+  count(path.join(historyRoot(), id));
+  let legacy = [];
+  try { legacy = fs.readdirSync(historyRoot(), { withFileTypes: true }); } catch { /* no history yet */ }
+  for (const m of legacy) if (m.isDirectory() && m.name !== id) count(path.join(historyRoot(), m.name, id));
+  return [...counts].map(([mode, zips]) => ({ mode, zips }));
 }
 
 /**
@@ -580,7 +588,7 @@ export function getRuntimeAssetId() {
 //
 //   UBEL-<tag>-<asset_id>-<report_uuid>
 //
-//   <tag>          the report's file tag (sca, firewall_npm, licenses, secrets, sast,
+//   <tag>          the report's file tag (sca, npm_firewall, licenses, secrets, sast,
 //                  malware, cloud, url, domain, host, easm) — see reportFileName()
 //   <asset_id>     the scan's asset id, embedded whole (32 hex, no hyphens); 32 zeros
 //                  when the scan has no asset id
@@ -721,22 +729,22 @@ export function assetFor(mode, ubelDir, scanScope, { machineTag = false } = {}) 
 
 /**
  * Path for a new history zip:
- *   $HOME/.ubel/history/<mode>/<asset_id>/<timestamp>.<tag>.zip
- * (history/<mode>/<timestamp>.<tag>.zip when no asset id is available).
+ *   $HOME/.ubel/history/<asset_id>/<timestamp>.<tag>.zip
+ * (history/<timestamp>.<tag>.zip when no asset id is available).
+ * There is no mode folder: the tag in the file name already says what produced the zip.
  * Creates the folders. If two runs of the same asset land in the same second
  * the later one gets "<timestamp>_2.<tag>.zip" rather than overwriting the first.
  *
- * @param {string} mode        history sub-folder, e.g. "sca", "os", "url"
  * @param {string} timestamp   from reportTimestamp()
- * @param {string} tag         file-name tag, e.g. "sca", "firewall_apt", "url"
+ * @param {string} tag         file-name tag, e.g. "sca", "apt_firewall", "url"
  * @param {string|null} [assetId]  asset_id from assetFor(); omitted/null = no asset folder
  * @returns {string}
  */
-export function historyZipPath(mode, timestamp, tag, assetId = null) {
+export function historyZipPath(timestamp, tag, assetId = null) {
   if (assetId != null && !ASSET_ID_RE.test(assetId)) {
     throw new Error(`invalid asset id: ${assetId}`);
   }
-  let dir = path.join(historyRoot(), sanitizeReportTag(mode));
+  let dir = historyRoot();
   if (assetId) dir = path.join(dir, assetId);
   fs.mkdirSync(dir, { recursive: true });
   let candidate = path.join(dir, reportFileName(timestamp, tag, "zip"));
@@ -746,7 +754,7 @@ export function historyZipPath(mode, timestamp, tag, assetId = null) {
   return candidate;
 }
 
-/** $HOME/.ubel/latest_reports — the newest zip of every tag, per mode and asset. */
+/** $HOME/.ubel/latest_reports — the newest zip of every tag, per asset. */
 export function latestReportsRoot() {
   return path.join(os.homedir(), ".ubel", "latest_reports");
 }
@@ -754,16 +762,15 @@ export function latestReportsRoot() {
 /**
  * Keep the newest scan of a tag in latest_reports/, apart from the history:
  *
- *   history/<mode>/<asset_id>/<timestamp>.<tag>.zip   (just written)
- *   latest_reports/<mode>/<asset_id>/latest.<tag>.zip (this copy)
+ *   history/<asset_id>/<timestamp>.<tag>.zip          (just written)
+ *   latest_reports/<asset_id>/latest.<tag>.zip        (this copy)
  *
- * The <mode>/<asset_id> part is taken from where the history zip was filed,
- * so the two trees always line up (and a zip filed without a asset id lands
- * in latest_reports/<mode>/). The copy goes to a temp file first and is renamed
- * over the old one, so a reader never sees a half-written latest zip and a
- * failed copy leaves the previous latest in place. Best effort: a scan must not
- * fail because this convenience copy couldn't be written, so errors are warned
- * about, not thrown.
+ * No mode folder, like history/. <asset_id> is taken from where the history zip was
+ * filed (a zip filed without an asset id lands in latest_reports/ itself). The copy
+ * goes to a temp file first and is renamed over the old one, so a reader never sees a
+ * half-written latest zip and a failed copy leaves the previous latest in place. Best
+ * effort: a scan must not fail because this convenience copy couldn't be written, so
+ * errors are warned about, not thrown.
  *
  * Call it after the timestamped zip has been written.
  *

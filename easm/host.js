@@ -222,7 +222,7 @@ Asset option (any command; the id is 32 hex characters):
                                           reports and the history zip; nothing is saved to disk
 
 Every run writes a timestamped <ts>.host.zip bundle (report.host.json +
-report.host.html inside) under $HOME/.ubel/history/host/, plus
+report.host.html inside) under $HOME/.ubel/history/<asset_id>/, plus
 fixed, unzipped "latest" copies at .ubel/reports/latest.host.json and
 latest.host.html — kept separate from ubel-url's and ubel-domain's own reports so one
 never overwrites another's latest pointer. Both include a plain-language

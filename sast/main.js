@@ -201,10 +201,10 @@ async function writeAnalyzeReports(results, opts) {
   const latestDir = path.join(workingDir, '.ubel', 'reports');
   fs.mkdirSync(latestDir, { recursive: true });
 
-  // <timestamp>.sast.zip (in $HOME/.ubel/history/sast/), latest.sast.<ext>, and report.sast.<ext> inside the zip.
+  // <timestamp>.sast.zip (in $HOME/.ubel/history/<asset_id>/), latest.sast.<ext>, and report.sast.<ext> inside the zip.
   const tag     = 'sast';
   const asset   = assetFor('sast', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('sast', ts, tag, asset.asset_id);
+  const zipPath = historyZipPath(ts, tag, asset.asset_id);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
@@ -393,10 +393,10 @@ async function writeMalwareReports(results, opts) {
   const latestDir = path.join(workingDir, '.ubel', 'reports');
   fs.mkdirSync(latestDir, { recursive: true });
 
-  // <timestamp>.malware.zip (in $HOME/.ubel/history/malware/), latest.malware.<ext>, and report.malware.<ext> inside the zip.
+  // <timestamp>.malware.zip (in $HOME/.ubel/history/<asset_id>/), latest.malware.<ext>, and report.malware.<ext> inside the zip.
   const tag     = 'malware';
   const asset   = assetFor('malware', path.join(workingDir, '.ubel'));
-  const zipPath = historyZipPath('malware', ts, tag, asset.asset_id);
+  const zipPath = historyZipPath(ts, tag, asset.asset_id);
 
   const latestJson  = path.join(latestDir, reportFileName('latest', tag, 'json'));
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));

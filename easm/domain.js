@@ -148,7 +148,7 @@ Asset option (any command; the id is 32 hex characters):
                                             reports and the history zip; nothing is saved to disk
 
 Every run writes a timestamped <ts>.domain.zip bundle (report.domain.json +
-report.domain.html inside) under $HOME/.ubel/history/domain/,
+report.domain.html inside) under $HOME/.ubel/history/<asset_id>/,
 plus fixed, unzipped "latest" copies at .ubel/reports/latest.domain.json and
 latest.domain.html — same bundling flow the SAST/malware scanners use. These are kept
 separate from ubel-url's own easm_url reports so a domain-wide sweep never

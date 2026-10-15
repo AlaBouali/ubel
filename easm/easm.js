@@ -288,7 +288,7 @@ Asset option (any command; the id is 32 hex characters):
                                           reports and the history zip; nothing is saved to disk
 
 Every run writes a timestamped <ts>.easm.zip bundle (report.easm.json +
-report.easm.html inside) under $HOME/.ubel/history/easm/, plus
+report.easm.html inside) under $HOME/.ubel/history/<asset_id>/, plus
 fixed, unzipped "latest" copies at .ubel/reports/latest.easm.json and
 latest.easm.html — kept separate from ubel-url's, ubel-domain's, and ubel-host's own
 reports so none of the four ever overwrites another's latest pointer. Both

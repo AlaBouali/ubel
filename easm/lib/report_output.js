@@ -130,7 +130,7 @@ export async function collectScanMetadata(opts = {}) {
  * scanners use (see writeAnalyzeReports in sast/main.js):
  *
  *   - the timestamped per-run copies are bundled into ONE .zip under
- *     $HOME/.ubel/history/<mode>/ (mode = url | domain | host | easm)
+ *     $HOME/.ubel/history/<asset_id>/
  *     rather than written out as loose files, to keep file count and
  *     storage down as runs accumulate
  *   - the always-current "latest" copies under .ubel/reports/ stay as
@@ -149,7 +149,7 @@ export async function collectScanMetadata(opts = {}) {
  *   {reportType: "easm-url", cliLabel: "[ubel-url]"} or
  *   {reportType: "easm-domain", cliLabel: "[ubel-domain]"}. The mode is
  *   reportType without its "easm-" prefix ("easm-full" -> "easm"), so these
- *   write to $HOME/.ubel/history/url/<timestamp>.url.zip and
+ *   write to $HOME/.ubel/history/<asset_id>/<timestamp>.url.zip and
  *   <project>/.ubel/reports/latest.url.* (and domain, host, easm for the
  *   other entry points).
  */
@@ -166,11 +166,11 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
 
   // Tag = the CLI's own mode: url | domain | host | easm
   // ("easm_url" -> "url", "easm_full" -> "easm"). It names the history folder
-  // and the files: $HOME/.ubel/history/<tag>/<timestamp>.<tag>.zip,
+  // and the files: $HOME/.ubel/history/<asset_id>/<timestamp>.<tag>.zip,
   // latest.<tag>.<ext>, and report.<tag>.<ext> inside the zip.
   const tag     = reportType === "easm_full" ? "easm" : reportType.replace(/^easm_/, "");
   const asset   = assetFor(tag, path.join(workingDir, ".ubel"));
-  const zipPath = historyZipPath(tag, ts, tag, asset.asset_id);
+  const zipPath = historyZipPath(ts, tag, asset.asset_id);
 
   // Identity goes into the report itself (JSON + HTML) — on a copy, so the
   // caller's payload object is left as it was.

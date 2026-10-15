@@ -112,7 +112,7 @@ Asset option (any command; the id is 32 hex characters):
                                          reports and the history zip; nothing is saved to disk
 
 Every run writes a timestamped <ts>.url.zip bundle (report.url.json +
-report.url.html inside) under $HOME/.ubel/history/url/,
+report.url.html inside) under $HOME/.ubel/history/<asset_id>/,
 plus fixed, unzipped "latest" copies at .ubel/reports/latest.url.json and
 .ubel/reports/latest.url.html — same bundling flow the SAST/malware
 scanners use. JSON and HTML are the only output formats — no SBOM, no SARIF
