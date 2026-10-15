@@ -1329,6 +1329,7 @@ export class SarifBuilder {
       asset_id:   si.asset_id   ?? null,
       asset_name: si.asset_name ?? null,
       asset_type: si.asset_type ?? null,
+      machine_id:   si.machine_id   ?? null,
     };
   }
 

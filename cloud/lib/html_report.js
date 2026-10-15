@@ -104,6 +104,7 @@ function buildReportPayload(reporter, meta = {}) {
     asset_id: meta.asset_id || null,
     asset_name: meta.asset_name || null,
     asset_type: meta.asset_type || null,
+    machine_id: meta.machine_id || null,
     providers: meta.providers || [],
     regions: meta.regions || {},
     provider_status: meta.provider_status || [],
@@ -403,6 +404,7 @@ async function generateHtmlReport(reportPayload) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset</span><span class="mono text-xs" id="sys-asset">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset ID</span><span class="mono text-[10px] break-all text-right" id="sys-asset-id">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset type</span><span class="mono text-xs" id="sys-asset-type">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Machine ID</span><span class="mono text-xs break-all text-right" id="sys-machine-id">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Generated at</span><span class="mono text-xs" id="sys-generated">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Providers scanned</span><span class="mono text-xs" id="sys-providers">—</span></div>
             <div class="flex justify-between"><span class="text-neutral-500 text-xs">Minimum severity filter</span><span class="mono text-xs" id="sys-filter">—</span></div>
@@ -1194,6 +1196,7 @@ function renderScanInfo() {
   document.getElementById('sys-asset').textContent      = reportData.asset_name || '—';
   document.getElementById('sys-asset-id').textContent   = reportData.asset_id || '—';
   document.getElementById('sys-asset-type').textContent = reportData.asset_type || '—';
+  document.getElementById('sys-machine-id').textContent = reportData.machine_id || '—';
   document.getElementById('sys-generated').textContent   = reportData.generated_at;
   document.getElementById('sys-providers').textContent   = (reportData.providers || []).join(', ') || '—';
 

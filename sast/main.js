@@ -215,6 +215,7 @@ async function writeAnalyzeReports(results, opts) {
   meta.asset_id     = asset.asset_id;
   meta.asset_name   = asset.asset_name;
   meta.asset_type   = asset.asset_type;
+  meta.machine_id   = asset.machine_id;
   meta.scan_type    = 'analyze';
   meta.scan_options = scanOptionsFor(opts, 'analyze', results);
   meta.scan_stats   = scanStatsFor(results);
@@ -406,6 +407,7 @@ async function writeMalwareReports(results, opts) {
   meta.asset_id     = asset.asset_id;
   meta.asset_name   = asset.asset_name;
   meta.asset_type   = asset.asset_type;
+  meta.machine_id   = asset.machine_id;
   meta.scan_type = 'malware';
   meta.scan_options = scanOptionsFor(opts, 'malware', results);
   meta.scan_stats   = scanStatsFor(results);

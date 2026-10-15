@@ -220,7 +220,8 @@ function activate(context) {
     const extensionsDir = editor.extensionsDir;
 
     const reportUri = vscode.Uri.file(
-      path.join(extensionsDir, ".ubel", "reports", "latest.sca.html")
+      // Editor-extensions scans are tagged <editor>_sca: vscode_sca, cursor_sca, vscodium_sca.
+      path.join(extensionsDir, ".ubel", "reports", `latest.${editor.kind}_sca.html`)
     );
 
     try {

@@ -23,7 +23,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
+- Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `sca_docker` for `health` scans, `os_sca` for host-OS health scans, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `firewall_<engine>` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `sca_docker` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -592,7 +592,7 @@ If the policy blocks, installation is aborted and the process exits `1`. For npm
 
 ### `init`
 
-Every `init` creates the folder's [asset id](#asset-id-ubel_assetjson) (`.ubel/ubel_asset.json`; `$HOME/.ubel/ubel_asset.json` for `ubel-apt`/`ubel-dnf`/`ubel-yum`) if it doesn't exist, and prints it — `[+] Asset id created: <id>` the first time, `Asset id already exists: <id>` after that (the id never changes), or the `--asset-id` value with nothing written. It exits `1` if the file can't be written. Beyond that, `init` is a no-op on npm/pnpm/bun/yarn/composer/cargo (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`; for composer, a minimal `composer.json` is likewise created lazily on first `check`/`install` if one doesn't already exist — see [Firewall Mechanics § composer](#composer)). On `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a stdlib `venv` at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those five binaries you run**, including the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager. `ubel-uv init` is the one exception: it provisions the venv via uv's own `uv init --bare` + `uv venv` instead, so the result is a project uv itself recognizes (`pyproject.toml` present), not just a stdlib interpreter uv is pointed at via `--python`; `--bare` skips uv's normal `README.md`/`main.py`/`.python-version`/`git init` scaffolding, since this is very often being run straight in the caller's real project root, not a fresh scratch directory. Both steps are skipped if already done (existing `pyproject.toml`, existing venv), so it's safe to call repeatedly. `ubel-pip`/`ubel-uv`/`ubel-pipx` all still run their respective provisioning implicitly on first `check`/`install` if the venv doesn't exist yet, so calling `init` explicitly is only needed to provision ahead of time or at a non-default path.
+Every `init` creates the folder's [asset id](#asset-id-ubel_assetjson) (`.ubel/ubel_asset.json`; `$HOME/.ubel/ubel_machine.json` for `ubel-apt`/`ubel-dnf`/`ubel-yum`) if it doesn't exist, and prints it — `[+] Asset id created: <id>` the first time, `Asset id already exists: <id>` after that (the id never changes), or the `--asset-id` value with nothing written. It exits `1` if the file can't be written. Beyond that, `init` is a no-op on npm/pnpm/bun/yarn/composer/cargo (nothing to provision — a lockfile is created lazily by the package manager itself on first `check`/`install`; for composer, a minimal `composer.json` is likewise created lazily on first `check`/`install` if one doesn't already exist — see [Firewall Mechanics § composer](#composer)). On `ubel-pip`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, it provisions a stdlib `venv` at `<projectRoot>/venv` (or wherever `venvDir` is set programmatically) and exits — this happens **regardless of which of those five binaries you run**, including the Linux ones, since venv provisioning is shared, generic setup rather than something specific to any one package manager. `ubel-uv init` is the one exception: it provisions the venv via uv's own `uv init --bare` + `uv venv` instead, so the result is a project uv itself recognizes (`pyproject.toml` present), not just a stdlib interpreter uv is pointed at via `--python`; `--bare` skips uv's normal `README.md`/`main.py`/`.python-version`/`git init` scaffolding, since this is very often being run straight in the caller's real project root, not a fresh scratch directory. Both steps are skipped if already done (existing `pyproject.toml`, existing venv), so it's safe to call repeatedly. `ubel-pip`/`ubel-uv`/`ubel-pipx` all still run their respective provisioning implicitly on first `check`/`install` if the venv doesn't exist yet, so calling `init` explicitly is only needed to provision ahead of time or at a non-default path.
 
 ```bash
 ubel-pip init
@@ -1410,6 +1410,7 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 |---|---|---|---|
 | SCA — `health` (`ubel-npm health`, `ubel-pip health`, …) | `sca` | `latest.sca.json` | `2026_10_10__12_30_05.sca.zip` |
 | Host OS — `health` with `scan_os` on Linux or Windows (`ubel-platform`, `ubel-agent`, `ubel-cicd`) | `os_sca` | `latest.os_sca.json` | `2026_10_10__12_30_05.os_sca.zip` |
+| Editor extensions — the VS Code extension's *Scan VS Code Extensions* (one tag per editor) | `vscode_sca`, `cursor_sca`, `vscodium_sca` | `latest.cursor_sca.json` | `2026_10_10__12_30_05.cursor_sca.zip` |
 | Docker — `ubel-docker health` | `sca_docker` | `latest.sca_docker.json` | `2026_10_10__12_30_05.sca_docker.zip` |
 | Firewall — `check` / `install` (SCA, or OS packages for apt/dnf/yum) | `firewall_<engine>` | `latest.firewall_npm.html`, `latest.firewall_apt.json` | `2026_10_10__12_30_05.firewall_pip.zip` |
 | Docker firewall — `ubel-docker check` / `install` | `firewall_docker` | `latest.firewall_docker.json` | `2026_10_10__12_30_05.firewall_docker.zip` |
@@ -1422,12 +1423,22 @@ Which files each tag gets:
 
 | Tag | JSON | HTML | SBOM (`.cdx.json`) | SARIF (`.sarif.json`) |
 |---|:---:|:---:|:---:|:---:|
-| `sca`, `sca_docker` | ✅ | ✅ | ✅ | ✅ |
+| `sca`, `sca_docker`, `<editor>_sca` | ✅ | ✅ | ✅ | ✅ |
 | `os_sca` | ✅ | ✅ | ✅ | ❌ |
 | `firewall_<engine>` (incl. `firewall_docker`) | ✅ | ✅ | ✅ | ❌ |
 | `licenses`, `secrets` | ✅ | ✅ | ❌ | ❌ |
 
-So the secrets and license findings carried in SBOM/SARIF (see [Secrets Detection](#secrets-detection) and [License Compliance](#license-compliance)) are those of a regular `sca` / `sca_docker` `health` scan; standalone `ubel-secrets` and `ubel-license` runs write JSON and HTML only. The History zip contains exactly the files its tag gets. `os_sca` is chosen from the platform the scan runs on (Linux or Windows); on any other platform the tag stays `sca`. A Docker image scan is never `os_sca` — it uses `sca_docker` / `firewall_docker`. The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+So the secrets and license findings carried in SBOM/SARIF (see [Secrets Detection](#secrets-detection) and [License Compliance](#license-compliance)) are those of a regular `sca` / `sca_docker` `health` scan; standalone `ubel-secrets` and `ubel-license` runs write JSON and HTML only. The History zip contains exactly the files its tag gets. `os_sca` is chosen from the platform the scan runs on (Linux or Windows); on any other platform the tag stays `sca`.
+
+A Docker image scan is never `os_sca` — it uses `sca_docker` / `firewall_docker`. The SAST/malware, EASM and cloud scanners use the same scheme with their own tags — see their READMEs.
+
+**Editor-extension tags (`<editor>_sca`)** — the VS Code extension's *Scan VS Code Extensions*:
+
+- `<editor>` is the editor that was scanned: `vscode`, `cursor` or `vscodium`.
+- Files and zips use the tag (`latest.cursor_sca.json`, `<timestamp>.cursor_sca.zip`); zips file under the `sca` history folder.
+- Each editor has its own asset id, because each has its own extensions folder (`~/.vscode`, `~/.cursor`, `~/.vscode-oss`); the asset is named `<editor>_extensions`.
+- They get JSON, HTML, SBOM and SARIF, like `sca`.
+
 
 ### History: `$HOME/.ubel/history/<mode>/`
 
@@ -1467,17 +1478,33 @@ Every `.ubel/` folder a UBEL CLI runs in holds a small `ubel_asset.json`:
 An **asset id is a random UUID v4 without hyphens** — 32 hex characters (case-insensitive; stored lowercase), the equivalent of Python's `uuid.uuid4().hex`. The hyphenated forms written by older versions (`<uuid>` and `<uuid>-<uuid>`) are still read, so existing files keep their id.
 
 - **Created on first use.** The first scan in a folder generates a random 32-hex id and a readable name; every later scan reads them back. The **id never changes**. Delete the file to start a fresh identity. It sits inside `.ubel/`, which UBEL already adds to `.gitignore` / `.dockerignore`, so it stays local by default. An existing file whose `asset_id` is not a valid `<uuid>` is replaced with a fresh one.
-- **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name; the machine tag is named after the host. Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
+- **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name (an editor's extensions folder is named `<editor>_extensions`). Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
 - **Files the history.** Zips go under `$HOME/.ubel/history/<mode>/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
-- **Written into every report.** The JSON report carries `asset_id`, `asset_name` and `asset_type` — and a per-report [`report_id`](#report-id-report_id) — (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
+- **Written into every report.** The JSON report carries `asset_id`, `asset_name`, `asset_type` and the scanning machine's [`machine_id`](#machine-id-ubel_machinejson) — and a per-report [`report_id`](#report-id-report_id) — (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
 - **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
 - **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
 - **Every CLI creates it if it doesn't exist, when it starts** — before any network call, install or LLM request, and for every mode, including ones that never write a report (`init`, `threshold`, `block-unknown`, `install-hook`, …) and `asset-id` itself. A new id is announced with one line on **stderr** (`[+] New asset id created: …`), so JSON on stdout stays clean; nothing is printed when it already existed. `--help` and `version` create nothing, and neither does a run with `--asset-id` (see below). `ubel-<cli> init` does the same explicitly and prints the id on stdout.
 - **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
-- **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no asset folder, so they use `$HOME/.ubel/ubel_asset.json` instead — a tag for *that machine*, shared by every OS scan on it (and by a host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*), and used as the `os/<asset_id>/` folder the same way.
+- **OS packages are the exception.** `ubel-apt`, `ubel-dnf` and `ubel-yum` have no asset folder, so they use `$HOME/.ubel/ubel_machine.json` instead — the id of *that machine*, shared by every OS scan on it, and used as the `os/<asset_id>/` folder the same way. See [Machine id](#machine-id-ubel_machinejson). (A host-platform scan of `$HOME`, such as the VS Code extension's *Scan Host Platform*, is a normal folder asset with its own `ubel_asset.json`.)
 - If the file can't be written (read-only folder), the scan still runs, a warning is printed, the report's `asset_id` / `asset_name` are `null`, and that zip is written straight into `history/<mode>/` without an asset folder.
 
 Zips written by earlier versions sit directly in `history/<mode>/` and are left where they are. A `ubel_project.json` left by an earlier version is no longer read: the next scan creates a `ubel_asset.json` with a new id.
+
+### Machine id: `ubel_machine.json`
+
+Every report also says **which machine produced it**. `$HOME/.ubel/ubel_machine.json` holds that id, created the first time any UBEL CLI runs:
+
+```json
+{ "machine_id": "3f6c2a9e1b7d4c589a426e0d8b5f7a13", "created_at": "2026-10-10T12:30:05.000Z" }
+```
+
+- **Id only — no name.** A random UUID v4 without hyphens (32 hex characters), never changed unless you run `set-machine-id`.
+- **Written into every report, of every scanner** (SCA, SAST/malware, cloud, EASM, licenses, secrets, docker): `machine_id` in the JSON (SCA: `scan_info`; SAST/malware: `meta`; cloud and EASM: top level), a `machine_id` property in the SBOM `metadata.properties` and the SARIF run `properties`, and *Machine ID* in the HTML scan-info panel. File names never contain it.
+- **Not the asset id.** The asset id says *what* was scanned, the machine id *where* the scan ran. Only `ubel-apt` / `ubel-dnf` / `ubel-yum` use the machine id as their asset id as well.
+- **Commands (every CLI):** `get-machine-id [--json]` prints it (creating it if missing); `set-machine-id <id>` links the machine to an existing id (e.g. a reinstalled machine); `asset-id --machine` / `set-asset-id --machine` do the same.
+- **Upgrading:** earlier versions kept the machine tag in `$HOME/.ubel/ubel_asset.json`. If there is no `ubel_machine.json` yet, its id is copied over once, so existing `history/os/<id>/` zips stay with the same machine.
+- If the file can't be written, the scan still runs and the reports' `machine_id` is `null`.
+
 
 #### Asset types: `asset_type`
 
@@ -1529,7 +1556,7 @@ UBEL-sca-3f6c2a9e1b7d4c589a426e0d8b5f7a13-bc7a66bc328541398ce34825a9bd2a16
 | Part | What it is |
 |---|---|
 | `UBEL` | fixed prefix |
-| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
+| `<tag>` | the report's [file tag](#file-naming-the-tag): `sca`, `sca_docker`, `os_sca`, `vscode_sca` / `cursor_sca` / `vscodium_sca`, `firewall_<engine>` (firewall `check` / `install`), `licenses`, `secrets`, `sast`, `malware`, `cloud`, or the EASM mode `url`, `domain`, `host`, `easm` (a hyphen in a tag is written `_`, as in file names) |
 | `<asset_id>` | the scan's [asset id](#asset-id-ubel_assetjson), embedded whole (32 hex). Every report of one asset has the same value, so you can group reports by asset. 32 zeros when the scan has no asset id |
 | `<report_uuid>` | a fresh random UUID (v4) without hyphens (32 hex), different for every report |
 
@@ -1570,7 +1597,7 @@ ubel-npm version                       # print the installed UBEL version (--jso
 
 Every CLI behaves the same (`ubel-sast asset-id`, `ubel-cloud set-asset-id <id>`, `ubel-url version`, …) because they all read and write the same `.ubel/ubel_asset.json`; the command is only handled when it is the **first** argument, so a scan of a folder literally named `version` is written `./version`.
 
-- **`ubel-apt` / `ubel-dnf` / `ubel-yum`** have no asset folder: their commands act on the machine tag, `$HOME/.ubel/ubel_asset.json`, directly (`ubel-apt asset-id`, `ubel-apt set-asset-id <id>`) and refuse a folder argument. Any other CLI can reach the machine tag with `--machine` (`ubel-npm asset-id --machine`; it can't be combined with a folder).
+- **`ubel-apt` / `ubel-dnf` / `ubel-yum`** have no asset folder: their commands act on the machine id, `$HOME/.ubel/ubel_machine.json`, directly (`ubel-apt asset-id`, `ubel-apt set-asset-id <id>`) and refuse a folder argument. Any other CLI can reach the machine id with `--machine` (or `get-machine-id` / `set-machine-id`) (`ubel-npm asset-id --machine`; it can't be combined with a folder).
 - **`ubel-docker`, `ubel-cloud` and the EASM CLIs** keep their id in the `.ubel/` of the directory you run them from (see above), so run the command there, or pass the folder.
 - **`set-asset-id`** only replaces the **id** (and the name with `--name`). `created_at`, the existing `asset_name` and any other field in the file are kept; a missing or corrupt file is recreated with the id and a derived name. It does not move or rewrite any history — new zips simply land in `history/<mode>/<asset_id>/` next to the old ones.
 - It checks `$HOME/.ubel/history/` for zips already filed under the id and lists the modes it finds. If there are none it still links the folder but prints a warning, since the usual cause is a mistyped id (or old history that lives on another machine).

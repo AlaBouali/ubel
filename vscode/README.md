@@ -119,15 +119,15 @@ Scans the npm packages bundled inside your installed VS Code / Cursor / VS Codiu
 **Report location**
 
 ```
-~/.vscode/extensions/.ubel/reports/latest.sca.*
+~/.vscode/extensions/.ubel/reports/latest.vscode_sca.*
 ```
 or
 ```
-~/.vscode-oss/extensions/.ubel/reports/latest.sca.*
+~/.vscode-oss/extensions/.ubel/reports/latest.vscodium_sca.*
 ```
 or
 ```
-~/.cursor/extensions/.ubel/reports/latest.sca.*
+~/.cursor/extensions/.ubel/reports/latest.cursor_sca.*
 ```
 
 ---
@@ -931,7 +931,8 @@ Every scan writes a self-contained interactive **HTML** report plus a machine-re
 
 | Command | `<tag>` | JSON | HTML | SBOM | SARIF |
 |---|---|---|---|---|---|
-| Scan Project / Scan VS Code Extensions | `sca` | ✅ | ✅ | ✅ | ✅ |
+| Scan Project | `sca` | ✅ | ✅ | ✅ | ✅ |
+| Scan VS Code Extensions | `vscode_sca` / `cursor_sca` / `vscodium_sca` (the editor you run it in) | ✅ | ✅ | ✅ | ✅ |
 | Scan Host Platform (Windows / Linux) | `os_sca` | ✅ | ✅ | ✅ | ❌ |
 | Scan project for Exposed Secrets | `secrets` | ✅ | ✅ | ❌ | ❌ |
 | Scan project for License Compliance | `licenses` | ✅ | ✅ | ❌ | ❌ |
@@ -952,14 +953,14 @@ For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html
 | Workspace | `<project-root>/.ubel/reports/latest.sca.*` |
 | Secrets-only scan | `<project-root>/.ubel/reports/latest.secrets.*` |
 | License-only scan | `<project-root>/.ubel/reports/latest.licenses.*` |
-| VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.sca.*` or `~/.cursor/extensions/.ubel/reports/latest.sca.*` |
-| Host platform | `~/.ubel/reports/latest.os_sca.*` on Windows / Linux, `latest.sca.*` elsewhere (machine tag: `~/.ubel/ubel_asset.json`) |
+| VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.vscode_sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.vscodium_sca.*` or `~/.cursor/extensions/.ubel/reports/latest.cursor_sca.*` |
+| Host platform | `~/.ubel/reports/latest.os_sca.*` on Windows / Linux, `latest.sca.*` elsewhere (every report also carries the machine id from `~/.ubel/ubel_machine.json`) |
 
 **Written atomically.** Every report file UBEL writes — the `latest.<tag>.*` files above, the timestamped history zips and the `latest_reports` copy below — is first written to a temporary file in the same folder and then renamed over the target in one step. A script, CI job, or browser tab that reads `latest.sca.json` / `latest.sca.html` while a scan is finishing therefore gets either the complete previous report or the complete new one, never a partial file. If a write fails, the temporary file is removed, the previous file is left as it was, and the scan reports the error (on Windows, replacing a report can fail while another program holds it open — close it and scan again).
 
 Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, and, where the scan type produces them, `report.<tag>.cdx.json` and `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
-- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform (the host-platform zips are named `<timestamp>.os_sca.zip` on Windows / Linux)
+- `~/.ubel/history/sca/` — Scan Project, Scan VS Code Extensions, Scan Host Platform (the host-platform zips are named `<timestamp>.os_sca.zip` on Windows / Linux, `<timestamp>.<editor>_sca.zip` for extensions)
 - `~/.ubel/history/secrets/` — Scan project for Exposed Secrets
 - `~/.ubel/history/licenses/` — Scan project for License Compliance
 
@@ -969,9 +970,9 @@ All projects and commands share this one folder, but each asset's zips live in a
 { "asset_id": "3f6c2a9e1b7d4c589a426e0d8b5f7a13", "asset_name": "shop", "created_at": "2026-10-10T12:30:05.000Z" }
 ```
 
-`asset_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Asset** and **Asset ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from. Each report also carries an **`asset_type`** (shown as **Asset type**), which depends on the command: *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* are `codebase`, *Scan VS Code Extensions* is `editor`, and *Scan Host Platform* is `machine` — see [Asset types](../sca/README.md#asset-types-asset_type) in the CLI docs. The type is not stored in `ubel_asset.json`; it is set per scan. Every report also has its own **`report_id`**, `UBEL-<tag>-<asset_id>-<uuid>` (for example `UBEL-sca-…` for *Scan Project*), the same in the report's JSON, HTML, SBOM and SARIF — see [Report ID](../sca/README.md#report-id-report_id).
+`asset_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Asset** and **Asset ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from. Each report also carries an **`asset_type`** (shown as **Asset type**), which depends on the command: *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* are `codebase`, *Scan VS Code Extensions* is `editor` (and gets one asset id per editor), and *Scan Host Platform* is `machine` — see [Asset types](../sca/README.md#asset-types-asset_type) in the CLI docs. The type is not stored in `ubel_asset.json`; it is set per scan. Every report also has its own **`report_id`**, `UBEL-<tag>-<asset_id>-<uuid>` (for example `UBEL-sca-…` for *Scan Project*), the same in the report's JSON, HTML, SBOM and SARIF — see [Report ID](../sca/README.md#report-id-report_id).
 
-**Scan Host Platform** scans your home directory, so it uses `~/.ubel/ubel_asset.json` — a tag for the machine itself (named after the host), the same one the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use. If a `ubel_asset.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/<mode>/` and the latest zip into `~/.ubel/latest_reports/<mode>/`. Zips from earlier versions stay where they are, directly in that folder. If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
+**Scan Host Platform** scans your home directory, so its asset id is the one in `~/.ubel/ubel_asset.json`. Separately, **every** report carries a `machine_id` (shown as **Machine ID** in the HTML) from `~/.ubel/ubel_machine.json` — the id of this machine, an id only, no name; the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use it as their asset id. If a `ubel_asset.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/<mode>/` and the latest zip into `~/.ubel/latest_reports/<mode>/`. Zips from earlier versions stay where they are, directly in that folder. If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
 
 #### Latest zip per scan type (`latest_reports`)
 
@@ -979,7 +980,8 @@ The newest scan of each tag is also kept in a folder of its own, apart from the 
 
 | Command | Latest zip |
 |---|---|
-| Scan Project / Scan VS Code Extensions | `~/.ubel/latest_reports/sca/<asset_id>/latest.sca.zip` |
+| Scan Project | `~/.ubel/latest_reports/sca/<asset_id>/latest.sca.zip` |
+| Scan VS Code Extensions | `~/.ubel/latest_reports/sca/<asset_id>/latest.<editor>_sca.zip` (`vscode_sca`, `cursor_sca` or `vscodium_sca`) |
 | Scan Host Platform (Windows / Linux) | `~/.ubel/latest_reports/sca/<asset_id>/latest.os_sca.zip` |
 | Scan project for Exposed Secrets | `~/.ubel/latest_reports/secrets/<asset_id>/latest.secrets.zip` |
 | Scan project for License Compliance | `~/.ubel/latest_reports/licenses/<asset_id>/latest.licenses.zip` |

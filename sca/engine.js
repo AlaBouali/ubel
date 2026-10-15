@@ -15,7 +15,7 @@ import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
 import { redactionEnabled, redactPaths } from "./redact.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset, isEditorScaTag } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -1475,6 +1475,7 @@ async function generateHTMLReport(data) {
             document.getElementById('scan-asset-name').textContent = scan.asset_name || 'N/A';
             document.getElementById('scan-asset-id').textContent = scan.asset_id || 'N/A';
             document.getElementById('scan-asset-type').textContent = scan.asset_type || 'N/A';
+            document.getElementById('scan-machine-id').textContent = scan.machine_id || 'N/A';
 
             document.getElementById('os-id').textContent = os.os_id;
             document.getElementById('os-name').textContent = os.os_name;
@@ -2227,6 +2228,10 @@ async function generateHTMLReport(data) {
         <div class="flex justify-between border-b border-neutral-800 pb-2">
           <span class="text-neutral-500 text-xs">Asset type</span>
           <span class="mono text-xs" id="scan-asset-type">...</span>
+        </div>
+        <div class="flex justify-between border-b border-neutral-800 pb-2">
+          <span class="text-neutral-500 text-xs">Machine ID</span>
+          <span class="mono text-xs break-all text-right" id="scan-machine-id">...</span>
         </div>
       </div>
     </div>
@@ -4069,7 +4074,8 @@ export class UbelEngineInstance {
   /**
    * The .ubel folder whose ubel_asset.json is this scan's asset id — the same folder
    * scan() files its report under (see assetFor() in scan()). docker passes its own
-   * (the scanned rootfs is throwaway); apt/dnf/yum resolve to $HOME/.ubel.
+   * (the scanned rootfs is throwaway); apt/dnf/yum resolve to $HOME/.ubel, where their
+   * asset id is the machine id in ubel_machine.json.
    */
   assetUbelDir(override = null) {
     return override || path.dirname(path.dirname(this.reportsLocation));
@@ -4085,7 +4091,8 @@ export class UbelEngineInstance {
    */
   provisionAsset(override = null, { announce = true } = {}) {
     const ubelDir = this.assetUbelDir(override);
-    const asset   = provisionAsset(ubelDir);
+    // apt / dnf / yum have no asset folder: the asset is the machine ($HOME/.ubel/ubel_machine.json).
+    const asset   = provisionAsset(ubelDir, { machineTag: this.systemType === "linux" });
     if (announce) announceNewAsset(asset, ubelDir);
     return asset ? { ...asset, ubelDir } : null;
   }
@@ -4789,13 +4796,14 @@ export class UbelEngineInstance {
       // into the SBOM and SARIF), and the same values file the zip.
       // ubelRoot is the .ubel folder this scan reports into (docker: the cwd's .ubel via
       // options.asset_ubel_dir — the scanned rootfs is throwaway). apt/dnf/yum ("os")
-      // use the machine tag in $HOME/.ubel/ubel_asset.json instead.
+      // use the machine id in $HOME/.ubel/ubel_machine.json instead. Every report also
+      // carries machine_id (the machine the scan ran on), whatever the asset is.
       const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
       const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
-      const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope);
+      const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope, { machineTag: this.systemType === "linux" });
       // The file tag (sca, firewall_npm, licenses, secrets) — also the <tag> of the report id,
       // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
-      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan });
+      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan, editorKind: options.editor_kind });
       const report_id   = generateReportId(reportTag, asset.asset_id);
 
       const finalJson = {
@@ -4805,7 +4813,7 @@ export class UbelEngineInstance {
         os_metadata:       { ...os_metadata_info },
         git_metadata:      git_metadata,
         tool_info:         { name: TOOL_NAME, version: TOOL_VERSION, license: TOOL_LICENSE },
-        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, report_id, asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, ...(runtime.editor ? { editor: runtime.editor } : {}) },
+        scan_info:         { type: this.checkMode, ecosystems: Array.from(ecosystems), engine: TOOL_NAME, scan_scope: options.scan_scope ?? "repository", vulnerability_scan: scan_vulns !== false, report_id, asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, machine_id: asset.machine_id, ...(runtime.editor ? { editor: runtime.editor } : {}) },
         stats,
         vulnerabilities_ids: Array.from(this.vulns_ids_found),
         components_ids:       inventory.map(c => c.id),
@@ -4954,6 +4962,7 @@ export class UbelEngineInstance {
       // Always points to the most recent scan OF THAT TYPE: the tag is
       //   sca            health scan
 //   os_sca         host OS health scan (Windows / Linux)
+      //   <editor>_sca   editor-extensions scan: vscode_sca, cursor_sca, vscodium_sca
       //   firewall_<engine>  firewall (check / install): firewall_npm, firewall_pip, firewall_apt, …
       //   licenses       ubel-license
       //   secrets        ubel-secrets
@@ -4976,11 +4985,12 @@ export class UbelEngineInstance {
       // SBOM: SCA scans only — the health scan ("sca") and firewall check/install runs
       // ("firewall_<engine>"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
       const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
-      // SARIF: the SCA health scan only (report tag "sca", or "sca_docker" for ubel-docker health).
+      // SARIF: the SCA health scan only (report tag "sca", "sca_docker" for ubel-docker health, or
+      // "<editor>_sca" — vscode_sca, cursor_sca, vscodium_sca — for an editor-extensions scan).
       // OS health scans (report tag "os_sca", Windows / Linux) get no SARIF.
       // Firewall check/install runs (incl. "firewall_docker") get the JSON, HTML and SBOM but no
       // SARIF; license and secrets scans get neither.
-      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker";
+      const writeSarif  = reportTag === "sca" || reportTag === "sca_docker" || isEditorScaTag(reportTag);
       const sbomString  = writeSbom
         ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
         : null;

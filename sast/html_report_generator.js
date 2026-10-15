@@ -1110,6 +1110,7 @@ function renderSystem() {
   s('sys-asset',  m.asset_name||'—');
   s('sys-asset-id', m.asset_id||'—');
   s('sys-asset-type', m.asset_type||'—');
+  s('sys-machine-id', m.machine_id||'—');
   s('sys-platform', m.platform||'—');
   s('sys-arch',     m.arch||'—');
   s('sys-node',     m.runtime_version||'—');
@@ -1427,6 +1428,7 @@ export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
       asset_id:        meta.asset_id        || null,
       asset_name:      meta.asset_name      || null,
       asset_type:      meta.asset_type      || null,
+      machine_id:      meta.machine_id      || null,
       platform:        process.platform,
       arch:            process.arch,
       runtime_version: process.version.replace(/^v/,''),
@@ -1761,6 +1763,7 @@ export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset</span><span class="mono text-xs" id="sys-asset">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset ID</span><span class="mono text-[10px] break-all text-right" id="sys-asset-id">—</span></div>
             <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Asset type</span><span class="mono text-xs" id="sys-asset-type">—</span></div>
+            <div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">Machine ID</span><span class="mono text-xs break-all text-right" id="sys-machine-id">—</span></div>
             <div class="flex flex-col gap-1"><span class="text-neutral-500 text-xs">Working Dir</span><span class="mono text-[10px] break-all bg-neutral-900 p-2 rounded" id="sys-dir">—</span></div>
           </div>
         </div>

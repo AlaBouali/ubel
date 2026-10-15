@@ -11,6 +11,8 @@
 // scanners never collide on disk and can be told apart without opening them:
 //
 //     sca                 .sca              (health scan of an asset: folder/host)
+//     editor extensions   .<editor>_sca     (vscode_sca, cursor_sca, vscodium_sca — the scan
+//                                            of an editor's extensions directory)
 //     docker health       .sca_docker       (ubel-docker health)
 //     os health           .os_sca           (host OS scan on Windows / Linux; no SARIF)
 //     firewall / os fw    .firewall_<engine> (check / install — npm, pip, apt, …;
@@ -53,8 +55,14 @@
 // (and into the SBOM / SARIF output) so a zip that is moved or renamed still says
 // where it came from. Every scanner gets one — SCA, SAST/malware, secrets,
 // licenses, docker, cloud, EASM. The one exception is the OS firewall
-// (apt/dnf/yum): it has no folder, so it uses $HOME/.ubel/ubel_asset.json as a tag
-// for the machine itself (the same file a host-platform scan of $HOME uses).
+// (apt/dnf/yum): it has no folder, so its asset id is the machine id in
+// $HOME/.ubel/ubel_machine.json (see "Machine identity" below).
+//
+// Machine identity: every report of every scanner also carries machine_id
+// — the id of the machine that produced it, read from $HOME/.ubel/ubel_machine.json
+// ({ "machine_id": "<32 hex>", "created_at": "<iso>" }),
+// created on first use. It is separate from the asset id: the asset says WHAT was
+// scanned, the machine says WHERE the scan ran. File names never contain it.
 //
 // Run-time override: every CLI accepts `--asset-id <id>`. For that run it replaces
 // the id from ubel_asset.json (nothing on disk is created or changed), so the
@@ -110,11 +118,30 @@ export function reportFileName(stem, tag, ext) {
   return `${stem}.${sanitizeReportTag(tag)}.${String(ext).replace(/^\./, "")}`;
 }
 
+/** Editors whose extensions directory can be scanned (the `kind` the VS Code extension detects). */
+export const EDITOR_KINDS = Object.freeze(["vscode", "cursor", "vscodium"]);
+
+/**
+ * Report tag of an editor-extensions scan: "<editor>_sca". An unknown / missing editor
+ * falls back to "vscode", like the engine's editor_kind default.
+ * @param {string} [editorKind]  "vscode" | "cursor" | "vscodium"
+ */
+export function editorScaTag(editorKind) {
+  const kind = String(editorKind ?? "vscode").toLowerCase().replace(/-/g, "_").replace(/[^a-z0-9_]/g, "") || "vscode";
+  return sanitizeReportTag(`${kind}_sca`);
+}
+
+/** True for the report tags of editor-extension scans (vscode_sca, cursor_sca, vscodium_sca, …). */
+export function isEditorScaTag(tag) {
+  return typeof tag === "string" && /^[a-z0-9]+_sca$/.test(tag) && tag !== "os_sca";
+}
+
 /**
  * Tag for a run of the SCA engine (sca/engine.js).
  *
  *   scan_scope "license"          → licenses
  *   scan_scope "secrets"          → secrets
+ *   scan_scope "editor_extension" → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca)
  *   scan_scope "container-image"  → firewall_docker (docker check / install)
  *                                   sca_docker      (docker health)
  *   check / install (firewall)    → firewall_<engine>   (npm, pnpm, pip, apt, dnf, …)
@@ -126,9 +153,11 @@ export function reportFileName(stem, tag, ext) {
  *
  * @param {{checkMode: string, engine: string, scanScope?: string, dockerMode?: string}} p
  */
-export function scaReportTag({ checkMode, engine, scanScope, dockerMode, scanOs, platform = process.platform }) {
+export function scaReportTag({ checkMode, engine, scanScope, dockerMode, scanOs, editorKind, platform = process.platform }) {
   if (scanScope === "license") return "licenses";
   if (scanScope === "secrets") return "secrets";
+  // Scan of an editor's extensions directory → <editor>_sca (vscode_sca, cursor_sca, vscodium_sca).
+  if (scanScope === "editor_extension") return editorScaTag(editorKind);
   if (scanScope === "container-image") {
     return dockerMode === "check" || dockerMode === "install" ? "firewall_docker" : "sca_docker";
   }
@@ -167,8 +196,20 @@ export function historyRoot() {
 
 // ── Asset identity (ubel_asset.json) ─────────────────────────────────────
 
-/** Name of the per-asset (or per-machine) identity file inside a .ubel/ folder. */
+/** Name of the per-asset identity file inside a .ubel/ folder. */
 export const ASSET_FILE_NAME = "ubel_asset.json";
+
+/** Name of the machine identity file, $HOME/.ubel/ubel_machine.json. */
+export const MACHINE_FILE_NAME = "ubel_machine.json";
+
+// How an identity file is laid out on disk. Everything in memory uses asset_id / asset_name
+// (readAsset, ensureAsset, setAssetId, …); the machine file stores the same values under
+// machine_id, and the helpers below translate in both directions.
+const ASSET_SPEC   = Object.freeze({ file: ASSET_FILE_NAME,   idKey: "asset_id",   nameKey: "asset_name" });
+const MACHINE_SPEC = Object.freeze({ file: MACHINE_FILE_NAME, idKey: "machine_id", nameKey: null });
+
+/** The identity spec of the machine tag — pass it to ensureAsset / readAsset / setAssetId. */
+export const MACHINE_IDENTITY = MACHINE_SPEC;
 
 const UUID_PART = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
@@ -195,6 +236,8 @@ export function machineUbelDir() {
   return path.join(os.homedir(), ".ubel");
 }
 
+const EDITOR_DOT_DIRS = { ".vscode": "vscode", ".cursor": "cursor", ".vscode-oss": "vscodium" };
+
 /**
  * Readable name for an asset, used only when ubel_asset.json is first
  * written (or backfilled): the repository name from `origin` when the folder
@@ -204,6 +247,12 @@ export function machineUbelDir() {
 function deriveAssetName(ubelDir) {
   if (path.resolve(ubelDir) === path.resolve(machineUbelDir())) return os.hostname();
   const dir = path.dirname(path.resolve(ubelDir));
+  // An editor's extensions directory (~/.vscode/extensions, ~/.cursor/extensions,
+  // ~/.vscode-oss/extensions) is named after the editor, not "extensions".
+  if (path.basename(dir) === "extensions") {
+    const editor = EDITOR_DOT_DIRS[path.basename(path.dirname(dir))];
+    if (editor) return `${editor}_extensions`;
+  }
   try {
     const url = execFileSync("git", ["-C", dir, "remote", "get-url", "origin"], {
       stdio: ["ignore", "pipe", "ignore"], timeout: 3000, encoding: "utf-8",
@@ -214,15 +263,29 @@ function deriveAssetName(ubelDir) {
   return path.basename(dir) || os.hostname();
 }
 
-function readAssetFile(file) {
+function readAssetFile(file, spec = ASSET_SPEC) {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf-8"));
-    if (!j || typeof j !== "object" || typeof j.asset_id !== "string" || !ASSET_ID_RE.test(j.asset_id)) return null;
-    return { ...j, asset_id: j.asset_id.toLowerCase() };
+    const id = j && typeof j === "object" ? j[spec.idKey] : undefined;
+    if (typeof id !== "string" || !ASSET_ID_RE.test(id)) return null;
+    if (spec === ASSET_SPEC) return { ...j, asset_id: id.toLowerCase() };
+    // machine file: machine_id → asset_id (in memory only)
+    const { [spec.idKey]: _id, [spec.nameKey]: name, ...rest } = j;
+    return { ...rest, asset_id: id.toLowerCase(), ...(typeof name === "string" ? { asset_name: name } : {}) };
   } catch {
     return null; // missing, unreadable, or not valid JSON
   }
 }
+
+/** Object as stored on disk: asset_id becomes machine_id for the machine file. */
+function toFileShape(obj, spec) {
+  if (spec === ASSET_SPEC) return obj;
+  // The machine file holds an id only — no name.
+  const { asset_id, asset_name, created_at, ...rest } = obj;
+  return { [spec.idKey]: asset_id, created_at, ...rest };
+}
+
+const serialize = (obj, spec) => JSON.stringify(toFileShape(obj, spec), null, 2) + "\n";
 
 /**
  * Write `content` to `filePath` so that a reader (another process, a CI step, a
@@ -276,17 +339,19 @@ const writeAtomic = atomicWriteFile;
  * history zip then lands directly in history/<mode>/ without an asset folder.
  *
  * @param {string} ubelDir  the .ubel folder (not the folder root)
+ * @param {typeof ASSET_SPEC} [spec]  ASSET_SPEC (ubel_asset.json, default) or MACHINE_IDENTITY (ubel_machine.json)
  * @returns {{asset_id: string, asset_name: string}|null}
  */
-export function ensureAsset(ubelDir) {
-  const file = path.join(ubelDir, ASSET_FILE_NAME);
+export function ensureAsset(ubelDir, spec = ASSET_SPEC) {
+  const file = path.join(ubelDir, spec.file);
   const pick = (j) => ({ asset_id: j.asset_id, asset_name: j.asset_name });
   try {
-    let existing = readAssetFile(file);
+    let existing = readAssetFile(file, spec);
     if (existing) {
+      if (spec === MACHINE_SPEC) return pick(existing); // machine file: id only, no name to backfill
       if (typeof existing.asset_name === "string" && existing.asset_name.trim()) return pick(existing);
       existing.asset_name = deriveAssetName(ubelDir); // backfill: id untouched
-      writeAtomic(file, JSON.stringify(existing, null, 2) + "\n");
+      writeAtomic(file, serialize(existing, spec));
       return pick(existing);
     }
 
@@ -296,7 +361,17 @@ export function ensureAsset(ubelDir) {
       asset_name: deriveAssetName(ubelDir),
       created_at:   new Date().toISOString(),
     };
-    const body = JSON.stringify(fresh, null, 2) + "\n";
+    // First machine file on a machine that already has a machine tag in the old place
+    // ($HOME/.ubel/ubel_asset.json, used by earlier versions): carry its id over, so the
+    // OS scan history filed under os/<id>/ stays with the same machine.
+    if (spec === MACHINE_SPEC) {
+      const legacy = readAssetFile(path.join(ubelDir, ASSET_FILE_NAME));
+      if (legacy) {
+        fresh.asset_id = legacy.asset_id;
+        if (legacy.created_at) fresh.created_at = legacy.created_at;
+      }
+    }
+    const body = serialize(fresh, spec);
 
     try {
       fs.writeFileSync(file, body, { flag: "wx" });
@@ -306,13 +381,15 @@ export function ensureAsset(ubelDir) {
     }
 
     // Lost a race, or the file exists but held no valid id.
-    const winner = readAssetFile(file);
+    const winner = readAssetFile(file, spec);
     if (winner && typeof winner.asset_name === "string" && winner.asset_name.trim()) return pick(winner);
-    if (winner) return ensureAsset(ubelDir); // id present, name still missing → backfill path
+    if (winner) return ensureAsset(ubelDir, spec); // id present, name still missing → backfill path
     writeAtomic(file, body);
     return pick(fresh);
   } catch (e) {
-    console.warn(`[ubel] could not write ${file}: ${e.message} — history zip will not be filed under an asset id`);
+    console.warn(`[ubel] could not write ${file}: ${e.message}` + (spec === MACHINE_SPEC
+      ? " — reports will not carry a machine id"
+      : " — history zip will not be filed under an asset id"));
     return null;
   }
 }
@@ -336,15 +413,21 @@ export function isValidAssetId(id) {
  *     already warned; the caller carries on, like a scan always has.
  *
  * @param {string} ubelDir  the .ubel folder (not the folder root)
- * @returns {{asset_id: string, asset_name: string|null, created: boolean, runtime: boolean}|null}
+ * @param {{machineTag?: boolean}} [opts]  machineTag: use the machine id file ($HOME/.ubel/ubel_machine.json)
+ * @returns {{asset_id: string, asset_name: string|null, created: boolean, runtime: boolean, file: string}|null}
  */
-export function provisionAsset(ubelDir) {
+export function provisionAsset(ubelDir, { machineTag = false } = {}) {
+  // machineTag: the asset IS this machine (ubel-apt / ubel-dnf / ubel-yum) — its id lives in
+  // $HOME/.ubel/ubel_machine.json instead of <ubelDir>/ubel_asset.json.
+  const spec = machineTag ? MACHINE_SPEC : ASSET_SPEC;
+  const dir  = machineTag ? machineUbelDir() : ubelDir;
+  const file = path.join(dir, spec.file);
   if (runtimeAssetId) {
-    return { asset_id: runtimeAssetId, asset_name: null, created: false, runtime: true };
+    return { asset_id: runtimeAssetId, asset_name: null, created: false, runtime: true, file };
   }
-  const existed = readAssetFile(path.join(ubelDir, ASSET_FILE_NAME)) !== null;
-  const asset = ensureAsset(ubelDir);
-  return asset ? { ...asset, created: !existed, runtime: false } : null;
+  const existed = readAssetFile(file, spec) !== null;
+  const asset = ensureAsset(dir, spec);
+  return asset ? { ...asset, created: !existed, runtime: false, file } : null;
 }
 
 /**
@@ -357,7 +440,9 @@ export function provisionAsset(ubelDir) {
  */
 export function announceNewAsset(asset, ubelDir) {
   if (!asset || !asset.created) return;
-  console.error(`[+] New asset id created: ${asset.asset_id}  (${asset.asset_name})  → ${path.join(ubelDir, ASSET_FILE_NAME)}`);
+  const file = asset.file || path.join(ubelDir, ASSET_FILE_NAME);
+  const what = path.basename(file) === MACHINE_FILE_NAME ? "machine id" : "asset id";
+  console.error(`[+] New ${what} created: ${asset.asset_id}${what === "asset id" ? `  (${asset.asset_name})` : ""}  → ${file}`);
 }
 
 /**
@@ -385,8 +470,8 @@ export function provisionAssetAt(workingDir) {
  * @returns {{asset_id: string, asset_name?: string, created_at?: string}|null}
  *          null when the file is missing, unreadable, or holds no valid UUID
  */
-export function readAsset(ubelDir) {
-  return readAssetFile(path.join(ubelDir, ASSET_FILE_NAME));
+export function readAsset(ubelDir, spec = ASSET_SPEC) {
+  return readAssetFile(path.join(ubelDir, spec.file), spec);
 }
 
 /**
@@ -430,13 +515,13 @@ export function historyForAsset(assetId) {
  * @param {{name?: string}} [opts]
  * @returns {{asset_id: string, asset_name: string, previous_id: string|null, changed: boolean}}
  */
-export function setAssetId(ubelDir, assetId, opts = {}) {
+export function setAssetId(ubelDir, assetId, opts = {}, spec = ASSET_SPEC) {
   if (!isValidAssetId(assetId)) {
     throw new Error(`not a valid asset id (expected 32 hex characters, like ${ASSET_ID_EXAMPLE}): ${assetId}`);
   }
   const id = assetId.trim().toLowerCase();
-  const file = path.join(ubelDir, ASSET_FILE_NAME);
-  const existing = readAssetFile(file);
+  const file = path.join(ubelDir, spec.file);
+  const existing = readAssetFile(file, spec);
   const name = typeof opts.name === "string" && opts.name.trim()
     ? opts.name.trim().slice(0, 200)
     : (typeof existing?.asset_name === "string" && existing.asset_name.trim()
@@ -450,7 +535,7 @@ export function setAssetId(ubelDir, assetId, opts = {}) {
     created_at:   existing?.created_at || new Date().toISOString(),
   };
   fs.mkdirSync(ubelDir, { recursive: true });
-  writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
+  writeAtomic(file, serialize(next, spec));
   return {
     asset_id:  id,
     asset_name: name,
@@ -568,9 +653,25 @@ export function assetTypeFor(mode, scanScope) {
 }
 
 /**
+ * Machine identity — the id of the machine a scan runs on, read from
+ * $HOME/.ubel/ubel_machine.json and created on first use (an id in the pre-ubel_machine.json
+ * machine tag, $HOME/.ubel/ubel_asset.json, is carried over once). Every report of every
+ * scanner carries it as machine_id, whatever was scanned.
+ *
+ * Never throws: when the file can't be written (read-only $HOME, …) ensureAsset() warns
+ * and both values are null.
+ *
+ * @returns {{machine_id: string|null}}
+ */
+export function machineFor() {
+  const m = ensureAsset(machineUbelDir(), MACHINE_SPEC);
+  return { machine_id: m?.asset_id ?? null };
+}
+
+/**
  * Asset identity for a scan that writes history under `mode`.
  *
- *   mode "os" (apt/dnf/yum)   → machine tag, $HOME/.ubel/ubel_asset.json
+ *   mode "os" (apt/dnf/yum)   → the machine itself, $HOME/.ubel/ubel_machine.json
  *   everything else           → <ubelDir>/ubel_asset.json
  *
  * When --asset-id was given (setRuntimeAssetId) that id is used instead of the
@@ -578,28 +679,37 @@ export function assetTypeFor(mode, scanScope) {
  * belongs to the same id, else derived.
  *
  * asset_id / asset_name are null when the identity file could not be written
- * (see ensureAsset); asset_type is always set.
+ * (see ensureAsset); asset_type is always set. machine_id (see
+ * machineFor) are always the machine's, even when --asset-id replaced the asset id.
  *
  * @param {string} mode        history mode (see historyZipPath)
  * @param {string} ubelDir     the .ubel folder this scan writes its reports into
  * @param {string} [scanScope] scan_scope of an SCA run; decides agent / machine (see assetTypeFor)
- * @returns {{asset_id: string|null, asset_name: string|null, asset_type: string}}
+ * @param {{machineTag?: boolean}} [opts]  machineTag: the asset is the machine even though `mode`
+ *        isn't "os" (ubel-apt / -dnf / -yum health scans)
+ * @returns {{asset_id: string|null, asset_name: string|null, asset_type: string, machine_id: string|null}}
  */
-export function assetFor(mode, ubelDir, scanScope) {
+export function assetFor(mode, ubelDir, scanScope, { machineTag = false } = {}) {
   const asset_type = assetTypeFor(mode, scanScope);
-  const dir = mode === "os" ? machineUbelDir() : ubelDir;
+  const isMachine  = mode === "os" || machineTag;
+  const spec = isMachine ? MACHINE_SPEC : ASSET_SPEC;
+  const dir  = isMachine ? machineUbelDir() : ubelDir;
+  const machine = machineFor();
 
   if (runtimeAssetId) {
-    const stored = readAssetFile(path.join(dir, ASSET_FILE_NAME));
+    const stored = readAssetFile(path.join(dir, spec.file), spec);
     const asset_name = stored && stored.asset_id === runtimeAssetId
       && typeof stored.asset_name === "string" && stored.asset_name.trim()
       ? stored.asset_name
       : deriveAssetName(dir);
-    return { asset_id: runtimeAssetId, asset_name, asset_type };
+    return { asset_id: runtimeAssetId, asset_name, asset_type, ...machine };
   }
 
-  const asset = ensureAsset(dir);
-  return { asset_id: asset?.asset_id ?? null, asset_name: asset?.asset_name ?? null, asset_type };
+  // The machine file was just ensured by machineFor(); don't write it twice.
+  const asset = isMachine
+    ? (machine.machine_id ? { asset_id: machine.machine_id, asset_name: os.hostname() } : null)
+    : ensureAsset(dir);
+  return { asset_id: asset?.asset_id ?? null, asset_name: asset?.asset_name ?? null, asset_type, ...machine };
 }
 
 /**

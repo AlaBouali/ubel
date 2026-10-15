@@ -112,6 +112,7 @@ export class CycloneDXBuilder {
         { name: "asset_id", value: String(scanInfo.asset_id || "") },
         { name: "asset_name", value: String(scanInfo.asset_name || "") },
         { name: "asset_type", value: String(scanInfo.asset_type || "") },
+        { name: "machine_id", value: String(scanInfo.machine_id || "") },
         { name: "scan_type", value: scanType },
         { name: "scan_scope", value: scanInfo.scan_scope || "repository" },
         { name: "engine", value: scanInfo.engine || "" },

@@ -244,6 +244,7 @@ async function writeCloudReports(reporter, meta, opts) {
     asset_id:     asset.asset_id,
     asset_name:   asset.asset_name,
     asset_type:   asset.asset_type,
+    machine_id:   asset.machine_id,
   });
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);

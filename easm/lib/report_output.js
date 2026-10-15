@@ -181,6 +181,7 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
     asset_id:     asset.asset_id,
     asset_name:   asset.asset_name,
     asset_type:   asset.asset_type,
+    machine_id:   asset.machine_id,
   };
   // The executive summary was built before the asset was known, so its cover is
   // given the same report id (JSON, HTML and the summary must all agree).
