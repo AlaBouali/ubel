@@ -77,6 +77,14 @@ const LICENSE_TABLE = Object.freeze({
   // "Ruby OR BSD-2-Clause" expressions.
   "Ruby":             { osi: false, category: "permissive",     risk: "low" },
 
+  // Added for RPM/Fedora-style license metadata (AlmaLinux/RHEL/Fedora images).
+  "BSD-4-Clause":     { osi: false, category: "permissive",     risk: "low" },   // "BSD with advertising"
+  "AFL-2.1":          { osi: true,  category: "permissive",     risk: "low" },
+  "AFL-3.0":          { osi: true,  category: "permissive",     risk: "low" },
+  "OLDAP-2.8":        { osi: true,  category: "permissive",     risk: "low" },   // "OpenLDAP"
+  "OpenSSL":          { osi: false, category: "permissive",     risk: "low" },   // advertising clause
+  "Inner-Net-2.0":    { osi: false, category: "permissive",     risk: "low" },   // glibc, Fedora "Inner-Net"
+
   // ── Permissive-in-practice, NOT OSI-approved ──
   "WTFPL":            { osi: false, category: "permissive",     risk: "low" },
   "CC0-1.0":          { osi: false, category: "public-domain",  risk: "low" },
@@ -97,9 +105,19 @@ const LICENSE_TABLE = Object.freeze({
   "OSL-3.0":               { osi: true, category: "weak-copyleft", risk: "medium" },
   "EUPL-1.1":              { osi: true, category: "weak-copyleft", risk: "medium" },
   "EUPL-1.2":              { osi: true, category: "weak-copyleft", risk: "medium" },
+  "LGPL-2.0-only":         { osi: true, category: "weak-copyleft", risk: "medium" },
+  "LGPL-2.0-or-later":     { osi: true, category: "weak-copyleft", risk: "medium" },
+  "SISSL":                 { osi: true, category: "weak-copyleft", risk: "medium" },
+  // Vim's license (charityware): modified versions must be marked and their
+  // source made available. Not OSI-approved. Weak-copyleft-like.
+  "Vim":                   { osi: false, category: "weak-copyleft", risk: "medium" },
 
   // ── Strong copyleft, OSI-approved (project-wide obligations) ──
   "GPL-1.0-only":          { osi: true, category: "strong-copyleft", risk: "high" },
+  "GPL-1.0-or-later":      { osi: true, category: "strong-copyleft", risk: "high" },
+  // Berkeley DB's license: redistributing the work requires offering source
+  // for the *whole* application — reciprocal, so rated like strong copyleft.
+  "Sleepycat":             { osi: true, category: "strong-copyleft", risk: "high" },
   "GPL-2.0-only":          { osi: true, category: "strong-copyleft", risk: "high" },
   "GPL-2.0-or-later":      { osi: true, category: "strong-copyleft", risk: "high" },
   "GPL-3.0-only":          { osi: true, category: "strong-copyleft", risk: "high" },
@@ -114,6 +132,10 @@ const LICENSE_TABLE = Object.freeze({
   "BUSL-1.1":         { osi: false, category: "source-available", risk: "high" },
   "Elastic-2.0":      { osi: false, category: "source-available", risk: "high" },
   "Commons-Clause":   { osi: false, category: "source-available", risk: "high" },
+  // GNU Free Documentation License — copyleft for documentation (glibc/GCC
+  // manuals etc.), not a software license and not OSI-approved.
+  "GFDL-1.3-only":        { osi: false, category: "non-software",     risk: "medium" },
+  "GFDL-1.3-or-later":    { osi: false, category: "non-software",     risk: "medium" },
   "CC-BY-4.0":        { osi: false, category: "non-software",     risk: "high" },
   "CC-BY-SA-4.0":     { osi: false, category: "non-software",     risk: "high" },
   "CC-BY-NC-4.0":     { osi: false, category: "non-software",     risk: "high" },
@@ -215,6 +237,23 @@ const ALIASES = Object.freeze({
   "wtfpl": "WTFPL", "do what the fuck you want": "WTFPL",
 
   "proprietary": "Proprietary", "all rights reserved": "Proprietary",
+
+  // ── RPM / Fedora short names (AlmaLinux, RHEL, Fedora, CentOS) ──
+  // GPLv2+/LGPLv3+/GPLv2 etc. are handled generically by GNU_SHORTHAND below;
+  // these are the non-GNU tags.
+  "asl 1.1": "Apache-1.1",
+  "bsd with advertising": "BSD-4-Clause",
+  "python": "Python-2.0",
+  "boost": "BSL-1.0",
+  "mplv2.0": "MPL-2.0", "mplv2": "MPL-2.0", "mplv1.1": "MPL-1.1",
+  // Fedora's "AFL" is version-agnostic; 2.1 and 3.0 carry the same risk.
+  "afl": "AFL-3.0",
+  "openldap": "OLDAP-2.8",
+  "inner-net": "Inner-Net-2.0",
+  // Fedora's "GFDL" is version-agnostic; assumed 1.3-or-later.
+  "gfdl": "GFDL-1.3-or-later",
+  // Fedora "GPL+" / "LGPL+" = any version, or later.
+  "gpl+": "GPL-1.0-or-later", "lgpl+": "LGPL-2.0-or-later",
 });
 
 // Sentinel strings that mean "there is genuinely no usable license info",
@@ -222,6 +261,9 @@ const ALIASES = Object.freeze({
 const EMPTY_SENTINELS = new Set([
   "", "unknown", "none", "null", "n/a", "na", "not specified", "unspecified",
   "nofile", "unlicensed license", // guard against odd re-serializations
+  // rpm's gpg-pubkey pseudo-packages (imported signing keys) carry "pubkey"
+  // as their License tag — they are keys, not software.
+  "pubkey",
 ]);
 
 // npm's `"license": "UNLICENSED"` — proprietary sentinel, NOT SPDX "Unlicense".
@@ -276,32 +318,27 @@ function cleanToken(token) {
     .trim();
 }
 
+// Generic GNU-family shorthand: "GPLv2+", "LGPLv3", "GPL-2.0+", "GPL v2 or
+// later", "AGPL3", "LGPL2.1". A trailing "+" / "or later" -> "-or-later",
+// anything else -> "-only" (the conservative, obligation-triggering reading).
+const GNU_SHORTHAND =
+  /^(A|L)?GPL[-\s]?v?(\d(?:\.\d)?)\s*(\+|-or-later|-only|or later|or newer|only)?$/i;
+
+const isKnownId = id => !!id && (
+  Object.prototype.hasOwnProperty.call(LICENSE_TABLE, id) || /^LicenseRef-/i.test(id)
+);
+
 /**
  * Resolves a single free-text or SPDX-ish token to a canonical SPDX id.
  * Returns null if the token can't be confidently identified.
  */
 function normalizeToken(rawToken) {
-  let token = cleanToken(stripPythonClassifier(rawToken));
+  const token = cleanToken(stripPythonClassifier(rawToken));
   if (!token) return null;
 
-  // SPDX "<license> WITH <exception>" expressions, e.g. "GPL-2.0-only WITH
-  // Classpath-exception-2.0". Recurse to canonicalize the base license id,
-  // then reassemble — classifyId() below applies the exception's effect
-  // on risk. Only recognized when the base id resolves to something we
-  // actually know; otherwise treated as unparsable, same as any other
-  // free-form text.
-  const withMatch = token.match(/^(.+?)\s+WITH\s+(.+)$/i);
-  if (withMatch) {
-    const base = normalizeToken(withMatch[1]);
-    const exception = cleanToken(withMatch[2]);
-    if (base && /^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(exception)) {
-      return `${base} WITH ${exception}`;
-    }
-    return null;
-  }
-
-  // "License" suffix noise: "MIT License" -> already aliased above, but
-  // catch generic "<Name> License" forms not explicitly listed.
+  // Whole-token alias lookup FIRST — before the WITH split — so aliases that
+  // legitimately contain "with" ("BSD with advertising" = BSD-4-Clause) are
+  // not misread as "<license> WITH <exception>".
   const key = token.toLowerCase();
   if (ALIASES[key]) return ALIASES[key];
 
@@ -309,69 +346,188 @@ function normalizeToken(rawToken) {
   const withoutSuffix = key.replace(/\s+licen[cs]e$/, "");
   if (withoutSuffix !== key && ALIASES[withoutSuffix]) return ALIASES[withoutSuffix];
 
-  // GPL-family "+" shorthand: "GPL-2.0+" -> GPL-2.0-or-later
-  const plusMatch = token.match(/^([A-Za-z]+)[-\s]?(\d(?:\.\d)?)\+$/);
-  if (plusMatch) {
-    const fam = plusMatch[1].toUpperCase();
-    const ver = plusMatch[2];
-    const candidate = `${fam}-${ver}-or-later`;
+  // SPDX "<license> WITH <exception>", e.g. "GPL-2.0-only WITH
+  // Classpath-exception-2.0". Recurse to canonicalize the base license id,
+  // then reassemble — classifyId() applies the exception's effect on risk.
+  const withMatch = token.match(/^(.+?)\s+WITH\s+(.+)$/i);
+  if (withMatch) {
+    const base = normalizeToken(withMatch[1]);
+    const exception = cleanToken(withMatch[2]);
+    if (base && /^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(exception)) {
+      // RPM-style unspecified "GPLv2+ with exceptions": not a real SPDX
+      // exception id, so keep the (valid) base id and rate it conservatively.
+      if (/^exceptions?$/i.test(exception)) return base;
+      return `${base} WITH ${exception}`;
+    }
+    return null;
+  }
+
+  // Already-canonical SPDX id (case-insensitive exact match).
+  const exact = Object.keys(LICENSE_TABLE).find(id => id.toLowerCase() === key);
+  if (exact) return exact;
+
+  // GNU-family shorthand ("GPLv2+", "LGPL-2.1", "GPL v3 or later", …).
+  const gnu = token.match(GNU_SHORTHAND);
+  if (gnu) {
+    const fam = (gnu[1] || "").toUpperCase() + "GPL";
+    const ver = gnu[2].includes(".") ? gnu[2] : `${gnu[2]}.0`;
+    const orLater = /^(\+|-or-later|or later|or newer)$/i.test(gnu[3] || "");
+    const candidate = `${fam}-${ver}-${orLater ? "or-later" : "only"}`;
     if (LICENSE_TABLE[candidate]) return candidate;
   }
 
-  // Already-canonical SPDX id (exact match, case-sensitive-ish).
-  const exact = Object.keys(LICENSE_TABLE).find(
-    id => id.toLowerCase() === key
-  );
-  if (exact) return exact;
-
-  // Bare "GPL-2.0" / "LGPL-2.1" without -only/-or-later — default to -only,
-  // the more conservative (obligation-triggering-sooner) reading.
-  const bareCopyleft = token.match(
-    /^(A?GPL|LGPL)[-\s]?(\d(?:\.\d)?)$/i
-  );
-  if (bareCopyleft) {
-    const fam = bareCopyleft[1].toUpperCase();
-    const ver = bareCopyleft[2];
-    const candidate = `${fam}-${ver}-only`;
-    if (LICENSE_TABLE[candidate]) return candidate;
+  // Trailing parenthetical that carries the real identifier, e.g. PyPI's
+  // "GNU General Public License v2 or later (GPLv2+)". Try the parenthetical
+  // first, then the text in front of it.
+  const tail = token.match(/^(.*\S)\s*\(([^()]+)\)$/);
+  if (tail) {
+    for (const part of [tail[2], tail[1]]) {
+      const id = normalizeToken(part);
+      if (isKnownId(id)) return id;
+    }
   }
 
   // Looks like a plausible SPDX identifier shape but isn't one we know.
   if (/^[A-Za-z0-9][A-Za-z0-9.+-]*$/.test(token) && token.length <= 40) {
-    return token; // returned as-is; caller checks LICENSE_TABLE membership
+    return token; // returned as-is; classifyId() marks it unrecognized
   }
 
   return null; // free-form text we can't safely parse (e.g. pasted license body)
 }
 
+// ── Expression parsing ───────────────────────────────────────────────────
+//
+// Real-world license fields are NOT always a single id or one flat operator.
+// RPM metadata in particular routinely mixes operators and nests groups:
+//   "(GPLv2+ or AFL) and GPLv2+"
+//   "MIT and Python and ASL 2.0 and BSD and (ASL 2.0 or BSD)"
+// so this is a small recursive-descent parser with SPDX precedence
+// (AND binds tighter than OR, parentheses group).
+//
+// Two details that matter for free-text names:
+//   - "or later" / "or newer" are part of a license NAME ("GNU General
+//     Public License v2 or later"), not an OR operator.
+//   - A "(" only opens a group at the START of an operand. Mid-operand it is
+//     part of the name: "Mozilla Public 2.0 (MPL 2.0)", "ISC (ISCL)".
+const KEYWORD_RE = /\s+(AND|OR)\s+(?!(?:any\s+)?(?:later|newer)\b)/iy;
+
+function tokenizeExpression(s) {
+  const out = [];
+  let buf = "";
+  let depth = 0;
+  const flush = () => {
+    const v = buf.replace(/\s+/g, " ").trim();
+    if (v) out.push({ type: "OPERAND", value: v });
+    buf = "";
+  };
+
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+
+    if (ch === "(") {
+      if (buf.trim() === "") {
+        flush();
+        out.push({ type: "LPAREN" });
+        depth++;
+        i++;
+        continue;
+      }
+      // Mid-operand "(": consume through its matching ")" as part of the name.
+      let d = 0, j = i;
+      for (; j < s.length; j++) {
+        if (s[j] === "(") d++;
+        else if (s[j] === ")" && --d === 0) break;
+      }
+      if (j >= s.length) { buf += s.slice(i); break; } // unbalanced — keep as text
+      buf += s.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+
+    if (ch === ")") {
+      if (depth > 0) {
+        flush();
+        out.push({ type: "RPAREN" });
+        depth--;
+      } else {
+        buf += ch;
+      }
+      i++;
+      continue;
+    }
+
+    KEYWORD_RE.lastIndex = i;
+    const m = KEYWORD_RE.exec(s);
+    if (m) {
+      flush();
+      out.push({ type: m[1].toUpperCase() });
+      i += m[0].length;
+      continue;
+    }
+
+    buf += ch;
+    i++;
+  }
+  flush();
+  return out;
+}
+
 /**
- * Splits an SPDX-style boolean expression into a flat operator + operand
- * list. Deliberately simple (no nested-precedence parser) — real-world
- * inventory license fields are essentially always a single id or a flat
- * "(A OR B)" / "A AND B" pair, never deeply nested expressions.
- *
- * Returns { op: "SINGLE"|"OR"|"AND", tokens: string[] }
+ * Parses a license expression into a tree:
+ *   { leaf: "<raw operand text>" } | { op: "AND"|"OR", children: [...] }
+ * Returns null if the expression is malformed (unbalanced parens, dangling
+ * operator, …).
  */
-function splitExpression(raw) {
-  const trimmed = raw.trim();
-  // Only strip parens when they wrap the WHOLE expression, e.g. "(MIT OR
-  // Apache-2.0)" -> "MIT OR Apache-2.0". The previous unconditional
-  // leading-"("/trailing-")" strip mangled any raw string with a trailing
-  // parenthetical that isn't expression-wrapping, e.g. "Mozilla Public 2.0
-  // (MPL 2.0)" -> "Mozilla Public 2.0 (MPL 2.0" (unbalanced), which then
-  // failed every downstream lookup regardless of what cleanToken or the
-  // alias table did later.
-  const wrapped = trimmed.match(/^\((.*)\)$/);
-  const cleaned = wrapped ? wrapped[1].trim() : trimmed;
-  const orParts = cleaned.split(/\s+OR\s+/i);
-  if (orParts.length > 1) {
-    return { op: "OR", tokens: orParts.map(cleanToken) };
+function parseExpression(raw) {
+  const toks = tokenizeExpression(raw);
+  let pos = 0;
+  const peek = () => (toks[pos] ? toks[pos].type : null);
+
+  function parseOr() {
+    const kids = [parseAnd()];
+    while (peek() === "OR") { pos++; kids.push(parseAnd()); }
+    return kids.length === 1 ? kids[0] : { op: "OR", children: kids };
   }
-  const andParts = cleaned.split(/\s+AND\s+/i);
-  if (andParts.length > 1) {
-    return { op: "AND", tokens: andParts.map(cleanToken) };
+  function parseAnd() {
+    const kids = [parsePrimary()];
+    while (peek() === "AND") { pos++; kids.push(parsePrimary()); }
+    return kids.length === 1 ? kids[0] : { op: "AND", children: kids };
   }
-  return { op: "SINGLE", tokens: [cleaned] };
+  function parsePrimary() {
+    const t = toks[pos];
+    if (!t) throw new Error("unexpected end of expression");
+    if (t.type === "LPAREN") {
+      pos++;
+      const node = parseOr();
+      if (peek() !== "RPAREN") throw new Error("missing )");
+      pos++;
+      return node;
+    }
+    if (t.type === "OPERAND") { pos++; return { leaf: t.value }; }
+    throw new Error(`unexpected ${t.type}`);
+  }
+
+  try {
+    const tree = parseOr();
+    return pos === toks.length ? tree : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Canonicalizes every leaf in place. Returns false if any leaf can't be parsed.
+function resolveTree(node) {
+  if (node.leaf !== undefined) {
+    node.id = normalizeToken(node.leaf);
+    return node.id !== null;
+  }
+  return node.children.map(resolveTree).every(Boolean);
+}
+
+function collectLeafIds(node) {
+  if (node.leaf !== undefined) return [node.id];
+  return node.children.flatMap(collectLeafIds);
 }
 
 /**
@@ -435,8 +591,12 @@ function classifyId(id) {
   return { id, osi: false, category: "unrecognized", risk: "unknown" };
 }
 
+// Combines already-classified children under one operator. `_op` records the
+// operator a composite result was built with, so a differing-operator child is
+// parenthesized when the id string is rebuilt (e.g. "(A OR B) AND C").
 function aggregate(op, classifications) {
-  if (op === "SINGLE") return classifications[0];
+  const idOf = c => (c._op && c._op !== op ? `(${c.id})` : c.id);
+  const id = classifications.map(idOf).join(` ${op} `);
 
   if (op === "OR") {
     // Best case wins — the consumer may legally pick the most favorable term.
@@ -444,10 +604,11 @@ function aggregate(op, classifications) {
       RISK_RANK[a.risk] <= RISK_RANK[b.risk] ? a : b
     );
     return {
-      id:       classifications.map(c => c.id).join(" OR "),
+      id,
       osi:      classifications.some(c => c.osi),
       category: best.category,
       risk:     best.risk,
+      _op:      op,
     };
   }
 
@@ -456,11 +617,17 @@ function aggregate(op, classifications) {
     RISK_RANK[a.risk] >= RISK_RANK[b.risk] ? a : b
   );
   return {
-    id:       classifications.map(c => c.id).join(" AND "),
+    id,
     osi:      classifications.every(c => c.osi),
     category: worst.category,
     risk:     worst.risk,
+    _op:      op,
   };
+}
+
+function evaluateTree(node) {
+  if (node.leaf !== undefined) return classifyId(node.id);
+  return aggregate(node.op, node.children.map(evaluateTree));
 }
 
 /**
@@ -521,10 +688,9 @@ function classifyLicense(rawLicense) {
     };
   }
 
-  const { op, tokens } = splitExpression(trimmed);
-  const normalizedIds  = tokens.map(normalizeToken);
+  const tree = parseExpression(trimmed);
 
-  if (normalizedIds.some(id => id === null)) {
+  if (!tree || !resolveTree(tree)) {
     return {
       raw: str,
       spdx: null,
@@ -537,22 +703,23 @@ function classifyLicense(rawLicense) {
     };
   }
 
-  const classifications = normalizedIds.map(classifyId);
-  const result = aggregate(op, classifications);
+  const leafIds   = [...new Set(collectLeafIds(tree))];
+  const leafCls   = leafIds.map(classifyId);
+  const result    = evaluateTree(tree);
 
-  const knownIds  = classifications.filter(c => c.category !== "unrecognized");
-  const anyUnknown = classifications.some(c => c.category === "unrecognized");
+  const knownIds  = leafCls.filter(c => c.category !== "unrecognized");
+  const anyUnknown = leafCls.some(c => c.category === "unrecognized");
 
   let reason;
   if (anyUnknown) {
     reason = `Contains an unrecognized license identifier alongside ` +
              `${knownIds.map(c => c.id).join(", ") || "no known licenses"}; ` +
              `treated conservatively.`;
-  } else if (op === "SINGLE") {
+  } else if (tree.leaf !== undefined) {
     reason = result.osi
       ? `${result.id} is an OSI-approved ${result.category} license.`
       : `${result.id} is not on the OSI-approved license list (${result.category}).`;
-  } else if (op === "OR") {
+  } else if (tree.op === "OR") {
     reason = `Dual/multi-licensed (${result.id}); classified using the ` +
               `most favorable option (${result.category}, ${result.risk} risk).`;
   } else {
@@ -563,8 +730,8 @@ function classifyLicense(rawLicense) {
 
   return {
     raw: str,
-    spdx: op === "SINGLE" ? classifications[0].id : result.id,
-    identifiers: classifications.map(c => c.id),
+    spdx: result.id,
+    identifiers: leafIds,
     osi_approved: anyUnknown ? null : result.osi,
     risk: anyUnknown ? "unknown" : result.risk,
     category: anyUnknown ? "unrecognized" : result.category,
