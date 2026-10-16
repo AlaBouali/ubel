@@ -10,6 +10,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 - **Exploit intelligence** — every vulnerability is checked against CISA's [Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/) (probability of exploitation in the next 30 days). By default the policy blocks on any KEV entry or an EPSS score of 10% or more, whatever the severity (tunable with `--block-kev` / `--epss-threshold`). The fields travel into the JSON, HTML, SBOM and SARIF outputs, and a feed outage degrades gracefully — the values become `null` (unknown, never "not exploited") and the matching rule isn't enforced — rather than aborting the scan. Applies to SCA, the firewall and EASM. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#exploit-intelligence-kev--epss).
 - **Executive summary & suggested fixes** — every SCA and EASM report opens with a plain-language executive summary for non-technical readers (risk rating, key findings, recommended actions, methodology; SCA adds the policy verdict), where known-exploited and likely-exploited issues raise the rating and the priority order. Each package also gets per-release-line upgrade suggestions (the fewest, highest versions that clear the most vulnerabilities, branch-aware), listed per component in the summary and carried in the JSON, SBOM and SARIF. See the SCA and EASM READMEs.
 - **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
+- **SBOM re-scan** — `ubel-resbom <sbom.cdx.json>` takes an SBOM that UBEL generated earlier and scans it again against today's advisories: the components and dependency graph come from the SBOM, and the usual pipeline (OSV/NVD lookup, KEV/EPSS, policy, suggested fixes, executive summary, JSON / HTML / SBOM / SARIF) runs on them — no project, lockfile or package manager, and nothing is installed or reverted. It answers whether a release that was clean when scanned has become vulnerable since, and can gate a scheduled job on the policy. Reports are tagged `<source tag>_resbom` (`sca_resbom`, `npm_firewall_resbom`, …) and filed under the SBOM's own asset. See [Re-scanning an SBOM](#re-scanning-an-sbom--ubel-resbom).
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe live restricted keys, and URL-embedded git credentials for GitHub, GitLab, Bitbucket, Azure DevOps and other git hosts, among others). Runs standalone via `ubel-secrets`, or as part of any `health`-mode SCA scan.
 - **License Compliance** — every scanned package's declared license (SPDX id, free text like "Apache 2.0", npm's `UNLICENSED` proprietary sentinel, a Python trove classifier, an SPDX `OR`/`AND` expression, or missing entirely) is normalized and checked against the OSI-approved license list, with a derived risk rating (permissive / weak-copyleft / strong-copyleft / proprietary / unknown). Included in every `health` scan by default (never on `check`/`install`) — surfaced per-package in the HTML report, as license properties on every SBOM component, and as a dedicated SARIF run. Runs standalone via `ubel-license` — inventory + license classification only, no OSV/NVD vulnerability lookups, no secrets scan.
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
@@ -42,6 +43,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-docker` | SCA + Firewall | Scans a container image without running it; `install` mode pulls, scans, and removes the image on a policy violation. No `install-hook` / `uninstall-hook` |
 | `ubel-secrets` | Secrets | Standalone secrets-only scan of the target directory — no dependency resolution, no LLM calls. Also scans git history (`--history`) and staged changes (`--staged`), installs a pre-commit hook, and baselines findings |
 | `ubel-license` | SCA | Standalone inventory + license-compliance scan — no vulnerability lookups (OSV/NVD), no secrets scan; writes JSON + HTML reports (no SBOM/SARIF) |
+| `ubel-resbom` | SCA | Re-scans an SBOM that UBEL generated earlier (`latest.<tag>.cdx.json`) against the current vulnerability data — one positional argument, the SBOM path; no project, lockfile or package manager needed, nothing installed. Same per-run policy flags as the SCA CLIs; writes `<tag>_resbom` JSON, HTML and SBOM (plus SARIF for `sca`-type sources) |
 | `ubel-agent` | SCA | AI-agent workspace scan (OS, runtimes, tools, dependencies, secrets) |
 | `ubel-cicd` | SCA | Post-install CI/CD scan of the final built workspace (OS, runtimes, tools, dependencies, secrets) |
 | `ubel-platform` | SCA | Host platform scan (OS, runtimes, tools) — no application dependency resolution and no secrets pass. Defaults to the home directory |
@@ -190,6 +192,32 @@ ubel-platform
 
 **Full documentation — exact flags per binary and how they differ from `ubel-secrets`/`ubel-license`:**
 [**sca/README.md#fixed-configuration-scan-clis**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#fixed-configuration-scan-clis)
+
+---
+
+## Re-scanning an SBOM — `ubel-resbom`
+
+`ubel-resbom` is the one SCA binary that doesn't look at a project. It takes a CycloneDX SBOM that UBEL wrote earlier (`.ubel/reports/latest.<tag>.cdx.json`, or `report.<tag>.cdx.json` out of an unzipped history bundle), reads the components and the dependency graph from it, and runs the engine's normal pipeline over them: OSV/NVD lookup, KEV/EPSS enrichment, policy, suggested fixes, executive summary, and the JSON / HTML / SBOM / SARIF reports. No package manager runs, no lockfile is read, nothing is installed or reverted — so it works on a machine with none of the project's tooling, and there is no `check` / `install` mode.
+
+```bash
+# Is the release we scanned last quarter still clean? Re-scan its SBOM against today's advisories
+ubel-resbom .ubel/reports/latest.sca.cdx.json
+
+# Gate a scheduled job: exit 1 if anything high or worse (or on KEV) is now known — saved policy untouched
+ubel-resbom ./release/report.sca.cdx.json --threshold high --block-kev
+
+# Only fail on vulnerabilities that are reachable (verdicts recorded by the original scan are kept)
+ubel-resbom latest.sca.cdx.json --reachable-only
+```
+
+- **What is recomputed vs. carried over.** Vulnerabilities, KEV/EPSS, component states, policy decision, suggested fixes, compliance mapping and the executive summary are computed again from current data (license classification too, when the SBOM came from a `health` scan). Asset id / name / type, machine id, the runtime, git and OS metadata the SBOM recorded, the secrets-in-source findings (there is no source tree to scan again) and the reachability verdicts of findings the SBOM already had are carried over; new findings get the graph-only reachability analysis, without import confirmation. OS packages (`deb` / `rpm` / `apk`) are matched against the distro release recorded on the component — see [OS Package Release Matching](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#os-package-release-matching).
+- **Reports.** The file tag is the source scan's tag plus `_resbom` — `sca_resbom`, `docker_sca_resbom`, `os_sca_resbom`, `npm_firewall_resbom`, … — so a re-scan never overwrites the `latest.<tag>.*` files it came from. It gets the files its source tag gets: JSON, HTML and SBOM always, SARIF only for `sca`-type sources (`sca`, `docker_sca`, `agent_sca`, `<editor>_sca`). Files land in `./.ubel/reports/` and as a timestamped bundle under `$HOME/.ubel/history/<asset_id>/` — the asset being the one the SBOM came from, unless `--asset-id` names another.
+- **Policy and exit codes.** The policy is `./.ubel/local/policy` of the current directory; `--threshold`, `--block-unknown`, `--block-kev`, `--epss-threshold`, `--block-undetermined`, `--reachable-only`, `--license-risk` and `--license-block-unknown` override it for one run. Exit `0` = policy passes, `1` = policy blocks (or bad arguments), `2` = the scan did not complete (unreadable / non-CycloneDX SBOM, incomplete advisory lookup, …). Reports are written whether the policy passes or blocks.
+- **Input.** A CycloneDX JSON file — a `.zip` bundle has to be unzipped first. An SBOM from another tool is re-scanned best-effort with a warning (treated as a `health` scan of unknown origin). It can only re-check the components the SBOM lists; it never discovers new ones.
+- **Programmatic.** `resbomScan({ sbom, projectRoot, policyOverrides })` from `@arcane-spark/ubel-node/sca`; throws a `PolicyViolationError` carrying the report when the policy blocks.
+
+**Full documentation — accepted inputs, what is read from the SBOM, asset handling, tag/file matrix, exit codes, programmatic use, and limits:**
+[**sca/README.md#re-scanning-an-sbom-ubel-resbom**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#re-scanning-an-sbom-ubel-resbom)
 
 ---
 
@@ -1334,6 +1362,34 @@ then `<engine> health` — a dependency scan (no OS scan).
   npm-family engine or `ubel-composer`, whose `health` is full-stack
   (the pip/uv/pipx/conda/cargo hooks scan only their own ecosystem).
 
+### SBOM re-scan — `ubel-resbom`, for every SBOM UBEL writes
+
+Every SCA scan except `ubel-license` and `ubel-secrets` writes a CycloneDX
+SBOM, and `ubel-resbom` can take any of them back in. It is not tied to an
+ecosystem: the SBOM's purls are the whole input, so an npm, Python, Rust,
+PHP, Go, Java, .NET, Ruby, Swift, Flutter/Dart, Docker-image, OS-package
+(`deb` / `rpm` / `apk`), agent or editor-extension SBOM is re-checked the
+same way, against current OSV/NVD, KEV and EPSS data.
+
+- **No tooling needed.** It never invokes a package manager or reads a
+  lockfile, so it runs where the project's toolchain isn't installed, and
+  it has no firewall (`check` / `install`) side effects to revert.
+- **Fidelity.** Asset identity, environment, git and OS metadata, the
+  secrets findings and the reachability verdicts the SBOM recorded are
+  carried over; OS packages keep the distro release they were scanned on,
+  so release matching still applies. Findings that are new since the SBOM
+  was written get graph-only reachability (no source tree, so no import
+  confirmation).
+- **Outputs.** `<source tag>_resbom` tag (`sca_resbom`,
+  `npm_firewall_resbom`, …): JSON, HTML and SBOM always, SARIF only where
+  the source tag gets it. Filed under the SBOM's own asset in
+  `$HOME/.ubel/history/<asset_id>/`.
+- **Doesn't claim** to discover components the original scan missed, to
+  re-run the secrets scan, or to read non-CycloneDX formats.
+
+See [Re-scanning an SBOM](#re-scanning-an-sbom--ubel-resbom) above and the
+[full reference](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#re-scanning-an-sbom-ubel-resbom).
+
 ### License Compliance — every ecosystem, including OS packages
 
 A zero-dependency, no-network normalization layer that takes whatever
@@ -1388,7 +1444,9 @@ not treated as an afterthought bolted onto the dependency scanner.
   the CycloneDX SBOM on `health`, host-OS (`os_sca`) and firewall
   (`check`/`install`) runs; SARIF on `health` scans only (`sca`,
   `docker_sca`). Standalone `ubel-license` and `ubel-secrets` write JSON and
-  HTML only, and firewall runs write no SARIF. See the report file-naming
+  HTML only, and firewall runs write no SARIF. A `ubel-resbom` re-scan
+  (tag `<source tag>_resbom`) gets exactly the formats its source tag gets.
+  See the report file-naming
   table in [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#file-naming-the-tag).
 - **SARIF 2.1.0** — full-fidelity output (deterministic SHA-256
   fingerprints, not random UUIDs, so the same finding produces the same ID
