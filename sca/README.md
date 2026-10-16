@@ -24,6 +24,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
 - Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `docker_sca` for `health` scans, `os_sca` for host-OS health scans, `agent_sca` for `ubel-agent`, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `<engine>_firewall` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `docker_sca` / `agent_sca` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
+- **Diffs between scans** — `health` reports compare dependencies, vulnerabilities, secrets and per-compliance-framework findings with the asset's previous report of the same type (new / unchanged / removed), in the report's `diffs` block and its Diffs tab, for PURL and Windows (CPE) components alike; see [Diffs against the previous report](#diffs-against-the-previous-report)
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx v1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -549,6 +550,8 @@ When invoked with `scan_os: true` on Windows, the scanner probes the registry an
 | Shell | PowerShell |
 
 Each component is reported with its actual license or vendor EULA (see [License Compliance](#license-compliance)) — proprietary Microsoft/vendor components (Windows itself, Defender, Edge, VS Code/Visual Studio IDE, Chrome, Docker Desktop, Cursor, Claude Code) resolve to a `LicenseRef-*` identifier rather than `unknown`; open-source runtimes and tools resolve to their real SPDX id (e.g. `MIT` for Node.js/.NET, `PSF-2.0` for Python, `GPL-2.0-only WITH Classpath-exception-2.0` for JRE/JDK).
+
+**Component ids are CPE 2.3 strings, not PURLs.** A Windows component's `id` is its full CPE (e.g. `cpe:2.3:a:python:python:3.12.4:*:*:*:*:*:*:*`), its `ecosystem` is `windows`, and the same string is the `affected_package_id` of every NVD finding against it. The version is part of the id, so the same product installed at several paths with one version is **one** component (all paths listed under `paths`), and an upgraded product is a different id. This is what the [Diffs](#diffs-against-the-previous-report) of an `os_sca` report compare on.
 
 ---
 
@@ -1734,6 +1737,44 @@ The `<mode>` is a filing label, not the report's [`asset_type`](#asset-types-ass
 One asset's zips sit together in its own `<asset_id>` folder, so listing an asset's history is `ls ~/.ubel/history/<asset_id>/` — and the newest scan of each tag is always at `~/.ubel/latest_reports/<asset_id>/latest.<tag>.zip`. The same id and name are written into every report (see below), so a zip that has been moved or renamed still says which asset it is from. If two runs of the same project finish in the same second the later zip gets a `_2` suffix (`2026_10_10__12_30_05_2.sca.zip`) instead of overwriting the first.
 
 For `ubel-apt`/`ubel-dnf`/`ubel-yum` specifically, the `latest.apt_firewall.*` copies are also rooted at `$HOME` rather than the project (`~/.ubel/reports/latest.apt_firewall.json`) — see [Firewall Mechanics](#firewall-mechanics) for why.
+
+### Diffs against the previous report
+
+`health`-mode reports carry a `diffs` block — shown as the **Diffs** tab of the HTML report — that says what changed since the previous report of the same asset and the same [tag](#file-naming-the-tag): an `os_sca` scan is compared only with an earlier `os_sca` scan, an `sca` scan only with an earlier `sca` scan. The previous report is read from the newest earlier `<timestamp>.<tag>.zip` in the asset's [history folder](#history-homeubelhistoryasset_id) (its `report.<tag>.json`); a zip that cannot be read is skipped in favour of the next older one. It is built before this scan's own zip is written, so the previous report is always an earlier one. Other modes (`check`, `install`, …) write `diffs: { "enabled": false }`.
+
+| What | Matched by | Lists |
+|---|---|---|
+| Dependencies | component `id` (`components_ids` / `inventory[].id`) | new / unchanged / removed |
+| Vulnerabilities | advisory id + affected component (`affected_package_id`) | new / still existing / fixed |
+| Secrets | rule id + file + masked match — not the line, which moves when the file is edited | new / still existing / removed |
+| Compliance frameworks | the same keys as the vulnerabilities and secrets above, grouped by each framework the finding maps to | new / still existing / resolved, per framework |
+
+- **Component identity follows the id.** A component whose version changed has a different id, so it appears once under *removed* (old version) and once under *new* (new version). A vulnerability is the same finding only when both the advisory and the component match, so the same CVE on a second component is *new*.
+- **PURL and CPE ids.** Application ecosystems use PURLs (`pkg:npm/…`), Windows host scans use CPE 2.3 strings (`cpe:2.3:a:vendor:product:version:…`; see [Platform scanning (Windows)](#platform-scanning-windows)). The Name, Ecosystem and Version columns come from the report's `inventory`; when the previous report holds only `components_ids`, they are parsed from the id itself — from the PURL, or for a CPE from its product and version fields (ecosystem `windows`; `*` and `-` count as no value, and `\:` inside a field is unescaped).
+- **Older previous reports.** If the previous report has no `vulnerabilities` list (advisory ids only), vulnerabilities are compared by advisory id alone, on both sides.
+- **Secrets are compared only when both reports scanned for them.** Otherwise `secrets` is `null` and the HTML says so — a run without the secrets scan is never read as "all secrets removed".
+- **Compliance frameworks.** Below the secrets, the Diffs tab shows one card per framework (OWASP Top 10, …) that either report mapped findings to, with *New*, *Existing* and *Resolved* counts; clicking a count lists the findings (type, id, severity, title, component or file, and the framework's control ids). A finding is matched by the same key as in the vulnerability and secret diffs, so it counts under every framework it maps to. Secrets are included only when both reports scanned for them; otherwise the section covers vulnerabilities only and says so. If the previous report has no `compliance_summary` or no per-finding `vulnerabilities` list (it predates compliance mapping), `compliance` is `null` and the section is omitted, so an older report is never read as "everything is new".
+- **First report.** With no earlier report for the asset and tag, `previous` and `counts` are `null` and the tab says there is nothing to compare against.
+- **Failure.** If building the diff throws, the scan still completes: `diffs` is written empty with an `error` message and a warning is printed.
+
+```json
+"diffs": {
+  "enabled": true,
+  "previous": { "report_id": "UBEL-os_sca-…", "generated_at": "2026-10-10T12:30:05.000Z", "bundle": "2026_10_10__12_30_05.os_sca.zip" },
+  "counts": { "new_deps": 1, "unchanged_deps": 14, "removed_deps": 1, "new_vulns": 0, "existing_vulns": 3, "fixed_vulns": 2 },
+  "deps":  { "new": [], "unchanged": [], "removed": [] },
+  "vulns": { "new": [], "existing": [], "fixed": [] },
+  "secrets": null,
+  "compliance": {
+    "includes_secrets": false,
+    "frameworks": [
+      { "id": "owasp_top10_2021", "name": "OWASP Top 10", "version": "2021", "new": [], "unchanged": [], "removed": [] }
+    ]
+  }
+}
+```
+
+Each entry has `name`, `ecosystem` and `version` (dependencies; vulnerabilities also carry the advisory `id`; secrets carry `id`, `title`, `severity`, `file_path`, `line` and `match_preview`). `counts` gains `new_secrets`, `unchanged_secrets` and `removed_secrets` when secrets were compared. Each framework's `new` / `unchanged` / `removed` entries have `kind` (`vuln` or `secret`), `id`, `title`, `severity`, `where` (`name@version` for a vulnerability, `file:line` for a secret) and `controls` (the framework's control ids, comma-separated); `compliance` is `null` when it cannot be compared (see above).
 
 ### Asset id: `ubel_asset.json`
 

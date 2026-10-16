@@ -299,8 +299,23 @@ function loadPreviousReport(zipPath, reportTag) {
   return null;
 }
 
-// name / ecosystem / version from a package URL, for components whose inventory entry is unavailable.
+// name / ecosystem / version from a CPE 2.3 formatted string
+// (cpe:2.3:<part>:<vendor>:<product>:<version>:...), the id format of the Windows / Linux
+// host scanner components. Fields are split on unescaped colons; "\:" and other backslash
+// escapes inside a field are undone. Wildcard / not-applicable values ("*", "-") count as empty.
+function cpeParts(id) {
+  const fields = String(id).trim().split(/(?<!\\):/);
+  if (fields.length < 6 || fields[0].toLowerCase() !== "cpe" || fields[1] !== "2.3") return null;
+  const clean = (s) => { const v = (s ?? "").replace(/\\(.)/g, "$1"); return v === "*" || v === "-" ? "" : v; };
+  return { name: clean(fields[4]) || String(id), ecosystem: "windows", version: clean(fields[5]) };
+}
+
+// name / ecosystem / version from a package URL or CPE id, for components whose inventory entry is unavailable.
 function purlParts(id) {
+  if (/^cpe:/i.test(String(id).trim())) {
+    const c = cpeParts(id);
+    if (c) return c;
+  }
   const m = /^pkg:([^/]+)\/(.+?)(?:@([^?#@]*))?(?:[?#].*)?$/.exec(String(id));
   if (!m) return { name: String(id), ecosystem: "", version: "" };
   let name = m[2];
@@ -353,10 +368,77 @@ function diffSecrets(report) {
   return out;
 }
 
+// Compliance-framework diff: for every framework mapped in either report, the findings
+// (vulnerabilities + secrets) that are new / still existing / resolved against that
+// framework. Findings are matched with the same keys as the vulns / secrets diffs above.
+// null when the previous report predates compliance mapping (no compliance_summary), so an
+// older report is never read as "everything is new".
+function diffComplianceItems(report, withSecrets) {
+  const out = new Map();
+  for (const v of Array.isArray(report.vulnerabilities) ? report.vulnerabilities : []) {
+    const key = `vuln::${v.id}::${diffVulnComponent(v)}`;
+    if (out.has(key)) continue;
+    out.set(key, {
+      kind: "vuln", id: v.id, title: v.title || "", severity: v.severity,
+      where: `${v.affected_dependency || "unknown"}@${v.affected_dependency_version || ""}`,
+      frameworks: v.compliance?.frameworks || [],
+    });
+  }
+  if (withSecrets) {
+    for (const f of report.secrets?.findings || []) {
+      const key = `secret::${f.id}::${f.file_path}::${f.match_preview ?? ""}`;
+      if (out.has(key)) continue;
+      out.set(key, {
+        kind: "secret", id: f.id, title: f.title || "", severity: f.severity,
+        where: `${f.file_path}${f.line != null ? ":" + f.line : ""}`,
+        frameworks: f.compliance?.frameworks || [],
+      });
+    }
+  }
+  return out;
+}
+
+function diffCompliance(current, previous) {
+  if (!current.compliance_summary || !previous.compliance_summary || !Array.isArray(previous.vulnerabilities)) return null;
+  const withSecrets = !!(diffSecrets(current) && diffSecrets(previous));
+  const cur = diffComplianceItems(current, withSecrets);
+  const old = diffComplianceItems(previous, withSecrets);
+  const fwMeta = new Map();
+  const perFw = (map) => {
+    const m = new Map(); // framework id -> Map(key -> entry for that framework)
+    for (const [key, it] of map) {
+      for (const fw of it.frameworks) {
+        if (!fwMeta.has(fw.id)) fwMeta.set(fw.id, { id: fw.id, name: fw.name, version: fw.version ?? null });
+        if (!m.has(fw.id)) m.set(fw.id, new Map());
+        m.get(fw.id).set(key, {
+          kind: it.kind, id: it.id, title: it.title, severity: it.severity, where: it.where,
+          controls: (fw.controls || []).map(c => c.id).join(", "),
+        });
+      }
+    }
+    return m;
+  };
+  const curFw = perFw(cur), oldFw = perFw(old);
+  const sortBy = (a, b) => a.kind.localeCompare(b.kind) || String(a.id).localeCompare(String(b.id)) || String(a.where).localeCompare(String(b.where));
+  const rows = [];
+  for (const meta of fwMeta.values()) {
+    const c = curFw.get(meta.id) || new Map(), o = oldFw.get(meta.id) || new Map();
+    const row = {
+      ...meta,
+      new:       [...c].filter(([k]) => !o.has(k)).map(([, e]) => e).sort(sortBy),
+      unchanged: [...c].filter(([k]) =>  o.has(k)).map(([, e]) => e).sort(sortBy),
+      removed:   [...o].filter(([k]) => !c.has(k)).map(([, e]) => e).sort(sortBy),
+    };
+    rows.push(row);
+  }
+  rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return { includes_secrets: withSecrets, frameworks: rows };
+}
+
 function buildDiffs(current, previous) {
   const empty = { new: [], unchanged: [], removed: [] };
   if (!previous) {
-    return { enabled: true, previous: null, counts: null, deps: empty, vulns: { new: [], existing: [], fixed: [] }, secrets: null };
+    return { enabled: true, previous: null, counts: null, deps: empty, vulns: { new: [], existing: [], fixed: [] }, secrets: null, compliance: null };
   }
   const prev = previous.report;
   const byInstance = Array.isArray(prev.vulnerabilities);
@@ -388,6 +470,7 @@ function buildDiffs(current, previous) {
     deps:  { new: d.added, unchanged: d.kept, removed: d.dropped },
     vulns: { new: v.added, existing: v.kept, fixed: v.dropped },
     secrets: sec,   // null when either report did not scan for secrets
+    compliance: diffCompliance(current, prev),   // null when the previous report has no compliance mapping
   };
 }
 
@@ -2160,6 +2243,24 @@ async function generateHTMLReport(data) {
             if (!d.secrets) {
                 html += '<p class="text-xs text-neutral-500">Secrets changes are not shown: this report or the previous one did not scan for secrets.</p>';
             }
+            if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
+                html += '<h3 class="text-lg font-bold pt-4">Compliance frameworks</h3>' +
+                    '<p class="text-xs text-neutral-500">Findings mapped to each framework, compared with the previous report' +
+                    (d.compliance.includes_secrets ? ' (vulnerabilities and secrets).' : ' (vulnerabilities only: secrets were not scanned in both reports).') + '</p>';
+                html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+                d.compliance.frameworks.forEach(function (fw, fi) {
+                    html += '<div class="glass rounded-xl p-5 space-y-3"><div><p class="font-semibold text-sm">' + diffEsc(fw.name) + '</p>' +
+                        (fw.version ? '<p class="text-[10px] text-neutral-500 mono">' + diffEsc(fw.version) + '</p>' : '') + '</div>' +
+                        '<div class="grid grid-cols-3 gap-2">';
+                    [['new', 'New', 'text-red-400'], ['unchanged', 'Existing', 'text-yellow-400'], ['removed', 'Resolved', 'text-green-400']].forEach(function (g) {
+                        html += '<button type="button" onclick="openComplianceDiffModal(' + fi + ',\\'' + g[0] + '\\')" class="bg-neutral-900 border border-neutral-800 hover:border-neutral-500 rounded-lg p-3 text-left transition-colors">' +
+                            '<span class="block text-[9px] uppercase tracking-widest text-neutral-500 font-bold">' + g[1] + '</span>' +
+                            '<span class="block text-2xl font-bold mono ' + g[2] + '">' + fw[g[0]].length + '</span></button>';
+                    });
+                    html += '</div></div>';
+                });
+                html += '</div>';
+            }
             sec.innerHTML = html;
         }
 
@@ -2196,6 +2297,35 @@ async function generateHTMLReport(data) {
             }
             document.getElementById('modal-body').innerHTML =
                 '<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
+                '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body;
+            document.getElementById('modal-overlay').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
+        function openComplianceDiffModal(fi, list) {
+            var d = reportData.diffs;
+            var fw = d && d.compliance && d.compliance.frameworks[fi];
+            if (!fw) return;
+            var labels = { new: 'New', unchanged: 'Still existing', removed: 'Resolved' };
+            var items = fw[list] || [];
+            var body;
+            if (items.length === 0) {
+                body = '<p class="text-sm text-neutral-500 italic">None.</p>';
+            } else {
+                body = '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+                    ['Type', 'ID', 'Severity', 'Title', 'Component / File', 'Controls'].map(function (c) { return '<th class="pb-2 pr-4 font-bold">' + c + '</th>'; }).join('') +
+                    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
+                    items.map(function (e) {
+                        return '<tr><td class="py-2 pr-4 text-neutral-400">' + (e.kind === 'secret' ? 'Secret' : 'Vulnerability') + '</td>' +
+                            '<td class="py-2 pr-4 mono">' + diffEsc(e.id) + '</td>' +
+                            '<td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + diffEsc((e.severity || 'unknown').toLowerCase()) + '">' + diffEsc(e.severity || 'unknown') + '</td>' +
+                            '<td class="py-2 pr-4 font-medium">' + diffEsc(e.title) + '</td>' +
+                            '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.where) + '</td>' +
+                            '<td class="py-2 pr-4 mono text-neutral-500">' + diffEsc(e.controls) + '</td></tr>';
+                    }).join('') + '</tbody></table></div>';
+            }
+            document.getElementById('modal-body').innerHTML =
+                '<h3 class="text-lg font-bold mb-1">' + diffEsc(fw.name) + ' \u2014 ' + labels[list] + '</h3>' +
                 '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body;
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
@@ -5199,7 +5329,7 @@ export class UbelEngineInstance {
           finalJson.diffs = buildDiffs(finalJson, loadPreviousReport(zipPath, reportTag));
         } catch (e) {
           console.warn("[~] Diffs failed:", e.message);
-          finalJson.diffs = { enabled: true, previous: null, counts: null, deps: { new: [], unchanged: [], removed: [] }, vulns: { new: [], existing: [], fixed: [] }, secrets: null, error: e.message };
+          finalJson.diffs = { enabled: true, previous: null, counts: null, deps: { new: [], unchanged: [], removed: [] }, vulns: { new: [], existing: [], fixed: [] }, secrets: null, compliance: null, error: e.message };
         }
       }
 

@@ -40,6 +40,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **OS package release matching** — advisories for the host's OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
+- **Diffs between scans** — the HTML and JSON reports compare dependencies, vulnerabilities, secrets and per-compliance-framework findings with the previous report of the same asset and scan type: what is new, what is unchanged and what was removed or fixed (see [Diffs Against the Previous Report](#diffs-against-the-previous-report))
 
 ---
 
@@ -310,7 +311,7 @@ Every notification includes an **Open Report** button that opens the full intera
 
 ## The HTML Report
 
-Each scan produces a self-contained HTML file that works fully offline. It contains nine tabs:
+Each scan produces a self-contained HTML file that works fully offline. It contains ten tabs:
 
 | Tab | Contents |
 |---|---|
@@ -322,6 +323,7 @@ Each scan produces a self-contained HTML file that works fully offline. It conta
 | **Dependency Sequences** | Interactive force-directed dependency graph — colour-coded by vulnerability status, with search, filter, drag, and pin |
 | **Detailed Stats** | Severity distribution charts, top vulnerable packages, ecosystem breakdown |
 | **Compliance** | One card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) with control breakdown and finding counts — see [Compliance Framework Mapping](#compliance-framework-mapping) |
+| **Diffs** | What changed since the previous report of this asset and scan type: new / unchanged / removed dependencies, new / still existing / fixed vulnerabilities, new / still existing / removed secrets, and — per compliance framework — new / existing / resolved findings. Click any count for the list — see [Diffs Against the Previous Report](#diffs-against-the-previous-report) |
 | **System Info** | OS metadata, git info, Node.js version, engine/tool versions (no IP addresses or ports are recorded) |
 
 ---
@@ -808,6 +810,27 @@ The top-level `compliance_summary` field aggregates every vulnerability and secr
 - **HTML report**: a dedicated **Compliance** tab with one card per framework (control breakdown + finding counts), plus a Compliance Frameworks section in each vulnerability's detail modal.
 - **JSON report**: a `compliance` object on every vulnerability and secrets finding, plus a report-level `compliance_summary` aggregating all findings into per-framework, per-control counts.
 - **SARIF report**: `compliance_categories` / `compliance_frameworks` on each rule, and the full `compliance` object on each result — in both the dependency-vulnerability run and the secrets run.
+
+---
+
+## Diffs Against the Previous Report
+
+Project, extension and host-platform scans carry a `diffs` block in the JSON report, shown as the **Diffs** tab of the HTML report (between **Compliance** and **System Info**). It says what changed since the previous report of the same asset **and** the same scan type: a `sca` scan is compared only with an earlier `sca` scan, an `os_sca` scan only with an earlier `os_sca` scan, and so on for each editor's `<editor>_sca` scan. The previous report is read from the newest earlier zip of that type in the asset's history folder (`~/.ubel/history/<asset_id>/`, see [Reports](#reports)); a zip that can't be read is skipped in favour of the next older one.
+
+| What | Matched by | Lists |
+|---|---|---|
+| Dependencies | component id (a PURL; for Windows host scans, a CPE 2.3 string) | new / unchanged / removed |
+| Vulnerabilities | advisory id + affected component | new / still existing / fixed |
+| Secrets | rule id + file + masked match (not the line, which moves when the file is edited) | new / still existing / removed |
+| Compliance frameworks | the same keys as the vulnerabilities and secrets, grouped by each framework the finding maps to | new / existing / resolved, per framework |
+
+In the HTML report each count is a button that opens the list behind it. The compliance frameworks appear below the secrets, one card per framework (OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, CIS Controls v8) that either report mapped findings to; its list shows each finding's type, id, severity, title, component or file, and the framework's control ids. A finding that maps to several frameworks is counted under each of them.
+
+- **An upgrade is a removal plus an addition.** The version is part of a component's id, so an upgraded package appears once under *removed* (old version) and once under *new* (new version). The same CVE on a second component is a *new* vulnerability.
+- **Secrets are compared only when both reports scanned for them.** Otherwise the secrets lists are omitted and the tab says so, so a scan without the secrets pass is never read as "all secrets removed". The compliance section then covers vulnerabilities only, and says so.
+- **Older previous reports.** A previous report from before compliance mapping existed has no per-framework data, so the compliance section is omitted rather than reporting every finding as new. A previous report that lists only advisory ids has its vulnerabilities compared by advisory id alone.
+- **First scan.** With no earlier report for the asset and scan type, the tab says there is nothing to compare against.
+- **Never blocks a scan.** If building the diff fails, the scan still completes and the tab is empty.
 
 ---
 

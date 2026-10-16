@@ -76,6 +76,8 @@ ubel-bun health
 ubel-composer health
 ```
 
+Every `health` report also carries a **Diffs** tab (`diffs` in the JSON): dependencies, vulnerabilities, secrets and — per compliance framework — mapped findings that are new, unchanged or removed since the asset's previous report of the same type. Components are matched by id — a PURL, or for Windows host scans a CPE 2.3 string, so an upgraded product shows as one removed and one new component. See [SCA § Diffs against the previous report](sca/README.md#diffs-against-the-previous-report).
+
 `health` mode also supports full-stack monorepo scanning (Python, PHP, Rust, Go, .NET, Java, Ruby, Swift, Flutter/Dart alongside Node) and host/platform scanning (Linux package managers, Windows registry) when invoked programmatically.
 
 **yarn** is supported in `health` mode only — it can't do a lockfile-only dry-run, so it has no firewall coverage below. It does support the dependency-scan pre-commit hook (`ubel-yarn install-hook`).
