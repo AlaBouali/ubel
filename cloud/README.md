@@ -29,6 +29,7 @@ Written against **Node.js's standard library only** — no AWS SDK, no
 - Credentials are only ever used for that run — nothing stored or reused, same model as the SAST module's LLM credentials
 - **Compliance framework mapping** — every finding is mapped onto the frameworks that apply to its risk category — OWASP Top 10, PCI DSS, HIPAA Security Rule, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, plus the provider-specific CIS Foundations Benchmarks (AWS, Azure, GCP) where a check has one — with a report-level per-framework/per-control finding-count summary (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Automatic report generation: timestamped **JSON** + interactive **HTML**, plus `latest.cloud.*` convenience links; a zipped snapshot of both is also saved for historic tracking
+- **Diffs against the previous report** — every report is compared with the asset's previous cloud report: findings, services, providers and compliance frameworks that are new, still present or fixed, in a dedicated Diffs tab and a `diffs` block in the JSON. Providers, regions and findings that were not scanned both times are left out of the comparison instead of showing up as "fixed" (see [Diffs against the previous report](#diffs-against-the-previous-report))
 - **Executive Summary** in both reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Reports](#reports))
 - `--fail-on` severity/count gate — same syntax as the rest of UBEL — for CI use
 - Zero external runtime dependencies (Node.js stdlib only)
@@ -374,9 +375,10 @@ The HTML report is fully self-contained (no server required) and includes:
 - Searchable, filterable findings table (free-text search plus severity and provider filters)
 - Per-finding detail modal (resource, region, description, remediation command, compliance framework mapping)
 - Dedicated Compliance tab — one card per framework, showing which controls this run's findings touch and how often (see [Compliance Framework Mapping](#compliance-framework-mapping))
+- Diffs tab (after Compliance) — what changed since the previous report, for findings, services, providers and each compliance framework; see [Diffs against the previous report](#diffs-against-the-previous-report)
 - Scan Info tab (tool version, generated-at timestamp, providers and regions scanned, per-provider status, GCP project / Azure subscription, and the `--min-severity` filter that was applied)
 
-The JSON report is the full machine-readable equivalent — `stats`, `compliance_summary`, the complete `findings` array, the scan-coverage fields (`providers`, `regions`, `provider_status`, `accounts`, `region_source`, `scan_options`), and the `executive_summary` object — and can be consumed by CI/CD tooling directly. The HTML report renders from that exact object, so the two never differ.
+The JSON report is the full machine-readable equivalent — `stats`, `compliance_summary`, the complete `findings` array, the scan-coverage fields (`providers`, `regions`, `provider_status`, `accounts`, `region_source`, `scan_options`), the `executive_summary` object, and the `diffs` block — and can be consumed by CI/CD tooling directly. The HTML report renders from that exact object, so the two never differ.
 
 ### Executive summary
 
@@ -396,6 +398,66 @@ Overall risk is the highest level that applies, using the severities the scanner
 | Not assessed | no cloud could be scanned — no rating is given instead of "Minimal" |
 
 `info` findings are housekeeping notes: they are counted separately and never raise the rating, so the summary's "Issues found" can be lower than the Findings tab total. A cloud that was requested but skipped (no credentials) or whose scan stopped part-way is stated in the summary — a missing or incomplete cloud is never presented as a clean one. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
+
+### Diffs against the previous report
+
+Every report carries a **Diffs** tab (`diffs` in the JSON): the findings, services, providers and — per compliance framework — mapped findings that are new, still present or fixed since the asset's previous cloud report. It is the cloud counterpart of the Diffs tab in the SCA and SAST reports and works the same way: nothing extra to run, and nothing to configure.
+
+**Which report it compares against.** The previous report is read back from the asset's history folder (see [Reports](#reports)): the newest earlier `<timestamp>.cloud.zip` whose `report.cloud.json` can be read — an unreadable zip is skipped in favour of the next older one. Only that one previous report is used; there is no way to pick a different baseline, and no trend across more than two runs. The first run for an asset, or one whose previous report has no `findings` list, shows "No previous report found" instead of numbers (`previous` and `counts` are `null` in the JSON — never zeros). The Diffs tab does not change the Executive Summary, the `--fail-on` gate or the exit code.
+
+**What is compared.**
+
+| Section | New | Still existing | Fixed / resolved |
+|---|---|---|---|
+| Findings | in this report only | in both | in the previous report only |
+| Services (`provider/service`) | has findings now, had none | has findings in both | had findings, has none now |
+| Providers | has findings now, had none | has findings in both | had findings, has none now |
+| Compliance frameworks | new findings mapped to the framework | existing ones | fixed ones |
+
+- A finding is matched on **provider + service + check + resource + region**, so the same misconfiguration on the same resource is one finding across runs, and the same check on a new bucket is a new one.
+- Services and providers are compared on their **finding counts**. A service that is still affected but has more or fewer findings is listed in a before / now / change table (largest change first), so "still affected, but 12 fewer" is visible.
+- The compliance diff is the findings diff filtered by framework: new and existing findings use this report's mapping, fixed ones use the previous report's. It is skipped (with a note in the tab) when the previous report has no `compliance_summary`, so an older report is never read as "everything is new". Mapping changes between tool versions therefore never move a finding between "new" and "fixed" on their own.
+
+**What is left out, so nothing reads as fixed that was only not checked.**
+
+- A provider that was `skipped` in this scan (no credentials) is not compared at all, and the tab says so. A provider that was only `partial` stays in, with a warning that some findings may show as fixed because they were not checked.
+- Findings from regions that were not scanned in **both** runs are ignored — for example after switching from auto-discovery to `--regions`. Resources without a region (IAM and other global resources) are always compared.
+- With `--min-severity`, earlier findings below that level are ignored (they were hidden, not fixed). If the filter differs from the previous run's, a note says the counts may not be directly comparable.
+- If the GCP project or Azure subscription differs from the previous report, the results are still shown, with a note that they describe a different account.
+
+**In the HTML report.** Nine tiles (New / Still existing / Fixed for findings, services and providers) open a list on click, followed by one card per framework with New / Existing / Resolved counts. Finding lists are in severity order, and a row opens the usual finding detail view; compliance lists add a *Controls* column. A list shows the first 500 rows with a note when there are more — the Findings tab has everything. `Esc` closes the open dialog. If building the comparison failed, the tab says so (`diffs.error` in the JSON) rather than disappearing; the scan and its reports are unaffected.
+
+**In the JSON.** To keep the report from growing by a copy of every finding, `diffs` points at findings that are already in the report instead of repeating them:
+
+```json
+"diffs": {
+  "enabled": true,
+  "previous": { "report_id": "UBEL-cloud-…", "generated_at": "2026-10-01T09:00:00.000Z", "bundle": "2026_10_01__09_00_00.cloud.zip" },
+  "counts": {
+    "new_findings": 2, "existing_findings": 14, "fixed_findings": 3,
+    "new_services": 1, "existing_services": 6, "resolved_services": 0,
+    "new_providers": 0, "existing_providers": 2, "resolved_providers": 0
+  },
+  "notes": ["The scanned regions differ from the previous report (AWS). Only findings in regions scanned both times are compared."],
+  "findings": {
+    "new":      [ { "provider": "aws", "service": "s3", "check": "…", "resource": "…" } ],
+    "existing": [ 0, 3, 4 ],
+    "fixed":    [ { "provider": "aws", "service": "iam", "check": "…", "resource": "…" } ]
+  },
+  "services":  { "new": [], "existing": [ { "key": "aws/s3", "provider": "aws", "service": "s3", "previous": 5, "current": 4, "delta": -1 } ], "resolved": [] },
+  "providers": { "new": [], "existing": [ { "key": "aws", "provider": "aws", "previous": 9, "current": 8, "delta": -1 } ], "resolved": [] },
+  "compliance": {
+    "frameworks": [ { "id": "pci_dss_4_0", "name": "PCI DSS", "version": "v4.0", "new": [0], "unchanged": [0, 3], "removed": [0] } ]
+  }
+}
+```
+
+- `findings.new` and `findings.fixed` hold the full finding objects (a fixed finding is no longer in `findings`, so it has to be carried here).
+- `findings.existing` holds **indexes into the report's top-level `findings` array**.
+- Per framework, `new` holds indexes into `diffs.findings.new`, `unchanged` indexes into the top-level `findings`, and `removed` indexes into `diffs.findings.fixed`.
+- `compliance` is `null` when the previous report has no compliance mapping. A failed comparison gives the same empty block as a first run (`previous` and `counts` are `null`) plus an `error` string.
+
+**Where the code lives.** `lib/previous_report.js` reads the previous report from the history zip (it reads stored and deflated zip entries with Node's `zlib`, in keeping with the stdlib-only rule above); `buildDiffs()` in `lib/html_report.js` does the comparison; `writeCloudReports()` in `index.js` passes the result into `buildReportPayload()` as `meta.previous_report` (`null` for a first run). A script that calls `buildReportPayload()` itself gets no `diffs` block, and no Diffs tab, unless it passes `previous_report` too.
 
 ---
 
@@ -485,7 +547,7 @@ up in a CI job or container layer.
   project-wide aggregated APIs, so this only matters if per-zone scanning
   is ever needed. AWS regions *are* auto-discovered now (via
   `DescribeRegions`), with `--regions`/`AWS_REGIONS` as an override.
-- Findings are point-in-time; there's no diffing between scan runs yet.
+- Findings are point-in-time. Each report is compared only with the immediately previous report of the same asset (see [Diffs against the previous report](#diffs-against-the-previous-report)); there is no baseline selection and no trend over more than two runs. Skipped providers and regions not scanned both times are excluded from the comparison, so a narrower scan shows less change, not more.
 - No SARIF output — findings don't currently plug into code-scanning
   dashboards (GitHub Advanced Security, etc.) the way the SCA and SAST
   modules' reports do; JSON + HTML only for now.

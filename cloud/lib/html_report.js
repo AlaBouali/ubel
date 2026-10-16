@@ -68,6 +68,178 @@ function buildStats(findings) {
   return { total: findings.length, bySeverity, byProvider, byService, byRegion };
 }
 
+// ─── diffs against the previous report ───────────────────────────────────────
+// The "Diffs" tab compares this scan with the previous cloud report of the same
+// asset: findings, services (provider/service), providers and compliance
+// frameworks that are new, still present, or gone. Findings are matched on
+// provider + service + check + resource + region. Services and providers are
+// compared on their finding counts, so one that is still affected but has more or
+// fewer findings is reported with its before/now numbers.
+//
+// Shape (kept small: the report already carries every current finding, so the
+// diff points at them instead of copying them):
+//   findings:   { new: [finding], existing: [index into payload.findings], fixed: [finding] }
+//   services / providers: { new|existing|resolved: [{ key, provider, service?, previous, current, delta }] }
+//   compliance: { frameworks: [{ id, name, version,
+//                 new: [index into findings.new],
+//                 unchanged: [index into payload.findings],
+//                 removed: [index into findings.fixed] }] }  (null when the previous report has no mapping)
+//
+// Things that would make the comparison dishonest are left out, and a note says so:
+//  - a provider skipped in this scan (otherwise all its earlier findings read as "fixed");
+//  - regions not scanned in both runs (same reason, per region);
+//  - earlier findings below this scan's --min-severity (they were hidden, not fixed).
+
+const DIFF_SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+const diffFindingKey = (f) => [f.provider, f.service, f.check, f.resource, f.region || ''].join('::');
+
+function diffSortFindings(a, b) {
+  return (DIFF_SEV_RANK[a.severity] ?? 9) - (DIFF_SEV_RANK[b.severity] ?? 9)
+    || String(a.provider).localeCompare(String(b.provider))
+    || String(a.service).localeCompare(String(b.service))
+    || String(a.resource).localeCompare(String(b.resource));
+}
+
+// Builds [{ key, provider, service?, previous, current, delta }] lists for one
+// dimension (provider or service) from two arrays of findings.
+function diffCountGroups(curFindings, prevFindings, keyOf, partsOf) {
+  const count = (list) => {
+    const m = new Map();
+    for (const f of list) m.set(keyOf(f), (m.get(keyOf(f)) || 0) + 1);
+    return m;
+  };
+  const cur = count(curFindings), prev = count(prevFindings);
+  const parts = new Map();
+  for (const f of [...curFindings, ...prevFindings]) parts.set(keyOf(f), partsOf(f));
+  const entry = (k) => ({ key: k, ...parts.get(k), previous: prev.get(k) || 0, current: cur.get(k) || 0, delta: (cur.get(k) || 0) - (prev.get(k) || 0) });
+  const keys = [...new Set([...cur.keys(), ...prev.keys()])].sort();
+  const all = keys.map(entry);
+  return {
+    new:      all.filter(e => e.previous === 0 && e.current > 0),
+    existing: all.filter(e => e.previous > 0 && e.current > 0),
+    resolved: all.filter(e => e.previous > 0 && e.current === 0),
+  };
+}
+
+// Per-framework view of the findings diff: the same new / existing / fixed
+// findings, filtered to those mapped to each framework (current mapping for new
+// and existing findings, the previous report's mapping for fixed ones).
+function diffCompliance(findings, allCurrent, indexOf) {
+  const fwOf = (f) => (f.compliance && f.compliance.frameworks) || [];
+  const meta = new Map();
+  for (const f of [...findings.new, ...findings.fixed, ...findings.existing.map(i => allCurrent[i])]) {
+    for (const fw of fwOf(f)) if (!meta.has(fw.id)) meta.set(fw.id, { id: fw.id, name: fw.name, version: fw.version ?? null });
+  }
+  const has = (f, id) => fwOf(f).some(x => x.id === id);
+  const frameworks = [...meta.values()].map(m => ({
+    ...m,
+    new:       findings.new.map((f, i) => has(f, m.id) ? i : -1).filter(i => i >= 0),
+    unchanged: findings.existing.filter(i => has(allCurrent[i], m.id)),
+    removed:   findings.fixed.map((f, i) => has(f, m.id) ? i : -1).filter(i => i >= 0),
+  }));
+  frameworks.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return { frameworks };
+}
+
+function diffsBlank(extra) {
+  const group = () => ({ new: [], existing: [], resolved: [] });
+  return {
+    enabled: true, previous: null, counts: null, notes: [],
+    findings: { new: [], existing: [], fixed: [] },
+    services: group(), providers: group(), compliance: null,
+    ...extra,
+  };
+}
+
+/**
+ * @param {object} current   the report payload being built (needs findings, providers, provider_status, regions, accounts, scan_options)
+ * @param {{file?:string, report:object}|null} previous  the previous report (parsed JSON) or null when this is the first one
+ */
+function buildDiffs(current, previous) {
+  const prev = previous && (previous.report || previous);
+  if (!prev || !Array.isArray(prev.findings)) return diffsBlank();
+
+  const notes = [];
+
+  // Providers
+  const skipped = new Set((current.provider_status || []).filter(p => p.status === 'skipped').map(p => p.provider));
+  const scanned = Array.isArray(current.providers) && current.providers.length ? new Set(current.providers) : null;
+  const comparable = (provider) => !skipped.has(provider) && (!scanned || scanned.has(provider));
+  const notCompared = [...new Set([...(prev.findings || []).map(f => f.provider), ...skipped])].filter(p => !comparable(p));
+  if (notCompared.length) {
+    notes.push('Not compared (not scanned this time): ' + notCompared.map(p => String(p).toUpperCase()).join(', ') + '.');
+  }
+  const partial = (current.provider_status || []).filter(p => p.status === 'partial').map(p => String(p.provider).toUpperCase());
+  if (partial.length) {
+    notes.push('Partially scanned this time: ' + partial.join(', ') + '. Some findings may show as fixed only because they were not checked.');
+  }
+
+  // Regions: only findings from regions scanned in both runs are comparable.
+  const regionList = (r, p) => (r && r.regions && Array.isArray(r.regions[p])) ? r.regions[p] : null;
+  const regionChanged = [];
+  for (const p of new Set([...Object.keys(current.regions || {}), ...Object.keys(prev.regions || {})])) {
+    const x = regionList(current, p), y = regionList(prev, p);
+    if (x && y && (x.length !== y.length || x.some(r => !y.includes(r)))) regionChanged.push(String(p).toUpperCase());
+  }
+  if (regionChanged.length) {
+    notes.push('The scanned regions differ from the previous report (' + regionChanged.join(', ') + '). Only findings in regions scanned both times are compared.');
+  }
+  const regionOk = (f) => {
+    if (!f.region) return true;   // global resources (IAM, ...) carry no region
+    const x = regionList(current, f.provider), y = regionList(prev, f.provider);
+    return !x || !y || (x.includes(f.region) && y.includes(f.region));
+  };
+
+  // Accounts
+  const acct = { gcp: 'GCP project', azure: 'Azure subscription' };
+  const acctChanged = Object.keys(acct).filter(k => current.accounts && prev.accounts && current.accounts[k] && prev.accounts[k] && current.accounts[k] !== prev.accounts[k]);
+  if (acctChanged.length) {
+    notes.push('The ' + acctChanged.map(k => acct[k]).join(' and ') + ' differs from the previous report, so these results describe a different account.');
+  }
+
+  // Severity filter
+  const curMin = current.scan_options && current.scan_options.min_severity;
+  const prevMin = prev.scan_options && prev.scan_options.min_severity;
+  if ((curMin || null) !== (prevMin || null)) {
+    notes.push('The minimum severity filter differs from the previous report (' + (prevMin || 'none') + ' before, ' + (curMin || 'none') + ' now), so counts may not be directly comparable.');
+  }
+
+  const indexOf = new Map(current.findings.map((f, i) => [f, i]));
+  const curFindings = current.findings.filter(f => comparable(f.provider) && regionOk(f));
+  const prevFindings = prev.findings.filter(f =>
+    comparable(f.provider) && regionOk(f) && (!curMin || (DIFF_SEV_RANK[f.severity] ?? 9) <= (DIFF_SEV_RANK[curMin] ?? 9))
+  );
+
+  const curMap = new Map(curFindings.map(f => [diffFindingKey(f), f]));
+  const prevMap = new Map(prevFindings.map(f => [diffFindingKey(f), f]));
+  const findings = {
+    new:      [...curMap].filter(([k]) => !prevMap.has(k)).map(([, f]) => f).sort(diffSortFindings),
+    existing: [...curMap].filter(([k]) =>  prevMap.has(k)).map(([, f]) => f).sort(diffSortFindings).map(f => indexOf.get(f)),
+    fixed:    [...prevMap].filter(([k]) => !curMap.has(k)).map(([, f]) => f).sort(diffSortFindings),
+  };
+
+  const services = diffCountGroups(curFindings, prevFindings,
+    f => f.provider + '/' + f.service, f => ({ provider: f.provider, service: f.service }));
+  const providers = diffCountGroups(curFindings, prevFindings,
+    f => f.provider, f => ({ provider: f.provider }));
+
+  return {
+    enabled: true,
+    previous: { report_id: prev.report_id ?? null, generated_at: prev.generated_at ?? null, bundle: previous.file ?? null },
+    counts: {
+      new_findings: findings.new.length, existing_findings: findings.existing.length, fixed_findings: findings.fixed.length,
+      new_services: services.new.length, existing_services: services.existing.length, resolved_services: services.resolved.length,
+      new_providers: providers.new.length, existing_providers: providers.existing.length, resolved_providers: providers.resolved.length,
+    },
+    notes,
+    findings,
+    services,
+    providers,
+    // null when the previous report predates compliance mapping, so an older report is never read as "everything is new"
+    compliance: prev.compliance_summary ? diffCompliance(findings, current.findings, indexOf) : null,
+  };
+}
+
 // ─── main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -90,6 +262,8 @@ function buildStats(findings) {
  * @param {'cli'|'configured'|'discovered'|'fallback'} [meta.region_source]  how the AWS region list was decided
  * @param {string} [meta.min_severity]  the --min-severity filter that was applied
  * @param {number} [meta.hidden_by_filter]  findings that filter removed before the report was built
+ * @param {{file?:string, report:object}|null} [meta.previous_report]  the previous report of this asset (parsed JSON),
+ *   or null when there is none. Leave undefined to skip diffs; the Diffs tab is then not shown.
  */
 function buildReportPayload(reporter, meta = {}) {
   const findings = reporter.sorted();
@@ -118,6 +292,16 @@ function buildReportPayload(reporter, meta = {}) {
     compliance_summary: complianceSummary,
     findings,
   };
+
+  // Diffs vs the previous report. Never allowed to fail the scan either.
+  if (meta.previous_report !== undefined) {
+    try {
+      payload.diffs = buildDiffs(payload, meta.previous_report);
+    } catch (e) {
+      console.warn(`[~] Diffs failed: ${e.message}`);
+      payload.diffs = diffsBlank({ error: e.message });
+    }
+  }
 
   // Executive summary (plain-language overview for non-technical readers).
   // Derived purely from the finished payload above, so it must be built last.
@@ -241,6 +425,7 @@ async function generateHtmlReport(reportPayload) {
       <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('findings')"  id="tab-findings"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
+      <button onclick="switchTab('diffs')"      id="tab-diffs"      class="hidden py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
       <button onclick="switchTab('stats')"      id="tab-stats"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
       <button onclick="switchTab('scaninfo')"  id="tab-scaninfo"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Scan Info</button>
     </div>
@@ -345,6 +530,9 @@ async function generateHtmlReport(reportPayload) {
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
       <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>
+
+    <!-- Diffs (only when a previous report was supplied) -->
+    <section id="section-diffs" class="hidden space-y-8"></section>
 
     <!-- Detailed Stats -->
     <section id="section-stats" class="hidden space-y-8">
@@ -990,6 +1178,8 @@ function openModal(html) {
   document.body.style.overflow = 'hidden';
 }
 
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('modal-overlay').addEventListener('click', (e) => {
     if (e.target.id === 'modal-overlay') closeModal();
@@ -1021,6 +1211,13 @@ document.addEventListener('DOMContentLoaded', () => {
     renderFindingDetail(f);
   });
 
+  document.getElementById('section-diffs').addEventListener('click', (e) => {
+    const tile = e.target.closest('[data-diff-tile]');
+    if (tile) { openDiffModal(parseInt(tile.dataset.diffTile, 10)); return; }
+    const fwBtn = e.target.closest('[data-diff-fw]');
+    if (fwBtn) openComplianceDiffModal(parseInt(fwBtn.dataset.diffFw, 10), fwBtn.dataset.diffList);
+  });
+
   updateTabCounts();
   renderDashboard();
   try { renderExecutiveSummary(); } catch (e) { console.error('Executive summary render failed:', e); }
@@ -1028,6 +1225,7 @@ document.addEventListener('DOMContentLoaded', () => {
   applyFilters();
   renderScanInfo();
   renderCompliance();
+  try { renderDiffs(); } catch (e) { console.error('Diffs render failed:', e); }
   renderStats();
 });
 
@@ -1037,6 +1235,7 @@ function updateTabCounts() {
   document.getElementById('tab-findings').textContent = 'Findings(' + reportData.stats.total + ')';
   const cs = reportData.compliance_summary;
   document.getElementById('tab-compliance').textContent = 'Compliance(' + (cs && cs.frameworks ? cs.frameworks.length : 0) + ')';
+  if (reportData.diffs && reportData.diffs.enabled) document.getElementById('tab-diffs').classList.remove('hidden');
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
@@ -1330,7 +1529,187 @@ function renderStatsCharts(s) {
     });
   }
 }
+// ── DIFFS ─────────────────────────────────────────────────────────────────────
+// Comparison with the previous report of this asset (reportData.diffs, built
+// server-side by buildDiffs). Absent when no previous-report lookup was done.
+// findings.existing and the compliance lists hold indexes, resolved below.
+
+const DIFF_ROW_CAP = 500;
+const DIFF_TILES = [
+  { group: 'findings',  list: 'new',      count: 'new_findings',       label: 'New findings',             color: 'text-red-400' },
+  { group: 'findings',  list: 'existing', count: 'existing_findings',  label: 'Still existing findings',  color: 'text-yellow-400' },
+  { group: 'findings',  list: 'fixed',    count: 'fixed_findings',     label: 'Fixed findings',           color: 'text-green-400' },
+  { group: 'services',  list: 'new',      count: 'new_services',       label: 'Newly affected services',  color: 'text-red-400' },
+  { group: 'services',  list: 'existing', count: 'existing_services',  label: 'Still affected services',  color: 'text-yellow-400' },
+  { group: 'services',  list: 'resolved', count: 'resolved_services',  label: 'Resolved services',        color: 'text-green-400' },
+  { group: 'providers', list: 'new',      count: 'new_providers',      label: 'Newly affected providers', color: 'text-red-400' },
+  { group: 'providers', list: 'existing', count: 'existing_providers', label: 'Still affected providers', color: 'text-yellow-400' },
+  { group: 'providers', list: 'resolved', count: 'resolved_providers', label: 'Resolved providers',       color: 'text-green-400' },
+];
+const DIFF_GROUPS = [
+  { group: 'findings',  title: 'Findings',  hint: 'Matched on provider, service, check, resource and region.' },
+  { group: 'services',  title: 'Services',  hint: 'A service is "affected" when it has at least one finding.' },
+  { group: 'providers', title: 'Providers', hint: 'A provider is "affected" when it has at least one finding.' },
+];
+
+function diffDeltaHtml(n) {
+  if (!n) return '<span class="text-neutral-500">0</span>';
+  return n > 0 ? '<span class="text-red-400">+' + n + '</span>' : '<span class="text-green-400">' + n + '</span>';
+}
+
+function diffNameOf(group, e) {
+  return group === 'providers' ? String(e.provider).toUpperCase() : e.provider + '/' + e.service;
+}
+
+// Findings behind a findings tile: new / fixed are stored whole, existing as indexes.
+function diffFindingList(list) {
+  const f = reportData.diffs.findings;
+  if (list === 'existing') return f.existing.map(i => reportData.findings[i]).filter(Boolean);
+  return f[list] || [];
+}
+
+// Findings behind a framework count (see the shape note in buildDiffs).
+function diffFrameworkList(fw, list) {
+  const f = reportData.diffs.findings;
+  const base = list === 'new' ? f.new : list === 'removed' ? f.fixed : reportData.findings;
+  return (fw[list] || []).map(i => base[i]).filter(Boolean);
+}
+
+function diffControlsOf(f, fwId) {
+  const fw = ((f.compliance && f.compliance.frameworks) || []).find(x => x.id === fwId);
+  return fw ? (fw.controls || []).map(c => c.id).join(', ') : '';
+}
+
+function diffCountsTable(group, items) {
+  return '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+    ['Name', 'Before', 'Now', 'Change'].map(c => '<th class="pb-2 pr-4 font-bold">' + c + '</th>').join('') +
+    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
+    items.map(e =>
+      '<tr><td class="py-2 pr-4 mono">' + escH(diffNameOf(group, e)) + '</td>' +
+      '<td class="py-2 pr-4 mono text-neutral-400">' + e.previous + '</td>' +
+      '<td class="py-2 pr-4 mono text-neutral-200">' + e.current + '</td>' +
+      '<td class="py-2 pr-4 mono">' + diffDeltaHtml(e.delta) + '</td></tr>'
+    ).join('') + '</tbody></table></div>';
+}
+
+// Rows open the usual finding detail view (same hook the compliance modal uses).
+// Long lists show the first DIFF_ROW_CAP rows; the findings are in severity order.
+function diffFindingsTable(items, fwId) {
+  const shown = items.slice(0, DIFF_ROW_CAP);
+  _currentComplianceMatches = shown;
+  const cols = ['Severity', 'Title', 'Service', 'Resource', 'Region'].concat(fwId ? ['Controls'] : []);
+  return '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+    cols.map(c => '<th class="pb-2 pr-4 font-bold">' + c + '</th>').join('') +
+    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
+    shown.map((f, idx) =>
+      '<tr class="hover:bg-neutral-800/30 cursor-pointer" data-finding-index="' + idx + '">' +
+      '<td class="py-2 pr-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ' + sevClass(f.severity) + '">' + escH(f.severity) + '</span></td>' +
+      '<td class="py-2 pr-4 font-medium">' + escH(f.title) + '</td>' +
+      '<td class="py-2 pr-4 mono text-neutral-400">' + escH(f.provider + '/' + f.service) + '</td>' +
+      '<td class="py-2 pr-4 mono text-neutral-400 break-all">' + escH(f.resource) + '</td>' +
+      '<td class="py-2 pr-4 mono text-neutral-500">' + escH(f.region || '\u2014') + '</td>' +
+      (fwId ? '<td class="py-2 pr-4 mono text-neutral-500">' + escH(diffControlsOf(f, fwId)) + '</td>' : '') + '</tr>'
+    ).join('') + '</tbody></table></div>' +
+    (items.length > shown.length
+      ? '<p class="text-[11px] text-neutral-500 italic mt-3">Showing the first ' + shown.length + ' of ' + items.length + ' (highest severity first). The Findings tab lists everything.</p>'
+      : '');
+}
+
+function renderDiffs() {
+  const sec = document.getElementById('section-diffs');
+  const d = reportData.diffs;
+  if (!sec || !d || !d.enabled) return;
+
+  let html = '<div class="flex flex-col md:flex-row gap-2 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Diffs</h2>';
+  if (d.previous) {
+    html += '<p class="text-xs text-neutral-500 mono">vs previous report ' + escH(d.previous.report_id || d.previous.bundle || '') +
+      (d.previous.generated_at ? ' (' + escH(d.previous.generated_at) + ')' : '') + '</p>';
+  }
+  html += '</div>';
+
+  if (d.error) {
+    sec.innerHTML = html + '<div class="glass rounded-xl p-6 text-sm text-neutral-400">The comparison with the previous report could not be built: ' + escH(d.error) + '</div>';
+    return;
+  }
+  if (!d.previous || !d.counts) {
+    sec.innerHTML = html + '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No previous report found for this asset, so there is nothing to compare against.</div>';
+    return;
+  }
+
+  (d.notes || []).forEach(n => {
+    html += '<p class="text-xs text-yellow-500/90 bg-neutral-900/50 p-3 rounded-lg border border-neutral-800">' + escH(n) + '</p>';
+  });
+
+  DIFF_GROUPS.forEach(g => {
+    html += '<div class="space-y-3"><div><h3 class="text-lg font-bold">' + g.title + '</h3><p class="text-xs text-neutral-500">' + g.hint + '</p></div>' +
+      '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
+    DIFF_TILES.forEach((t, i) => {
+      if (t.group !== g.group) return;
+      html += '<button type="button" data-diff-tile="' + i + '" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
+        '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
+        '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
+    });
+    html += '</div>';
+
+    // Services / providers: before/now numbers for everything that changed.
+    if (g.group !== 'findings') {
+      const changed = [].concat(d[g.group].new, d[g.group].existing, d[g.group].resolved)
+        .filter(e => e.delta !== 0)
+        .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || diffNameOf(g.group, a).localeCompare(diffNameOf(g.group, b)));
+      html += changed.length
+        ? '<div class="glass rounded-xl p-4">' + diffCountsTable(g.group, changed) + '</div>'
+        : '<p class="text-xs text-neutral-500 italic">No change in finding counts for any ' + (g.group === 'services' ? 'service' : 'provider') + '.</p>';
+    }
+    html += '</div>';
+  });
+
+  if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
+    html += '<div class="space-y-3"><div><h3 class="text-lg font-bold">Compliance frameworks</h3>' +
+      '<p class="text-xs text-neutral-500">Findings mapped to each framework, compared with the previous report.</p></div>' +
+      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+    d.compliance.frameworks.forEach((fw, fi) => {
+      html += '<div class="glass rounded-xl p-5 space-y-3"><div><p class="font-semibold text-sm">' + escH(fw.name) + '</p>' +
+        (fw.version ? '<p class="text-[10px] text-neutral-500 mono">' + escH(fw.version) + '</p>' : '') + '</div>' +
+        '<div class="grid grid-cols-3 gap-2">';
+      [['new', 'New', 'text-red-400'], ['unchanged', 'Existing', 'text-yellow-400'], ['removed', 'Resolved', 'text-green-400']].forEach(g => {
+        html += '<button type="button" data-diff-fw="' + fi + '" data-diff-list="' + g[0] + '" class="bg-neutral-900 border border-neutral-800 hover:border-neutral-500 rounded-lg p-3 text-left transition-colors">' +
+          '<span class="block text-[9px] uppercase tracking-widest text-neutral-500 font-bold">' + g[1] + '</span>' +
+          '<span class="block text-2xl font-bold mono ' + g[2] + '">' + fw[g[0]].length + '</span></button>';
+      });
+      html += '</div></div>';
+    });
+    html += '</div></div>';
+  } else if (!d.compliance) {
+    html += '<p class="text-xs text-neutral-500">Compliance changes are not shown: the previous report has no compliance mapping to compare against.</p>';
+  }
+
+  sec.innerHTML = html;
+}
+
+function openComplianceDiffModal(fi, list) {
+  const d = reportData.diffs;
+  const fw = d && d.compliance && d.compliance.frameworks[fi];
+  if (!fw || !fw[list]) return;
+  const labels = { new: 'New', unchanged: 'Still existing', removed: 'Resolved' };
+  const items = diffFrameworkList(fw, list);
+  openModal('<h3 class="text-lg font-bold mb-1">' + escH(fw.name) + ' \u2014 ' + labels[list] + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' +
+    (items.length ? diffFindingsTable(items, fw.id) : '<p class="text-sm text-neutral-500 italic">None.</p>'));
+}
+
+function openDiffModal(i) {
+  const t = DIFF_TILES[i];
+  const d = reportData.diffs;
+  if (!t || !d) return;
+  const items = t.group === 'findings' ? diffFindingList(t.list) : ((d[t.group] && d[t.group][t.list]) || []);
+  let body;
+  if (!items.length) body = '<p class="text-sm text-neutral-500 italic">None.</p>';
+  else if (t.group === 'findings') body = diffFindingsTable(items, null);
+  else body = diffCountsTable(t.group, items);
+  openModal('<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
+}
 `;
 }
 
-export { generateHtmlReport, buildReportPayload };
+export { generateHtmlReport, buildReportPayload, buildDiffs };

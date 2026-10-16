@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { Reporter } from './lib/report.js';
 import { generateHtmlReport, buildReportPayload } from './lib/html_report.js';
+import { loadPreviousReport } from './lib/previous_report.js';
 import { buildZip } from '../sca/zip_writer.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
 import { loadAwsCredentials, loadAwsRegionsFromEnv } from './auth/aws-creds.js';
@@ -245,6 +246,8 @@ async function writeCloudReports(reporter, meta, opts) {
     asset_name:   asset.asset_name,
     asset_type:   asset.asset_type,
     machine_id:   asset.machine_id,
+    // Previous report of this asset (null on the first run): feeds the "Diffs" tab.
+    previous_report: loadPreviousReport(zipPath, tag, reportFileName('report', tag, 'json')),
   });
 
   const jsonPayload = JSON.stringify(reportPayload, null, 2);
