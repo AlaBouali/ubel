@@ -65,6 +65,7 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | Same, for Linux packages |
 | `ubel-docker` | Scan or gate a container image |
 | `ubel-secrets` / `ubel-license` | Standalone secrets / license scans |
+| `ubel-sbom` | Fills a CycloneDX SBOM's `vulnerabilities` with its components' known vulnerabilities, enriched with CISA KEV and FIRST EPSS — looked up by purl (OSV), by CPE (NVD) only when a component has no usable purl. Writes nothing else: no reachability, no reports |
 | `ubel-agent` / `ubel-cicd` / `ubel-platform` | Fixed-configuration scans: AI-agent workspace, built CI/CD workspace, host |
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |

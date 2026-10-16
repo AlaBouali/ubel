@@ -30,6 +30,7 @@
     "ubel-dnf": "bin/dnf.js",
     "ubel-yum": "bin/yum.js",
     "ubel-resbom": "bin/resbom.js",
+    "ubel-sbom": "bin/sbom.js",
     "ubel-agent": "bin/agent.js",
     "ubel-platform": "bin/platform.js",
     "ubel-sast": "bin/sast.js",

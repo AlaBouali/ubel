@@ -247,8 +247,13 @@ export class CycloneDXBuilder {
     return deps;
     }
 
-  /** Build vulnerabilities + VEX analysis. */
-  buildVulnerabilities() {
+  /**
+   * Build vulnerabilities + VEX analysis.
+   * @param {object}  [opts]
+   * @param {boolean} [opts.analysis=true]  false: leave the VEX `analysis` object out. It is derived from
+   *   reachability, so a caller that never ran reachability (ubel-sbom) has nothing to say there.
+   */
+  buildVulnerabilities({ analysis: withAnalysis = true } = {}) {
     const out = [];
     for (const v of this.data.vulnerabilities || []) {
       const vid = v.id || "";
@@ -322,7 +327,7 @@ export class CycloneDXBuilder {
         description: v.description || "",
         advisories,
         affects: purl ? [{ ref: purl }] : [],
-        analysis,
+        ...(withAnalysis ? { analysis } : {}),
         recommendation,
       };
       if (v.published) entry.published = v.published;

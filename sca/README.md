@@ -35,6 +35,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - **OS package release matching** — advisories for OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary; included by default in every scan, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - **Re-scan a saved SBOM** — `ubel-resbom <sbom.cdx.json>` reads the components and dependency graph out of an SBOM UBEL generated earlier and runs the whole pipeline again (OSV/NVD, KEV/EPSS, policy, suggested fixes, executive summary, JSON / HTML / SBOM / SARIF) against today's advisories — no project, lockfile or package manager needed, nothing installed. Use it to find out whether a release you already shipped has become vulnerable since it was scanned (see [Re-scanning an SBOM](#re-scanning-an-sbom-ubel-resbom))
+- **Fill an SBOM with vulnerabilities** — `ubel-sbom <sbom.cdx.json>` writes the known vulnerabilities of an SBOM's components (any CycloneDX JSON, not only UBEL's) into the SBOM's own `vulnerabilities` array, each with CISA KEV and FIRST EPSS data — looked up by purl (OSV), by CPE (NVD) only when a component has no usable purl — and writes nothing else: no reachability, policy or report files (see [Filling an SBOM with vulnerabilities](#filling-an-sbom-with-vulnerabilities-ubel-sbom))
 
 ---
 
@@ -68,6 +69,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-secrets` | standalone secrets-only scan of a directory — see [Secrets Detection](#secrets-detection) |
 | `ubel-license` | standalone inventory + license-compliance scan, no OSV/NVD or secrets — see [License Compliance](#license-compliance) |
 | `ubel-resbom` | re-scan an SBOM that UBEL generated earlier (`latest.<tag>.cdx.json`) against the current vulnerability data — no project, lockfile or package manager needed; see [Re-scanning an SBOM](#re-scanning-an-sbom-ubel-resbom) |
+| `ubel-sbom` | fill a CycloneDX SBOM's `vulnerabilities` with its components' known vulnerabilities plus KEV / EPSS (purl → OSV first, CPE → NVD as fallback); changes nothing else in the file; see [Filling an SBOM with vulnerabilities](#filling-an-sbom-with-vulnerabilities-ubel-sbom) |
 
 
 > **yarn** does not support a lockfile-only dry-run — this is yarn's own CLI design, not a gap in UBEL's implementation: `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing. **yarn does support the pre-commit hook** (`ubel-yarn install-hook`) since the hook only needs a `health` scan, which yarn does support.
@@ -145,6 +147,7 @@ ubel-dnf   <mode> [packages...]
 ubel-yum   <mode> [packages...]
 
 ubel-resbom <sbom.cdx.json> [policy flags]   # no <mode>: re-scan an SBOM UBEL wrote earlier — see "Re-scanning an SBOM"
+ubel-sbom    <sbom.cdx.json> [-o <file>]     # no <mode>: write vulnerabilities (+ KEV / EPSS) into a CycloneDX SBOM — see "Filling an SBOM with vulnerabilities"
 
 # Pre-commit hook (any engine except docker and apt/dnf/yum):
 ubel-npm   install-hook [--force]      # install the pre-commit hook (secrets scan + dependency scan)
@@ -1009,6 +1012,116 @@ const report = await resbomScan({
 - **Anything that cannot be matched stays unmatched**, as in the original scan: a component without a version is `undetermined`, and (as in every scan) packages from a VCS URL, a download URL or a file path are not matched against registry data.
 - **Reachability of new findings is graph-only** (see above), and secrets are never re-detected.
 - Only CycloneDX JSON is read. SPDX and other SBOM formats are not supported.
+
+---
+
+## Filling an SBOM with vulnerabilities: `ubel-sbom`
+
+`ubel-sbom` takes a **CycloneDX JSON SBOM from any tool** and writes the known vulnerabilities of its components into the SBOM's `vulnerabilities` array, each enriched with CISA KEV and FIRST EPSS. It is deliberately narrow: **only `vulnerabilities` is written.** No reachability analysis, no VEX `analysis`, no policy decision, no executive summary, no JSON / HTML / SARIF report, no history zip, no asset id — and no other part of the SBOM (components, dependencies, metadata, serial number, version) is modified.
+
+It differs from [`ubel-resbom`](#re-scanning-an-sbom-ubel-resbom), which re-runs the whole pipeline over an SBOM *UBEL wrote* and produces reports and an exit code from the policy. Use `ubel-sbom` when the thing you want is the SBOM itself, carrying its vulnerabilities — e.g. an SBOM from Syft, Trivy or cdxgen that a downstream tool (a dashboard, Dependency-Track, a VEX workflow) will read.
+
+### Usage
+
+```
+ubel-sbom <sbom.cdx.json> [-o <file>]
+```
+
+There is exactly one positional argument, the path of the SBOM. `ubel-sbom --help` prints the usage; `ubel-sbom version` prints the version.
+
+```bash
+# Fill the SBOM in place
+ubel-sbom ./bom.cdx.json
+
+# Keep the original untouched; write the filled copy elsewhere
+ubel-sbom ./bom.cdx.json --output ./bom.with-vulns.cdx.json
+```
+
+| Option | Effect |
+|---|---|
+| `-o`, `--output <file>` | Write the SBOM with its vulnerabilities to `<file>`. The input file is left untouched. Without it the input is rewritten in place. |
+| `-h`, `--help` | Print the usage. |
+
+The write is atomic (a temporary file in the same folder, then a rename) and happens only after every lookup succeeded, so an interrupted or failed run never leaves a half-written SBOM. File mode, indentation (the file's own — or a single line, if that is how it was written) and a trailing newline are kept; an SBOM that is a symlink stays one and its target is updated.
+
+### Lookup: purl first, CPE as a fallback
+
+Each component is resolved to **one** lookup, in this order:
+
+| # | The component has… | Looked up | Source |
+|---|---|---|---|
+| 1 | a purl OSV can be asked about | by **purl** | OSV (`api.osv.dev`) |
+| 2 | no such purl, but a usable CPE | by **CPE** | NVD (`services.nvd.nist.gov`) |
+| 3 | neither | not looked up — counted and reported on stderr | — |
+
+A purl is "one OSV can be asked about" when it is a well-formed `pkg:` URL **with a version**, is not a VCS-URL / download-URL / file source (`?vcs_url=`, `?download_url=`, `?file=` — not the registry package of that name), and is of a type UBEL matches against OSV: `npm`, `pypi`, `maven`, `golang`, `cargo`, `gem`, `nuget`, `composer`, `swift`, `pub`, `deb` (`debian`, `ubuntu`), `rpm` (`redhat`, `almalinux`, `rocky-linux`) and `apk` (`alpine`) — the same list the other CLIs use. (`pkg:conda` is excluded, as everywhere: OSV has no conda ecosystem.)
+
+**Priority, not union.** A component with a usable purl is looked up by purl *only*. If it also carries a CPE, that CPE is ignored — it is not a second opinion. A purl is an exact package coordinate; a CPE is a vendor:product guess, and querying both would add look-alike NVD matches on top of an OSV answer that is already complete. Only a component whose purl cannot be used falls through to its CPE.
+
+For the CPE fallback, a CPE 2.2 URI (`cpe:/a:vendor:product:1.0`) is converted to the 2.3 formatted string NVD takes, and a wildcard or "not applicable" version (`*`, `-`) is replaced by the component's own `version`; a CPE that already names a version keeps it. A CPE with no version and a component with none either is skipped. NVD matches are re-checked locally against the version's range, as in every scan. NVD is queried serially at the public rate limit (about one CPE every 5 seconds), so an SBOM with many purl-less components takes time — an SBOM whose components have purls does not touch NVD at all.
+
+Components that resolve to the same purl (or the same CPE) are queried once, and the resulting finding's `affects` lists every one of their `bom-ref`s. Nested components (`components[].components`) are included; `metadata.component` (the SBOM's subject) is not looked up.
+
+### What is written
+
+`vulnerabilities[]` entries in the same shape an SBOM from a UBEL scan carries — one per (advisory, package) — minus the parts that need a scan:
+
+| Written | Not written |
+|---|---|
+| `id`, `source` (`osv` / `nvd`), `description`, `published` / `updated`, `cwes`, `advisories` (references; the CISA KEV catalog entry for KEV-listed CVEs) | `analysis` (VEX state / justification — derived from reachability, which `ubel-sbom` does not run) |
+| `ratings`: the CVSS score / vector / method, plus a **FIRST EPSS** rating (`score` = probability of exploitation in the next 30 days, 0–1) | `reachability.*`, `policy.*` and suggested-fix properties |
+| `properties`: `kev.listed` (`true` / `false` / `unknown`), `kev.date_added`, `kev.due_date`, `epss.score`, `epss.percentile`; `os.release_confidence` for OS packages | Any change to `components`, `dependencies`, `metadata`, `serialNumber`, `version` or other keys |
+| `affects`: the component's `bom-ref` (the purl / CPE if it has no `bom-ref` — components are never modified, and a warning says how many findings are affected) | |
+| `recommendation`: the upgrade advice (fixed versions) | |
+
+KEV and EPSS are the same lookups as in every scan — see [Exploit Intelligence](#exploit-intelligence-kev--epss). Advisories that name the same issue (a GHSA and its CVE) are collapsed to one finding per package. OS-package (`deb` / `rpm` / `apk`) advisories are scoped to the release in the purl's `distro` qualifier (`?distro=debian-12`) or the component's `distro` property, and advisories for other releases are dropped. Findings are ordered by severity, then score. Dates NVD stamps without a time zone are written as UTC (`…Z`), and on a CycloneDX 1.4 / 1.5 SBOM a CVSS 4.0 rating gets the method `other` (the `CVSSv4` method exists from 1.6; score and vector are unchanged).
+
+An existing `vulnerabilities` array in the file is **replaced**, not merged — running `ubel-sbom` again refreshes the data, but a VEX analysis or findings added by another tool are lost; use `-o` to keep the original.
+
+### Input
+
+| Accepted | Not accepted |
+|---|---|
+| CycloneDX **JSON**, spec **1.4 or newer** (`vulnerabilities` does not exist before 1.4), from any tool, with a `components` array (an empty one is fine) | CycloneDX XML, SPDX, a UBEL JSON report, a `.zip` bundle (unzip it first) |
+
+An unreadable file, invalid JSON, a non-CycloneDX document, a pre-1.4 spec version or a missing `components` array stops the run with exit code `2` and a message saying which; the file is not touched.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The SBOM was written. This says nothing about what was found — `ubel-sbom` has no policy and never fails because of a vulnerability |
+| `1` | The command line is wrong (no SBOM path, more than one, an unknown option, `-o` without a file) |
+| `2` | Nothing was written: the SBOM is unreadable or invalid, or the OSV / NVD lookup was incomplete (it fails closed, like every scan — an incomplete lookup is never turned into an SBOM that reads as clean) |
+
+Set `DEBUG=1` for the stack trace of an exit-`2` failure. An unreachable KEV / EPSS feed is **not** an exit-`2` condition (same as in every scan): the SBOM is written with `kev.listed` / `epss.score` = `unknown` for the affected findings and a warning on stderr — check stderr, or look for `unknown`, in a pipeline that relies on exploit intelligence.
+
+### Network and environment
+
+OSV, NVD, the CISA KEV catalog and the FIRST EPSS API, exactly as for a scan; only package identifiers (purls / CPEs) and CVE ids leave the machine. `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` apply (see [Environment Variables](#environment-variables)).
+
+### Programmatic use
+
+```js
+import { sbomVulnsScan } from "@arcane-spark/ubel-node/sca";
+
+const { file, replaced, summary } = await sbomVulnsScan({
+  sbom: "./bom.cdx.json",
+  output: "./bom.with-vulns.cdx.json",   // optional; default: rewrite `sbom` in place
+  log: () => {},                          // optional progress sink; default console.log
+});
+// summary: { components, looked_up_by_purl, looked_up_by_cpe, not_looked_up: { <reason>: n },
+//            vulnerabilities, infections, by_severity, kev, epss_scored, threat_intel, … }
+```
+
+It rejects with an `Error` for the exit-`2` cases above (a `VulnLookupError` when the OSV / NVD lookup was incomplete) and writes nothing.
+
+### Limits
+
+- **It only looks up what the SBOM lists**, and only what can be identified: a component with no purl or CPE that UBEL can use is reported as not looked up, not treated as clean. Check the stderr summary.
+- **CPE matching is a fallback, and it is looser than purl matching.** NVD's CPE data names products, not packages, so a CPE-resolved component can produce false positives and misses that a purl lookup would not.
+- **No reachability, no VEX.** Every finding is reported as found; whether it is exploitable in your product is not assessed (the entries carry no `analysis`).
+- **CycloneDX JSON, 1.4+, only.**
 
 ---
 

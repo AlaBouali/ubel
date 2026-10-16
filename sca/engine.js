@@ -3406,7 +3406,7 @@ function matchDependenciesWithInventory(inventory) {
 // meaningless in both directions (false hits, and a vulnerable fork reported
 // "safe"), so it is not queried and stays "undetermined" — same treatment as
 // conda. The lockfile parser marks these with a purl qualifier.
-const UNVERIFIED_SOURCE_RE = /\?(?:vcs_url|download_url|file)=/;
+export const UNVERIFIED_SOURCE_RE = /\?(?:vcs_url|download_url|file)=/;
 
 function setInventoryState(infectedPurls, vulnerablePurls, inventory) {
   for (const item of inventory) {

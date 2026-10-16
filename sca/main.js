@@ -1459,3 +1459,4 @@ export async function resbomScan({ sbom, projectRoot, policyOverrides = {}, is_s
 }
 
 export { main as SCA_scan };
+export { sbomVulnsScan } from "./sbom_vulns.js";
