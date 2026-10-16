@@ -93,15 +93,16 @@
  *       install — scan, then remove the image only if the scan results in
  *                 a policy block; a clean scan leaves it in place.
  *
- *     In place of an image reference, <image|tar-path> also accepts a path
- *     to a local, uncompressed .tar file (e.g. from a prior `docker save`/
- *     `docker export`, or a CI artifact) — detected automatically by a
- *     `.tar` extension that resolves to an existing file. That skips
- *     `docker pull`/`docker create`/`docker export` entirely and extracts
- *     the given tar directly; `--no-pull` is a no-op in that case, and
- *     `check`/`install` won't attempt `docker rmi` since there's no pulled
- *     image to remove. Compressed tarballs (.tar.gz/.tgz) aren't supported
- *     — decompress first.
+ *     In place of an image reference, <image|tar-path> also accepts a local
+ *     image file or directory (e.g. from a prior `docker save`/`docker
+ *     export`, `skopeo copy ... oci:`, or a CI artifact): a `.tar`, a
+ *     gzip-compressed `.tar.gz`/`.tgz` (decompressed for you — no manual
+ *     step), or a directory that is an OCI image layout (`oci-layout` +
+ *     `index.json`). A tar may hold a `docker export` filesystem, a `docker
+ *     save` archive, or an OCI layout. That skips `docker pull`/`docker
+ *     create`/`docker export` entirely; `--no-pull` is a no-op in that case,
+ *     and `check`/`install` won't attempt `docker rmi` since there's no
+ *     pulled image to remove. The input itself is never modified.
  *
  *   Resbom mode (`resbom` engine, bin/resbom.js → `ubel-resbom`):
  *     node src/main.js resbom <sbom.cdx.json> [per-run policy flags]
@@ -214,7 +215,7 @@
  *   });
  *
  *   await dockerScan({ image: "node:20-alpine" });
- *   await dockerScan({ image: "/path/to/rootfs.tar" });  // local tar file, same API
+ *   await dockerScan({ image: "/path/to/image.tar.gz" }); // local tar/.tgz/OCI layout dir, same API
  *
  * ── check/install support matrix ─────────────────────────────────────────────
  *   npm    — yes  (--package-lock-only dry-run)
@@ -1299,8 +1300,9 @@ export async function scan_project(projectRoot, options = {}) {
  *
  * @param {object}  opts
  * @param {string}  opts.image           Anything `docker pull`/`docker create` accepts,
- *                                       OR a path to a local, uncompressed .tar file
- *                                       (auto-detected — see DockerImageScanner). In the
+ *                                       OR a path to a local .tar / .tar.gz / .tgz file or
+ *                                       OCI image layout directory (auto-detected — see
+ *                                       DockerImageScanner). In the
  *                                       latter case `pull`/`--no-pull` has no effect and
  *                                       `check`/`install` skip image removal (nothing was
  *                                       pulled).

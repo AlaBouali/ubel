@@ -1154,7 +1154,8 @@ per-package manifest to read a declared license from.
 ## Docker — container images
 
 **SCA:** The most complete single-target scan in UBEL. Pulls (or reuses a
-local) image or accepts an already-exported uncompressed `.tar` — never
+local) image or accepts an already-exported `.tar`, `.tar.gz`/`.tgz`, or
+OCI image-layout directory — never
 runs the image's `ENTRYPOINT`/`CMD` — exports its filesystem to a temp dir,
 and scans that filesystem exactly like any other project root: OS packages
 via the Linux host scanner *and* every application-level ecosystem's

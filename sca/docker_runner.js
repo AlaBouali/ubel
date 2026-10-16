@@ -25,7 +25,11 @@
  * C#/Java/Ruby scanners (all path-based, no changes needed), and
  * LinuxHostScanner (patched in linux_runner.js to accept rootDir).
  *
- * Requires `docker` on PATH. No `tar` binary, no npm dependencies —
+ * Local inputs (no docker needed): a .tar, a gzip-compressed .tar.gz/.tgz, or an
+ * OCI image-layout directory are accepted directly, mirroring Trivy — see the
+ * DockerImageScanner constructor.
+ *
+ * Requires `docker` on PATH (except for local inputs). No `tar` binary, no npm dependencies —
  * consistent with the rest of the SCA engine (uses only Node built-ins:
  * fs, os, path, child_process).
  */
@@ -364,23 +368,160 @@ function extractTarPure(tarPath, destDir, { whiteouts = false } = {}) {
   return { regularCount, dirCount, linkCount, resolvedLinks, skipCount, writeFailCount, writeFailures, blockedTraversals };
 }
 
+// ── Local image inputs: compression sniffing + OCI image-layout resolution ────
+//
+// Like Trivy, local inputs are recognised by what they are rather than by how
+// they were produced: a (possibly gzip-compressed) tar from `docker save` /
+// `docker export`, a tar holding an OCI image layout, or an OCI image layout
+// directory. Compression is always detected from magic bytes — never from the
+// file name or a layer's mediaType — so a mislabelled blob still works.
+
+const OCI_MAX_JSON_SIZE = 16 * 1024 * 1024; // manifests/indexes are a few KB; cap what we'll parse
+const OCI_MAX_INDEX_DEPTH = 5;              // index -> index -> ... nesting guard against hostile cycles
+// process.arch -> OCI/Go GOARCH, used to prefer the host's platform in multi-arch layouts.
+const OCI_GO_ARCH = { x64: "amd64", arm64: "arm64", arm: "arm", ia32: "386", s390x: "s390x", riscv64: "riscv64" };
+
+/** @returns {"gzip"|"zstd"|null} compression of `file`, from its leading magic bytes. */
+function detectCompression(file) {
+  const buf = Buffer.alloc(4);
+  let n = 0;
+  const fd = fs.openSync(file, "r");
+  try { n = fs.readSync(fd, buf, 0, 4, 0); } finally { fs.closeSync(fd); }
+  if (n >= 2 && buf[0] === 0x1f && buf[1] === 0x8b) return "gzip";
+  if (n >= 4 && buf[0] === 0x28 && buf[1] === 0xb5 && buf[2] === 0x2f && buf[3] === 0xfd) return "zstd";
+  return null;
+}
+
+/** Streams `src` through the matching decompressor into `dest` (bounded memory). */
+async function decompressToFile(src, dest, kind) {
+  let decoder;
+  if (kind === "gzip") {
+    decoder = zlib.createGunzip();
+  } else if (kind === "zstd") {
+    if (typeof zlib.createZstdDecompress !== "function") {
+      throw new Error(
+        "found a zstd-compressed archive/layer, but this Node.js has no built-in zstd support " +
+        "(needs Node >= 22.15 / 23.8) — upgrade Node.js, or re-export the image with gzip layers"
+      );
+    }
+    decoder = zlib.createZstdDecompress();
+  } else {
+    throw new Error(`unsupported compression '${kind}'`);
+  }
+  await pipeline(fs.createReadStream(src), decoder, fs.createWriteStream(dest));
+}
+
+/** True when `dir` looks like an OCI image layout (oci-layout marker + index.json). */
+function isOciLayoutDir(dir) {
+  try {
+    return fs.statSync(path.join(dir, "oci-layout")).isFile() && fs.statSync(path.join(dir, "index.json")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Maps an OCI digest ("sha256:<hex>") to <layout>/blobs/<alg>/<hex>, refusing anything that could leave the layout. */
+function ociBlobPath(layoutDir, digest) {
+  const m = /^([a-z0-9]+(?:[+._-][a-z0-9]+)*):([a-zA-Z0-9=_-]+)$/.exec(String(digest));
+  if (!m) throw new Error(`OCI layout contains an invalid digest '${digest}'`);
+  const root = path.resolve(layoutDir);
+  const abs = path.resolve(root, "blobs", m[1], m[2]);
+  const rel = path.relative(root, abs);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`OCI layout digest '${digest}' resolves outside the layout`);
+  }
+  return abs;
+}
+
+function readOciJson(layoutDir, digest, what) {
+  const file = ociBlobPath(layoutDir, digest);
+  let st;
+  try { st = fs.statSync(file); } catch { st = null; }
+  if (!st || !st.isFile()) throw new Error(`OCI layout is missing ${what} blob ${digest}`);
+  if (st.size > OCI_MAX_JSON_SIZE) throw new Error(`OCI ${what} blob ${digest} is implausibly large (${st.size} bytes)`);
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new Error(`OCI ${what} blob ${digest} is not valid JSON: ${err.message}`);
+  }
+}
+
+function describeOciDescriptor(d) {
+  const name = d.annotations?.["org.opencontainers.image.ref.name"];
+  const p = d.platform ? `${d.platform.os || "?"}/${d.platform.architecture || "?"}${d.platform.variant ? "/" + d.platform.variant : ""}` : null;
+  return [name, p, d.digest && d.digest.slice(0, 19)].filter(Boolean).join(" ");
+}
+
+/**
+ * Walks index.json (and any nested image index / Docker manifest list) down to a
+ * single image manifest. Attestation/"unknown" platform entries (buildx
+ * provenance) are ignored. With several images, the host's linux platform is
+ * preferred, then a platform-less entry, then any linux image, then the first.
+ */
+function pickOciImageManifest(layoutDir, entries, depth = 0) {
+  if (depth > OCI_MAX_INDEX_DEPTH) throw new Error("OCI layout index nesting is too deep");
+  const hostArch = OCI_GO_ARCH[process.arch];
+  const rank = (d) => {
+    if (d.platform?.os === "linux" && d.platform?.architecture === hostArch) return 0;
+    if (!d.platform) return 1;
+    return d.platform.os === "linux" ? 2 : 3;
+  };
+  const candidates = (Array.isArray(entries) ? entries : [])
+    .filter((d) =>
+      d && typeof d.digest === "string" &&
+      d.annotations?.["vnd.docker.reference.type"] !== "attestation-manifest" &&
+      d.platform?.os !== "unknown" && d.platform?.architecture !== "unknown")
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => rank(a.d) - rank(b.d) || a.i - b.i)
+    .map(({ d }) => d);
+  if (!candidates.length) throw new Error("OCI layout lists no image manifests in its index");
+  if (candidates.length > 1) {
+    console.warn(`[docker] OCI layout holds ${candidates.length} images — scanning the first match (${describeOciDescriptor(candidates[0])})`);
+  }
+
+  let lastErr = null;
+  for (const desc of candidates) {
+    const doc = readOciJson(layoutDir, desc.digest, "manifest");
+    if (Array.isArray(doc.manifests)) {
+      try { return pickOciImageManifest(layoutDir, doc.manifests, depth + 1); } catch (err) { lastErr = err; continue; }
+    }
+    if (Array.isArray(doc.layers)) return doc;
+    lastErr = new Error(`OCI blob ${desc.digest} is neither an image manifest nor an image index`);
+  }
+  throw lastErr;
+}
+
+/** Resolves an OCI image layout directory to its ordered list of layer blob paths. */
+function resolveOciLayers(layoutDir) {
+  let index;
+  try {
+    index = JSON.parse(fs.readFileSync(path.join(layoutDir, "index.json"), "utf8"));
+  } catch (err) {
+    throw new Error(`OCI layout index.json is unreadable: ${err.message}`);
+  }
+  const manifest = pickOciImageManifest(layoutDir, index?.manifests);
+  if (!manifest.layers.length) throw new Error("OCI image manifest lists no layers");
+  return manifest.layers.map((l) => ociBlobPath(layoutDir, l?.digest));
+}
+
 export class DockerImageScanner {
   /**
    * @param {string} image  Any reference `docker pull`/`docker create` accepts:
    *                        "node:20-alpine", "myregistry.io/team/app@sha256:...", etc.
-   *                        OR a path to a local, uncompressed .tar file (e.g. from a
-   *                        prior `docker save`/`docker export`, or a CI artifact) —
-   *                        auto-detected by a ".tar" extension that resolves to an
-   *                        existing file. In that case extract() skips
-   *                        pull/create/export entirely and extracts the given tar
-   *                        directly; the file is never modified or deleted (only tars
-   *                        this class creates itself via `docker export` are cleaned
-   *                        up). Compressed tarballs (.tar.gz/.tgz) are NOT matched
-   *                        here and fall through to being treated as an image
-   *                        reference — extractTarPure only reads uncompressed ustar/
-   *                        GNU tar, and silently mis-parsing a gzip header as tar data
-   *                        would fail confusingly deep inside the parser instead of
-   *                        with a clear error up front.
+   *                        OR a local image file/directory (e.g. from a prior
+   *                        `docker save`/`docker export`, `skopeo copy ... oci:`,
+   *                        `buildah push ... oci-archive:`, or a CI artifact),
+   *                        auto-detected when it resolves to something that exists:
+   *                          - a `.tar` file, or a gzip-compressed `.tar.gz`/`.tgz`
+   *                            (compression is sniffed from the content, so zstd and
+   *                            mislabelled files work too) holding a `docker export`
+   *                            filesystem, a `docker save` archive, or an OCI image layout;
+   *                          - a directory that is an OCI image layout (has `oci-layout`
+   *                            and `index.json`).
+   *                        In these cases extract() skips pull/create/export entirely;
+   *                        the input is never modified or deleted (only files this
+   *                        class creates itself — `docker export` output or a
+   *                        decompressed copy — are cleaned up).
    */
   constructor(image) {
     // Every docker invocation below places this positionally where an image
@@ -395,21 +536,31 @@ export class DockerImageScanner {
     }
 
     let isTarFile = false;
+    let isOciDir = false;
     try {
-      isTarFile = image.toLowerCase().endsWith(".tar") && fs.statSync(image).isFile();
+      const lower = image.toLowerCase();
+      const st = fs.statSync(image);
+      isTarFile = st.isFile() && (lower.endsWith(".tar") || lower.endsWith(".tar.gz") || lower.endsWith(".tgz"));
+      // A directory only counts when it really is an OCI layout, so a bare
+      // image name like "node" never gets hijacked by a same-named folder.
+      isOciDir = st.isDirectory() && isOciLayoutDir(image);
     } catch {
-      isTarFile = false; // doesn't exist / not accessible — treat as an image reference
+      // doesn't exist / not accessible — treat as an image reference
     }
 
     this.image        = image;
     this.isTarFile     = isTarFile;
+    this.isOciDir      = isOciDir;
+    this.isLocalInput  = isTarFile || isOciDir; // no docker pull/create/export, nothing to rmi
     this.containerId  = null;
     this.rootDir       = null;
-    this._tarPath      = isTarFile ? path.resolve(image) : null;
-    // Only a tar this class produces itself (via `docker export`) is ours
-    // to delete in cleanup() — a tar the caller pointed us at is their
-    // file, and removing it out from under them would be a bad surprise.
-    this._tarPathIsOwned = !isTarFile;
+    this._inputPath    = this.isLocalInput ? path.resolve(image) : null;
+    this._tarPath      = isTarFile ? this._inputPath : null;
+    // Only a tar this class produces itself (via `docker export`, or by
+    // decompressing a .tar.gz) is ours to delete in cleanup() — a tar the
+    // caller pointed us at is their file, and removing it out from under
+    // them would be a bad surprise.
+    this._tarPathIsOwned = !isTarFile && !isOciDir;
     // true/false once extract() has checked whether the image was already
     // local before we touched it; null = unknown. removeImage() only removes
     // an image we know we brought in.
@@ -433,7 +584,9 @@ export class DockerImageScanner {
    * @returns {Promise<string>} Absolute path to the extracted rootfs.
    */
   async extract({ pull = true } = {}) {
-    if (this.isTarFile) {
+    if (this.isOciDir) {
+      console.log(`[docker] Using local OCI image layout ${this._inputPath} ...`);
+    } else if (this.isTarFile) {
       console.log(`[docker] Using local tar file ${this._tarPath} ...`);
     } else {
       // Remember whether the image was already on this machine, so check/install
@@ -460,25 +613,45 @@ export class DockerImageScanner {
     const uuid = randomUUID();
     this.rootDir  = path.join(process.cwd(), ".ubel", uuid);
     fs.mkdirSync(this.rootDir, { recursive: true });
-    if (!this.isTarFile) {
+    if (!this.isLocalInput) {
       this._tarPath = path.join(process.cwd(), ".ubel", `${uuid}.tar`);
     }
 
     try {
-      if (!this.isTarFile) {
-        console.log("[docker] Exporting filesystem ...");
-        const exportRes = run("docker", ["export", "-o", this._tarPath, this.containerId]);
-        if (exportRes.status !== 0) {
-          throw new Error(`docker export failed: ${(exportRes.stderr || exportRes.stdout || "").trim()}`);
+      let stats;
+      if (this.isOciDir) {
+        // OCI image layout directory: read manifest -> layers straight from
+        // blobs/ (never modified) and apply them in order.
+        console.log(`[docker] Extracting to ${this.rootDir} ...`);
+        stats = await this._flattenOciLayout(this._inputPath);
+      } else {
+        if (!this.isTarFile) {
+          console.log("[docker] Exporting filesystem ...");
+          const exportRes = run("docker", ["export", "-o", this._tarPath, this.containerId]);
+          if (exportRes.status !== 0) {
+            throw new Error(`docker export failed: ${(exportRes.stderr || exportRes.stdout || "").trim()}`);
+          }
+        } else {
+          // .tar.gz / .tgz (or a gzip/zstd stream behind any name): decompress
+          // to a scratch tar we own. extractTarPure only reads plain tar, and
+          // the caller's file is left untouched.
+          const kind = detectCompression(this._tarPath);
+          if (kind) {
+            const plainTar = path.join(process.cwd(), ".ubel", `${uuid}.tar`);
+            console.log(`[docker] Decompressing ${kind} archive ...`);
+            this._tarPath = plainTar;
+            this._tarPathIsOwned = true; // cleanup() removes it, even if decompression fails midway
+            await decompressToFile(this._inputPath, plainTar, kind);
+          }
         }
-      }
 
-      console.log(`[docker] Extracting to ${this.rootDir} ...`);
-      let stats = extractTarPure(this._tarPath, this.rootDir);
-      if (this.isTarFile) {
-        // `docker save` output holds layer tars, not a filesystem — flatten them.
-        const layered = await this._flattenSavedImage();
-        if (layered) stats = layered;
+        console.log(`[docker] Extracting to ${this.rootDir} ...`);
+        stats = extractTarPure(this._tarPath, this.rootDir);
+        if (this.isTarFile) {
+          // `docker save` / OCI-layout output holds layer tars, not a filesystem — flatten them.
+          const layered = await this._flattenSavedImage();
+          if (layered) stats = layered;
+        }
       }
       console.log(
         `[docker] extracted ${stats.regularCount} files, ${stats.dirCount} dirs, ` +
@@ -524,76 +697,100 @@ export class DockerImageScanner {
   }
 
   /**
-   * If the tar extracted into rootDir is a `docker save` archive (manifest.json
-   * listing layer tars), rebuilds rootDir as the flattened filesystem: layers are
-   * applied in manifest order, honouring `.wh.` whiteouts. Returns the summed
-   * extraction stats, or null when the tar was a plain filesystem (docker export).
-   * Throws a clear error for OCI-layout archives with no manifest.json.
+   * If the tar extracted into rootDir is an image archive — a `docker save` archive
+   * (manifest.json listing layer tars) or an OCI image layout (oci-layout + index.json) —
+   * rebuilds rootDir as the flattened filesystem: layers are applied in manifest order,
+   * honouring `.wh.` whiteouts. Returns the summed extraction stats, or null when the tar
+   * was a plain filesystem (docker export).
    */
   async _flattenSavedImage() {
     const manifestPath = path.join(this.rootDir, "manifest.json");
-    if (!fs.existsSync(manifestPath)) {
-      if (fs.existsSync(path.join(this.rootDir, "oci-layout")) && fs.existsSync(path.join(this.rootDir, "index.json"))) {
-        throw new Error(
-          "this tar is an OCI image layout without a Docker manifest.json, which is not supported — " +
-          "use `docker save` (Docker manifest format) or `docker export <container>` instead"
-        );
+    const hasOciLayout = isOciLayoutDir(this.rootDir);
+
+    let layerNames = null; // docker save: layer paths relative to the archive root
+    if (fs.existsSync(manifestPath)) {
+      let manifest = null;
+      try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch { /* fall through */ }
+      if (Array.isArray(manifest) && manifest.length && Array.isArray(manifest[0]?.Layers) && manifest[0].Layers.length) {
+        if (manifest.length > 1) {
+          console.warn(`[docker] archive holds ${manifest.length} images — scanning the first (${(manifest[0].RepoTags || []).join(", ") || "untagged"})`);
+        }
+        layerNames = manifest[0].Layers.map(String);
+      } else if (!hasOciLayout) {
+        return null;
       }
-      return null;
+    } else if (!hasOciLayout) {
+      return null; // plain filesystem tar
     }
-
-    let manifest;
-    try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch { return null; }
-    if (!Array.isArray(manifest) || !manifest.length || !Array.isArray(manifest[0]?.Layers) || !manifest[0].Layers.length) return null;
-    if (manifest.length > 1) {
-      console.warn(`[docker] archive holds ${manifest.length} images — scanning the first (${(manifest[0].RepoTags || []).join(", ") || "untagged"})`);
-    }
-
-    const stagingDir = `${this.rootDir}.save`;
-    const stagingResolved = path.resolve(stagingDir);
-    const layerPaths = manifest[0].Layers.map((l) => {
-      const abs = path.resolve(stagingDir, String(l));
-      const rel = path.relative(stagingResolved, abs);
-      if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`docker save manifest references a layer outside the archive: ${l}`);
-      return abs;
-    });
 
     // Move the outer archive contents aside; rootDir becomes the flattened fs.
+    const stagingDir = `${this.rootDir}.save`;
+    const stagingResolved = path.resolve(stagingDir);
     fs.renameSync(this.rootDir, stagingDir);
     this._stagingDir = stagingDir;
     fs.mkdirSync(this.rootDir, { recursive: true });
 
+    let layerPaths;
+    let kindLabel;
+    if (layerNames) {
+      kindLabel = "docker save archive";
+      layerPaths = layerNames.map((l) => {
+        const abs = path.resolve(stagingDir, l);
+        const rel = path.relative(stagingResolved, abs);
+        if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`docker save manifest references a layer outside the archive: ${l}`);
+        return abs;
+      });
+    } else {
+      kindLabel = "OCI image layout";
+      layerPaths = resolveOciLayers(stagingDir);
+    }
+
+    const total = await this._applyLayers(layerPaths, stagingResolved, kindLabel);
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+    this._stagingDir = null;
+    return total;
+  }
+
+  /** Flattens an OCI image layout directory into rootDir (the directory itself is only read). */
+  async _flattenOciLayout(layoutDir) {
+    return this._applyLayers(resolveOciLayers(layoutDir), path.resolve(layoutDir), "OCI image layout");
+  }
+
+  /**
+   * Applies layer tars to rootDir in order (whiteouts honoured). Gzip/zstd layers
+   * (OCI blobs) are decompressed one at a time into a scratch file beside rootDir —
+   * never next to the source layer, which may sit in a read-only or user-owned directory.
+   */
+  async _applyLayers(layerPaths, baseDir, kindLabel) {
     for (const abs of layerPaths) {
-      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
-        throw new Error(`docker save archive is missing layer ${path.relative(stagingResolved, abs)}`);
+      let st;
+      try { st = fs.statSync(abs); } catch { st = null; }
+      if (!st || !st.isFile()) {
+        throw new Error(`${kindLabel} is missing layer ${path.relative(baseDir, abs)}`);
       }
     }
 
     const total = { regularCount: 0, dirCount: 0, linkCount: 0, resolvedLinks: 0, skipCount: 0, writeFailCount: 0, writeFailures: [], blockedTraversals: [] };
-    console.log(`[docker] docker save archive — applying ${layerPaths.length} layer(s) in order ...`);
+    console.log(`[docker] ${kindLabel} — applying ${layerPaths.length} layer(s) in order ...`);
+    const scratchTar = `${this.rootDir}.layer.tar`;
     for (const abs of layerPaths) {
       let layerTar = abs;
-      let tmpTar = null;
-      const magic = Buffer.alloc(2);
-      const fd = fs.openSync(abs, "r");
-      try { fs.readSync(fd, magic, 0, 2, 0); } finally { fs.closeSync(fd); }
-      if (magic[0] === 0x1f && magic[1] === 0x8b) { // gzip-compressed layer (OCI-style blobs)
-        tmpTar = `${abs}.untar`;
-        await pipeline(fs.createReadStream(abs), zlib.createGunzip(), fs.createWriteStream(tmpTar));
-        layerTar = tmpTar;
-      }
+      let decompressed = false;
       try {
+        const kind = detectCompression(abs);
+        if (kind) {
+          await decompressToFile(abs, scratchTar, kind);
+          layerTar = scratchTar;
+          decompressed = true;
+        }
         const st = extractTarPure(layerTar, this.rootDir, { whiteouts: true });
         for (const k of ["regularCount", "dirCount", "linkCount", "resolvedLinks", "skipCount", "writeFailCount"]) total[k] += st[k];
         total.writeFailures.push(...st.writeFailures.slice(0, Math.max(0, 20 - total.writeFailures.length)));
         total.blockedTraversals.push(...st.blockedTraversals);
       } finally {
-        if (tmpTar) fs.rmSync(tmpTar, { force: true });
+        if (decompressed || fs.existsSync(scratchTar)) fs.rmSync(scratchTar, { force: true });
       }
     }
-
-    fs.rmSync(stagingDir, { recursive: true, force: true });
-    this._stagingDir = null;
     return total;
   }
 
@@ -631,11 +828,11 @@ export class DockerImageScanner {
    * Used by `check` (always, after scanning) and `install` (only when the
    * scan results in a policy block) to decide whether the image stays on
    * the local machine after the scan is done. A no-op when the scan
-   * source was a local .tar file — there's no pulled image to remove.
+   * source was a local tar file or OCI layout — there's no pulled image to remove.
    */
   removeImage() {
-    if (this.isTarFile) {
-      console.log(`[docker] input was a local tar file (${this._tarPath}) — no pulled image to remove, skipping docker rmi`);
+    if (this.isLocalInput) {
+      console.log(`[docker] input was a local ${this.isOciDir ? "OCI layout" : "tar file"} (${this._inputPath}) — no pulled image to remove, skipping docker rmi`);
       return;
     }
     if (this._imageExistedBefore !== false) {

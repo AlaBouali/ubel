@@ -267,7 +267,7 @@ Flags:
 - `--no-pull` — scan an image that only exists locally (e.g. right after `docker build`, before it's pushed); skips `docker pull`.
 - `--keep` — skip cleanup of the extracted rootfs afterward, for debugging. It does not affect image removal, which follows the mode above.
 
-In place of an image reference, `<image|tar-path>` also accepts a path to a local, uncompressed `.tar` file (e.g. from a prior `docker save`/`docker export`, or a CI artifact) — detected automatically by a `.tar` extension that resolves to an existing file. That skips `docker pull`/`docker create`/`docker export` entirely and extracts the given tar directly (a `docker export` tar is used as the filesystem; a `docker save` archive — recognised by its `manifest.json` — is flattened by applying its layer tars in order, honouring `.wh.` whiteouts; an OCI layout without a Docker `manifest.json` is rejected with a clear message); `--no-pull` is a no-op in that case, and `check`/`install` won't attempt `docker rmi` since there's no pulled image to remove. Compressed tarballs (`.tar.gz`/`.tgz`) aren't supported — decompress first.
+In place of an image reference, `<image|tar-path>` also accepts a local image file or directory (e.g. from a prior `docker save`/`docker export`, `skopeo copy ... oci:`, or a CI artifact), detected automatically when the path exists: a `.tar`, a gzip-compressed `.tar.gz`/`.tgz` (decompressed for you; compression is sniffed from the content, so zstd streams and mislabelled files work too), or a directory that is an OCI image layout (`oci-layout` + `index.json`). A tar may hold a `docker export` filesystem (used as-is), a `docker save` archive (recognised by its `manifest.json`), or an OCI image layout; the latter two are flattened by applying their layers in order, honouring `.wh.` whiteouts (gzip and zstd layers are handled; zstd needs Node >= 22.15). For OCI layouts with several images the host's linux platform is preferred, buildx attestation entries are ignored, and a warning names the image scanned. This skips `docker pull`/`docker create`/`docker export` entirely; `--no-pull` is a no-op in that case, and `check`/`install` won't attempt `docker rmi` since there's no pulled image to remove. The input is never modified.
 
 ```bash
 # Scan a base image before it's ever run
@@ -281,6 +281,13 @@ ubel-docker check myapp:latest --no-pull
 
 # Scan a tar artifact from CI (e.g. docker save output) directly
 ubel-docker health ./myapp-image.tar
+
+# Compressed tarballs are decompressed for you
+ubel-docker health ./myapp-image.tar.gz
+
+# Scan an OCI image layout directory (e.g. from skopeo / buildah)
+skopeo copy docker://node:20-alpine oci:./node-oci:20-alpine
+ubel-docker health ./node-oci
 ```
 
 ### pip
