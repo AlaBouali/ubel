@@ -559,7 +559,19 @@ export async function scanTargets(targets, opts = {}) {
   // as its own result set. See ./secrets_crawl.js.
   let secrets = { findings: [], errors: [], stats: { total: 0 } };
   if (scanSecrets) {
-    secrets = await crawlAndScanSecrets(assets, { concurrency, log });
+    // The crawl is best-effort: a failure inside it is recorded in the report's
+    // secrets errors and must never abort a scan whose CVE and misconfiguration
+    // results are already in hand.
+    try {
+      secrets = await crawlAndScanSecrets(assets, { concurrency, log });
+    } catch (err) {
+      console.warn(`[~] Secrets crawl failed: ${err?.message || err}`);
+      secrets = {
+        findings: [],
+        errors: [{ url: "(secrets crawl)", stage: "crawl", error: err?.message || String(err) }],
+        stats: { total: 0 },
+      };
+    }
   }
 
   // ── Fixed-set web misconfiguration checks ──────────────────────────────

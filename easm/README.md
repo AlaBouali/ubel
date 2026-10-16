@@ -239,6 +239,13 @@ dependency; if it's answering HTTP requests, it's running.
 - **Compliance framework mapping**, same shared engine as every other module
 - Automatic report generation: timestamped **JSON** + interactive **HTML**,
   plus `latest.<mode>.*` convenience copies (`latest.url.*`, `latest.domain.*`, `latest.host.*`, `latest.easm.*`)
+- **Diffs against the previous report** — every report compares itself with
+  the asset's previous report of the same CLI and lists what is new, still
+  present or gone: IPs, domains, IP ports, misconfigurations, technologies
+  (name + version), exposed secrets, findings per technology and, per
+  compliance framework, mapped findings. Shown as the **Diffs** tab and as
+  `diffs` in the JSON (see
+  [Diffs against the previous report](#diffs-against-the-previous-report))
 - `--fail-on` severity/count gate (vulnerabilities, infections and web
   misconfigurations) — same syntax as `ubel-cloud` — for CI use
 - **Exploit intelligence** — every vulnerability is checked against the
@@ -1126,6 +1133,12 @@ other UBEL report vendors them) and includes:
   "not scanned" panel
 - Dedicated Compliance tab — one card per framework, same shape as every
   other UBEL module's compliance tab
+- **Diffs tab** — what changed since the previous report of this asset:
+  one card per category (IPs, Domains, IP ports, Misconfigurations,
+  Technologies, Secrets, Findings per technology) with clickable
+  New / Existing / Removed counts that open the matching rows, plus a
+  Frameworks mapping section with one card per compliance framework — see
+  [Diffs against the previous report](#diffs-against-the-previous-report)
 - **Detailed Stats tab**, same idea as the SAST/SCA reports': target
   reachability (resolved vs dead vs scanned/skipped/errored), component
   counts broken out by state, low-confidence version, WordPress, purl and
@@ -1152,8 +1165,9 @@ IP), the complete `inventory` (fingerprinted components, each with its
 `suggested_fixes`), the complete
 `vulnerabilities` array, `secrets` / `secrets_errors` (exposed credentials
 with URL and position), and `misconfigurations` / `misconfigurations_errors`
-(one entry per rule id, each carrying its own occurrence list) — and can be
-consumed by CI/CD tooling directly.
+(one entry per rule id, each carrying its own occurrence list), and `diffs`
+(see [Diffs against the previous report](#diffs-against-the-previous-report))
+— and can be consumed by CI/CD tooling directly.
 
 ### Suggested fixes
 
@@ -1246,6 +1260,94 @@ ubel-easm, `discovery` (`source`, `ok`, `attempts`, `certificate_records`,
 `hosts_discovered`, `hosts_included`, `hosts_excluded`).
 
 ---
+
+### Diffs against the previous report
+
+Every report (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) is compared
+with the **previous report of the same asset and the same CLI**: the newest
+earlier `<timestamp>.<tag>.zip` in `$HOME/.ubel/history/<asset_id>/` (so a
+`ubel-url` run is only ever compared with an earlier `ubel-url` run, never with
+a `ubel-domain` one). The comparison is written to the JSON as `diffs` and
+rendered as the **Diffs** tab, so the two always agree. It is the EASM
+counterpart of the SCA report's
+[Diffs tab](../sca/README.md#diffs-against-the-previous-report).
+
+Each category is split into **new** (in this report only), **unchanged**
+(in both; shown as "Existing") and **removed** (in the previous report only).
+The tab shows one count per list; click a count to open its rows.
+
+| Category | An item is | Columns |
+| --- | --- | --- |
+| IPs | one IP address | IP, domains hosted on it, status |
+| Domains | one subdomain name | domain, IPs it resolved to, status |
+| IP ports | one `ip:port` | host, port, whether it answered HTTP(S) |
+| Misconfigurations | one rule id on one target (`missing-hsts` on `a.example.com`) | rule, severity, title, category, target |
+| Technologies | one name + version (`nginx 1.24.0`); an upgrade is one removed and one new row | name, version, number of hosts it was seen on |
+| Secrets | one rule id at one URL with one redacted preview (line number is not part of the key, so a script that merely shifts lines is not "new") | rule, severity, title, URL, line, redacted match |
+| Findings per technology | one vulnerability id on one name + version | technology, version, ID, severity, title |
+
+Ports are listed for the IP that was port-scanned; a subdomain's own ports are
+only listed when no IP entry stands behind it (`ubel-url`, `ubel-domain`).
+
+**Frameworks mapping.** For every compliance framework present in either
+report, the findings mapped to it (vulnerabilities, misconfigurations and —
+when both runs scanned for them — secrets) are listed as **new**, **existing**
+or **resolved**, with the framework controls they map to. The same
+[compliance mapping](#reports) the Compliance tab uses is the source.
+
+**When a category is not compared.** A category that cannot be compared fairly
+is `null` in the JSON and named under "Not compared" in the tab, rather than
+being shown as "everything is new/removed":
+
+- Secrets, when either run used `--no-secrets` (or the earlier report has no
+  secrets data), so a run that did not look never reads as "all secrets fixed".
+- Frameworks mapping, when the previous report has no compliance mapping.
+
+**Other behaviour worth knowing**
+
+- The first run for an asset has no previous report: `diffs.previous` is
+  `null` and the tab says there is nothing to compare against.
+- Reports written before the Scope list existed are still comparable: the
+  IP/domain/port rows are rebuilt from their `hosts`.
+- An unreadable earlier bundle is skipped in favour of the next older one. A
+  failure while building the diff never fails the scan: it is logged,
+  `diffs.error` carries the message and the report is written without a
+  comparison.
+- `--min-severity` is accounted for. It filters the vulnerability list before a
+  report is built, so when the two runs used different levels the vulnerability
+  comparisons (Findings per technology and the Frameworks mapping) are made at
+  the **stricter** of the two on both reports, and the tab says so. A finding
+  that one run filtered out therefore never reads as new or removed in the
+  other. `diffs.min_severity` records `current`, `previous`, `applied` and
+  `changed`. Infections are always included. Misconfigurations, secrets,
+  technologies and the IP/domain/port lists are not affected by
+  `--min-severity`.
+- The targets or `--ports` range may still differ between runs; a host that was
+  not part of the earlier run shows up as new (or removed).
+
+JSON shape (`diffs`):
+
+```json
+{
+  "enabled": true,
+  "previous": { "report_id": "UBEL-url-<asset_id>-<uuid>", "generated_at": "...", "bundle": "<timestamp>.url.zip" },
+  "min_severity": { "current": "unknown", "previous": "unknown", "applied": "unknown", "changed": false },
+  "counts": { "new_ips": 1, "unchanged_ips": 4, "removed_ips": 0, "new_techs": 2, "...": 0 },
+  "ips":        { "new": [], "unchanged": [], "removed": [] },
+  "domains":    { "new": [], "unchanged": [], "removed": [] },
+  "ports":      { "new": [], "unchanged": [], "removed": [] },
+  "misconfigs": { "new": [], "unchanged": [], "removed": [] },
+  "techs":      { "new": [], "unchanged": [], "removed": [] },
+  "secrets":    null,
+  "findings":   { "new": [], "unchanged": [], "removed": [] },
+  "compliance": { "includes_secrets": false, "frameworks": [ { "id": "...", "name": "...", "version": "...", "new": [], "unchanged": [], "removed": [] } ] }
+}
+```
+
+`counts` carries `new_`, `unchanged_` and `removed_` for every category that was
+compared (`ips`, `domains`, `ports`, `misconfigs`, `techs`, `secrets`,
+`findings`). With no previous report, `previous`, `counts` and `compliance` are
+`null`.
 
 ## Programmatic API
 
@@ -1484,8 +1586,11 @@ rather than every push.
   registry-published package by name off the page itself — see
   `buildPurlIds()` in `componentId.js` for the format and why it's opt-in
   rather than guessed at for every scanner.
-- No historical diffing between scan runs yet — each run is a fresh,
-  point-in-time snapshot, same as `ubel-cloud`.
+- Diffing compares a run only with the previous report of the same asset and
+  CLI (see [Diffs against the previous report](#diffs-against-the-previous-report)).
+  A different `--min-severity` is normalised, but a different target list or
+  `--ports` range between runs shows up as new/removed items. There is no trend
+  over more than two runs.
 - No `--proxy` support — the vendored fingerprinting engine deliberately
   dropped the original tool's proxy plumbing (see
   [`fingerprint/NOTICE.md`](./fingerprint/NOTICE.md)) since it wasn't

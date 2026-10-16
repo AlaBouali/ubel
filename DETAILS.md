@@ -456,6 +456,8 @@ are all still included. Every detected component is reported
 with `scopes: ["prod"]` — anything fingerprinted over the network is, by
 definition, already running.
 
+Every EASM report (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) also carries a **Diffs** tab (`diffs` in the JSON): IPs, domains, IP ports, misconfigurations, technologies (name + version), exposed secrets, findings per technology and — per compliance framework — mapped findings that are new, existing or removed since the asset's previous report of the same CLI, read back from the asset's history folder. Secrets are only compared when both runs scanned for them (no `--no-secrets`), so a skipped crawl never reads as "all fixed"; when the two runs used a different `--min-severity`, vulnerability findings are compared at the stricter level so a filtered-out finding never reads as new or removed; a technology upgrade shows as one removed and one new row. See [EASM § Diffs against the previous report](https://github.com/AlaBouali/ubel/blob/main/easm/README.md#diffs-against-the-previous-report).
+
 ```bash
 # One domain, safety guard on by default (skips private/self-IP targets)
 ubel-url example.com

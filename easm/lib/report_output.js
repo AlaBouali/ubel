@@ -15,6 +15,7 @@ import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip,
 import { getGitMetadata } from "../../sca/git_info.js";
 import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
+import { computeEasmDiffs } from "./diffs.js";
 
 export const SEVERITY_RANK = { infection: -1, critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
 export const VALID_SEVERITIES = new Set(["critical", "high", "medium", "low", "unknown"]);
@@ -191,6 +192,11 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
       cover: { ...reportPayload.executive_summary.cover, report_id },
     };
   }
+
+  // Diffs vs the previous report of this asset (newest earlier <ts>.<tag>.zip in the
+  // same history folder): the "Diffs" tab, and `diffs` in the JSON. Built from the
+  // finished payload, so JSON and HTML agree.
+  reportPayload.diffs = computeEasmDiffs(reportPayload, zipPath, tag);
 
   const latestJson = path.join(latestDir, reportFileName("latest", tag, "json"));
   const latestHtml = path.join(latestDir, reportFileName("latest", tag, "html"));

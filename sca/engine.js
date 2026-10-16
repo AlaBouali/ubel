@@ -248,7 +248,7 @@ function escapeHTML(str) {
 // vulnerabilities by advisory id + affected component.
 
 /** Reads one entry of a zip (stored or deflate) into a Buffer; null when absent / unsupported. */
-function readZipEntry(zipFile, entryName) {
+export function readZipEntry(zipFile, entryName) {
   const buf = fs.readFileSync(zipFile);
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65535); i--) {
@@ -282,7 +282,7 @@ function readZipEntry(zipFile, entryName) {
  * The newest report of the same tag that precedes `zipPath` in the same history folder.
  * Returns { file, report } or null (first report of this asset/type, or none readable).
  */
-function loadPreviousReport(zipPath, reportTag) {
+export function loadPreviousReport(zipPath, reportTag) {
   const dir     = path.dirname(zipPath);
   const current = path.basename(zipPath);
   const suffix  = `.${reportTag}.zip`;

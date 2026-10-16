@@ -10,13 +10,19 @@ import https from "node:https";
 import { URL } from "node:url";
 import zlib from "node:zlib";
 
-export function decompress(buf, encoding) {
+// Default ceilings for one response. A body larger than this is aborted while it
+// streams in (rather than buffered whole and rejected afterwards), and so is a
+// compressed body that inflates past it.
+const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
+
+export function decompress(buf, encoding, maxOutputLength = DEFAULT_MAX_BYTES) {
   const enc = String(encoding || "").toLowerCase().trim();
   if (!enc || enc === "identity") return buf;
+  const zopts = { maxOutputLength };
   try {
-    if (enc.includes("gzip"))    return zlib.gunzipSync(buf);
-    if (enc.includes("deflate")) return zlib.inflateSync(buf);
-    if (enc.includes("br"))      return zlib.brotliDecompressSync(buf);
+    if (enc.includes("gzip"))    return zlib.gunzipSync(buf, zopts);
+    if (enc.includes("deflate")) return zlib.inflateSync(buf, zopts);
+    if (enc.includes("br"))      return zlib.brotliDecompressSync(buf, zopts);
   } catch {
     // fall through and return the raw buffer
   }
@@ -77,22 +83,54 @@ export class HttpResponse {
  * @param {"GET"|"POST"} [opts.method]
  * @param {object} [opts.headers]
  * @param {string} [opts.data] request body for POST
- * @param {number} [opts.timeout] seconds - matches the `timeout=` convention used throughout the original scanners
+ * @param {number} [opts.timeout] seconds of socket inactivity - matches the `timeout=` convention used throughout the original scanners
+ * @param {number} [opts.totalTimeout] seconds for the whole request incl. redirects and body (default 5x timeout);
+ *   `timeout` alone never fires on a server that keeps trickling bytes
+ * @param {number} [opts.maxBytes] abort once the response body exceeds this many bytes (default 50 MiB)
  * @param {number} [opts.maxRedirects]
- * @returns {Promise<HttpResponse>}
+ * @returns {Promise<HttpResponse>} always settles: a dropped connection, a body that stops short of its
+ *   Content-Length, an oversized body, a malformed redirect target or the overall deadline either resolve
+ *   or reject - none of them throw out of an event handler or leave the promise pending.
  */
 export function request(targetUrl, opts = {}) {
-  const { method = "GET", headers = {}, data = null, timeout = 20, maxRedirects = 5 } = opts;
+  const {
+    method = "GET", headers = {}, data = null, timeout = 20, maxRedirects = 5,
+    maxBytes = DEFAULT_MAX_BYTES,
+  } = opts;
+  const totalTimeout = opts.totalTimeout ?? Math.max(1, timeout) * 5;
 
   return new Promise((resolve, reject) => {
     let redirectsLeft = maxRedirects;
+    let settled = false;
+    let activeReq = null;
+    let deadline = null;
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      try { if (activeReq) activeReq.destroy(); } catch { /* already gone */ }
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const done = (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolve(response);
+    };
+
+    deadline = setTimeout(() => fail(new Error(`Request exceeded ${totalTimeout}s overall`)), totalTimeout * 1000);
 
     const doRequest = (currentUrl) => {
       let parsed;
       try {
         parsed = new URL(currentUrl);
       } catch (e) {
-        reject(e);
+        fail(e);
+        return;
+      }
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        fail(new Error(`Unsupported protocol ${parsed.protocol}`));
         return;
       }
       // NOTE: the scheme in the URL is authoritative. Do not "correct" it based on the
@@ -112,30 +150,65 @@ export function request(targetUrl, opts = {}) {
 
       const req = lib.request(reqOptions, (res) => {
         const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const status = res.statusCode || 0;
-          if ([301, 302, 303, 307, 308].includes(status) && res.headers.location && redirectsLeft > 0) {
-            redirectsLeft -= 1;
-            doRequest(new URL(res.headers.location, currentUrl).toString());
+        let size = 0;
+
+        res.on("data", (c) => {
+          size += c.length;
+          if (size > maxBytes) {
+            fail(new Error(`Response body exceeded ${maxBytes} bytes`));
+            res.destroy();
             return;
           }
-          const raw = Buffer.concat(chunks);
-          const body = decompress(raw, res.headers["content-encoding"]);
-          resolve(new HttpResponse({
-            statusCode: status,
-            headers: res.headers,
-            body,
-            url: currentUrl,
-          }));
+          chunks.push(c);
+        });
+        // A connection dropped mid-body surfaces on the response, not the request. Without these
+        // handlers the promise never settled (or, on some Node versions, the unhandled 'error'
+        // event killed the process) - either way the whole scan stalled or died.
+        res.on("error", fail);
+        res.on("aborted", () => fail(new Error("Connection closed before the response completed")));
+        res.on("close", () => {
+          if (!res.complete) fail(new Error("Connection closed before the response completed"));
+        });
+        res.on("end", () => {
+          try {
+            const status = res.statusCode || 0;
+            if ([301, 302, 303, 307, 308].includes(status) && res.headers.location && redirectsLeft > 0) {
+              let next = null;
+              try {
+                next = new URL(res.headers.location, currentUrl);
+              } catch {
+                next = null; // malformed Location: hand back the 3xx itself instead of throwing
+              }
+              if (next && (next.protocol === "http:" || next.protocol === "https:")) {
+                redirectsLeft -= 1;
+                doRequest(next.toString());
+                return;
+              }
+            }
+            const raw = Buffer.concat(chunks);
+            const body = decompress(raw, res.headers["content-encoding"], maxBytes);
+            done(new HttpResponse({
+              statusCode: status,
+              headers: res.headers,
+              body,
+              url: currentUrl,
+            }));
+          } catch (e) {
+            fail(e);
+          }
         });
       });
+      activeReq = req;
 
       req.on("timeout", () => req.destroy(new Error(`Request timed out after ${timeout}s`)));
-      req.on("error", reject);
+      req.on("error", fail);
 
-      if (data) req.write(data);
-      req.end();
+      try {
+        if (data) req.write(data);
+        req.end();
+      } catch (e) {
+        fail(e);
+      }
     };
 
     doRequest(targetUrl);

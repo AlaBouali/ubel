@@ -655,6 +655,8 @@ export function buildReportPayload(scanResult, meta = {}) {
     misconfigurations: groupedMisconfigs,
     misconfigurations_errors: misconfigResult.errors || [],
     threat_intel: scanResult.threat_intel || null,
+    // Filled in by writeEasmReports() once the history folder is known (see ./diffs.js).
+    diffs: { enabled: false },
   };
 
   // Executive summary (plain-language overview for non-technical readers).
@@ -788,6 +790,7 @@ export async function generateHtmlReport(reportPayload) {
       <button onclick="switchTab('misconfigs')" id="tab-misconfigs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Misconfigurations(0)</button>
       <button onclick="switchTab('secrets')"    id="tab-secrets"    class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets(0)</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
+      <button onclick="switchTab('diffs')"      id="tab-diffs"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
       <button onclick="switchTab('stats')"      id="tab-stats"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
       <button onclick="switchTab('scaninfo')"   id="tab-scaninfo"   class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Scan Info</button>
     </div>
@@ -1091,6 +1094,8 @@ export async function generateHtmlReport(reportPayload) {
     </section>
 
     <!-- Detailed Stats -->
+    <section id="section-diffs" class="hidden space-y-6"></section>
+
     <section id="section-stats" class="hidden space-y-8">
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
 
@@ -3163,6 +3168,140 @@ function renderExecutiveSummary() {
   });
 })();
 
+// ── DIFFS ─────────────────────────────────────────────────────────────────────
+// Comparison with the previous report of this asset (reportData.diffs, built
+// server-side by easm/lib/diffs.js). Written with string concatenation only:
+// this whole script lives inside a template literal.
+
+var DIFF_CATS = [
+  { key: 'ips',        label: 'IPs',                  cols: [['IP', 'ip'], ['Domains', 'domains'], ['Status', 'status']] },
+  { key: 'domains',    label: 'Domains',              cols: [['Domain', 'domain'], ['IPs', 'ips'], ['Status', 'status']] },
+  { key: 'ports',      label: 'IP ports',             cols: [['Host', 'host'], ['Port', 'port'], ['HTTP(S)', 'http']] },
+  { key: 'misconfigs', label: 'Misconfigurations',    cols: [['Rule', 'id'], ['Severity', 'severity'], ['Title', 'title'], ['Category', 'category'], ['Target', 'target']] },
+  { key: 'techs',      label: 'Technologies',         cols: [['Name', 'name'], ['Version', 'version'], ['Seen on', 'hosts']] },
+  { key: 'secrets',    label: 'Secrets',              cols: [['Rule', 'id'], ['Severity', 'severity'], ['Title', 'title'], ['URL', 'url'], ['Line', 'line'], ['Match', 'match_preview']] },
+  { key: 'findings',   label: 'Findings per technology', cols: [['Technology', 'tech'], ['Version', 'version'], ['ID', 'id'], ['Severity', 'severity'], ['Title', 'title']] }
+];
+var DIFF_LISTS = [
+  { key: 'new',       label: 'New',      color: 'text-red-400' },
+  { key: 'unchanged', label: 'Existing', color: 'text-yellow-400' },
+  { key: 'removed',   label: 'Removed',  color: 'text-green-400' }
+];
+
+function diffTable(cols, items, sevKey) {
+  if (!items.length) return '<p class="text-sm text-neutral-500 italic">None.</p>';
+  return '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+    cols.map(function (c) { return '<th class="pb-2 pr-4 font-bold">' + escH(c[0]) + '</th>'; }).join('') +
+    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
+    items.map(function (e) {
+      return '<tr>' + cols.map(function (c) {
+        var v = e[c[1]];
+        if (v === true) v = 'yes'; else if (v === false) v = 'no';
+        if (c[1] === sevKey) {
+          var sv = String(v || 'unknown').toLowerCase();
+          return '<td class="py-2 pr-4 uppercase text-[10px] font-bold ' + (typeof sevClass === 'function' ? sevClass(sv) : '') + '">' + escH(sv) + '</td>';
+        }
+        return '<td class="py-2 pr-4 mono text-neutral-300 break-all">' + escH(v) + '</td>';
+      }).join('') + '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function diffCountButton(attrs, label, count, color) {
+  return '<button type="button" ' + attrs + ' class="bg-neutral-900 border border-neutral-800 hover:border-neutral-500 rounded-lg p-3 text-left transition-colors">' +
+    '<span class="block text-[9px] uppercase tracking-widest text-neutral-500 font-bold">' + escH(label) + '</span>' +
+    '<span class="block text-2xl font-bold mono ' + color + '">' + count + '</span></button>';
+}
+
+function renderDiffs() {
+  var sec = document.getElementById('section-diffs');
+  if (!sec) return;
+  var d = reportData.diffs;
+  if (!d || !d.enabled) { sec.innerHTML = ''; return; }
+  var html = '<div class="flex flex-col md:flex-row gap-2 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Diffs</h2>';
+  if (d.previous) {
+    html += '<p class="text-xs text-neutral-500 mono">vs previous report ' + escH(d.previous.report_id || d.previous.bundle) +
+      (d.previous.generated_at ? ' (' + escH(d.previous.generated_at) + ')' : '') + '</p>';
+  }
+  html += '</div>';
+  if (!d.previous || !d.counts) {
+    html += '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No previous report found for this asset, so there is nothing to compare against.</div>';
+    sec.innerHTML = html;
+    return;
+  }
+  if (d.min_severity && d.min_severity.changed) {
+    html += '<p class="text-xs text-yellow-400">The two reports used a different --min-severity (previous: ' + escH(d.min_severity.previous) +
+      ', this one: ' + escH(d.min_severity.current) + '). Vulnerability findings (Findings per technology and the Frameworks mapping) are compared at the stricter level, ' +
+      escH(d.min_severity.applied) + ' and above, so a finding hidden by one filter is not shown as new or removed.</p>';
+  }
+  html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+  var skipped = [];
+  DIFF_CATS.forEach(function (cat) {
+    var g = d[cat.key];
+    if (!g) { skipped.push(cat.label); return; }
+    html += '<div class="glass rounded-xl p-5 space-y-3"><p class="font-semibold text-sm">' + escH(cat.label) + '</p><div class="grid grid-cols-3 gap-2">';
+    DIFF_LISTS.forEach(function (l) {
+      html += diffCountButton('data-diff-cat="' + cat.key + '" data-diff-list="' + l.key + '"', l.label, (g[l.key] || []).length, l.color);
+    });
+    html += '</div></div>';
+  });
+  html += '</div>';
+  if (skipped.length) {
+    html += '<p class="text-xs text-neutral-500">Not compared: ' + escH(skipped.join(', ')) + ' (this report or the previous one did not include them, e.g. secrets were not scanned).</p>';
+  }
+  if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
+    html += '<h3 class="text-lg font-bold pt-4">Frameworks mapping</h3>' +
+      '<p class="text-xs text-neutral-500">Findings mapped to each framework, compared with the previous report (vulnerabilities, misconfigurations' +
+      (d.compliance.includes_secrets ? ' and secrets).' : '; secrets were not scanned in both reports).') + '</p>';
+    html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+    d.compliance.frameworks.forEach(function (fw, fi) {
+      html += '<div class="glass rounded-xl p-5 space-y-3"><div><p class="font-semibold text-sm">' + escH(fw.name) + '</p>' +
+        (fw.version ? '<p class="text-[10px] text-neutral-500 mono">' + escH(fw.version) + '</p>' : '') + '</div><div class="grid grid-cols-3 gap-2">';
+      [['new', 'New', 'text-red-400'], ['unchanged', 'Existing', 'text-yellow-400'], ['removed', 'Resolved', 'text-green-400']].forEach(function (x) {
+        html += diffCountButton('data-diff-fw="' + fi + '" data-diff-list="' + x[0] + '"', x[1], fw[x[0]].length, x[2]);
+      });
+      html += '</div></div>';
+    });
+    html += '</div>';
+  } else if (!d.compliance) {
+    html += '<p class="text-xs text-neutral-500">Frameworks mapping is not compared: the previous report has no compliance mapping.</p>';
+  }
+  sec.innerHTML = html;
+}
+
+function openDiffModal(catKey, listKey) {
+  var d = reportData.diffs;
+  var cat = DIFF_CATS.filter(function (c) { return c.key === catKey; })[0];
+  var l = DIFF_LISTS.filter(function (x) { return x.key === listKey; })[0];
+  if (!d || !cat || !l || !d[catKey]) return;
+  var items = d[catKey][listKey] || [];
+  openModal('<h3 class="text-lg font-bold mb-1">' + escH(cat.label) + ' — ' + escH(l.label) + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + diffTable(cat.cols, items, 'severity'));
+}
+
+function openComplianceDiffModal(fi, listKey) {
+  var d = reportData.diffs;
+  var fw = d && d.compliance && d.compliance.frameworks[fi];
+  if (!fw) return;
+  var labels = { new: 'New', unchanged: 'Still existing', removed: 'Resolved' };
+  var items = (fw[listKey] || []).map(function (e) {
+    return Object.assign({}, e, { kindLabel: e.kind === 'secret' ? 'Secret' : e.kind === 'misconfig' ? 'Misconfiguration' : 'Vulnerability' });
+  });
+  openModal('<h3 class="text-lg font-bold mb-1">' + escH(fw.name) + ' — ' + labels[listKey] + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' +
+    diffTable([['Type', 'kindLabel'], ['ID', 'id'], ['Severity', 'severity'], ['Title', 'title'], ['Where', 'where'], ['Controls', 'controls']], items, 'severity'));
+}
+
+function bindDiffs() {
+  var sec = document.getElementById('section-diffs');
+  if (!sec) return;
+  sec.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-diff-list]');
+    if (!b) return;
+    if (b.dataset.diffFw !== undefined) openComplianceDiffModal(parseInt(b.dataset.diffFw, 10), b.dataset.diffList);
+    else openDiffModal(b.dataset.diffCat, b.dataset.diffList);
+  });
+}
+
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 
 function switchTab(id) {
@@ -3278,6 +3417,8 @@ document.addEventListener('DOMContentLoaded', () => {
   renderScanInfo();
   renderCompliance();
   renderStats();
+  bindDiffs();
+  try { renderDiffs(); } catch (e) { console.error('Diffs render failed:', e); }
 });
 
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────

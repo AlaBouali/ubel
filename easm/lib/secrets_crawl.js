@@ -53,13 +53,19 @@ const TYPE_ATTR_RE = /(?<![\w-])type\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
 // looking for, and the secrets rules are content-based, not syntax-based.
 const NON_JS_TYPES = new Set(["text/template", "text/x-template", "text/html"]);
 
-/** Line number (1-based) of a character offset within a string. */
-function lineAtOffset(text, offset) {
+/**
+ * Returns a function giving the 1-based line of a character offset. Offsets
+ * must be asked for in non-decreasing order (script tags are matched left to
+ * right), so the text is walked once overall rather than once per block.
+ */
+function makeLineCounter(text) {
+  let pos = 0;
   let line = 1;
-  for (let i = 0; i < offset && i < text.length; i++) {
-    if (text[i] === "\n") line++;
-  }
-  return line;
+  return (offset) => {
+    const end = Math.min(offset, text.length);
+    for (; pos < end; pos++) if (text.charCodeAt(pos) === 10) line++;
+    return line;
+  };
 }
 
 /**
@@ -104,6 +110,7 @@ export function extractScripts(html, pageUrl) {
     return { inline, external };
   }
 
+  const lineAt = makeLineCounter(html);
   SCRIPT_TAG_RE.lastIndex = 0;
   let m;
   while ((m = SCRIPT_TAG_RE.exec(html)) !== null) {
@@ -137,7 +144,7 @@ export function extractScripts(html, pageUrl) {
     // only when the tag ends with a newline; computing from the content's
     // actual offset handles both shapes without guessing.
     const contentOffset = m.index + m[0].indexOf(">") + 1;
-    inline.push({ content: body, lineOffset: lineAtOffset(html, contentOffset) });
+    inline.push({ content: body, lineOffset: lineAt(contentOffset) });
   }
 
   // Look up URLs from <link> tags as well. These routinely carry JS:
@@ -220,9 +227,24 @@ function scanBlob(content, { url, sourceType, lineOffset = 0, pageUrl }) {
   }));
 }
 
+/**
+ * Runs one crawl task and turns anything it throws (a dropped connection, a
+ * malformed URL, an oversized body ...) into a recorded per-URL error, so one
+ * bad host or script can never abort the crawl or the scan around it.
+ */
+async function safely(task, onError) {
+  try {
+    return await task();
+  } catch (err) {
+    return onError(err instanceof Error ? err : new Error(String(err)));
+  }
+}
+
 async function fetchText(url, timeout) {
   url = normalizeUrl(url);
-  const res = await httpClient.get(url, { timeout, maxRedirects: 3 });
+  // maxBytes aborts an oversized body while it streams in, instead of buffering
+  // it whole (a multi-GB "script" used to exhaust memory and take the scan down).
+  const res = await httpClient.get(url, { timeout, maxRedirects: 3, maxBytes: MAX_SCRIPT_BYTES });
   if (res.status_code < 200 || res.status_code >= 300) return null;
   const text = res.text;
   if (!text || text.length > MAX_SCRIPT_BYTES) return null;
@@ -274,7 +296,7 @@ export async function crawlAndScanSecrets(assets, opts = {}) {
   const externalRefs = new Map();
 
   // ── Pass 1: page documents + inline scripts ────────────────────────────
-  const pageResults = await mapLimit(crawlable, concurrency, async (asset) => {
+  const pageResults = await mapLimit(crawlable, concurrency, async (asset) => safely(async () => {
     // Normalize BEFORE extractScripts: asset.resolved_url is often a bare
     // host ("devops.medcity.tn"). fetchText would silently prepend https://
     // but the original string would still be handed to extractScripts,
@@ -310,7 +332,7 @@ export async function crawlAndScanSecrets(assets, opts = {}) {
       );
     }
     return { pageUrl, ok: true, inlineCount: inline.length, bytes: html.length, findings };
-  });
+  }, (err) => ({ pageUrl: asset.resolved_url, ok: false, error: err.message || String(err) })));
 
   let pagesCrawled = 0;
   pageResults.forEach((r, i) => {
@@ -335,7 +357,7 @@ export async function crawlAndScanSecrets(assets, opts = {}) {
     console.log(`[*] Fetching ${externalUrls.length} unique external script(s)...`);
   }
 
-  const scriptResults = await mapLimit(externalUrls, concurrency, async (url) => {
+  const scriptResults = await mapLimit(externalUrls, concurrency, async (url) => safely(async () => {
     const js = await fetchText(url, timeout);
     if (js === null) return { url, ok: false, error: "script fetch failed (non-2xx, empty, or > MAX_SCRIPT_BYTES)" };
     const pages = [...externalRefs.get(url)];
@@ -350,7 +372,7 @@ export async function crawlAndScanSecrets(assets, opts = {}) {
         referenced_by: pages,
       })),
     };
-  });
+  }, (err) => ({ url, ok: false, error: err.message || String(err) })));
 
   let externalScanned = 0;
   scriptResults.forEach((r, i) => {
