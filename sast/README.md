@@ -22,6 +22,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - Pluggable LLM provider registry — OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, and local/Docker-hosted models (Ollama-compatible), selectable per run with no code changes
 - Automatic report generation: timestamped **JSON** + interactive **HTML** + **SARIF 2.1.0**, plus `latest.<tag>.*` convenience links (`latest.sast.*`, `latest.malware.*`), kept in a separate namespace per scan type so SAST and malware runs never collide. For historic tracking, a zipped snapshot of these reports are generated and saved, too.
 - **Executive Summary** in the JSON and HTML reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Executive summary](#executive-summary))
+- **Diffs against the previous report** — every report carries a **Diffs** tab (`diffs` in the JSON): the code units (chunks), findings and — per compliance framework — mapped findings that are new, unchanged or removed since the asset's previous report of the same type (see [Diffs against the previous report](#diffs-against-the-previous-report))
 - **Compliance framework mapping** — every finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - Zero external runtime dependencies (Node.js stdlib only)
 
@@ -436,7 +437,7 @@ $HOME/.ubel/history/<asset_id>/
 
 Files follow the shared `<file_name>.<tag>.<extension>` scheme: the tag (`sast` or `malware`) sits between the file name and the extension; the file name is `latest` for the always-current copies, a timestamp for the zip, and `report` for the files inside the zip. The zips go to the shared `$HOME/.ubel/history/` folder (the same one every UBEL scanner uses), in a sub-folder named after the asset — no mode folder, the tag in the file name says `sast` or `malware`: `<asset_id>` is the `<uuid>` id in `<project>/.ubel/ubel_asset.json`, created on the first run and never changed (or the id passed with `--asset-id` for that run). `asset_id`, `asset_name` and `asset_type` (always `codebase` here, for both `sast` and `malware`; the `sast` / `malware` mode only names the history folder and file tag) are written into the report's `meta` together with a per-report `report_id` (`UBEL-sast-…` or `UBEL-malware-…`, see the SCA README's [Report ID](../sca/README.md#report-id-report_id)), into the SARIF run's `properties`, and shown in the HTML report's system panel as *Asset*, *Asset ID* and *Asset type* — see the SCA README's [Asset id](../sca/README.md#asset-id-ubel_assetjson) and [Asset types](../sca/README.md#asset-types-asset_type) sections. A second run of the same project in the same second gets a `_2` suffix instead of overwriting the first. Every report also carries a `machine_id` — the id of the machine the scan ran on, from `$HOME/.ubel/ubel_machine.json` (id only, no name; see the SCA README's [Machine id](../sca/README.md#machine-id-ubel_machinejson)) — in the JSON `meta` and the SARIF run's `properties` and in the HTML scan info as *Machine ID*. (Earlier versions wrote `<project>/.ubel/local/reports/sast/<date>/sast__<timestamp>.zip` and `…/malware/<date>/malware__<timestamp>.zip` with untagged `report.json` / `report.html` / `report.sarif.json` inside; old files are left untouched.)
 
-The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab. The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, results }`, where `meta.scan_type` is `analyze` or `malware`, `meta.scan_options` records the non-secret run settings **and the measured coverage** (verification and taint-trace on/off, diff mode, the limits actually in force, `chunks_found` / `chunks_scanned` / `chunks_dropped_by_cap`, files skipped as too large, AI replies cut off) the summary needs to say what was and was not checked, and `meta.scan_stats` records the **real token usage** the provider returned per pass (`usage.scan|verify|taint|total`: calls, input/output/cache-read/cache-write tokens, and `estimated_calls` for any provider that returned no usage) plus pipeline counters (packed calls, pack fallbacks, batched verify/trace calls, findings not traced); the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
+The HTML report is fully self-contained (no server required) and includes an Executive Summary tab (right after the Dashboard), a searchable findings table, per-finding detail views (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance framework mapping), and run metadata (git commit, OS, provider/model used), plus a dedicated Compliance tab and a Diffs tab (comparison with the previous report, see [Diffs against the previous report](#diffs-against-the-previous-report)). The JSON report is the full machine-readable equivalent — `{ generated_at, meta, executive_summary, diffs, results }`, where `meta.scan_type` is `analyze` or `malware`, `meta.scan_options` records the non-secret run settings **and the measured coverage** (verification and taint-trace on/off, diff mode, the limits actually in force, `chunks_found` / `chunks_scanned` / `chunks_dropped_by_cap`, files skipped as too large, AI replies cut off) the summary needs to say what was and was not checked, and `meta.scan_stats` records the **real token usage** the provider returned per pass (`usage.scan|verify|taint|total`: calls, input/output/cache-read/cache-write tokens, and `estimated_calls` for any provider that returned no usage) plus pipeline counters (packed calls, pack fallbacks, batched verify/trace calls, findings not traced); the SARIF 2.1.0 report is meant for direct consumption by CI/CD tooling and code-scanning dashboards (GitHub Code Scanning, etc.).
 
 ### Keeping UBEL's own files out of git and Docker
 
@@ -469,6 +470,52 @@ Findings are AI-proposed candidates, so the summary sorts each into exactly one 
 | Not assessed | no code unit could be analyzed — no rating is given instead of "Minimal" |
 
 Anything that means "not everything was checked" — code units beyond the `--max-chunks` limit (including the default of 1000), files over the size limit, AI replies that were cut off, code units whose AI reply could not be decoded, verification or the taint trace switched off, `--only-diff`, `--max-chunks`/`--chunks-start`, `--languages`, `--skip-folders`/`--skip-files` — is stated in the summary and never presented as a clean result. The suggested timeframes (Critical: immediately; High: within days; the rest: next maintenance cycle) and owners are generic defaults, not your organization's remediation policy.
+
+---
+
+## Diffs against the previous report
+
+Every `analyze` and `malware` report carries a **Diffs** tab in the HTML report and a top-level `diffs` block in the JSON (not in the SARIF output). It compares this scan with the **previous report of the same type for the same asset**: the newest earlier `<timestamp>.<tag>.zip` in `$HOME/.ubel/history/<asset_id>/` (`sast` compares with `sast`, `malware` with `malware`; its `report.<tag>.json` is read back). The comparison is built once in `main.js` (`diffs.js`), before this scan's own bundle is written, so the previous report is always an earlier one, and the JSON and HTML always carry the same data. It never fails a scan: if the comparison cannot be built, the tab says so and the scan carries on.
+
+Three things are compared:
+
+| Section | Matched by | Shown as |
+|---|---|---|
+| **Chunks** — the code units analysed | chunk id (file + function/method) | new / unchanged / removed |
+| **Findings** | vulnerability class + chunk; the same class twice in one chunk counts as two occurrences (`#2`, `#3`, …) | new / still existing / fixed |
+| **Compliance frameworks** — one card per framework | the same finding key, restricted to findings mapped to that framework | new / existing / resolved, each with the finding's controls |
+
+In the HTML tab each count is a tile that opens the list behind it (chunks: file, function, type, language; findings: severity, class, title, file:line, function, whether the taint trace confirmed it exploitable; framework lists add the controls).
+
+Things worth knowing:
+
+- **Line numbers and snippets are not part of the key.** They move whenever a file is edited, so an unrelated change above a finding does not turn it into "one fixed, one new". The flip side: two different issues of the same class in the same function are told apart only by order.
+- **Dismissed findings do not count.** A finding the verification pass marked as a false positive (`is_valid: false`) is left out of both reports, so a finding being cleared shows up as *fixed*, and one that was already dismissed never shows up at all. Unverified and unresolved findings count.
+- **Scope changes can look like code changes.** If either scan ran with `--only-diff`, or left chunks out because of the `--max-chunks` cap, the tab shows a warning (`diffs.scope_note`): chunks that were simply not scanned this time appear as *removed*, and findings in them as *fixed*.
+- **Old reports are handled.** With no previous report (a first run, or an empty history folder) the tab says there is nothing to compare against and `diffs.previous` is `null`. If the previous report has no compliance mapping, the framework section is omitted (`diffs.compliance` is `null`) instead of listing everything as new.
+- **The comparison is only as good as the history folder.** It needs the previous bundle to be present and readable; an unreadable bundle is skipped in favour of the next older one. Running with `--asset-id` compares against that asset's history.
+
+JSON shape:
+
+```json
+{
+  "diffs": {
+    "enabled": true,
+    "previous": { "report_id": "UBEL-sast-…", "generated_at": "2026-10-01T09:30:00Z", "bundle": "2026_10_01__09_30_00.sast.zip" },
+    "counts": { "new_chunks": 3, "unchanged_chunks": 240, "removed_chunks": 1,
+                "new_vulns": 2, "existing_vulns": 5, "fixed_vulns": 1 },
+    "scope_note": null,
+    "chunks": { "new": [ { "id": "…", "file": "src/a.js", "name": "run", "type": "function", "language": "javascript" } ], "unchanged": [], "removed": [] },
+    "vulns":  { "new": [ { "id": "SQL injection", "title": "…", "severity": "high", "file": "src/a.js", "name": "run", "line": 42, "exploitable": true, "frameworks": [] } ], "existing": [], "fixed": [] },
+    "compliance": { "frameworks": [
+      { "id": "owasp_top10_2021", "name": "OWASP Top 10 (2021)", "version": null,
+        "new": [ { "id": "SQL injection", "title": "…", "severity": "high", "where": "src/a.js:42 (run)", "controls": "A03:2021" } ],
+        "unchanged": [], "removed": [] } ] }
+  }
+}
+```
+
+`diffs.compliance` is `null` when the previous report predates compliance mapping, and `diffs.previous` / `diffs.counts` are `null` when there is no previous report. The `vulns` entries also carry the findings' `frameworks`, as stored in the report. The same feature exists for SCA reports — see the SCA README's [Diffs against the previous report](../sca/README.md#diffs-against-the-previous-report), which compares dependencies, vulnerabilities and secrets instead of chunks and findings.
 
 ---
 

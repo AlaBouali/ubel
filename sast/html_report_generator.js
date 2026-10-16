@@ -1306,6 +1306,147 @@ function openComplianceModal(fwIdx, cIdx) {
   \`);
 }
 
+// ── DIFFS ─────────────────────────────────────────────────────────────────────
+// Comparison with the previous report of this asset (reportData.diffs, built in
+// main.js from the newest earlier bundle of the same report type). Written with
+// string concatenation, not template literals: this file is itself embedded in an
+// outer template literal.
+
+var DIFF_TILES = [
+  { count: 'new_chunks',       label: 'New chunks',              group: 'chunks', list: 'new',       color: 'text-orange-400' },
+  { count: 'unchanged_chunks', label: 'Unchanged chunks',        group: 'chunks', list: 'unchanged', color: 'text-neutral-300' },
+  { count: 'removed_chunks',   label: 'Removed chunks',          group: 'chunks', list: 'removed',   color: 'text-blue-400' },
+  { count: 'new_vulns',        label: 'New findings',            group: 'vulns',  list: 'new',       color: 'text-red-400' },
+  { count: 'existing_vulns',   label: 'Still existing findings', group: 'vulns',  list: 'existing',  color: 'text-yellow-400' },
+  { count: 'fixed_vulns',      label: 'Fixed findings',          group: 'vulns',  list: 'fixed',     color: 'text-green-400' }
+];
+var DIFF_GROUPS = ['new', 'unchanged', 'removed'];
+
+function diffEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderDiffs() {
+  var sec = document.getElementById('section-diffs');
+  if (!sec) return;
+  var d = reportData.diffs;
+  if (!d || !d.enabled) { sec.innerHTML = ''; return; }
+
+  var html = '<div class="flex flex-col md:flex-row gap-2 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Diffs</h2>';
+  if (d.previous) {
+    html += '<p class="text-xs text-neutral-500 mono">vs previous report ' + diffEsc(d.previous.report_id || d.previous.bundle) +
+      (d.previous.generated_at ? ' (' + diffEsc(d.previous.generated_at) + ')' : '') + '</p>';
+  }
+  html += '</div>';
+
+  if (d.error) {
+    html += '<div class="glass rounded-xl p-4 text-xs text-red-400">The comparison could not be built: ' + diffEsc(d.error) + '</div>';
+  }
+  if (!d.previous || !d.counts) {
+    html += '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No previous report found for this asset, so there is nothing to compare against.</div>';
+    sec.innerHTML = html;
+    return;
+  }
+  if (d.scope_note) {
+    html += '<p class="text-xs text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded-lg px-3 py-2">' + diffEsc(d.scope_note) + '</p>';
+  }
+
+  html += '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
+  DIFF_TILES.forEach(function (t, i) {
+    html += '<button type="button" onclick="openDiffModal(' + i + ')" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
+      '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
+      '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
+  });
+  html += '</div>';
+  html += '<p class="text-xs text-neutral-500">Findings dismissed as false positives by the verification pass are not counted, so clearing one shows up as fixed.</p>';
+
+  if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
+    html += '<h3 class="text-lg font-bold pt-4">Compliance frameworks</h3>' +
+      '<p class="text-xs text-neutral-500">Findings mapped to each framework, compared with the previous report.</p>' +
+      '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+    d.compliance.frameworks.forEach(function (fw, fi) {
+      html += '<div class="glass rounded-xl p-5 space-y-3"><div><p class="font-semibold text-sm">' + diffEsc(fw.name) + '</p>' +
+        (fw.version ? '<p class="text-[10px] text-neutral-500 mono">' + diffEsc(fw.version) + '</p>' : '') + '</div>' +
+        '<div class="grid grid-cols-3 gap-2">';
+      [['new', 'New', 'text-red-400'], ['unchanged', 'Existing', 'text-yellow-400'], ['removed', 'Resolved', 'text-green-400']].forEach(function (g, gi) {
+        html += '<button type="button" onclick="openComplianceDiffModal(' + fi + ',' + gi + ')" class="bg-neutral-900 border border-neutral-800 hover:border-neutral-500 rounded-lg p-3 text-left transition-colors">' +
+          '<span class="block text-[9px] uppercase tracking-widest text-neutral-500 font-bold">' + g[1] + '</span>' +
+          '<span class="block text-2xl font-bold mono ' + g[2] + '">' + fw[g[0]].length + '</span></button>';
+      });
+      html += '</div></div>';
+    });
+    html += '</div>';
+  } else if (!d.compliance) {
+    html += '<p class="text-xs text-neutral-500">Compliance changes are not shown: the previous report has no compliance mapping.</p>';
+  }
+  sec.innerHTML = html;
+}
+
+function diffTable(cols, rowsHtml) {
+  return '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+    cols.map(function (c) { return '<th class="pb-2 pr-4 font-bold">' + c + '</th>'; }).join('') +
+    '</tr></thead><tbody class="divide-y divide-neutral-800">' + rowsHtml + '</tbody></table></div>';
+}
+
+function diffSevCell(sev) {
+  var s = String(sev || 'unknown').toLowerCase();
+  return '<td class="py-2 pr-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ' + sevClass(s) + '">' + diffEsc(s) + '</span></td>';
+}
+
+function openDiffModal(i) {
+  var t = DIFF_TILES[i];
+  var d = reportData.diffs;
+  if (!t || !d) return;
+  var items = (d[t.group] && d[t.group][t.list]) || [];
+  var body;
+  if (items.length === 0) {
+    body = '<p class="text-sm text-neutral-500 italic">None.</p>';
+  } else if (t.group === 'chunks') {
+    body = diffTable(['File', 'Function / Method', 'Type', 'Language'], items.map(function (e) {
+      return '<tr><td class="py-2 pr-4 mono text-neutral-400 break-all">' + diffEsc(e.file) + '</td>' +
+        '<td class="py-2 pr-4 font-medium">' + diffEsc(e.name) + '</td>' +
+        '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.type || '-') + '</td>' +
+        '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.language || '-') + '</td></tr>';
+    }).join(''));
+  } else {
+    body = diffTable(['Severity', 'Vuln class', 'Title', 'File:Line', 'Function', 'Exploitable'], items.map(function (e) {
+      return '<tr>' + diffSevCell(e.severity) +
+        '<td class="py-2 pr-4 font-medium">' + diffEsc(e.id) + '</td>' +
+        '<td class="py-2 pr-4 text-neutral-300">' + diffEsc(e.title) + '</td>' +
+        '<td class="py-2 pr-4 mono text-neutral-400 break-all">' + diffEsc(e.file) + (e.line != null ? ':' + diffEsc(e.line) : '') + '</td>' +
+        '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.name) + '</td>' +
+        '<td class="py-2 pr-4">' + (e.exploitable ? '<span class="text-red-400 font-bold">YES</span>' : '<span class="text-neutral-600">-</span>') + '</td></tr>';
+    }).join(''));
+  }
+  _currentComplianceMatches = null;
+  openModal('<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
+}
+
+function openComplianceDiffModal(fi, gi) {
+  var d = reportData.diffs;
+  var fw = d && d.compliance && d.compliance.frameworks[fi];
+  var list = DIFF_GROUPS[gi];
+  if (!fw || !list) return;
+  var labels = { 'new': 'New', unchanged: 'Still existing', removed: 'Resolved' };
+  var items = fw[list] || [];
+  var body;
+  if (items.length === 0) {
+    body = '<p class="text-sm text-neutral-500 italic">None.</p>';
+  } else {
+    body = diffTable(['Severity', 'Vuln class', 'Title', 'File:Line (function)', 'Controls'], items.map(function (e) {
+      return '<tr>' + diffSevCell(e.severity) +
+        '<td class="py-2 pr-4 font-medium">' + diffEsc(e.id) + '</td>' +
+        '<td class="py-2 pr-4 text-neutral-300">' + diffEsc(e.title) + '</td>' +
+        '<td class="py-2 pr-4 mono text-neutral-400 break-all">' + diffEsc(e.where) + '</td>' +
+        '<td class="py-2 pr-4 mono text-neutral-500">' + diffEsc(e.controls) + '</td></tr>';
+    }).join(''));
+  }
+  _currentComplianceMatches = null;
+  openModal('<h3 class="text-lg font-bold mb-1">' + diffEsc(fw.name) + ' - ' + labels[list] + '</h3>' +
+    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
+}
+
 // ── FILTERS & DROPDOWNS ──────────────────────────────────────────────────────
 
 function setupFilters() {
@@ -1353,6 +1494,7 @@ function init() {
   renderStats();
   renderSystem();
   renderCompliance();
+  try { renderDiffs(); } catch (e) { console.error('Diffs render failed:', e); }
   setupFilters();
 }
 
@@ -1418,6 +1560,9 @@ export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
     generated_at: meta.generated_at || new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
     stats,
     executive_summary: executiveSummary || null,
+    // Comparison with the previous report of this asset (built by main.js). Empty
+    // when the caller passed none, e.g. a programmatic call that skips it.
+    diffs:        (extras && extras.diffs) || { enabled: false },
     meta: {
       scan_type:       meta.scan_type       || 'analyze',
       scan_options:    meta.scan_options    || null,
@@ -1545,7 +1690,8 @@ export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
       <button onclick="switchTab('inventory')"      id="tab-inventory"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Chunk Inventory(0)</button>
       <button onclick="switchTab('stats')"          id="tab-stats"          class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
       <button onclick="switchTab('compliance')"     id="tab-compliance"     class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
-      <button onclick="switchTab('system')"         id="tab-system"         class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
+      <button onclick="switchTab('diffs')"          id="tab-diffs"          class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
+      <button onclick="switchTab('system')"         id="tab-system"        class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
     </div>
   </nav>
 
@@ -1742,6 +1888,9 @@ export async function generateSastHTMLReport(results, meta = {}, extras = {}) {
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
       <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
     </section>
+
+    <!-- Diffs (comparison with the previous report of this asset) -->
+    <section id="section-diffs" class="hidden space-y-6"></section>
 
     <!-- System Info -->
     <section id="section-system" class="hidden space-y-8">

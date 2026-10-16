@@ -10,6 +10,7 @@ import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
 import { buildSastExecutiveSummary } from './executive_summary.js';
 import { evaluateSastGate, isUnresolvedSastFinding } from './sast_gate.js';
+import { loadPreviousSastReport, buildSastDiffs } from './diffs.js';
 import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
 import { TOOL_VERSION }           from '../sca/info.js';
@@ -168,6 +169,23 @@ function buildExecutiveSummarySafe(results, meta, tag) {
   }
 }
 
+// Comparison with the previous report of the same asset and type (the "Diffs" tab).
+// Must run before this scan's own bundle is written, so the "previous" report is
+// always an earlier one. Never allowed to fail the scan.
+function buildDiffsSafe(results, meta, zipPath, tag, logTag) {
+  try {
+    return buildSastDiffs(results, meta, loadPreviousSastReport(zipPath, tag));
+  } catch (e) {
+    console.warn(`[${logTag}] Diffs failed: ${e.message}`);
+    return {
+      enabled: true, previous: null, counts: null, scope_note: null,
+      chunks: { new: [], unchanged: [], removed: [] },
+      vulns: { new: [], existing: [], fixed: [] },
+      compliance: null, error: e.message,
+    };
+  }
+}
+
 async function collectMetadata(opts) {
   let gitMetadata = {};
   let osMetadata  = {};
@@ -248,6 +266,7 @@ async function writeAnalyzeReports(results, opts) {
   );
 
   const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-sast');
+  const diffs = buildDiffsSafe(results, meta, zipPath, tag, 'ubel-sast');
 
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // json/html/sarif used to be written out as three separate files per scan
@@ -262,6 +281,7 @@ async function writeAnalyzeReports(results, opts) {
   const jsonPayload = JSON.stringify({
     generated_at: meta.generated_at, meta,
     ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
+    diffs,
     results,
   }, null, 2);
   atomicWriteFile(latestJson, jsonPayload);
@@ -269,7 +289,7 @@ async function writeAnalyzeReports(results, opts) {
   console.log(`\n[ubel-sast] JSON  report : ${latestJson}`);
 
   try {
-    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
+    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary, diffs });
     atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName('report', tag, 'html'), data: htmlReport });
     console.log(`[ubel-sast] HTML  report : ${latestHtml}`);
@@ -430,6 +450,7 @@ async function writeMalwareReports(results, opts) {
   );
 
   const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-malware');
+  const diffs = buildDiffsSafe(results, meta, zipPath, tag, 'ubel-malware');
 
   // ── Timestamped bundle ────────────────────────────────────────────────────
   // See writeAnalyzeReports() above — same rationale: json/html/sarif are
@@ -440,6 +461,7 @@ async function writeMalwareReports(results, opts) {
   const jsonPayload = JSON.stringify({
     generated_at: meta.generated_at, meta,
     ...(executiveSummary ? { executive_summary: executiveSummary } : {}),
+    diffs,
     results,
   }, null, 2);
   atomicWriteFile(latestJson, jsonPayload);
@@ -447,7 +469,7 @@ async function writeMalwareReports(results, opts) {
   console.log(`\n[ubel-malware] JSON  report : ${latestJson}`);
 
   try {
-    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary });
+    const htmlReport = await generateSastHTMLReport(results, meta, { executiveSummary, diffs });
     atomicWriteFile(latestHtml, htmlReport);
     bundleEntries.push({ name: reportFileName('report', tag, 'html'), data: htmlReport });
     console.log(`[ubel-malware] HTML  report : ${latestHtml}`);

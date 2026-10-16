@@ -315,6 +315,8 @@ Every finding gets a `compliance` object (categories + per-framework control lis
 
 Chunks your codebase into semantically-bounded units (15 language families — 12 source-code languages (including Dart/Flutter and Swift) plus Docker, IaC, and Kubernetes manifests as their own dedicated families) and runs a three-pass LLM pipeline — **scan → verify → taint trace** — cross-referenced against a 64-class CWE-mapped vulnerability catalog. A fully separate 15-class malicious-code catalog covers intentionally planted backdoors and implants; that scan (`ubel-mal`) stops after **scan → verify**, since reachability isn't the relevant question for code that's itself the payload. Outputs JSON, interactive HTML, and SARIF 2.1.0 reports, ready for CI/CD gating.
 
+Every SAST and malware report also carries a **Diffs** tab (`diffs` in the JSON): the code units (chunks), findings and — per compliance framework — mapped findings that are new, unchanged or removed since the asset's previous report of the same type (`sast` against `sast`, `malware` against `malware`), read back from the asset's history folder. Findings matched by vulnerability class + chunk (not line number), findings the verification pass dismissed as false positives are not counted, and a warning is shown when either scan was scoped (`--only-diff`, chunk cap). See [SAST § Diffs against the previous report](https://github.com/AlaBouali/ubel/blob/main/sast/README.md#diffs-against-the-previous-report).
+
 ```bash
 # Vulnerability scan
 ubel-sast /path/to/project
