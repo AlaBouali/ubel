@@ -103,6 +103,18 @@
  *     image to remove. Compressed tarballs (.tar.gz/.tgz) aren't supported
  *     — decompress first.
  *
+ *   Resbom mode (`resbom` engine, bin/resbom.js → `ubel-resbom`):
+ *     node src/main.js resbom <sbom.cdx.json> [per-run policy flags]
+ *
+ *     Re-scans an SBOM that UBEL generated earlier. The components (and the dependency graph)
+ *     are read from the SBOM instead of from a project, then looked up again in OSV/NVD and
+ *     KEV/EPSS, run through the policy, and written out as new JSON, HTML, SBOM and — when the
+ *     original scan type and asset type get one — SARIF reports tagged `<tag>_resbom`
+ *     (sca_resbom, npm_firewall_resbom, ...). Everything the SBOM recorded about the original scan
+ *     (asset id/name/type, machine id, runtime, git info, secrets findings, reachability verdicts)
+ *     is carried over. No project, lockfile or package manager is needed and nothing is installed.
+ *     See resbom.js.
+ *
  *   Pip/pipx/uv/conda/apt/dnf/yum mode (each gets its own dedicated bin/*.js —
  *   ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-apt, ubel-dnf, ubel-yum; no
  *   auto-detection between them, same one-binary-per-tool shape as
@@ -234,7 +246,8 @@ import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
 import { ensureUbelIgnoreEntries } from "./ignore_files.js";
-import { provisionAsset, announceNewAsset, ASSET_FILE_NAME } from "./report_naming.js";
+import { provisionAsset, announceNewAsset, ASSET_FILE_NAME, getRuntimeAssetId, setRuntimeAssetId } from "./report_naming.js";
+import { loadUbelSbom } from "./resbom.js";
 import { installHook as installScaHook, uninstallHook as uninstallScaHook } from "./sca_hook.js";
 
 import fs from 'node:fs/promises';
@@ -337,6 +350,30 @@ const VALID_MODES      = [
   "install-hook", "uninstall-hook",
 ];
 const VALID_SEVERITIES = new Set(["low", "medium", "high", "critical", "none"]);
+
+const RESBOM_USAGE = `Usage: ubel-resbom <sbom.cdx.json> [policy flags] [--asset-id <asset-id>]
+
+Re-scan an SBOM that UBEL generated earlier (latest.<tag>.cdx.json, or report.<tag>.cdx.json
+from a report bundle) against the current vulnerability data. The components and the
+dependency graph come from the SBOM; the vulnerabilities, exploit intelligence (CISA KEV +
+FIRST EPSS), policy decision, suggested fixes and executive summary are produced again, and
+written to .ubel/reports/ as:
+
+  latest.<tag>_resbom.json / .html / .cdx.json    always (<tag> is the source scan's tag: sca, npm_firewall, ...)
+  latest.<tag>_resbom.sarif.json                  only when that scan type + asset type get SARIF
+                                                  (health scans of a codebase, docker image, agent or editor)
+
+plus a timestamped bundle under $HOME/.ubel/history/<asset-id>/. The new SBOM is derived from
+the old one: asset id/name/type, machine id, environment, git info, secrets findings and
+reachability verdicts are carried over.
+No project or package manager is needed and nothing is installed.
+
+The policy is the one in ./.ubel/local/policy (the per-run flags below override it for this run only):
+  --threshold <level>   --block-unknown [true|false]   --block-kev [true|false]
+  --epss-threshold <v>  --block-undetermined [true|false]  --reachable-only [true|false]
+  --license-risk <level>  --license-block-unknown [true|false]
+
+Exit codes: 0 allowed, 1 blocked by policy (reports are still written), 2 the scan did not complete.`;
 const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
@@ -795,6 +832,42 @@ async function main(programmaticOptions) {
     // The hook belongs to the repo in the cwd, so that is where its asset id lives.
     announceNewAsset(provisionAsset(path.join(process.cwd(), ".ubel")), path.join(process.cwd(), ".ubel"));
     await handleHookMode(engine, mode, extraArgs);
+    return;
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // RESBOM ENGINE
+  // Called by: bin/resbom.js
+  // Re-scans the SBOM named on the command line — not the project in the cwd —
+  // so it branches out here before resolvedRoot/manager/eng get built for a scan.
+  // (The cwd is still where policy, the asset id and the "latest" reports live.)
+  // ════════════════════════════════════════════════════════════════════════════
+  if (engine === "resbom") {
+    const resbomArgs = process.argv.slice(3);
+    if (resbomArgs.includes("-h") || resbomArgs.includes("--help")) {
+      console.log(RESBOM_USAGE);
+      process.exit(0);
+    }
+    const { rest, overrides } = parsePolicyFlags(resbomArgs, { license: true });
+    const stray = rest.filter(a => a.startsWith("-"));
+    const files = rest.filter(a => !a.startsWith("-"));
+    if (stray.length || files.length !== 1) {
+      if (stray.length) console.error(`[!] Unknown option(s): ${stray.join(", ")}`);
+      console.error(RESBOM_USAGE);
+      process.exit(1);
+    }
+
+    try {
+      await resbomScan({ sbom: files[0], policyOverrides: overrides });
+      process.exit(0);
+    } catch (err) {
+      if (err instanceof PolicyViolationError) {
+        process.exit(1);
+      }
+      console.error("[!] Resbom scan failed:", err.message);
+      if (process.env.DEBUG) console.error(err.stack);
+      process.exit(2); // 1 = policy violation, 2 = the scan did not complete (same as every other CLI)
+    }
     return;
   }
 
@@ -1316,6 +1389,73 @@ export async function dockerScan({ image, pull = true, keep = false, mode = "hea
   }
 
   return report;
+}
+
+/**
+ * resbomScan() — re-scan an SBOM that UBEL generated earlier (the engine behind `ubel-resbom`).
+ *
+ * Same eng.scan() pipeline every other engine goes through; the components come from the SBOM
+ * (see resbom.js) instead of from a project, so no package manager runs and nothing is
+ * installed. Reports land in <projectRoot>/.ubel/reports (latest.<tag>_resbom.*) and in the
+ * source asset's history bundle ($HOME/.ubel/history/<asset-id>/), the policy used is
+ * <projectRoot>/.ubel/local/policy.
+ *
+ * @param {object}  opts
+ * @param {string|object} opts.sbom   Path of the .cdx.json, or the parsed SBOM document.
+ * @param {string}  [opts.projectRoot=cwd]  Folder whose .ubel/ holds the policy and the "latest" reports.
+ * @param {object}  [opts.policyOverrides={}]  Per-run policy fields ({ severity_threshold: "high", block_kev: true, ... }):
+ *                                       applied for this process only, the saved policy is restored on exit.
+ * @param {boolean} [opts.is_script=false]  true: print nothing to stdout (report paths still go to stderr).
+ * @param {boolean} [opts.save_reports=true]
+ * @returns {Promise<object>} the report, like eng.scan(). Throws PolicyViolationError (report on err.report) when the policy blocks.
+ */
+export async function resbomScan({ sbom, projectRoot, policyOverrides = {}, is_script = false, save_reports = true, ...rest } = {}) {
+  if (!sbom) throw new Error("resbomScan requires `sbom`: the path of a UBEL-generated CycloneDX SBOM (.cdx.json), or its parsed JSON.");
+
+  const resbom       = loadUbelSbom(sbom);
+  const resolvedRoot = path.resolve(projectRoot ?? process.cwd());
+  ensureUbelIgnoreFiles(resolvedRoot);
+
+  // The new reports stay filed under the SBOM's own asset, so they sit next to the history of the scan
+  // they derive from. An id given with --asset-id wins; then the old asset's name, type and machine id
+  // are not carried onto it.
+  const chosenAssetId = getRuntimeAssetId();
+  if (chosenAssetId && chosenAssetId !== resbom.asset.asset_id) resbom.asset = {};
+  const usesSbomAsset = !chosenAssetId && !!resbom.asset.asset_id;
+  if (usesSbomAsset) setRuntimeAssetId(resbom.asset.asset_id);
+
+  const eng = new UbelEngineInstance(new NodeManagerInstance(), resolvedRoot);
+  eng.engine     = resbom.engine;
+  eng.systemType = resbom.system_type;
+  eng.checkMode  = resbom.scan_type;
+  eng.initiateLocalPolicy();
+
+  try {
+    if (!is_script) {
+      console.log(banner);
+      console.log(`Reports location: ${path.join(resolvedRoot, ".ubel", "reports")}`);
+      console.log();
+      console.log(`Policy location: ${eng.policyDir}`);
+      console.log();
+    }
+    for (const w of resbom.warnings) console.warn(`[!] ${w}`);
+
+    applyPolicyOverrides(eng, policyOverrides);
+
+    return await eng.scan([], {
+        ...rest,
+        is_script,
+        save_reports,
+        scan_os:      false,
+        full_stack:   false,
+        scan_secrets: false,                 // carried over from the SBOM instead (no source tree here)
+        scan_vulns:   true,
+        scan_scope:   resbom.scan_scope,
+        resbom,
+      });
+  } finally {
+    if (usesSbomAsset) setRuntimeAssetId(null);
+  }
 }
 
 export { main as SCA_scan };

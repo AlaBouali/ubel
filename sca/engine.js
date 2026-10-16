@@ -15,7 +15,7 @@ import { CycloneDXBuilder } from "./sbom_builder.js";
 import { SarifBuilder } from "./sarif_builder.js"
 import { buildZip } from "./zip_writer.js";
 import { redactionEnabled, redactPaths } from "./redact.js";
-import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset, isEditorScaTag, AGENT_SCA_TAG } from "./report_naming.js";
+import { reportTimestamp, reportFileName, scaReportTag, scaHistoryMode, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAsset, announceNewAsset, scaWritesSbom, scaWritesSarif } from "./report_naming.js";
 import { scanSecrets } from "./secrets.js";
 import { enrichReport as enrichReachability } from "./reachability_analyzer.js"
 import { findClosestFixVersions, _vr_purlToEcosystem, _vr_parseSemver, _vr_semverGt } from "./version_recommender.js"
@@ -4176,6 +4176,12 @@ export class UbelEngineInstance {
       // calling process.exit(0), so the caller's finally/cleanup blocks run
       // (dockerScan passes this). The CLI entry point owns the process exit.
       no_exit             = false,
+      // ubel-resbom: a parsed UBEL SBOM (see resbom.js). The components come from it instead of
+      // from a package manager / lockfile / filesystem, and so does everything the SBOM recorded
+      // about the original scan (asset, environment, secrets, reachability verdicts). Everything
+      // downstream — OSV/NVD, KEV/EPSS, policy, reports, SBOM, SARIF — is this method's usual
+      // pipeline, and nothing is ever installed or reverted.
+      resbom              = null,
     } = options;
 
     const projectRoot = this.projectRoot;
@@ -4250,7 +4256,13 @@ export class UbelEngineInstance {
       }
     }
 
-    const os_metadata_info = await getOSMetadata();
+    // resbom: the OS the SBOM recorded. SBOMs from before that was recorded have none; for those
+    // the OS of this machine is used when the SBOM came from the same platform (never for a
+    // container image, whose OS is not the host's).
+    const recordedOs = resbom && Object.values(resbom.os_metadata).some(Boolean);
+    const os_metadata_info = resbom && (recordedOs || resbom.scan_scope === "container-image" || resbom.runtime.platform !== process.platform)
+      ? { ...resbom.os_metadata }
+      : await getOSMetadata();
 
     const getinstalledoptions = {
       full_stack,
@@ -4265,7 +4277,10 @@ export class UbelEngineInstance {
 
     const ecosystems = new Set();
 
-    if (this.checkMode!=="health") {
+    if (resbom) {
+      // No package manager is run: the engine is whatever the SBOM recorded.
+      manager.engineVersion = resbom.engine_info.version;
+    } else if (this.checkMode!=="health") {
       manager._captureEngineVersion(this.engine);
     } else {
       this.engine           = TOOL_NAME;
@@ -4283,12 +4298,19 @@ export class UbelEngineInstance {
     let purls        = [];
     let reportContent = null;
 
+    // A resbom run never touches lockfiles, so there is nothing to back up or revert even when the
+    // SBOM came from a check / install scan.
     const needsRevert =
-      this.checkMode === "check" || this.checkMode === "install";
+      !resbom && (this.checkMode === "check" || this.checkMode === "install");
 
     try {
       // ── Collect packages ──────────────────────────────────────────────────
-      if (this.systemType === "pypi") {
+      if (resbom) {
+        // ── ubel-resbom: the components of the SBOM being re-scanned ─────────
+        manager.inventoryData = resbom.inventory;
+        purls         = resbom.inventory.map(c => c.id);
+        reportContent = {};
+      } else if (this.systemType === "pypi") {
         // ── Python (pip / uv / pipx) firewall ────────────────────────────────
         if (needsRevert) {
           const venvDir = this.venvDir || path.join(projectRoot, "venv");
@@ -4608,14 +4630,34 @@ export class UbelEngineInstance {
       // so run it now (it normally runs after the report is assembled). The same
       // result is reused for the report below. If it fails, no vulnerability is
       // exempted — the policy fails closed to "evaluate everything".
+      //
+      // A resbom run has no source tree: reachability then comes from the dependency graph alone
+      // (no import scan), and the verdicts the old SBOM recorded for findings it already had — reached
+      // with the source in hand — are put back over it. Findings that are new get the graph-only analysis.
+      const runReachability = (report) => {
+        if (!resbom) {
+          enrichReachability(report, projectRoot, { absolutePaths: scan_scope === "container-image" });
+          return;
+        }
+        enrichReachability(report, null);
+        const defined = (o) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
+        for (const v of report.vulnerabilities || []) {
+          const old = resbom.reachability.get(`${v.id}|${v.affected_package_id}`);
+          if (!old || !v.reachability) continue;
+          v.reachability = {
+            ...v.reachability, ...defined(old),
+            signals: { ...v.reachability.signals, ...defined(old.signals || {}) },
+          };
+        }
+      };
       let reachabilityDone = false;
       if (policy.reachable_only === true && vulnerabilities.length > 0) {
         try {
-          enrichReachability({
+          runReachability({
             vulnerabilities,
             inventory,
             findings_summary: summarizeVulnerabilities(vulnerabilities, inventory),
-          }, projectRoot, { absolutePaths: scan_scope === "container-image" });
+          });
           reachabilityDone = true;
         } catch (e) {
           console.warn(`[!] Reachability analysis failed (${e.message}): reachable_only was NOT applied — all vulnerabilities are evaluated against the policy.`);
@@ -4742,7 +4784,8 @@ export class UbelEngineInstance {
         license_stats: licenseSummary,
       };
 
-      const runtime = {
+      // A resbom run reports the environment the SBOM was made in, not the one it is re-scanned in.
+      const runtime = resbom ? { ...resbom.runtime } : {
         environment: this.runtime_environment,
         version:     this.runtime_version,
         platform:    process.platform,
@@ -4755,7 +4798,7 @@ export class UbelEngineInstance {
         version: manager.engineVersion,
       };
 
-      const git_metadata = getGitMetadata(projectRoot);
+      const git_metadata = resbom ? { ...resbom.git_metadata } : getGitMetadata(projectRoot);
 
       // ── Build final JSON ───────────────────────────────────────────────────
       const findingsSummary = summarizeVulnerabilities(vulnerabilities, inventory);
@@ -4801,9 +4844,11 @@ export class UbelEngineInstance {
       const ubelRoot    = path.dirname(path.dirname(this.reportsLocation));
       const historyMode = scaHistoryMode({ checkMode: this.checkMode, systemType: this.systemType, scanScope: options.scan_scope });
       const asset       = assetFor(historyMode, options.asset_ubel_dir || ubelRoot, options.scan_scope, { machineTag: this.systemType === "linux" });
+      // resbom: the report stays the source SBOM's asset's (name, type, machine) unless the caller chose another asset id.
+      if (resbom?.asset) Object.assign(asset, resbom.asset);
       // The file tag (sca, npm_firewall, licenses, secrets) — also the <tag> of the report id,
       // which is made once here so the JSON, HTML, SBOM and SARIF all carry the same one.
-      const reportTag   = scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan, editorKind: options.editor_kind });
+      const reportTag   = resbom ? resbom.report_tag : scaReportTag({ checkMode: this.checkMode, engine: this.engine, scanScope: options.scan_scope, dockerMode: options.docker_mode, scanOs: options.scan_os ?? options.os_scan, editorKind: options.editor_kind });
       const report_id   = generateReportId(reportTag, asset.asset_id);
 
       const finalJson = {
@@ -4827,14 +4872,22 @@ export class UbelEngineInstance {
 
       // Reachability (already done above when reachable_only is on)
       if (!reachabilityDone) {
-        try { enrichReachability(finalJson, projectRoot, { absolutePaths: scan_scope === "container-image" }); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
+        try { runReachability(finalJson); } catch(e) { console.warn("[~] Reachability failed:", e.message); }
       }
 
       // ── Secrets-in-source scan (independent of the dependency scan above) ──
       // Health mode only, and only when not switched off: `scan_secrets: false`
       // is honoured (ubel-license relies on it), and the `license` scope never
       // scans for secrets regardless of what a caller passes.
-      if (this.checkMode === "health" && scan_secrets === true && scan_scope !== "license") {
+      if (resbom) {
+        // No source tree to scan: the secrets-in-source findings the SBOM carried are kept as they were.
+        const carried  = resbom.secrets && typeof resbom.secrets === "object" ? resbom.secrets : null;
+        const findings = Array.isArray(carried?.findings) ? carried.findings : [];
+        for (const f of findings) f.compliance = getComplianceForSecret();
+        finalJson.secrets = carried
+          ? { enabled: carried.enabled !== false, count: carried.count ?? findings.length, findings, stats: carried.stats || { by_severity: {} } }
+          : { enabled: false, count: 0, findings: [], stats: { by_severity: {} } };
+      } else if (this.checkMode === "health" && scan_secrets === true && scan_scope !== "license") {
         try {
           // .env* files are skipped in repository scans but scanned in
           // container-image scans, where a baked-in .env ships with the image.
@@ -4885,7 +4938,7 @@ export class UbelEngineInstance {
       // directory. Everything above needed the real on-disk paths; from here on the
       // report (JSON, HTML, SBOM, SARIF, the returned object) must only show where
       // things live inside the image, never the temp directory.
-      if (scan_scope === "container-image") {
+      if (scan_scope === "container-image" && !resbom) {
         rebaseReportToImage(finalJson, projectRoot);
       }
 
@@ -4985,13 +5038,14 @@ export class UbelEngineInstance {
       // ── CycloneDX SBOM + SARIF ─────────────────────────────────────────────
       // SBOM: SCA scans only — the health scan ("sca") and firewall check/install runs
       // ("<engine>_firewall"). ubel-license ("licenses") and ubel-secrets ("secrets") get no SBOM.
-      const writeSbom   = reportTag !== "licenses" && reportTag !== "secrets";
+      const writeSbom   = scaWritesSbom(reportTag);
       // SARIF: the SCA health scan only (report tag "sca", "docker_sca" for ubel-docker health, or
       // "<editor>_sca" — vscode_sca, cursor_sca, vscodium_sca — for an editor-extensions scan).
       // OS health scans (report tag "os_sca", Windows / Linux) get no SARIF.
       // Firewall check/install runs (incl. "docker_firewall") get the JSON, HTML and SBOM but no
       // SARIF; license and secrets scans get neither.
-      const writeSarif  = reportTag === "sca" || reportTag === "docker_sca" || reportTag === AGENT_SCA_TAG || isEditorScaTag(reportTag);
+      // (a ubel-resbom run follows the scan its SBOM came from: report tag "<tag>_resbom".)
+      const writeSarif  = scaWritesSarif(reportTag);
       const sbomString  = writeSbom
         ? redact(safeJsonString(new CycloneDXBuilder(finalJson).generate(), 1000))
         : null;
@@ -5065,6 +5119,10 @@ export class UbelEngineInstance {
         violationError.report = finalJson;
         throw violationError;
       }
+
+      // ubel-resbom: reports are written and the policy passed. Whatever scan type the SBOM came
+      // from, nothing is installed or reverted here.
+      if (resbom) return finalJson;
 
       if (this.checkMode === "health" && !is_script) {
         if (no_exit) return finalJson;

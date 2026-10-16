@@ -92,6 +92,8 @@ export class CycloneDXBuilder {
     const scanInfo = this.data.scan_info || {};
     const git = this.data.git_metadata || {};
     const runtime = this.data.runtime || {};
+    const osMeta = this.data.os_metadata || {};
+    const engineInfo = this.data.engine || {};
 
     const scanType = scanInfo.type || "health";
     let lifecycle = [];
@@ -125,6 +127,13 @@ export class CycloneDXBuilder {
         { name: "git_branch", value: String(git.branch || "") },
         { name: "git_commit", value: String(git.latest_commit || "") },
         { name: "git_url", value: String(git.url || "") },
+        // What the report said about the scanned system / the engine behind it, so a
+        // ubel-resbom run over this SBOM can restore them (it has no access to either).
+        { name: "os_id", value: String(osMeta.os_id || "") },
+        { name: "os_name", value: String(osMeta.os_name || "") },
+        { name: "os_version", value: String(osMeta.os_version || "") },
+        { name: "engine_name", value: String(engineInfo.name || "") },
+        { name: "engine_version", value: String(engineInfo.version || "") },
       ],
     };
   }
@@ -183,7 +192,10 @@ export class CycloneDXBuilder {
 
       const props = this._props(item, [
         "scopes", "paths", "introduced_by", "parents",
-        "state", "is_policy_violation", "policy_violations"
+        "state", "is_policy_violation", "policy_violations",
+        // OS packages: the release ("ubuntu-24.04") their advisories were matched against —
+        // ubel-resbom needs it to re-match them to the same release.
+        "distro"
       ]);
       // License risk classification (see license_checker.js) as component
       // properties — CycloneDX's `licenses` field has no room for OSI

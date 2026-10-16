@@ -143,6 +143,44 @@ export function isEditorScaTag(tag) {
   return typeof tag === "string" && EDITOR_KINDS.some((k) => tag === `${k}_sca`);
 }
 
+/** Suffix of the report tag of a `ubel-resbom` run: "<tag of the source SBOM's scan>_resbom". */
+export const RESBOM_TAG_SUFFIX = "_resbom";
+
+/** The tag of the scan a report tag derives from: "sca_resbom" → "sca"; any other tag is returned unchanged. */
+export function baseScaTag(tag) {
+  const t = String(tag ?? "");
+  return t.endsWith(RESBOM_TAG_SUFFIX) ? t.slice(0, -RESBOM_TAG_SUFFIX.length) : t;
+}
+
+/**
+ * Report tag of a `ubel-resbom` run over an SBOM produced by a scan tagged `sourceTag`
+ * (sca → sca_resbom, npm_firewall → npm_firewall_resbom). Re-running over a resbom SBOM keeps
+ * the tag as it is instead of growing it to "…_resbom_resbom".
+ */
+export function resbomReportTag(sourceTag) {
+  return sanitizeReportTag(`${baseScaTag(sourceTag)}${RESBOM_TAG_SUFFIX}`);
+}
+
+/**
+ * Does a scan with this report tag get a CycloneDX SBOM? Every SCA scan except ubel-license
+ * ("licenses") and ubel-secrets ("secrets"). A `_resbom` tag follows the scan it derives from.
+ */
+export function scaWritesSbom(tag) {
+  const base = baseScaTag(tag);
+  return base !== "licenses" && base !== "secrets";
+}
+
+/**
+ * Does a scan with this report tag get a SARIF report? The SCA health scan only: "sca",
+ * "docker_sca" (ubel-docker health), "agent_sca", and the editor-extension scans
+ * ("vscode_sca", "cursor_sca", "vscodium_sca"). Not the host OS scan ("os_sca"), the firewall
+ * check / install runs, licenses or secrets. A `_resbom` tag follows the scan it derives from.
+ */
+export function scaWritesSarif(tag) {
+  const base = baseScaTag(tag);
+  return base === "sca" || base === "docker_sca" || base === AGENT_SCA_TAG || isEditorScaTag(base);
+}
+
 /**
  * Tag for a run of the SCA engine (sca/engine.js).
  *
