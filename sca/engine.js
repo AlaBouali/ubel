@@ -1,5 +1,6 @@
 import fs      from "fs";
 import path    from "path";
+import zlib    from "zlib";
 import https   from "https";
 import http, { get }    from "http";
 import { fileURLToPath } from "url";
@@ -236,6 +237,158 @@ function escapeHTML(str) {
         '"': '&quot;',
         "'": '&#39;'
     }[m]));
+}
+
+// ── Diffs against the previous report of the same asset ─────────────────────
+// Health-mode reports carry a `diffs` block (the "Diffs" tab in the HTML report): the
+// dependencies and vulnerabilities that are new / unchanged / removed (fixed) compared
+// with the previous report of the same type in the asset's history folder. The previous
+// report is read from the newest earlier <timestamp>.<tag>.zip of the asset (its
+// report.<tag>.json). Components are matched by id (components_ids / inventory[].id) and
+// vulnerabilities by advisory id + affected component.
+
+/** Reads one entry of a zip (stored or deflate) into a Buffer; null when absent / unsupported. */
+function readZipEntry(zipFile, entryName) {
+  const buf = fs.readFileSync(zipFile);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65535); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) return null;
+  const total = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  for (let n = 0; n < total; n++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) return null;
+    const method     = buf.readUInt16LE(p + 10);
+    const csize      = buf.readUInt32LE(p + 20);
+    const nameLen    = buf.readUInt16LE(p + 28);
+    const extraLen   = buf.readUInt16LE(p + 30);
+    const commentLen = buf.readUInt16LE(p + 32);
+    const localOff   = buf.readUInt32LE(p + 42);
+    const name       = buf.toString("utf8", p + 46, p + 46 + nameLen);
+    if (name === entryName) {
+      const dataStart = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
+      const raw = buf.subarray(dataStart, dataStart + csize);
+      if (method === 0) return Buffer.from(raw);
+      if (method === 8) return zlib.inflateRawSync(raw);
+      return null;
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return null;
+}
+
+/**
+ * The newest report of the same tag that precedes `zipPath` in the same history folder.
+ * Returns { file, report } or null (first report of this asset/type, or none readable).
+ */
+function loadPreviousReport(zipPath, reportTag) {
+  const dir     = path.dirname(zipPath);
+  const current = path.basename(zipPath);
+  const suffix  = `.${reportTag}.zip`;
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return null; }
+  const earlier = names.filter(n => n.endsWith(suffix) && n < current).sort().reverse();
+  const entry   = reportFileName("report", reportTag, "json");
+  for (const n of earlier) {
+    try {
+      const data = readZipEntry(path.join(dir, n), entry);
+      if (data) return { file: n, report: JSON.parse(data.toString("utf8")) };
+    } catch { /* unreadable bundle: try the next older one */ }
+  }
+  return null;
+}
+
+// name / ecosystem / version from a package URL, for components whose inventory entry is unavailable.
+function purlParts(id) {
+  const m = /^pkg:([^/]+)\/(.+?)(?:@([^?#@]*))?(?:[?#].*)?$/.exec(String(id));
+  if (!m) return { name: String(id), ecosystem: "", version: "" };
+  let name = m[2];
+  try { name = decodeURIComponent(name); } catch { /* keep as is */ }
+  return { name, ecosystem: m[1], version: m[3] || "" };
+}
+
+function diffDeps(report) {
+  const inv  = Array.isArray(report.inventory) ? report.inventory : [];
+  const byId = new Map(inv.map(c => [c.id, c]));
+  const ids  = Array.isArray(report.components_ids) ? report.components_ids : inv.map(c => c.id);
+  const out  = new Map();
+  for (const id of ids) {
+    if (out.has(id)) continue;
+    const c = byId.get(id);
+    out.set(id, c ? { id, name: c.name, ecosystem: c.ecosystem, version: c.version } : { id, ...purlParts(id) });
+  }
+  return out;
+}
+
+const diffVulnComponent = (v) => v.affected_package_id || `${v.affected_dependency || "unknown"}@${v.affected_dependency_version || ""}`;
+
+// Keyed by advisory id + affected component. A previous report with no `vulnerabilities`
+// list (ids only) falls back to advisory ids, on both sides.
+function diffVulns(report, byInstance) {
+  const out = new Map();
+  if (byInstance) {
+    for (const v of report.vulnerabilities || []) {
+      const key = `${v.id}::${diffVulnComponent(v)}`;
+      if (!out.has(key)) out.set(key, { id: v.id, name: v.affected_dependency, ecosystem: v.ecosystem, version: v.affected_dependency_version });
+    }
+  } else {
+    const ids = Array.isArray(report.vulnerabilities_ids) ? report.vulnerabilities_ids : [];
+    for (const id of ids) if (!out.has(String(id))) out.set(String(id), { id, name: "", ecosystem: "", version: "" });
+  }
+  return out;
+}
+
+// Secrets-in-source findings, matched by rule id + file + masked match (not by line, which
+// moves whenever the file is edited). null when that report did not scan for secrets, so a
+// run without the secrets scan is never read as "all secrets removed".
+function diffSecrets(report) {
+  const s = report.secrets;
+  if (!s || s.enabled === false || !Array.isArray(s.findings)) return null;
+  const out = new Map();
+  for (const f of s.findings) {
+    const key = `${f.id}::${f.file_path}::${f.match_preview ?? ""}`;
+    if (!out.has(key)) out.set(key, { id: f.id, title: f.title, severity: f.severity, file_path: f.file_path, line: f.line, match_preview: f.match_preview });
+  }
+  return out;
+}
+
+function buildDiffs(current, previous) {
+  const empty = { new: [], unchanged: [], removed: [] };
+  if (!previous) {
+    return { enabled: true, previous: null, counts: null, deps: empty, vulns: { new: [], existing: [], fixed: [] }, secrets: null };
+  }
+  const prev = previous.report;
+  const byInstance = Array.isArray(prev.vulnerabilities);
+  const sortBy = (a, b) => String(a.name || "").localeCompare(String(b.name || ""))
+    || String(a.id).localeCompare(String(b.id)) || String(a.version || "").localeCompare(String(b.version || ""));
+  const split = (cur, old) => ({
+    added:   [...cur].filter(([k]) => !old.has(k)).map(([, e]) => e).sort(sortBy),
+    kept:    [...cur].filter(([k]) =>  old.has(k)).map(([, e]) => e).sort(sortBy),
+    dropped: [...old].filter(([k]) => !cur.has(k)).map(([, e]) => e).sort(sortBy),
+  });
+  const d = split(diffDeps(current), diffDeps(prev));
+  const v = split(diffVulns(current, byInstance), diffVulns(prev, byInstance));
+  const curSecrets = diffSecrets(current), prevSecrets = diffSecrets(prev);
+  const sec = curSecrets && prevSecrets
+    ? (() => {
+        const x = split(curSecrets, prevSecrets);
+        const bySev = (a, b) => String(a.file_path).localeCompare(String(b.file_path)) || (a.line ?? 0) - (b.line ?? 0);
+        return { new: x.added.sort(bySev), unchanged: x.kept.sort(bySev), removed: x.dropped.sort(bySev) };
+      })()
+    : null;
+  return {
+    enabled: true,
+    previous: { report_id: prev.scan_info?.report_id ?? null, generated_at: prev.generated_at ?? null, bundle: previous.file },
+    counts: {
+      new_deps: d.added.length, unchanged_deps: d.kept.length, removed_deps: d.dropped.length,
+      new_vulns: v.added.length, existing_vulns: v.kept.length, fixed_vulns: v.dropped.length,
+      ...(sec ? { new_secrets: sec.new.length, unchanged_secrets: sec.unchanged.length, removed_secrets: sec.removed.length } : {}),
+    },
+    deps:  { new: d.added, unchanged: d.kept, removed: d.dropped },
+    vulns: { new: v.added, existing: v.kept, fixed: v.dropped },
+    secrets: sec,   // null when either report did not scan for secrets
+  };
 }
 
 async function generateHTMLReport(data) {
@@ -604,6 +757,7 @@ async function generateHTMLReport(data) {
             renderSystem();
             renderSecrets();
             renderCompliance();
+            try { renderDiffs(); } catch (e) { console.error('Diffs render failed:', e); }
             setupFilters();
             populatePackageSelect();
             setupCounts();
@@ -1960,6 +2114,93 @@ async function generateHTMLReport(data) {
             return \`<div class="space-y-3"><div class="flex flex-wrap gap-4"><span class="text-[10px] uppercase text-neutral-500 font-bold">Reachable: </span><span class="font-bold text-sm" style="color:\${r.reachable?'#f87171':'#4ade80'}">\${r.reachable?'YES':'NO'}</span><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold mono" style="color:\${lc};border-color:\${lc}">\${r.level}</span><span class="text-[10px] font-semibold" style="color:\${cc}">\${r.confidence.toUpperCase()} confidence</span></div><div class="grid grid-cols-3 md:grid-cols-6 gap-2 text-[10px]"><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Depth</p><p class="mono">\${s.depth!=null?s.depth:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">AV</p><p class="mono">\${s.attack_vector||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Scope</p><p class="mono">\${s.scope||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Orphan</p><p class="mono">\${s.is_orphan_tool?'yes':'no'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Paths</p><p class="mono">\${s.num_paths!=null?s.num_paths:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Non-Lib</p><p class="mono">\${s.is_non_library?'yes':'no'}</p></div></div><div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Import Scan</p>\${isHtml}</div><p class="text-xs text-neutral-300 bg-neutral-900/50 px-3 py-2 rounded border border-neutral-800 italic">\${r.rationale}</p>\${tags?'<div class="flex flex-wrap gap-1">'+tags+'</div>':''}</div>\`;
         }
 
+        // ── DIFFS ────────────────────────────────────────────────────────────────────
+        // Comparison with the previous report of this asset (reportData.diffs, built
+        // server-side). Empty outside health mode.
+        function diffEsc(s) {
+            return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        var DIFF_TILES = [
+            { count: 'new_deps',       label: 'New dependencies',              group: 'deps',  list: 'new',       color: 'text-orange-400' },
+            { count: 'unchanged_deps', label: 'Unchanged dependencies',        group: 'deps',  list: 'unchanged', color: 'text-neutral-300' },
+            { count: 'removed_deps',   label: 'Removed dependencies',          group: 'deps',  list: 'removed',   color: 'text-blue-400' },
+            { count: 'new_vulns',      label: 'New vulnerabilities',           group: 'vulns', list: 'new',       color: 'text-red-400' },
+            { count: 'existing_vulns', label: 'Still existing vulnerabilities', group: 'vulns', list: 'existing',  color: 'text-yellow-400' },
+            { count: 'fixed_vulns',    label: 'Fixed vulnerabilities',         group: 'vulns', list: 'fixed',     color: 'text-green-400' },
+            { count: 'new_secrets',       label: 'New secrets',              group: 'secrets', list: 'new',       color: 'text-red-400' },
+            { count: 'unchanged_secrets', label: 'Still existing secrets',   group: 'secrets', list: 'unchanged', color: 'text-yellow-400' },
+            { count: 'removed_secrets',   label: 'Removed secrets',          group: 'secrets', list: 'removed',   color: 'text-green-400' }
+        ];
+
+        function renderDiffs() {
+            var sec = document.getElementById('section-diffs');
+            if (!sec) return;
+            var d = reportData.diffs;
+            if (!d || !d.enabled) { sec.innerHTML = ''; return; }
+            var html = '<div class="flex flex-col md:flex-row gap-2 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Diffs</h2>';
+            if (d.previous) {
+                html += '<p class="text-xs text-neutral-500 mono">vs previous report ' + diffEsc(d.previous.report_id || d.previous.bundle) +
+                    (d.previous.generated_at ? ' (' + diffEsc(d.previous.generated_at) + ')' : '') + '</p>';
+            }
+            html += '</div>';
+            if (!d.previous || !d.counts) {
+                html += '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No previous report found for this asset, so there is nothing to compare against.</div>';
+                sec.innerHTML = html;
+                return;
+            }
+            html += '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
+            DIFF_TILES.forEach(function (t, i) {
+                if (t.group === 'secrets' && !d.secrets) return;
+                html += '<button type="button" onclick="openDiffModal(' + i + ')" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
+                    '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
+                    '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
+            });
+            html += '</div>';
+            if (!d.secrets) {
+                html += '<p class="text-xs text-neutral-500">Secrets changes are not shown: this report or the previous one did not scan for secrets.</p>';
+            }
+            sec.innerHTML = html;
+        }
+
+        function openDiffModal(i) {
+            var t = DIFF_TILES[i];
+            var d = reportData.diffs;
+            if (!t || !d) return;
+            var items = (d[t.group] && d[t.group][t.list]) || [];
+            var isVuln = t.group === 'vulns';
+            var isSecret = t.group === 'secrets';
+            var cols = isSecret ? ['Rule', 'Severity', 'Title', 'File', 'Line', 'Match']
+                     : isVuln ? ['ID', 'Name', 'Ecosystem', 'Version'] : ['Name', 'Ecosystem', 'Version'];
+            var body;
+            if (items.length === 0) {
+                body = '<p class="text-sm text-neutral-500 italic">None.</p>';
+            } else {
+                body = '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
+                    cols.map(function (c) { return '<th class="pb-2 pr-4 font-bold">' + c + '</th>'; }).join('') +
+                    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
+                    items.map(function (e) {
+                        if (isSecret) {
+                            return '<tr><td class="py-2 pr-4 mono">' + diffEsc(e.id) + '</td>' +
+                                '<td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + diffEsc((e.severity || 'unknown').toLowerCase()) + '">' + diffEsc(e.severity || 'unknown') + '</td>' +
+                                '<td class="py-2 pr-4 font-medium">' + diffEsc(e.title) + '</td>' +
+                                '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.file_path) + '</td>' +
+                                '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.line) + '</td>' +
+                                '<td class="py-2 pr-4 mono text-neutral-500">' + diffEsc(e.match_preview) + '</td></tr>';
+                        }
+                        return '<tr>' + (isVuln ? '<td class="py-2 pr-4 mono">' + diffEsc(e.id) + '</td>' : '') +
+                            '<td class="py-2 pr-4 font-medium">' + diffEsc(e.name) + '</td>' +
+                            '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.ecosystem) + '</td>' +
+                            '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.version) + '</td></tr>';
+                    }).join('') + '</tbody></table></div>';
+            }
+            document.getElementById('modal-body').innerHTML =
+                '<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
+                '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body;
+            document.getElementById('modal-overlay').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
         function closeModal() {
             document.getElementById('modal-overlay').style.display = 'none';
             document.body.style.overflow = 'auto';
@@ -2060,6 +2301,7 @@ async function generateHTMLReport(data) {
             <button onclick="switchTab('graph')" id="tab-graph" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependency Sequences</button>
             <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
             <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
+            <button onclick="switchTab('diffs')" id="tab-diffs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
             <button onclick="switchTab('system')" id="tab-system" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">System Info</button>
         </div>
     </nav>
@@ -2302,6 +2544,7 @@ async function generateHTMLReport(data) {
   </div>
 </section>
         <!-- Secrets Section -->
+        <section id="section-diffs" class="hidden space-y-6"></section>
         <section id="section-secrets" class="hidden space-y-6">
             <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
                 <h2 class="text-xl font-bold">Secrets Found in Source</h2>
@@ -4867,6 +5110,7 @@ export class UbelEngineInstance {
         inventory,
         policy,
         threat_intel: threatIntel,
+        diffs: { enabled: false },   // health mode fills this in below, once the history folder is known
         //dependencies_tree: buildImpactDependencyTree(inventory),  // kept for compatibility but not used in new graph
       };
 
@@ -4944,6 +5188,19 @@ export class UbelEngineInstance {
 
       if (is_script && !save_reports) {
         return finalJson;
+      }
+
+      // ── Diffs vs the previous report of this asset (health mode only; other modes keep the
+      // empty block). Must run before the HTML/JSON are serialized and before this scan's own
+      // bundle is written below, so the "previous" report is always an earlier one.
+      const zipPath = historyZipPath(timestamp, reportTag, asset.asset_id);
+      if (this.checkMode === "health") {
+        try {
+          finalJson.diffs = buildDiffs(finalJson, loadPreviousReport(zipPath, reportTag));
+        } catch (e) {
+          console.warn("[~] Diffs failed:", e.message);
+          finalJson.diffs = { enabled: true, previous: null, counts: null, deps: { new: [], unchanged: [], removed: [] }, vulns: { new: [], existing: [], fixed: [] }, secrets: null, error: e.message };
+        }
       }
 
       // --redact-paths / UBEL_REDACT_PATHS=1: strip the local project and home paths from
@@ -5070,7 +5327,6 @@ export class UbelEngineInstance {
       // copies above are intentionally left as plain files, unzipped.
       // Filed under the asset: history/<asset_id>/<timestamp>.<tag>.zip
       // (asset and historyMode were resolved above, before the report was built).
-      const zipPath = historyZipPath(timestamp, reportTag, asset.asset_id);
       atomicWriteFile(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
