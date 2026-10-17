@@ -104,9 +104,23 @@ function reachableSeverityStats(vulns, policy) {
   return buckets;
 }
 
+/** "a", "a and b", "a, b and c" */
+function joinAnd(items) {
+  if (items.length <= 1) return items[0] || "";
+  return items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+}
+
 /**
  * Evaluate policy against a scan report.
  * Returns [allowed: boolean, reason: string]
+ *
+ * Every rule is evaluated and every violated rule is named in the reason
+ * (joined with "; "), in evaluation order: infections, secrets, KEV, EPSS,
+ * severity, unknown severity, undetermined, license risk, unknown license.
+ * Nothing short-circuits, so the reason never hides a violation behind an
+ * earlier one. The reason keeps the "Blocked:" prefix only when every violated
+ * rule is an always-enforced one (infections / secrets); otherwise it is
+ * "Blocked by policy:".
  *
  * @param {object} report  - Scan report with .stats and .policy fields.
  */
@@ -118,12 +132,19 @@ export function evaluatePolicy(report) {
     throw new Error("No policy returned by API (fail-closed)");
   }
 
-  // ── 1. Infections: always blocked, no policy toggle ──────────────────────
+  const blocks = [];        // one reason fragment per violated rule
+  let onlyAlways = true;    // stays true while every fragment is always-enforced
+  const block = (text, always = false) => {
+    blocks.push(text);
+    if (!always) onlyAlways = false;
+  };
+
+  // ── 1. Infections / secrets: always blocked, no policy toggle ─────────────
   if ((stats.total_infections || 0) > 0) {
-    return [false, "Blocked: infections detected (always enforced)"];
+    block("infections detected (always enforced)", true);
   }
   if ((report.secrets?.count || 0) > 0) {
-    return [false, "Blocked: secrets detected (always enforced)"];
+    block("secrets detected (always enforced)", true);
   }
 
   // ── 1b. Threat intel: CISA KEV, then EPSS ────────────────────────────────
@@ -146,25 +167,26 @@ export function evaluatePolicy(report) {
 
   const kevIds = idsWith("kev");
   if (kevIds.length > 0) {
-    return [false, `Blocked by policy: ${kevIds.length} known-exploited (CISA KEV) vulnerabilit${kevIds.length === 1 ? "y" : "ies"} detected: ${fmtIds(kevIds)}`];
+    block(`${kevIds.length} known-exploited (CISA KEV) vulnerabilit${kevIds.length === 1 ? "y" : "ies"} detected: ${fmtIds(kevIds)}`);
   }
   const epssIds = idsWith("epss");
   if (epssIds.length > 0) {
     const pct = parseFloat((Number(policy.epss_threshold) * 100).toFixed(2));
-    return [false, `Blocked by policy: ${epssIds.length} vulnerabilit${epssIds.length === 1 ? "y" : "ies"} with EPSS >= ${pct}% detected: ${fmtIds(epssIds)}`];
+    block(`${epssIds.length} vulnerabilit${epssIds.length === 1 ? "y" : "ies"} with EPSS >= ${pct}% detected: ${fmtIds(epssIds)}`);
   }
 
   // ── 2. Severity threshold ─────────────────────────────────────────────────
   const rawThreshold = (policy.severity_threshold || "").toLowerCase();
   if (rawThreshold && SEVERITY_ORDER.includes(rawThreshold)) {
-    for (const level of SEVERITY_ORDER) {
-      if (meetsThreshold(level, rawThreshold) && (severityCounts[level] || 0) > 0) {
-        return [
-          false,
-          `Blocked by policy: ${level} severity vulnerabilities detected ` +
-          `(threshold: ${rawThreshold}${scopeNote})`,
-        ];
-      }
+    // Highest severity first; every level at/above the threshold with findings is named.
+    const hits = [...SEVERITY_ORDER].reverse()
+      .filter(level => meetsThreshold(level, rawThreshold) && (severityCounts[level] || 0) > 0);
+    if (hits.length > 0) {
+      const total = hits.reduce((n, level) => n + severityCounts[level], 0);
+      block(
+        `${joinAnd(hits.map(level => `${severityCounts[level]} ${level}`))} severity ` +
+        `vulnerabilit${total === 1 ? "y" : "ies"} detected (threshold: ${rawThreshold}${scopeNote})`
+      );
     }
   }
 
@@ -172,7 +194,7 @@ export function evaluatePolicy(report) {
   if (policy.block_unknown_vulnerabilities === true) {
     const unknownCount = severityCounts.unknown || 0;
     if (unknownCount > 0) {
-      return [false, `Blocked by policy: ${unknownCount} unknown-severity vulnerabilities detected${reachableOnly ? " (reachable vulnerabilities only)" : ""}`];
+      block(`${unknownCount} unknown-severity vulnerabilities detected${reachableOnly ? " (reachable vulnerabilities only)" : ""}`);
     }
   }
 
@@ -188,7 +210,7 @@ export function evaluatePolicy(report) {
     if (count > 0) {
       const names = [...new Set(undet.map(c => c.name || c.id).filter(Boolean))];
       const shown = names.length > 5 ? `${names.slice(0, 5).join(", ")} and ${names.length - 5} more` : names.join(", ");
-      return [false, `Blocked by policy: ${count} component${count === 1 ? "" : "s"} could not be checked against any vulnerability database (undetermined)${shown ? `: ${shown}` : ""}`];
+      block(`${count} component${count === 1 ? "" : "s"} could not be checked against any vulnerability database (undetermined)${shown ? `: ${shown}` : ""}`);
     }
   }
 
@@ -199,11 +221,10 @@ export function evaluatePolicy(report) {
 
     for (const level of LICENSE_RISK_ORDER) {
       if (meetsLicenseRiskThreshold(level, rawLicenseThreshold) && (byRisk[level] || 0) > 0) {
-        return [
-          false,
-          `Blocked by policy: ${byRisk[level]} package(s) with ${level} license risk detected ` +
-          `(threshold: ${rawLicenseThreshold})`,
-        ];
+        block(
+          `${byRisk[level]} package(s) with ${level} license risk detected ` +
+          `(threshold: ${rawLicenseThreshold})`
+        );
       }
     }
   }
@@ -212,8 +233,12 @@ export function evaluatePolicy(report) {
   if (policy.block_unknown_license_risk === true) {
     const unknownLicenseCount = stats?.license_stats?.by_risk?.unknown || 0;
     if (unknownLicenseCount > 0) {
-      return [false, `Blocked by policy: ${unknownLicenseCount} package(s) with unclassified license risk detected`];
+      block(`${unknownLicenseCount} package(s) with unclassified license risk detected`);
     }
+  }
+
+  if (blocks.length > 0) {
+    return [false, `${onlyAlways ? "Blocked" : "Blocked by policy"}: ${blocks.join("; ")}`];
   }
 
   // Passed — but say so if KEV/EPSS couldn't be checked, so a pass is never

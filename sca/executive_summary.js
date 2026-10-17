@@ -319,10 +319,10 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
     const upgradeTo = malicious ? null : plan ? plan.version : suggestUpgrade(p.version, fixable, p.purl);
     const fixOpts   = malicious ? { options: [], more: 0, noFixYet: 0 }
       : buildFixOptions(invById.get(p.purl), fixScope, plan ? plan.version : null);
-    // Exploit intelligence. `exploited` (ranking) ignores findings confirmed
-    // unreachable, like the overall rating; `known_exploited` (display) counts all.
+    // Exploit intelligence. A known-exploited finding ranks first whether or not it
+    // was judged unused: like malicious components, the policy never exempts it.
     const kevAll    = p.vulns.filter(v => v.is_kev === true);
-    const exploited = kevAll.some(v => !isConfirmedUnreachable(v));
+    const exploited = kevAll.length > 0;
     const epssVals  = p.vulns.map(v => v.epss_score).filter(x => typeof x === "number");
     const maxEpss   = epssVals.length ? Math.max(...epssVals) : null;
     const likelySoon = p.vulns.some(v => v.is_kev !== true && !isConfirmedUnreachable(v) &&
@@ -393,21 +393,23 @@ function overallRiskCore(m) {
       rationale: `${count(m.malicious_components, "component")} identified as deliberately malicious software.`,
     };
   }
-  if (m.effective.critical > 0 || m.effective.high > 0 || m.secrets.serious > 0 || m.kev.effective > 0) {
+  if (m.effective.critical > 0 || m.effective.high > 0 || m.secrets.serious > 0 || m.kev.total > 0) {
     const parts = [];
     if (m.effective.critical) parts.push(`${count(m.effective.critical, "Critical-severity issue")}`);
     if (m.effective.high)     parts.push(`${count(m.effective.high, "High-severity issue")}`);
     if (m.secrets.serious)    parts.push(`${count(m.secrets.serious, "exposed credential")}`);
-    // A known-exploited weakness is High however it is scored: attackers are already using it.
-    if (m.kev.effective)      parts.push(`${count(m.kev.effective, "weakness already exploited in real attacks", "weaknesses already exploited in real attacks")}`);
+    // A known-exploited weakness is High however it is scored and whether or not the
+    // usage estimate judged it unused: attackers are already using it, and the policy
+    // never exempts it from blocking.
+    if (m.kev.total)          parts.push(`${count(m.kev.total, "weakness already exploited in real attacks", "weaknesses already exploited in real attacks")}`);
     return {
       level: "high",
       rationale: `Includes ${parts.join(", ")}. These could be used against the organization.` +
-        (m.kev.effective > 0 ? " Some are already being used by attackers." : ""),
+        (m.kev.total > 0 ? " Some are already being used by attackers." : ""),
     };
   }
   if (m.effective.medium > 0 || m.effective.unknown > 0 || m.secrets.total > 0 ||
-      m.epss.effective > 0 || m.kev.total > 0 ||
+      m.epss.effective > 0 ||
       m.by_severity.critical > 0 || m.by_severity.high > 0) {
     let rationale;
     if (m.effective.medium > 0 || m.effective.unknown > 0 || m.secrets.total > 0) {
@@ -559,7 +561,10 @@ function buildMethodology(report, ctx) {
   if (hasReach) {
     steps.push({
       step: "Usage estimate",
-      detail: "For each weakness, an automated heuristic estimated whether the application is likely to use the affected component, based on how it is installed, whether it is only for development or testing, how deeply it is nested, and (where source files were available) whether the code imports it. This is an estimate, not proof. In this summary, issues judged not to be in use lower the overall risk rating and rank lower in the priority list, but they are still counted and listed. The pass/fail policy result ignores this estimate: it counts every weakness at or above the blocking severity, so a report can be rated Medium and still fail the policy.",
+      detail: "For each weakness, an automated heuristic estimated whether the application is likely to use the affected component, based on how it is installed, whether it is only for development or testing, how deeply it is nested, and (where source files were available) whether the code imports it. This is an estimate, not proof. In this summary, issues judged not to be in use lower the overall risk rating and rank lower in the priority list (known-exploited weaknesses are never lowered), but they are still counted and listed. " +
+        (policy.reachable_only === true
+          ? "The pass/fail policy result uses this estimate too: weaknesses judged not in use do not block, except known-exploited ones (while that rule is on), which always block."
+          : "The pass/fail policy result ignores this estimate: it counts every weakness at or above the blocking severity, so a report can be rated Medium and still fail the policy."),
     });
   }
   if (secretsInfo.enabled) {
@@ -597,8 +602,8 @@ function buildMethodology(report, ctx) {
 
   const ratingRules = [
     { level: "Critical", rule: "At least one malicious component was found." },
-    { level: "High", rule: "At least one Critical- or High-severity weakness that was not judged unused, at least one weakness known to be exploited in real attacks (and not judged unused), or at least one exposed High/Critical credential." },
-    { level: "Medium", rule: "Medium or unrated weaknesses, weaknesses forecast as likely to be exploited soon, lower-severity credentials, or Critical/High/known-exploited weaknesses that were all judged unused." },
+    { level: "High", rule: "At least one Critical- or High-severity weakness that was not judged unused, at least one weakness known to be exploited in real attacks (whether or not it was judged unused), or at least one exposed High/Critical credential." },
+    { level: "Medium", rule: "Medium or unrated weaknesses, weaknesses forecast as likely to be exploited soon, lower-severity credentials, or Critical/High weaknesses that were all judged unused." },
     { level: "Low", rule: "Only Low-severity weaknesses, or Medium/unrated ones that were all judged unused, with none forecast as likely to be exploited soon." },
     { level: "Minimal", rule: "Nothing found." },
   ];
@@ -607,7 +612,7 @@ function buildMethodology(report, ctx) {
   }
 
   const prioritization =
-    "“Components to fix first” covers only components with at least one issue that breaks the security policy (malicious components always do); the issue counts, severity and exploit signals shown for each refer to those policy-breaking issues only. These components are ranked by: (1) malicious, (2) at least one issue known to be exploited in real attacks and not judged unused, (3) at least one issue not judged unused, (4) worst severity, (5) at least one issue forecast as likely to be exploited soon, (6) number of issues, and the top five are shown. " +
+    "“Components to fix first” covers only components with at least one issue that breaks the security policy (malicious components always do); the issue counts, severity and exploit signals shown for each refer to those policy-breaking issues only. These components are ranked by: (1) malicious, (2) at least one issue known to be exploited in real attacks (whether or not it was judged unused), (3) at least one issue not judged unused, (4) worst severity, (5) at least one issue forecast as likely to be exploited soon, (6) number of issues, and the top five are shown. " +
     "The suggested version comes from the per-component fix analysis: of the published upgrade paths, the closest one that resolves the most of that component’s issues that break the policy. It is a starting point and has not been tested against your application; a major version change may break compatibility.";
 
   const timeframes =
@@ -768,7 +773,6 @@ export function buildExecutiveSummary(report) {
   const intel  = exploitIntel(report, regular);
   const epssT  = resolveEpssThreshold(report?.policy);
   const kevVulns = regular.filter(v => v.is_kev === true);
-  const kevEffective = kevVulns.filter(v => !isConfirmedUnreachable(v));
   const kevCount = kevVulns.length;
   // EPSS-forecast issues exclude KEV ones so nothing is counted twice.
   const epssHigh = regular.filter(v => v.is_kev !== true && typeof v.epss_score === "number" && v.epss_score >= epssT.value);
@@ -785,7 +789,7 @@ export function buildExecutiveSummary(report) {
     secrets: secretsInfo,
     vulns_checked: vulnsChecked,
     intel_incomplete: regular.length > 0 && !(intel.kevKnown && intel.epssKnown && !intel.epssPartial),
-    kev:  { total: kevCount, effective: kevEffective.length },
+    kev:  { total: kevCount },
     epss: { effective: epssHighEffective.length },
   };
 
@@ -823,11 +827,13 @@ export function buildExecutiveSummary(report) {
   // Known-exploited weaknesses get their own driver, so they are left out of the
   // serious/lower counts to keep the sentence from counting anything twice.
   const seriousCount = regular.filter(v => isSerious(v) && v.is_kev !== true).length;
+  const seriousInUse = regular.filter(v => isSerious(v) && v.is_kev !== true && !isConfirmedUnreachable(v)).length;
   const lowerCount = regular.length - kevCount - seriousCount;
   const drivers = [];
   if (maliciousComponents > 0) drivers.push(count(maliciousComponents, "malicious component"));
   if (kevCount > 0) drivers.push(count(kevCount, "known-exploited weakness", "known-exploited weaknesses"));
-  if (seriousCount > 0) drivers.push(count(seriousCount, "serious weakness", "serious weaknesses"));
+  if (seriousCount > 0) drivers.push(count(seriousCount, "serious weakness", "serious weaknesses") +
+    (seriousInUse < seriousCount ? ` (${seriousInUse === 0 ? "none" : seriousInUse} likely in use)` : ""));
   if (secretsInfo.total > 0) drivers.push(count(secretsInfo.total, "exposed credential"));
   if (lowerCount > 0) drivers.push(count(lowerCount, "lower-severity weakness", "lower-severity weaknesses"));
   const shown = drivers.slice(0, 3);
@@ -883,18 +889,24 @@ export function buildExecutiveSummary(report) {
   }
 
   if (kevCount > 0) {
-    const unusedKev = kevCount - kevEffective.length;
+    const unusedKev = kevVulns.filter(isConfirmedUnreachable).length;
     const deadlines = kevVulns.map(v => v.kev_deadline).filter(d => typeof d === "string" && d).sort();
+    // ISO dates compare as strings. A due date before the scan date has already passed.
+    const scanDay   = String(report?.generated_at || "").slice(0, 10);
+    const overdue   = !!(deadlines.length && scanDay && deadlines[0] < scanDay);
     keyFindings.push({
-      severity: kevEffective.length > 0 ? "critical" : "medium",
+      severity: "critical",
       title: "Weaknesses already being exploited by attackers",
       detail: `${count(kevCount, "weakness is", "weaknesses are")} listed in the catalog of weaknesses that the U.S. cybersecurity agency (CISA) has confirmed are being used in real attacks. ` +
-        (unusedKev === kevCount
-          ? "The analysis indicates the affected code is not used in production paths, which lowers the priority but does not remove the risk."
-          : unusedKev > 0
-            ? `${unusedKev} of them ${plural(unusedKev, "appears", "appear")} not to be reachable from production code. The rest should be fixed before issues that are rated only by severity.`
-            : "They should be fixed before issues that are rated only by severity.") +
-        (deadlines.length ? ` CISA’s earliest remediation due date for these is ${deadlines[0]} (set for U.S. federal agencies, but a useful benchmark for others).` : ""),
+        (unusedKev > 0
+          ? (unusedKev === kevCount
+              ? "The analysis indicates the affected code is not used in production paths, but that estimate does not lower their priority"
+              : `${unusedKev} of them ${plural(unusedKev, "appears", "appear")} not to be reachable from production code, but that estimate does not lower their priority`) +
+            (policy_blocks_kev(report) ? " or exempt them from the security policy" : "") +
+            " when attackers are already exploiting the weakness. "
+          : "") +
+        "They should be fixed before issues that are rated only by severity." +
+        (deadlines.length ? ` CISA’s earliest remediation due date for these ${overdue ? "was" : "is"} ${deadlines[0]}${overdue ? ", which has already passed" : ""} (set for U.S. federal agencies, but a useful benchmark for others).` : ""),
     });
   }
 
@@ -1031,10 +1043,10 @@ export function buildExecutiveSummary(report) {
       owner: "Development team",
     });
   }
-  if (kevEffective.length > 0) {
+  if (kevCount > 0) {
     actions.push({
       priority: actions.length + 1, timeframe: "Immediately",
-      action: `Fix or contain the ${count(kevEffective.length, "weakness", "weaknesses")} that attackers are already exploiting.`,
+      action: `Fix or contain the ${count(kevCount, "weakness", "weaknesses")} that attackers are already exploiting.`,
       why: "These are confirmed as used in real attacks, which makes them the most likely to cause harm. Update the affected components first; where no fix exists, restrict access to what depends on them or replace the component. Where the security policy blocks on them, their components are marked in the “Components to fix first” list.",
       owner: "Security team with development team",
     });
@@ -1070,7 +1082,7 @@ export function buildExecutiveSummary(report) {
   const regularBlocking = regular.filter(v => v.is_policy_violation).length;
   // Known-exploited / forecast findings that are not serious by severity have
   // their own actions above, but only count as covered when the policy enforces them.
-  const kevOnlyCovered  = policy_blocks_kev(report) ? kevEffective.filter(v => !isSerious(v)).length : 0;
+  const kevOnlyCovered  = policy_blocks_kev(report) ? kevVulns.filter(v => !isSerious(v)).length : 0;
   const epssOnlyCovered = epssT.enforced ? epssLower.length : 0;
   const blockingCovered = seriousFixable + seriousNoFix + kevOnlyCovered + epssOnlyCovered;
   if (!decision.allowed && regularBlocking > blockingCovered) {
@@ -1135,14 +1147,30 @@ export function buildExecutiveSummary(report) {
   let complianceOverview = null;
   const cs = report?.compliance_summary;
   if (cs && Array.isArray(cs.frameworks) && cs.frameworks.length) {
-    const top = [...cs.frameworks]
+    let top = [...cs.frameworks]
       .sort((a, b) => (b.findings_count || 0) - (a.findings_count || 0))
       .slice(0, 4)
       .map(f => ({ framework: f.name, findings: f.findings_count || 0 }));
+    // When the leading frameworks all show the same count (typically every finding maps to every
+    // framework) the ranking says nothing, so show each framework's most-affected control instead.
+    // A control hit by every finding of its framework is just as uninformative and is skipped.
+    let tied = false;
+    if (top.length > 1 && top.every(t => t.findings === top[0].findings)) {
+      const perFramework = [];
+      for (const f of cs.frameworks) {
+        const best = (f.controls || [])
+          .filter(c => (c.findings_count || 0) > 0 && (c.findings_count || 0) < (f.findings_count || 0))
+          .sort((a, b) => (b.findings_count || 0) - (a.findings_count || 0))[0];
+        if (best) perFramework.push({ framework: `${f.name}: ${best.id} ${best.title}`, findings: best.findings_count });
+      }
+      perFramework.sort((a, b) => b.findings - a.findings || a.framework.localeCompare(b.framework));
+      if (perFramework.length) { top = perFramework.slice(0, 4); tied = true; }
+    }
     complianceOverview = {
       frameworks_touched: cs.frameworks.length,
       most_affected: top,
       statement: `The findings relate to controls in ${count(cs.frameworks.length, "industry framework")}. ` +
+        (tied ? "The leading frameworks are tied on finding counts, so the list shows the most-affected single control in each framework instead. " : "") +
         "Unresolved findings may need to be explained or remediated in a related audit. " +
         "The numbers shown count individual findings; the Compliance tab counts distinct CVEs and components, so its figures can be lower.",
       disclaimer: cs.disclaimer || "Compliance mappings are best-effort guidance, not a certified assessment.",
@@ -1258,8 +1286,11 @@ export function buildExecutiveSummary(report) {
     uniqueNote,
     maliciousComponents > 0 ? `plus ${count(maliciousComponents, "malicious component")}, counted separately` : "",
   ].filter(Boolean).join("; ");
-  let weaknessTone = maliciousComponents > 0 ? "critical" : figureTone(worstOf(bySeverity), vulnsChecked ? regular.length : null);
-  if (kevEffective.length > 0 && weaknessTone !== "critical") weaknessTone = "high";
+  // Same scale as the overall rating: only malicious components reach "critical"; otherwise the
+  // tone follows the worst finding not judged unused (capped at "high"), and any known-exploited one makes it "high".
+  const effWorst = worstOf(effective) || "low";
+  let weaknessTone = maliciousComponents > 0 ? "critical" : figureTone(effWorst === "critical" ? "high" : effWorst, vulnsChecked ? regular.length : null);
+  if (kevCount > 0 && weaknessTone !== "critical") weaknessTone = "high";
   const credTotal = credsKnown ? secretsInfo.total : null;
   const credSub = credsKnown ? "Passwords / keys found in source files" : "Credential search did not run or did not complete";
   const policyValue = verdict.status === "pass" ? "Pass" : "Blocked";
@@ -1352,7 +1383,7 @@ export function buildExecutiveSummary(report) {
       label: RISK_LABEL[risk.level],
       rationale: risk.rationale,
       business_impact: BUSINESS_IMPACT[risk.level] +
-        (risk.level === "high" && kevEffective.length > 0
+        (risk.level === "high" && kevCount > 0
           ? " At least one of these weaknesses is already being used in real attacks, so it should not wait for the next release."
           : ""),
       basis: "Ratings follow a scale defined by this tool, not CVSS or a regulatory standard. The impact text is general guidance for the rating level, not an assessment of your environment.",
