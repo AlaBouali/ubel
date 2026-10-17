@@ -270,7 +270,7 @@ function describeUpgrade(plan) {
   text += ".";
   if (plan.cleared < plan.total) {
     const left = plan.total - plan.cleared;
-    text += ` This resolves ${plan.cleared} of ${plan.total} issues; ` +
+    text += ` This resolves ${plan.cleared} of ${plan.total} ${plan.total === 1 ? "issue" : "issues"} that break the policy; ` +
       (plan.unfixed >= left
         ? `${left === 1 ? "the other has" : `the other ${left} have`} no published fix yet.`
         : "the rest need a different upgrade path (see Suggested Fixes in the Inventory tab).");
@@ -301,11 +301,15 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
     const worstKey  = Object.keys(SEV_RANK).find(k => SEV_RANK[k] === worst) || "unknown";
     const reachable = p.vulns.some(v => !isConfirmedUnreachable(v));
     const fixable   = nonInf.filter(v => v.has_fix || (v.fixed_versions || []).length > 0);
-    const plan      = malicious ? null : planUpgrade(invById.get(p.purl), nonInf.length);
+    // The per-package suggested_fixes only cover policy-violating vulnerabilities, so
+    // the upgrade plan and the "possible fixes" counts are measured against that same
+    // scope. A component with no violating issue has no plan and uses the heuristic.
+    const fixScope  = nonInf.filter(v => v.is_policy_violation);
+    const plan      = malicious || !fixScope.length ? null : planUpgrade(invById.get(p.purl), fixScope.length);
     const upgradeTo = malicious ? null : plan ? plan.version : suggestUpgrade(p.version, fixable, p.purl);
     const blocked   = p.vulns.some(v => v.is_policy_violation);
     const fixOpts   = malicious ? { options: [], more: 0, noFixYet: 0 }
-      : buildFixOptions(invById.get(p.purl), nonInf, plan ? plan.version : null);
+      : buildFixOptions(invById.get(p.purl), fixScope, plan ? plan.version : null);
     // Exploit intelligence. `exploited` (ranking) ignores findings confirmed
     // unreachable, like the overall rating; `known_exploited` (display) counts all.
     const kevAll    = p.vulns.filter(v => v.is_kev === true);
@@ -339,9 +343,13 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
       action: malicious
         ? "Confirm the malicious-package match; if genuine, remove this component and investigate how it was introduced."
         : !upgradeTo
-          ? "No fixed version is published yet. Consider replacing or isolating the component."
+          ? (plan
+              ? "No fixed version is published yet for the issues that break the policy. Consider replacing or isolating the component."
+              : "No fixed version is published yet. Consider replacing or isolating the component.")
           : plan
-            ? describeUpgrade(plan)
+            ? describeUpgrade(plan) + (nonInf.length > fixScope.length
+                ? ` The other ${nonInf.length - fixScope.length} ${nonInf.length - fixScope.length === 1 ? "issue does" : "issues do"} not break the policy and ${nonInf.length - fixScope.length === 1 ? "is" : "are"} not counted here.`
+                : "")
             : `Upgrade to version ${upgradeTo}.${fixable.length < nonInf.length ? " Some issues have no fix yet; see technical details." : ""}`,
       _rank: [malicious ? 1 : 0, exploited ? 1 : 0, reachable ? 1 : 0, worst, likelySoon ? 1 : 0, p.vulns.length],
     };
@@ -591,7 +599,7 @@ function buildMethodology(report, ctx) {
 
   const prioritization =
     "“Components to fix first” ranks components by: (1) malicious, (2) at least one issue known to be exploited in real attacks and not judged unused, (3) at least one issue not judged unused, (4) worst severity, (5) at least one issue forecast as likely to be exploited soon, (6) number of issues, and lists the top five. " +
-    "The suggested version comes from the per-component fix analysis: of the published upgrade paths, the closest one that resolves the most of that component’s issues. It is a starting point and has not been tested against your application; a major version change may break compatibility.";
+    "The suggested version comes from the per-component fix analysis: of the published upgrade paths, the closest one that resolves the most of that component’s issues that break the policy. It is a starting point and has not been tested against your application; a major version change may break compatibility.";
 
   const timeframes =
     "The timeframes in “Suggested actions” are default guidance built into the tool (credentials, malicious software and weaknesses known to be exploited: immediately; serious weaknesses and those forecast as likely to be exploited soon: within days; the rest: next maintenance cycle). " +

@@ -1092,14 +1092,14 @@ async function generateHTMLReport(data) {
                 '<span class="mono text-neutral-100">' + esc(o.version) + '</span>' +
                 (o.recommended ? badge('none', 'Best') : '') +
                 (major ? badge('medium', 'Major') : '') +
-                '<span class="text-neutral-400">fixes ' + esc(o.resolves) + ' of ' + esc(o.of) +
+                '<span class="text-neutral-400" title="Policy-violating issues of this component">fixes ' + esc(o.resolves) + ' of ' + esc(o.of) + ' violating' +
                 (o.known_exploited_total ? ' (' + esc(o.resolves_known_exploited) + ' of ' + esc(o.known_exploited_total) + ' exploited)' : '') +
                 '</span></li>';
             }).join('');
             return '<div class="mt-3 pt-2 border-t border-neutral-800"><div class="text-[10px] uppercase tracking-widest text-neutral-500 mb-1">Possible fixes</div>' +
               '<ul class="space-y-1 text-[11px]">' + rows + '</ul>' +
               (c.fix_options_more ? '<div class="text-[10px] text-neutral-500 mt-1">+' + esc(c.fix_options_more) + ' more in the Inventory tab</div>' : '') +
-              (c.no_fix_yet ? '<div class="text-[10px] text-neutral-500 mt-1">' + esc(c.no_fix_yet) + ' ' + (c.no_fix_yet === 1 ? 'issue has' : 'issues have') + ' no published fix yet.</div>' : '') +
+              (c.no_fix_yet ? '<div class="text-[10px] text-neutral-500 mt-1">' + esc(c.no_fix_yet) + ' ' + (c.no_fix_yet === 1 ? 'policy-violating issue has' : 'policy-violating issues have') + ' no published fix yet.</div>' : '') +
               '</div>';
           };
 
@@ -5137,9 +5137,6 @@ export class UbelEngineInstance {
       // inflate the counts nor drive which version gets suggested.
       const policyBlockingVulns = vulnerabilities.filter(v => v.policy_decision === "block");
       attachSuggestedFixes(inventory, policyBlockingVulns);
-      for (const comp of inventory) {
-        if (!comp.suggested_fixes) comp.suggested_fixes = { fixes: [], unfixed: [] };
-      }
 
       const stats = {
         inventory_size: inventory.length,

@@ -1,7 +1,9 @@
 // suggested_fixes.js — per-package upgrade suggestions
 //
-// For every inventory item, looks at all of its vulnerabilities and the fixed
-// version of every affected range, then suggests upgrades PER RANGE:
+// For every inventory item, looks at the vulnerabilities it is given and the fixed
+// version of every affected range, then suggests upgrades PER RANGE. The SCA engine
+// passes only the policy-violating vulnerabilities, so every count and list below
+// (fixes[].count, fixes[].vulnerabilities, unfixed) is about blocking findings only:
 //   - one group per minor range above the installed version (4.17.x, 4.18.x, ...)
 //   - then one group per higher major range (5.x, 6.x, ...)
 // Inside each range the fewest / highest versions that fix the most
