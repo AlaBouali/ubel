@@ -1818,7 +1818,7 @@ async function generateHTMLReport(data) {
                     '<th class="px-3 py-2 whitespace-nowrap w-px">Range</th>' +
                     '<th class="px-3 py-2 whitespace-nowrap w-px">Suggested version</th>' +
                     (anyConf ? '<th class="px-3 py-2 whitespace-nowrap w-px" title="Confidence that this version is for the installed distro release">Release match</th>' : '') +
-                    '<th class="px-3 py-2">Vulnerabilities fixed</th>' +
+                    '<th class="px-3 py-2">Policy-violating vulnerabilities fixed</th>' +
                     '</tr></thead><tbody>' +
                     fixes.map(function(f) {
                         const k = f.range ? f.range.key : '';
@@ -1832,7 +1832,7 @@ async function generateHTMLReport(data) {
                         return '<tr>' + rangeCell +
                             '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' +
                             '<span class="mono text-sm font-bold text-green-400">' + escapeHtml(String(f.version)) + '</span>' +
-                            '<span class="ml-2 text-[10px] text-neutral-500">fixes ' + f.count + '</span></td>' +
+                            '<span class="ml-2 text-[10px] text-neutral-500" title="Policy-violating vulnerabilities fixed by this version">fixes ' + f.count + ' violating</span></td>' +
                             (anyConf ? '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' + releaseConfBadge(f.release_confidence, f.release_confidence_reason) + '</td>' : '') +
                             '<td class="px-3 py-2 align-top border-t border-l border-neutral-800"><div class="flex flex-wrap gap-x-4 gap-y-1.5">' +
                             (f.vulnerabilities || []).map(function(v) {
@@ -1843,10 +1843,10 @@ async function generateHTMLReport(data) {
                     }).join('') +
                     '</tbody></table></div>';
             } else {
-                html += '<p class="text-neutral-500 text-xs italic">No upgrade version fixes any vulnerability of this package.</p>';
+                html += '<p class="text-neutral-500 text-xs italic">No upgrade version fixes any policy-violating vulnerability of this package.</p>';
             }
 
-            html += '<h5 class="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mt-4 mb-2">Vulnerabilities with no fix (' + unfixed.length + ')</h5>';
+            html += '<h5 class="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mt-4 mb-2">Policy-violating vulnerabilities with no fix (' + unfixed.length + ')</h5>';
             if (unfixed.length) {
                 html += '<div class="rounded-lg border border-neutral-800 overflow-auto max-h-48">' +
                     '<table class="w-full text-xs text-left">' +
@@ -1861,7 +1861,7 @@ async function generateHTMLReport(data) {
                     }).join('') +
                     '</tbody></table></div>';
             } else {
-                html += '<p class="text-neutral-500 text-xs italic">None — every vulnerability has a published fix.</p>';
+                html += '<p class="text-neutral-500 text-xs italic">None — every policy-violating vulnerability has a published fix.</p>';
             }
             return html;
         }
@@ -5131,7 +5131,15 @@ export class UbelEngineInstance {
 
       // ── Suggested fixes: per-package upgrade versions that fix vulns in bulk,
       // plus the vulnerabilities that have no published fix ────────────────
-      attachSuggestedFixes(inventory, vulnerabilities);
+      // Only vulnerabilities that violate the policy are counted: a suggested version
+      // "fixes N" = N policy-blocking findings, and the "no fix" list holds only
+      // blocking findings. Allowed (non-blocking) vulns are left out so they neither
+      // inflate the counts nor drive which version gets suggested.
+      const policyBlockingVulns = vulnerabilities.filter(v => v.policy_decision === "block");
+      attachSuggestedFixes(inventory, policyBlockingVulns);
+      for (const comp of inventory) {
+        if (!comp.suggested_fixes) comp.suggested_fixes = { fixes: [], unfixed: [] };
+      }
 
       const stats = {
         inventory_size: inventory.length,

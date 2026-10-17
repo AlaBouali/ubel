@@ -32,7 +32,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - **Secrets detection** — Trivy's ported ruleset plus UBEL's own rules for vendors Trivy's current upstream doesn't cover (see [Secrets Detection](#secrets-detection)), included in every `health`-mode scan by default (never in `check`/`install`) and runnable standalone via `ubel-secrets`
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating; included by default on every `health`-mode scan (see [License Compliance](#license-compliance))
 - **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
-- **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer minor/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
+- **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer minor/major), picking the fewest and highest versions that clear the most vulnerabilities that violate your policy, and lists whichever of those have no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **OS package release matching** — advisories for OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
 - **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary; included by default in every scan, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - **Re-scan a saved SBOM** — `ubel-resbom <sbom.cdx.json>` reads the components and dependency graph out of an SBOM UBEL generated earlier and runs the whole pipeline again (OSV/NVD, KEV/EPSS, policy, suggested fixes, executive summary, JSON / HTML / SBOM / SARIF) against today's advisories — no project, lockfile or package manager needed, nothing installed. Use it to find out whether a release you already shipped has become vulnerable since it was scanned (see [Re-scanning an SBOM](#re-scanning-an-sbom-ubel-resbom))
@@ -2033,26 +2033,28 @@ The rating and prioritization text in `methodology` is a prose copy of the logic
 
 ## Recommended Package Fixes
 
-For every package in the inventory, UBEL looks at **all** of its vulnerabilities and the fixed version of every affected range, then suggests which versions to upgrade to. Instead of a single "latest" version, suggestions are grouped **per version range**, so you can pick the least disruptive upgrade that still closes the most issues:
+For every package in the inventory, UBEL looks at its **policy-violating** vulnerabilities and the fixed version of every affected range, then suggests which versions to upgrade to. Instead of a single "latest" version, suggestions are grouped **per version range**, so you can pick the least disruptive upgrade that still closes the most issues:
 
 - **One group per minor range above your installed version** — e.g. `4.17.x`, `4.18.x` (same major version, so typically non-breaking)
 - **Then one group per higher major range** — e.g. `5.x`, `6.x` (may be breaking)
 
 Groups are listed closest-first: minor ranges, then major ranges, with the highest version first inside a range.
 
+**Policy scope.** Only vulnerabilities that violate the [policy](#policy) (`is_policy_violation: true`, i.e. policy decision `block`) take part. Every number in this section — "fixes N", the vulnerabilities listed under each version, the `unfixed` list — counts blocking findings only, and the versions themselves are picked to clear as many blocking findings as possible. A version that would only fix allowed (non-blocking) vulnerabilities is not suggested, and vulnerabilities the policy allows (below the severity threshold, or exempt as confirmed unreachable under `reachable_only`) are neither counted nor listed here. They are not removed from the report: they still appear in the Vulnerabilities tab and in the package's own vulnerability list. A package with no policy-violating vulnerabilities of its own — including one flagged only because a vulnerable dependency violates policy — gets an empty table.
+
 **How versions are picked.** Inside each range, UBEL picks the version that fixes the most still-open vulnerabilities (ties go to the highest version), then repeats until nothing more can be fixed in that range — so you get the fewest, highest versions that cover the most. A vulnerability can therefore appear in several ranges: each range is an **alternative upgrade path**, not a sequence of steps to apply together.
 
 **Branch-aware matching.** A candidate version is only counted as a fix if it genuinely falls outside every affected range of that vulnerability — not merely because it is numerically higher than some fixed version. This matters for advisories fixed on several release branches (e.g. a fix backported to `4.17.21` while `4.18.0`–`4.18.2` stays affected). When an advisory carries no usable range data, UBEL falls back to "at or after a known fixed version". Git-commit ranges are ignored since they can't be compared to package versions. For NVD-sourced advisories, each branch's lower bound is kept alongside its fix version, so a fix on a lower branch (say `1.2.5` next to `1.3.2`) is recognized as a fix for that branch rather than looking still-affected.
 
-**Unfixed vulnerabilities.** Anything with no fixed version above the one you have installed — or that no candidate version actually clears — is listed separately as `unfixed` rather than silently dropped, so you can see what an upgrade won't solve.
+**Unfixed vulnerabilities.** Any policy-violating vulnerability with no fixed version above the one you have installed — or that no candidate version actually clears — is listed separately as `unfixed` rather than silently dropped, so you can see what an upgrade won't solve.
 
 **In the HTML report**
 
 Open the **Inventory** tab and click a package: its detail modal has a **Suggested Fixes** section.
 
-- A table with one row per suggested version — **Range** (label plus *minor range* / *major range*), **Suggested version** (with "fixes N"), and **Vulnerabilities fixed**, each with its severity badge. Click any vulnerability to jump to its detail modal.
-- Below it, **Vulnerabilities with no fix (N)** — ID, severity, and score for everything no suggested version resolves.
-- Malicious (infection) entries are shown with an `infection` badge. If nothing can be fixed by upgrading, the modal says so; if the package has no suggestion data, it says that instead.
+- A table with one row per suggested version — **Range** (label plus *minor range* / *major range*), **Suggested version** (with "fixes N violating" — the number of policy-violating vulnerabilities it resolves), and **Policy-violating vulnerabilities fixed**, each with its severity badge. Click any vulnerability to jump to its detail modal.
+- Below it, **Policy-violating vulnerabilities with no fix (N)** — ID, severity, and score for every blocking vulnerability no suggested version resolves.
+- Malicious (infection) entries are shown with an `infection` badge. If nothing can be fixed by upgrading, the modal says no upgrade version fixes any policy-violating vulnerability of the package; if the package has no suggestion data, it says that instead.
 
 **Ordering.** Vulnerabilities inside every group are ordered most severe first: malicious (infection), then critical, high, medium, low, unknown; ties are broken by CVSS score, then ID.
 
@@ -2089,13 +2091,13 @@ Each inventory item in the JSON report carries a `suggested_fixes` object:
 | Field | Meaning |
 |---|---|
 | `fixes[].version` | A suggested version to upgrade to |
-| `fixes[].count` | How many of the package's vulnerabilities that version resolves |
+| `fixes[].count` | How many of the package's **policy-violating** vulnerabilities that version resolves |
 | `fixes[].range` | The range the version belongs to: `scope` is `minor` (same major as installed) or `major` (higher major); `label` is e.g. `4.17.x` or `5.x` |
-| `fixes[].vulnerabilities` | The vulnerabilities resolved, most severe first |
+| `fixes[].vulnerabilities` | The policy-violating vulnerabilities resolved, most severe first |
 | `fixes[].release_confidence`, `fixes[].release_confidence_reason` | OS packages only: how sure UBEL is that the version is built for the installed distro release (lowest of the vulnerabilities it covers; `low` if the version is visibly for another release). `unfixed[]` entries carry `release_confidence` too — see [OS Package Release Matching](#os-package-release-matching) |
-| `unfixed` | Vulnerabilities no suggested version resolves |
+| `unfixed` | Policy-violating vulnerabilities no suggested version resolves |
 
-If suggestions can't be computed for a package, its `suggested_fixes` carries an `error` message with empty `fixes`/`unfixed`, and the rest of the report is unaffected. Suggestions are computed once per scan by `suggested_fixes.js` (`attachSuggestedFixes`), right after vulnerabilities are matched and before the executive summary is built, so the summary can use them. A failure on one package never fails the scan.
+If suggestions can't be computed for a package, its `suggested_fixes` carries an `error` message with empty `fixes`/`unfixed`, and the rest of the report is unaffected. Suggestions are computed once per scan by `suggested_fixes.js` (`attachSuggestedFixes`), right after the policy decision has been applied to every vulnerability (it needs to know which ones violate) and before the executive summary is built, so the summary can use them. A failure on one package never fails the scan.
 
 ## OS Package Release Matching
 
