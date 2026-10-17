@@ -278,6 +278,12 @@ function describeUpgrade(plan) {
   return text;
 }
 
+// Only findings that break the policy decide what is listed here, the same scope
+// the per-package suggested_fixes use: a component appears only if at least one of
+// its findings is a policy violation (malicious ones always are), and its issue
+// count, worst severity, exploit signals, references and upgrade advice are all
+// measured on those findings. Allowed findings are not ranked; when a component
+// has an upgrade plan, its action text says how many allowed issues are not counted.
 function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
   const invById = new Map((inventory || []).map(i => [i.id, i]));
   const byPkg = new Map();
@@ -288,26 +294,29 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
         purl: v.affected_package_id || null,
         name: v.affected_dependency || "unknown",
         version: v.affected_dependency_version || "",
-        vulns: [],
+        allVulns: [],
+        vulns: [],   // policy-violating findings only
       });
     }
-    byPkg.get(key).vulns.push(v);
+    const p = byPkg.get(key);
+    p.allVulns.push(v);
+    if (v.is_policy_violation) p.vulns.push(v);
   }
 
-  const rows = [...byPkg.values()].map(p => {
+  const rows = [...byPkg.values()].filter(p => p.vulns.length > 0).map(p => {
     const malicious = p.vulns.some(v => v.is_infection);
     const nonInf    = p.vulns.filter(v => !v.is_infection);
     const worst     = nonInf.reduce((w, v) => Math.max(w, SEV_RANK[sevOf(v)]), -1);
     const worstKey  = Object.keys(SEV_RANK).find(k => SEV_RANK[k] === worst) || "unknown";
     const reachable = p.vulns.some(v => !isConfirmedUnreachable(v));
     const fixable   = nonInf.filter(v => v.has_fix || (v.fixed_versions || []).length > 0);
-    // The per-package suggested_fixes only cover policy-violating vulnerabilities, so
-    // the upgrade plan and the "possible fixes" counts are measured against that same
-    // scope. A component with no violating issue has no plan and uses the heuristic.
-    const fixScope  = nonInf.filter(v => v.is_policy_violation);
+    // p.vulns is already limited to policy-violating findings, which is the scope the
+    // per-package suggested_fixes cover, so the upgrade plan and the "possible fixes"
+    // counts are measured against the same set.
+    const fixScope  = nonInf;
+    const otherAllowed = p.allVulns.filter(v => !v.is_infection && !v.is_policy_violation).length;
     const plan      = malicious || !fixScope.length ? null : planUpgrade(invById.get(p.purl), fixScope.length);
     const upgradeTo = malicious ? null : plan ? plan.version : suggestUpgrade(p.version, fixable, p.purl);
-    const blocked   = p.vulns.some(v => v.is_policy_violation);
     const fixOpts   = malicious ? { options: [], more: 0, noFixYet: 0 }
       : buildFixOptions(invById.get(p.purl), fixScope, plan ? plan.version : null);
     // Exploit intelligence. `exploited` (ranking) ignores findings confirmed
@@ -325,7 +334,7 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
       worst_severity: malicious ? "malicious" : worstKey,
       worst_severity_label: malicious ? "Malicious" : SEV_LABEL[worstKey],
       likely_in_use: reachable,
-      blocks_policy: blocked,
+      blocks_policy: true,
       known_exploited: kevAll.length,
       max_epss: maxEpss,
       upgrade_to: upgradeTo || null,
@@ -347,8 +356,8 @@ function buildPriorityComponents(vulns, inventory, epssMin, limit = 5) {
               ? "No fixed version is published yet for the issues that break the policy. Consider replacing or isolating the component."
               : "No fixed version is published yet. Consider replacing or isolating the component.")
           : plan
-            ? describeUpgrade(plan) + (nonInf.length > fixScope.length
-                ? ` The other ${nonInf.length - fixScope.length} ${nonInf.length - fixScope.length === 1 ? "issue does" : "issues do"} not break the policy and ${nonInf.length - fixScope.length === 1 ? "is" : "are"} not counted here.`
+            ? describeUpgrade(plan) + (otherAllowed > 0
+                ? ` The other ${otherAllowed} ${otherAllowed === 1 ? "issue does" : "issues do"} not break the policy and ${otherAllowed === 1 ? "is" : "are"} not counted here.`
                 : "")
             : `Upgrade to version ${upgradeTo}.${fixable.length < nonInf.length ? " Some issues have no fix yet; see technical details." : ""}`,
       _rank: [malicious ? 1 : 0, exploited ? 1 : 0, reachable ? 1 : 0, worst, likelySoon ? 1 : 0, p.vulns.length],
@@ -598,7 +607,7 @@ function buildMethodology(report, ctx) {
   }
 
   const prioritization =
-    "“Components to fix first” ranks components by: (1) malicious, (2) at least one issue known to be exploited in real attacks and not judged unused, (3) at least one issue not judged unused, (4) worst severity, (5) at least one issue forecast as likely to be exploited soon, (6) number of issues, and lists the top five. " +
+    "“Components to fix first” covers only components with at least one issue that breaks the security policy (malicious components always do); the issue counts, severity and exploit signals shown for each refer to those policy-breaking issues only. These components are ranked by: (1) malicious, (2) at least one issue known to be exploited in real attacks and not judged unused, (3) at least one issue not judged unused, (4) worst severity, (5) at least one issue forecast as likely to be exploited soon, (6) number of issues, and the top five are shown. " +
     "The suggested version comes from the per-component fix analysis: of the published upgrade paths, the closest one that resolves the most of that component’s issues that break the policy. It is a starting point and has not been tested against your application; a major version change may break compatibility.";
 
   const timeframes =
@@ -1026,7 +1035,7 @@ export function buildExecutiveSummary(report) {
     actions.push({
       priority: actions.length + 1, timeframe: "Immediately",
       action: `Fix or contain the ${count(kevEffective.length, "weakness", "weaknesses")} that attackers are already exploiting.`,
-      why: "These are confirmed as used in real attacks, which makes them the most likely to cause harm. Update the affected components first; where no fix exists, restrict access to what depends on them or replace the component. The “Components to fix first” list marks them.",
+      why: "These are confirmed as used in real attacks, which makes them the most likely to cause harm. Update the affected components first; where no fix exists, restrict access to what depends on them or replace the component. Where the security policy blocks on them, their components are marked in the “Components to fix first” list.",
       owner: "Security team with development team",
     });
   }
@@ -1034,7 +1043,7 @@ export function buildExecutiveSummary(report) {
     actions.push({
       priority: actions.length + 1, timeframe: "Within days",
       action: `Update the components behind the ${count(seriousFixable, "Critical/High issue")} that already have a fix.`,
-      why: "These are the weaknesses most likely to cause real damage, and the fix is already available. The “Components to fix first” list shows where to start.",
+      why: "These are the weaknesses most likely to cause real damage, and the fix is already available. Those that break the security policy are listed under “Components to fix first”.",
       owner: "Development team",
     });
   }
