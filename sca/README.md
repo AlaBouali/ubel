@@ -3,13 +3,13 @@
 
 Ubel resolves dependencies, generates PURLs, scans them through [OSV.dev](https://osv.dev) and [NVD](https://nvd.nist.gov/), and enforces configurable security policies at install-time to block supply-chain attacks before they reach production.
 
-This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. `health` scans additionally read **Go, Java (Maven), Ruby (Bundler), C# / .NET (NuGet), Swift (SwiftPM / Carthage) and Flutter / Dart (pub)** projects when run full-stack (the default for `health` on npm/pnpm/bun/yarn/composer, and always for `ubel-docker`, `ubel-agent`, `ubel-cicd` and `ubel-license`) — see [Full-stack monorepo scanning](#full-stack-monorepo-scanning); those ecosystems have no firewall (`check` / `install`). The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section — and so is `ubel-resbom`, which re-scans an SBOM UBEL wrote earlier instead of scanning a project (see [Re-scanning an SBOM](#re-scanning-an-sbom-ubel-resbom)).
+This document's core is the `<engine> <mode>` firewall/SCA surface across every ecosystem shipped in the `@arcane-spark/ubel-node` package: **Node.js** (npm, pnpm, bun, yarn), **PHP** (Composer), **Rust** (Cargo), **Python** (pip, uv, pipx, conda, poetry), and the **Linux host** (apt, dnf, yum). They share one engine, one policy format, and one report format — the differences are called out inline wherever a given mode, flag, or guarantee doesn't carry over identically across ecosystems. `health` scans additionally read **Go, Java (Maven), Ruby (Bundler), C# / .NET (NuGet), Swift (SwiftPM / Carthage) and Flutter / Dart (pub)** projects when run full-stack (the default for `health` on npm/pnpm/bun/yarn/composer, and always for `ubel-docker`, `ubel-agent`, `ubel-cicd` and `ubel-license`) — see [Full-stack monorepo scanning](#full-stack-monorepo-scanning); those ecosystems have no firewall (`check` / `install`). The fixed-configuration and standalone binaries (`ubel-docker`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, `ubel-secrets`, `ubel-license`) are also documented below, each in their own section — and so is `ubel-resbom`, which re-scans an SBOM UBEL wrote earlier instead of scanning a project (see [Re-scanning an SBOM](#re-scanning-an-sbom-ubel-resbom)).
 
 ---
 
 ## Features
 
-- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun/composer) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; conda via `conda create --dry-run --json` against a scratch prefix; cargo via `cargo add` + `cargo update --workspace` in a scratch copy of the project; apt/dnf/yum via each manager's own simulate/assume-no flag)
+- Full dependency resolution with PURL generation via lockfile dry-run (npm/pnpm/bun/composer) or native dry-run (pip/pipx via `pip install --dry-run --report`; uv via `uv pip install --dry-run`; conda via `conda create --dry-run --json` against a scratch prefix; poetry via `poetry add --lock` in a scratch copy of the project, reading the resulting `poetry.lock`; cargo via `cargo add` + `cargo update --workspace` in a scratch copy of the project; apt/dnf/yum via each manager's own simulate/assume-no flag)
 - Querying authoritative vulnerability sources in real time, allowing newly published advisories to be detected immediately without waiting for scheduled database refreshes unlike the competitors.
 - OSV.dev vulnerability scanning via batched API queries and NVD's APIs
 - Concurrent vulnerability enrichment (CVSS, fix recommendations, references)
@@ -20,7 +20,7 @@ This document's core is the `<engine> <mode>` firewall/SCA surface across every 
 - `install` mode — scan-gate before installation; blocks if policy violated
 - `health` mode — scan the current project's installed dependencies
 - **Pre-commit hook** — `install-hook` / `uninstall-hook` modes wire up the single ubel git pre-commit hook: a secrets scan of the staged changes on every commit, plus a dependency scan (`<engine> health`, no OS scan) on every commit, so a bad change is blocked at `git commit` time rather than after it lands (see [Pre-commit Hook](#pre-commit-hook))
-- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo resolves in a scratch copy so the project is never modified before the scan passes; see [Firewall Mechanics](#firewall-mechanics))
+- Atomic lockfile revert — originals are always restored on violation or error (npm/pnpm/bun/composer only — pip/uv/pipx/conda/apt/dnf/yum have no lockfile to revert, and cargo and poetry resolve in a scratch copy so the project is never modified before the scan passes — poetry's `install` also restores the original `pyproject.toml`/`poetry.lock` if the real install fails; see [Firewall Mechanics](#firewall-mechanics))
 - Disk-based lockfile backup under `.ubel/lockfiles/<timestamp>/` with manual recovery on failure (npm/pnpm/bun/composer only)
 - Dependency graph with introduced-by and parent tracking (all ecosystems except `uv`- and `conda`-sourced firewall scans, which report a flat package list — see [Firewall Mechanics § uv](#uv) and [§ conda](#conda); Swift and Flutter/Dart lockfiles don't record a dependency graph either, so those packages have no edges)
 - Automatic report generation: **JSON** + **HTML** + **SBOM** (CycloneDX) + **SARIF** per scan, named `<file_name>.<tag>.<ext>` (e.g. `latest.sca.json`, `latest.sca.cdx.json`; tags: `sca` and `docker_sca` for `health` scans, `os_sca` for host-OS health scans, `agent_sca` for `ubel-agent`, `vscode_sca` / `cursor_sca` / `vscodium_sca` for editor-extension scans, `<engine>_firewall` for `check`/`install` runs, `licenses`, `secrets`), plus `latest.<tag>.*` convenience links. Not every tag gets every format — SARIF is written only for `sca` / `docker_sca` / `agent_sca` / `<editor>_sca`, and `licenses` / `secrets` get JSON + HTML only; see [File naming](#file-naming-the-tag). For historic tracking, a zipped snapshot of these reports is generated and saved, too.
@@ -58,6 +58,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
 | `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
 | `ubel-conda` | conda — same eight modes as `ubel-pip`; `check`/`install` driven by `conda create --dry-run`; see note below and [Firewall Mechanics § conda](#conda) |
+| `ubel-poetry` | Poetry — same eight modes as `ubel-pip`; `check`/`install` driven by `poetry add --lock` in a scratch copy of the project; see note below and [Firewall Mechanics § poetry](#poetry) |
 | `ubel-cargo` | Cargo (Rust) — `health`/`check`/`install` plus `threshold`/`block-unknown` (`init` only creates the [asset id](#asset-id-ubel_assetjson)); `check`/`install` resolve in a scratch copy of the project; see note below and [Firewall Mechanics § cargo](#cargo) |
 | `ubel-pipx` | pip, CLI-tool isolation mode — installs into a dedicated per-tool venv with a global shim, same idea as upstream `pipx`, now scan-gated |
 | `ubel-apt` | apt (Debian/Ubuntu) |
@@ -81,6 +82,8 @@ After installation, the following entry-point binaries are available:
 >
 > **conda** shares `ubel-pip`'s eight modes and its `check`/`install` shape, but resolves with `conda create --dry-run --json` against a scratch prefix (so `check` creates nothing) and installs the exact scanned builds with `--no-deps`. OSV has no conda ecosystem, so only conda packages that are Python distributions are matched against it (as PyPI packages) — see [Firewall Mechanics § conda](#conda) for exactly what that does and doesn't cover. It needs the `conda` binary itself on `PATH` (or via `$CONDA_EXE`, or in a default install location); `mamba`/`micromamba` aren't driven directly.
 >
+> **poetry** shares `ubel-pip`'s eight modes and its `check`/`install` shape, but resolves in a **scratch copy of the project** (`poetry add --lock <packages>`; with no package arguments the project's own `poetry.lock` is scanned as-is), so `check` never modifies your `pyproject.toml` or `poetry.lock`. The scanned `poetry.lock` is the inventory — it carries the full dependency graph and the prod/dev groups — and a clean `install` writes the scanned `pyproject.toml` + `poetry.lock` into the project and runs `poetry install --no-root` with source distributions refused. See [Firewall Mechanics § poetry](#poetry). It needs the `poetry` binary itself on `PATH` (or in a default install location).
+>
 > **cargo** gates installs by resolving in a **scratch copy of the project** — `cargo add <crate>` (only if packages were given) then `cargo update --workspace`, both of which read the registry index only and never run build scripts — so `check` never modifies your tree. A clean `install` then writes the scanned `Cargo.toml`/`Cargo.lock` and runs `cargo fetch --locked`. Only crates.io crates are matched against vulnerability data; git and alternative-registry dependencies are listed in a warning but not scanned, and `build.rs`/proc-macros still run later at `cargo build`, outside the firewall — see [Firewall Mechanics § cargo](#cargo). It needs the `cargo` binary itself (found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`); `init` has no environment to build, so it only creates the [asset id](#asset-id-ubel_assetjson).
 >
 > **apt / dnf / yum** are three separate binaries, each bound to exactly one native package manager — there's no auto-detection between them, the same one-binary-per-tool shape as `ubel-npm`/`ubel-pnpm`/`ubel-bun`. Running `ubel-dnf` on a host that only has `apt` fails with a clear "not found on PATH" error rather than silently falling back to a different manager.
@@ -94,6 +97,7 @@ After installation, the following entry-point binaries are available:
 - `ubel-pip`/`ubel-uv`/`ubel-pipx` additionally need a `python3`/`python` interpreter on `PATH` — Node.js can't provision one itself, it only shells out to it to create/manage the venv
 - `ubel-uv` additionally needs the `uv` binary itself on `PATH`, separate from Python — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`
 - `ubel-conda` additionally needs the `conda` binary itself — found via `PATH`, then `$CONDA_EXE` (exported by `conda init`'s shell hook), then conda's default install directories (`~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `/opt/conda`, …). It doesn't need a Python interpreter on `PATH`
+- `ubel-poetry` additionally needs the `poetry` binary itself — found via `PATH`, then Poetry's default install locations (`~/.local/bin`, `~/.poetry/bin`, the macOS/Windows installer directories, Homebrew) — and a Poetry release that supports `poetry add --lock` and the `installer.only-binary` setting (the latter is verified before every real install). Poetry brings its own Python handling; no separate interpreter is needed on `PATH` for UBEL itself
 - `ubel-cargo` additionally needs the `cargo` binary itself (Rust toolchain) — found via `PATH`, then `$CARGO_HOME/bin`, then `~/.cargo/bin` — and cargo ≥ 1.62 when packages are given (`cargo add`). It doesn't need a Python interpreter on `PATH`
 - `ubel-apt`/`ubel-dnf`/`ubel-yum` additionally need their specific package manager on `PATH` (each binary targets exactly one — no auto-detection between them) and, for `install` mode only, passwordless-or-prompted `sudo` access; `health`/`check` don't normally need elevated privileges, with one exception: if `dnf`/`yum install --assumeno` refuses to run as a non-root user, the dry-run is retried once with `sudo -n` (non-interactive), so `check` on dnf/yum may then need passwordless `sudo`
 
@@ -110,7 +114,7 @@ After installation, the following entry-point binaries are available:
 | `UBEL_STAGED_MAX_FILE_MB` | `128` | Per-file cap, in MB of added content, for `ubel-secrets --staged`. Past it the scan of that file stops and a warning is printed (nothing is dropped silently below it). |
 | `UBEL_NO_IGNORE_FILES` | unset | When set to `1`, UBEL does not add `.ubel/` and `.ubelignore` to the working directory's `.gitignore` / `.dockerignore` before writing reports (see [Keeping UBEL's own files out of git and Docker](#keeping-ubels-own-files-out-of-git-and-docker)). |
 | `UBEL_REDACT_PATHS` | unset | When set to `1`, same as passing `--redact-paths` — local project and home paths are stripped from reports (see [Redacting local paths](#redacting-local-paths---redact-paths)). |
-| `UBEL_API_KEY` + `UBEL_ASSET_ID` | unset | Reserved for a remote mode that is **not implemented** in the Node CLI: if both are set (in the environment or a `.env` in the working directory), the pip/uv/pipx/conda/cargo/apt/dnf/yum and npm-family scans exit `1` with "Remote mode … is not yet implemented". Leave at most one of them set. (`UBEL_ENDPOINT` is read alongside them and is likewise unused.) |
+| `UBEL_API_KEY` + `UBEL_ASSET_ID` | unset | Reserved for a remote mode that is **not implemented** in the Node CLI: if both are set (in the environment or a `.env` in the working directory), the pip/uv/pipx/conda/poetry/cargo/apt/dnf/yum and npm-family scans exit `1` with "Remote mode … is not yet implemented". Leave at most one of them set. (`UBEL_ENDPOINT` is read alongside them and is likewise unused.) |
 
 Both `UBEL_OSV_ENDPOINT` and `UBEL_NVD_ENDPOINT` are intended for self-hosted or air-gapped deployments — e.g. an internal proxy in front of a local OSV data dump, or a cached/rate-limit-friendly NVD mirror — where UBEL should never reach the public internet to do a live scan. Neither variable changes the "view online" reference links (`osv.dev/vulnerability/{id}`, `nvd.nist.gov/vuln/detail/{id}`) shown per-finding in reports — those stay pointed at the public sites by default, since a private mirror generally doesn't serve an equivalent browsable web UI at the same path. If your mirror does, you can still open the report and follow the link manually; it just isn't rewritten automatically.
 
@@ -140,6 +144,7 @@ ubel-yarn  health              # health only — check/install unsupported, see 
 ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown | block-undetermined | reachable-only
 ubel-uv    <mode> [packages...]        # same eight modes, same shape as ubel-pip
 ubel-conda <mode> [packages...]        # same eight modes; check/install driven by conda
+ubel-poetry <mode> [package[@constraint]...]   # same eight modes; check/install driven by poetry (init = `poetry init` if there is no pyproject.toml)
 ubel-cargo <mode> [crate[@req]...]     # health | check | install | threshold | block-unknown | block-undetermined | reachable-only | init (asset id only)
 ubel-pipx  <mode> [package]
 
@@ -153,7 +158,7 @@ ubel-sbom    <sbom.cdx.json> [-o <file>]     # no <mode>: write vulnerabilities 
 # Pre-commit hook (any engine except docker and apt/dnf/yum):
 ubel-npm   install-hook [--force]      # install the pre-commit hook (secrets scan + dependency scan)
 ubel-npm   uninstall-hook              # remove it
-ubel-pip   install-hook                # works on pip/pipx/uv/conda/cargo/composer/yarn too
+ubel-pip   install-hook                # works on pip/pipx/uv/conda/poetry/cargo/composer/yarn too
 
 # Any of the above, on health | check | install — one-off policy overrides, nothing saved:
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
@@ -164,7 +169,7 @@ ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|fals
 
 The policy flags are covered in [Per-run policy flags](#per-run-policy-flags).
 
-Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only eight modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`, `block-undetermined`, `reachable-only`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
+Package arguments are optional for `check`/`install` on every engine, but what "omitted" falls back to differs: npm/pnpm/bun/composer use the existing lockfile in the working directory (`composer.lock`/`composer.json` for composer); `ubel-pip`/`ubel-uv` fall back to `./requirements.txt`, then `./pyproject.toml`'s `[project]` dependencies if that's absent too (erroring only if neither is present); `ubel-conda` falls back to `./environment.yml`, then `./environment.yaml` (the `dependencies:` list — see [§ conda](#conda)); `ubel-poetry` scans the project's existing `poetry.lock` (running `poetry lock` in the scratch copy only if there is none) and errors if there is no `pyproject.toml` (see [§ poetry](#poetry)); `ubel-cargo` uses the project's existing `Cargo.toml`/`Cargo.lock` (see [§ cargo](#cargo)); `ubel-apt`/`ubel-dnf`/`ubel-yum` have no fallback source — packages must be given explicitly. `ubel-pip`/`ubel-uv`/`ubel-conda`/`ubel-poetry`/`ubel-pipx`/`ubel-apt`/`ubel-dnf`/`ubel-yum` also support only eight modes (`health`, `check`, `install`, `init`, `threshold`, `block-unknown`, `block-undetermined`, `reachable-only`) — `license-risk`/`license-block-unknown` are npm-family-only, see [Modes](#modes). `ubel-cargo` supports the same, but `ubel-cargo init` has no environment to create: it only creates the [asset id](#asset-id-ubel_assetjson) and exits `0`. `install-hook`/`uninstall-hook` are supported on every engine except `docker` and `apt`/`dnf`/`yum`.
 
 ---
 
@@ -367,6 +372,40 @@ Other differences worth knowing:
 - `environment.yml` fallback reads the flat `dependencies:` list only. A nested `- pip:` block is skipped (those packages are installed by pip, outside this firewall — scan them with `ubel-pip`) and `channels:` is ignored (conda's configured channels apply); both are reported when present.
 - `ubel-conda health` finds conda environments by their `conda-meta/` directory (including each environment under a conda base install's `envs/`) and inventories the Python packages inside them via the same `.dist-info`/`.egg-info` scan as `ubel-pip health`. Native conda packages aren't part of the `health` inventory.
 
+### poetry
+
+`ubel-poetry check` and `ubel-poetry install <package>` resolve in a **scratch copy of the project** — UBEL copies `pyproject.toml`, `poetry.lock`, `poetry.toml` (local config such as package sources) and the declared readme into a temporary directory and runs Poetry there, so your project is never modified before the scan passes. UBEL scans what Poetry resolved, then makes the same binary decision as the other Python engines:
+
+- **Resolution** — with package arguments: `poetry add --lock <packages>` (adds to the main group, locks, installs nothing). With none: the project's existing `poetry.lock` is used as-is; `poetry lock` runs in the scratch copy only if there is no lockfile yet. Existing locked versions are never silently re-resolved.
+- **Clean** — the scanned `pyproject.toml` and `poetry.lock` are written into the project and `poetry install --no-root` runs against them. If that install fails, the original `pyproject.toml` and `poetry.lock` are restored (a lockfile that didn't exist before is removed).
+- **Violation** — the real install never runs, and since everything happened in the scratch copy there is nothing to revert.
+
+Why this is built differently from `ubel-pip`:
+
+- **The lockfile is the inventory.** `poetry.lock` holds the full transitive closure with exact versions, the dependency edges and the dependency groups, so `introduced_by`/`parents` are populated (unlike `ubel-uv`/`ubel-conda`) and packages only in non-`main` groups are scoped `dev`.
+- **The scanned set is the installed set.** The scratch `pyproject.toml` and `poetry.lock` are SHA-256 recorded after resolution and re-checked immediately before the install; a mismatch aborts it. The project's own `pyproject.toml` must also be unchanged since the scan, so a concurrent edit is never overwritten. `poetry install` (never `update`) installs exactly what the lock pins and refuses a `pyproject.toml` that has drifted from the lock.
+- **`--no-root`.** The project's own package is not built or installed, so its build backend is not executed by the firewall.
+- **No source distributions.** The install runs with Poetry's `installer.only-binary = :all:`. Because an unknown `POETRY_*` setting is silently ignored by older releases, UBEL first asks the installed Poetry what value it will actually use and aborts (nothing installed) if it isn't honoured — upgrade Poetry in that case. The cost is the same as `--only-binary=:all:` for pip/uv: an sdist-only package can't be installed through this tool.
+- **Package sources come from Poetry's own configuration** (`pyproject.toml` sources, `poetry.toml`, `config.toml`, `POETRY_*` variables). Option-shaped arguments, paths, URLs, whitespace, `:` and `;` are rejected before Poetry is invoked, so a specifier can't add a git/path/URL source or an environment marker.
+
+```bash
+ubel-poetry check requests@^2.31 "requests[socks]>=2,<3"
+ubel-poetry install requests@^2.31   # scan-gated; updates pyproject.toml + poetry.lock only if clean
+ubel-poetry install                  # no args → scan the existing poetry.lock, then install it
+ubel-poetry init                     # optional: `poetry init --no-interaction` if there is no pyproject.toml
+```
+
+**What is and isn't matched against vulnerability data.** Registry packages — PyPI or any Poetry `legacy` index, treated the way pip treats a custom `--index-url` — are reported as `pkg:pypi/<name>@<version>` and matched against OSV like any other Python package. A package locked from **git, a URL, or a local file/directory** is not the registry package of the same name, so it is not queried and stays `undetermined` (reported with the `?vcs_url=` / `?download_url=` / `?file=` purl qualifier, never "safe"); enable `block-undetermined` to make those fail the install.
+
+Other differences worth knowing:
+
+- Poetry can still build a source distribution **while locking** when an index publishes no wheel metadata for a package (rare on PyPI). That step is Poetry's own and can't be switched off from outside; it never happens at install time (see above).
+- `license` is `unknown` on `check`/`install` (`poetry.lock` carries no license data); license classification only ever runs on `health` scans anyway.
+- No `requirements.txt` sync after a clean install — Poetry owns `pyproject.toml` and `poetry.lock`, which are overwritten with the scanned versions. Only the main dependency group is touched by `poetry add`; `--group`/`--dev` and other options are not accepted.
+- `venvDir` is not used: Poetry manages its own virtualenv.
+- `ubel-poetry health` scans a project-local `.venv` like `ubel-pip health` does, and additionally asks Poetry for the project's environment (`poetry env info --path`), since Poetry keeps it in its cache directory unless `virtualenvs.in-project` is set. A failing Poetry probe never breaks `health`.
+- Run `ubel-poetry` from the project root (the directory holding `pyproject.toml`); path dependencies with relative paths can't be resolved in the scratch copy and are reported as an error by Poetry.
+
 ### cargo
 
 `ubel-cargo check` and `ubel-cargo install [crate[@req] ...]` resolve in a **scratch copy of the project**: UBEL copies it (minus `target/`, `.git/`, `node_modules/` and `.ubel/`) to a temp directory, runs `cargo add <specs>` there when packages were given, then `cargo update --workspace`. `--workspace` leaves every crate already in `Cargo.lock` where it is and only resolves what's missing, so the scanned set is your existing lockfile plus exactly what was added. Both commands read the registry index only — they download no crate sources and never run `build.rs` or proc-macros. UBEL scans the resulting `Cargo.lock`, then makes the same binary decision as the other engines:
@@ -425,6 +464,8 @@ ubel-apt install curl
 npm/pnpm/bun/composer-specific: npm/pnpm/bun are triggered with the flag `--ignore-scripts`; composer with `--no-scripts --no-plugins` (Composer's own name for the script opt-out, plus the flag that stops Composer loading plugin code) — every dry-run *and* real-install invocation across all four passes them. pip/apt/dnf/yum don't have an equivalent opt-out flag for this document to invoke, because their dry-run modes don't run install-time lifecycle scripts to begin with — apt/dnf/yum's simulate flags never execute package maintainer scripts, and pip's `--dry-run` doesn't run a package's own `post_install` hooks (sdist build-backend code is a distinct concern, handled by `--only-binary=:all:` — see the pip section above).
 
 conda is the one engine where the real install is *not* script-free: `conda create --dry-run` only solves and never links a package, but the real install runs each conda package's own pre/post-link scripts, and UBEL passes no flag to suppress them. What the conda firewall guarantees is that only the exact scanned builds are installed (exact pins plus `--no-deps`) — not that those packages' install-time scripts are inert.
+
+poetry's real install is script-free for source builds: `poetry install --no-root` with `installer.only-binary = :all:` never runs a build backend (neither the project's nor a dependency's sdist). What the poetry firewall guarantees is that exactly the scanned `pyproject.toml`/`poetry.lock` pair is installed from wheels.
 
 cargo's real install (`cargo fetch --locked`) is script-free too, but for a narrower reason: it only populates the registry cache, and `build.rs`/proc-macros run later at `cargo build`, which this firewall doesn't gate. See [§ cargo](#cargo).
 
@@ -1592,6 +1633,8 @@ Specifiers containing shell metacharacters or other unsafe characters are reject
 
 **conda** — validated against its own, stricter pattern, because `ubel-conda` allows `:` (for `channel::name`), which the loose pattern above would turn into a way to pass a URL. A specifier must start with a letter, digit or underscore (so no option-shaped arguments like `-c` or `--file`) and may then contain only letters, digits and `. _ - + * ! < > = , ~ : [ ]` — no `/`, `\`, spaces or quotes, so no paths or URLs — and must not end in `.conda` or `.tar.bz2` (conda installs those from disk, bypassing the channel resolution UBEL scans). `numpy`, `numpy=1.26`, `python>=3.10,<3.13` and `conda-forge::scipy` are accepted.
 
+**poetry** — validated against its own pattern: a package name, optionally followed by `[extras]`, then optionally `@constraint` or a PEP 440 / Poetry operator constraint (`==`, `>=`, `<=`, `!=`, `~=`, `===`, `>`, `<`, `^`, `~`). It must start with a letter or digit (so no option-shaped arguments like `--git` or `-e`) and may not contain whitespace, `/`, `\\`, `:` or `;` — no paths, URLs, git sources or environment markers. `requests`, `requests@^2.31`, `requests==2.31.0` and `requests[socks]>=2,<3` are accepted.
+
 **cargo** — validated against a strict `name` or `name@requirement` pattern: the name must start with a letter or underscore (so no option-shaped arguments like `--git`), and the optional requirement after `@` may contain only letters, digits and `. ^ ~ = < > * + ! , -` — no spaces, `/`, `:` or quotes, so no paths, URLs or sources. `serde`, `serde@1.0` and `tokio@^1.35` are accepted.
 
 Either way, a rejected specifier exits non-zero before any filesystem or network operation occurs.
@@ -1607,7 +1650,7 @@ import { SCA_scan } from "@arcane-spark/ubel-node/sca";
 
 const report = await SCA_scan({
   projectRoot : "/abs/path/to/project",
-  engine      : "npm",   // npm | pnpm | bun | yarn | composer | docker | pip | uv | pipx | conda | cargo | apt | dnf | yum
+  engine      : "npm",   // npm | pnpm | bun | yarn | composer | docker | pip | uv | pipx | conda | poetry | cargo | apt | dnf | yum
   mode        : "health",
   is_script   : true,
   save_reports: true,
@@ -1687,7 +1730,7 @@ A scan-type **tag** sits between the file name and the real extension (`<file_na
 | Secrets — `ubel-secrets` | `secrets` | `latest.secrets.json` | `2026_10_10__12_30_05.secrets.zip` |
 | Re-scan of an SBOM — `ubel-resbom` | `<source tag>_resbom` | `latest.sca_resbom.json`, `latest.npm_firewall_resbom.html` | `2026_10_10__12_30_05.sca_resbom.zip` |
 
-`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `docker_firewall` gets the JSON, HTML and SBOM but no SARIF; `docker_sca` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`).
+`<engine>` is the binary that ran the firewall scan: `npm`, `pnpm`, `bun`, `yarn`, `composer`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `apt`, `dnf`, `yum`, `docker`. `ubel-docker` always runs the same scan pipeline; its CLI mode only picks the tag, and it files under the `sca` history folder in all three modes. As with every firewall (`check` / `install`) run, `docker_firewall` gets the JSON, HTML and SBOM but no SARIF; `docker_sca` also gets SARIF. The SBOM and SARIF files keep their compound extensions after the tag (`.cdx.json`, `.sarif.json`).
 
 **Tag shape.** A tag is either a bare scanner name (`sca`, `licenses`, `secrets`, `sast`, `malware`, `cloud`, `url`, `domain`, `host`, `easm`) or `<qualifier>_<scanner>`, with the qualifier first and the scanner last: `os_sca`, `agent_sca`, `docker_sca`, `<editor>_sca`, `<engine>_firewall`, `docker_firewall`.
 
@@ -1726,7 +1769,7 @@ Every report file UBEL writes — the `latest.<tag>.*` files under `<project>/.u
 | `<mode>` folder | Holds |
 |---|---|
 | `sca` | health scans (`ubel-npm health`, `ubel-agent`, `ubel-cicd`, `ubel-platform`, …) and every `ubel-docker` scan (`health`, `check`, `install`) |
-| `firewall` | `check` / `install` for npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo |
+| `firewall` | `check` / `install` for npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, poetry, cargo |
 | `os` | `check` / `install` for apt, dnf, yum |
 | `licenses` | `ubel-license` |
 | `secrets` | `ubel-secrets` |
@@ -2204,6 +2247,12 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
     version: 0.22.0
     args: install                     # scan-gated; resolves from ./environment.yml, installs the exact scanned builds
 
+- uses: AlaBouali/ubel@<commit-sha>    # needs a preceding step that installs Poetry (e.g. snok/install-poetry) and a Python interpreter for it
+  with:
+    command: poetry
+    version: 0.22.0
+    args: install                     # scan-gated; scans ./poetry.lock, then poetry install --no-root
+
 - uses: AlaBouali/ubel@<commit-sha>    # needs the Rust toolchain on PATH (e.g. dtolnay/rust-toolchain)
   with:
     command: cargo
@@ -2217,7 +2266,7 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `cargo`, `apt`, `dnf`, `yum`.
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `apt`, `dnf`, `yum`.
 
 **Calling the binaries directly** (self-hosted runners, non-GitHub CI, Dockerfiles):
 
@@ -2243,6 +2292,9 @@ All CLI commands exit non-zero on policy violations — and when a vulnerability
 
 - name: UBEL Python firewall-gated install (via conda)
   run: ubel-conda install
+
+- name: UBEL Python firewall-gated install (via poetry)
+  run: ubel-poetry install
 
 - name: UBEL apt firewall-gated install
   run: ubel-apt install curl
@@ -2312,6 +2364,11 @@ ubel-uv install requests==2.31.0
 ubel-conda check numpy=1.26
 ubel-conda install numpy=1.26
 ubel-conda install                        # no args → ./environment.yml
+
+# Python via Poetry: dry-run in a scratch copy of the project, then install the scanned pyproject.toml + poetry.lock
+ubel-poetry check requests@^2.31
+ubel-poetry install requests@^2.31
+ubel-poetry install                       # no args → scan the existing poetry.lock
 
 # Rust: dry-run in a scratch copy of the project, then write the scanned manifest/lockfile and `cargo fetch --locked`
 ubel-cargo check serde@1

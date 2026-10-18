@@ -15,12 +15,12 @@
  *                                              // Known Exploited Vulnerabilities catalog
  *   "epss_threshold": 0.1,                     // block EPSS score >= this (fraction,
  *                                              // 0.1 = 10%); "none" disables
- *   "block_undetermined": false,               // true = block when any component
+ *   "block_undetermined": true,                // true = block when any component
  *                                              // is "undetermined": no version, or
  *                                              // a source that is not matched
  *                                              // against any vulnerability database
  *                                              // (git / tarball URL / local path,
- *                                              // conda non-Python). Default false.
+ *                                              // conda non-Python). Default true.
  *   "reachable_only": false                    // true = the vulnerability rules
  *                                              // (severity, unknown, KEV, EPSS) only
  *                                              // count REACHABLE vulnerabilities;

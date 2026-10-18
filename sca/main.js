@@ -5,10 +5,10 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | cargo | apt | dnf | yum
+ *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | poetry | cargo | apt | dnf | yum
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown | install-hook | uninstall-hook
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
- *     conda/cargo/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
+ *     conda/poetry/cargo/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
  *     install-hook / uninstall-hook install/remove the git pre-commit hook that
  *     runs `<engine> health` (dependency scan only — no OS scan) on every
  *     commit that stages a dependency manifest/lockfile. Supported on every
@@ -27,7 +27,7 @@
  *       Separate from license-risk above: blocks packages whose license
  *       couldn't be classified at all, rather than a specific risk level.
  *       Same health-mode-only scope. Defaults to false.
- *     block-undetermined <true|false> — set block_undetermined (all engines, default false)
+ *     block-undetermined <true|false> — set block_undetermined (all engines, default true)
  *       Blocks when any component is "undetermined": no version, or a git / tarball
  *       URL / local-path source (or a non-Python conda package) that is never matched
  *       against a vulnerability database.
@@ -44,7 +44,7 @@
  *     --epss-threshold <value>     — override epss_threshold: block EPSS >= value. Accepts a
  *                                    fraction (0.1), a percentage (10%), or "none" to disable.
  *                                    A bare number above 1 is rejected (ambiguous: 10 vs 10%).
- *     --block-undetermined [true|false] — override block_undetermined (default false; bare = true)
+ *     --block-undetermined [true|false] — override block_undetermined (default true; bare = true)
  *     --reachable-only [true|false] — override reachable_only (default false): apply the
  *                                    vulnerability rules (severity, unknown, KEV, EPSS) to
  *                                    reachable vulnerabilities only (bare = true). Infections and
@@ -121,6 +121,7 @@
  *   auto-detection between them, same one-binary-per-tool shape as
  *   npm/pnpm/bun):
  *     node src/main.js <pip|uv|conda> <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> [packages...]
+ *     node src/main.js poetry  <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> [package[@constraint]...]   (init = `poetry init` when there is no pyproject.toml)
  *     node src/main.js cargo   <health|check|install|threshold|block-unknown|install-hook|uninstall-hook> [crate[@req]...]   (init only creates the asset id)
  *     node src/main.js pipx    <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook> <package>
  *     node src/main.js <apt|dnf|yum> <health|check|install|init|threshold|block-unknown> [packages...]                       (no hook modes)
@@ -167,6 +168,15 @@
  *     --no-deps --file <exact-pinned specs>` into <projectRoot>/conda-env (never
  *     `create` against an existing env). With no package args it falls back to
  *     ./environment.yml / ./environment.yaml; `init` creates an empty env there.
+ *
+ *     poetry (poetry_runner.js) — `check`/`install` resolve in a SCRATCH COPY of the project
+ *     (`poetry add --lock <packages>`; with no package args the project's own poetry.lock is
+ *     scanned as-is), so `check` leaves the project untouched. The scanned poetry.lock is the
+ *     inventory (full dependency graph + prod/dev scopes). A clean `install` writes the scanned
+ *     pyproject.toml + poetry.lock into the project and runs `poetry install --no-root` with
+ *     source distributions refused (`installer.only-binary`, verified against the installed
+ *     Poetry first); the originals are restored if it fails. Packages locked from git/URL/path
+ *     sources are reported "undetermined", never "safe".
  *
  *     apt/dnf/yum write reports/policy under $HOME (~/.ubel/local/...) rather
  *     than the project-relative default, so invoking them never requires sudo —
@@ -230,6 +240,7 @@
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
  *   pipx   — yes  (isolated per-tool venv via dryRunCli()/installCli(), not the shared project venv)
  *   conda  — yes  (`conda create --dry-run --json` against a scratch prefix; exact-pinned `--no-deps` real install)
+ *   poetry — yes  (`poetry add --lock` in a scratch copy of the project; scanned pyproject.toml + poetry.lock installed with `poetry install --no-root`)
  *   cargo  — yes  (`cargo add` + `cargo update --workspace` in a scratch copy of the project; `cargo fetch --locked` real install)
  *   apt/dnf/yum — yes (native OS package-manager dry-run; each engine bound to exactly one manager)
  */
@@ -241,6 +252,7 @@ import { NodeManagerInstance }  from "./node_runner.js";
 import { PhpComposerScanner }   from "./php_runner.js";
 import { PypiManagerInstance }  from "./pypi_runner.js";
 import { CondaManagerInstance } from "./conda_runner.js";
+import { PoetryManagerInstance } from "./poetry_runner.js";
 import { CargoManagerInstance } from "./cargo_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { banner }               from "./info.js";
@@ -386,7 +398,7 @@ const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun", "composer"]);
 // branch below (mirroring __main__.py's _run_mode), not through the
 // npm-family path, so they're intentionally NOT added to
 // CHECK_INSTALL_ENGINES above.
-const PYPI_ENGINES  = new Set(["pip", "pipx", "uv", "conda"]);
+const PYPI_ENGINES  = new Set(["pip", "pipx", "uv", "conda", "poetry"]);
 // Each of ubel-apt/ubel-dnf/ubel-yum targets exactly one native package
 // manager — no auto-detection across the three, same as ubel-npm never
 // guesses whether you meant pnpm.
@@ -398,7 +410,7 @@ const LINUX_ENGINES = new Set(["apt", "dnf", "yum"]);
 // with scan_os forced off — never the OS scanner.
 const HOOK_ENGINES = new Set([
   "npm", "pnpm", "bun", "yarn", "composer",
-  "pip", "pipx", "uv", "conda",
+  "pip", "pipx", "uv", "conda", "poetry",
   "cargo",
 ]);
 
@@ -544,6 +556,12 @@ function resolveManager(engine) {
     // installer mode.
     return { manager: new CondaManagerInstance(), systemType: "pypi" };
   }
+  if (engine === "poetry") {
+    // poetry shares the "pypi" systemType bucket (engine.js's Python-family dry-run →
+    // scan → gated-install branch) but resolves in a scratch copy of the project and
+    // installs from the scanned poetry.lock — see poetry_runner.js.
+    return { manager: new PoetryManagerInstance(), systemType: "pypi" };
+  }
   if (PYPI_ENGINES.has(engine)) {
     // pipx has no "uvx" equivalent implemented here — its CLI-isolation
     // methods (dryRunCli/installCli) are pip-only regardless of engine, so
@@ -629,7 +647,7 @@ async function handleHookMode(engine, mode, extraArgs) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"cargo"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"poetry"|"cargo"|"apt"|"dnf"|"yum".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
@@ -642,7 +660,7 @@ async function handleHookMode(engine, mode, extraArgs) {
  *   though only pip/uv/pipx's `init` actually provisions a Python venv there.
  * @param {string[]} [programmaticOptions.packages=[]]
  * @param {string}  [programmaticOptions.scan_scope="repository"]
- * @param {boolean} [programmaticOptions.block_undetermined=false]  When true, block when any component is
+ * @param {boolean} [programmaticOptions.block_undetermined=true]  When true, block when any component is
  *   "undetermined" (no version, or a git / URL / local-path source never matched against a vuln DB).
  * @param {boolean} [programmaticOptions.reachable_only=false]  When true, apply the vulnerability policy
  *   rules to reachable vulnerabilities only (unreachable ones are reported but never block).
@@ -827,7 +845,7 @@ async function main(programmaticOptions) {
   if (mode === "install-hook" || mode === "uninstall-hook") {
     if (!HOOK_ENGINES.has(engine)) {
       console.error(`[!] ${mode} is not supported for the '${engine}' engine.`);
-      console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, cargo");
+      console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, poetry, cargo");
       process.exit(1);
     }
     // The hook belongs to the repo in the cwd, so that is where its asset id lives.
@@ -938,7 +956,7 @@ async function main(programmaticOptions) {
   if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo") {
     const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown", "block-undetermined", "reachable-only"];
     const scanScope =
-      (engine === "pip" || engine === "uv" || engine === "conda" || engine === "cargo") ? "repository" :
+      (engine === "pip" || engine === "uv" || engine === "conda" || engine === "poetry" || engine === "cargo") ? "repository" :
       engine === "pipx" ? "cli_tool"   :
       "linux_machine"; // apt | dnf | yum
 
@@ -979,6 +997,9 @@ async function main(programmaticOptions) {
     }
 
     const effectiveMode = PIP_LINUX_VALID_MODES.includes(mode) ? mode : "health";
+    // poetry: `check`/`install` with no package args scan the project's own poetry.lock
+    // (resolved by PoetryManagerInstance.runDryRun), so there is no requirements.txt-style
+    // fallback below for it.
     eng.checkMode = effectiveMode;
 
     // Every CLI creates the asset id if it doesn't exist (init prints it below).
@@ -992,6 +1013,10 @@ async function main(programmaticOptions) {
       const venvDir = eng.venvDir || path.join(resolvedRoot, engine === "conda" ? "conda-env" : "venv");
       if (engine === "conda") {
         new CondaManagerInstance().initCondaEnv(venvDir);
+      } else if (engine === "poetry") {
+        // Poetry creates its own virtualenv on `install`; init only makes sure there is a
+        // pyproject.toml to resolve against (`poetry init --no-interaction`, idempotent).
+        new PoetryManagerInstance().initPoetryProject(resolvedRoot);
       } else if (engine === "uv") {
         new PypiManagerInstance("uv").initUvVenv(venvDir);
       } else {
@@ -1039,7 +1064,7 @@ async function main(programmaticOptions) {
       const value = raw === "true";
       eng.setPolicyField("block_undetermined", value);
       console.log(`[+] Policy updated: block_undetermined = ${value}`);
-      console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path / non-Python conda source) blocks. Defaults to false.");
+      console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path / non-Python conda source) blocks. Defaults to true.");
       process.exit(0);
     }
 
@@ -1206,7 +1231,7 @@ async function main(programmaticOptions) {
     const value = raw === "true";
     eng.setPolicyField("block_undetermined", value);
     console.log(`[+] Policy updated: block_undetermined = ${value}`);
-    console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path source) blocks. Defaults to false.");
+    console.log("[i] When true, a component that could not be matched against any vulnerability database (no version, or a git / URL / local-path source) blocks. Defaults to true.");
     process.exit(0);
   }
 

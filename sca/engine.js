@@ -3676,6 +3676,46 @@ export function scopeAffectedToDistro(affected, dependency, distro) {
   return keep("medium", `Advisory names ${d.family} without a release, so ${distro} could not be confirmed.`, pruned);
 }
 
+/**
+ * True when the installed version is itself listed as a `fixed` event in the advisory's ranges
+ * for this package. By OSV semantics the fixed version is NOT affected, so such a match is a
+ * false positive — it shows up with RPM-based distros (AlmaLinux, Rocky, RHEL, ...) where the
+ * advisory's affected ranges can still be returned for the very build that carries the fix.
+ *
+ * RPM epochs are tolerated: the installed epoch comes from the purl's `epoch` qualifier and
+ * the fixed version may carry an "N:" prefix ("1:2.3-4.el8" vs "2.3-4.el8"). An epoch is only
+ * compared when both sides state one.
+ */
+export function installedVersionIsFixed(affected, dependency, installedVersion, purl) {
+  const inst = String(installedVersion || "").trim();
+  if (!inst || !Array.isArray(affected)) return false;
+
+  const splitEpoch = (v) => {
+    const m = /^(\d+):(.+)$/.exec(String(v).trim());
+    return m ? { epoch: Number(m[1]), ver: m[2] } : { epoch: null, ver: String(v).trim() };
+  };
+  const instParts = splitEpoch(inst);
+  if (instParts.epoch === null) {
+    const q = /[?&]epoch=(\d+)/.exec(String(purl || ""));
+    if (q) instParts.epoch = Number(q[1]);
+  }
+
+  const dep = String(dependency || "").toLowerCase();
+  for (const item of affected) {
+    if (String(item?.package?.name || "").toLowerCase() !== dep) continue;
+    for (const range of (item.ranges || [])) {
+      for (const event of (range.events || [])) {
+        if (typeof event.fixed !== "string" || !event.fixed) continue;
+        const fx = splitEpoch(event.fixed);
+        if (fx.ver !== instParts.ver) continue;
+        if (fx.epoch !== null && instParts.epoch !== null && fx.epoch !== instParts.epoch) continue;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export async function getVulnById({ vulnerability_id, purl, dependency, affected_version, distro }) {
   let res;
   try {
@@ -3708,6 +3748,10 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
     if (!release.applicable) return null;
     data.affected = release.affected;
   }
+
+  // The installed version is the advisory's own fixed version (seen with RPM-based distros):
+  // it is not affected, so drop the finding. null = "not applicable" (same as the release check).
+  if (installedVersionIsFixed(data.affected, dependency, affected_version, purl)) return null;
 
   processVulnerability(data);
 
@@ -4207,11 +4251,11 @@ export async function enrichWithThreatIntel(vulnerabilities) {
 //   block_undetermined            — block when any component is left "undetermined":
 //                                   no version, or resolved from git / a tarball URL /
 //                                   a local path (or a non-Python conda package), so it
-//                                   was never matched against OSV/NVD. Default false:
-//                                   conda and VCS/URL dependencies are common and a
-//                                   fresh scan would otherwise block on them. Turn it on
-//                                   to make "could not be checked" a failure rather
-//                                   than a warning. Not affected by reachable_only.
+//                                   was never matched against OSV/NVD. Default true
+//                                   (fail closed): "could not be checked" is a failure,
+//                                   not a silent pass. Set it to false to downgrade
+//                                   conda / VCS / URL / path dependencies to a warning.
+//                                   Not affected by reachable_only.
 //   reachable_only                — apply the vulnerability rules above (severity,
 //                                   unknown severity, KEV, EPSS) to REACHABLE
 //                                   vulnerabilities only. A vulnerability the
@@ -4230,7 +4274,7 @@ const DEFAULT_POLICY = {
   block_unknown_vulnerabilities: true,
   license_risk_threshold:        "none",
   block_unknown_license_risk:    false,
-  block_undetermined:            false,
+  block_undetermined:            true,
   block_kev:                     true,
   epss_threshold:                0.1,
   reachable_only:                false,
@@ -4604,9 +4648,17 @@ export class UbelEngineInstance {
     // URLs or whitespace, so nothing can add a --git/--path/--registry source.
     const CARGO_SPEC_RE = /^[A-Za-z_][A-Za-z0-9_-]*(@[0-9A-Za-z.^~=<>*+!,-]+)?$/;
 
+    // poetry specifiers: `name`, `name[extras]`, then optionally `@constraint` or a PEP 440 /
+    // Poetry operator constraint (`requests@^2.31`, `requests>=2,<3`, `requests==2.31.0`).
+    // No whitespace, `/`, `\\`, `:` or `;`, so no git/URL/path source and no marker can be
+    // smuggled in; option-shaped arguments never match (first char must be a letter/digit).
+    const POETRY_SPEC_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?((@|==|>=|<=|!=|~=|===|>|<|\^|~)[0-9A-Za-z.*+!^~<>=,-]+)?$/;
+
     if (args.length) {
       const bad = this.engine === "composer"
         ? args.filter(a => !COMPOSER_PKG_ARG_RE.test(a))
+        : this.engine === "poetry"
+          ? args.filter(a => !POETRY_SPEC_RE.test(a))
         : this.engine === "conda"
           ? args.filter(a => !CONDA_SPEC_RE.test(a) || CONDA_ARTIFACT_RE.test(a))
         : this.engine === "cargo"
@@ -4618,6 +4670,8 @@ export class UbelEngineInstance {
         console.error(`[!] Rejected unsafe or malformed package argument(s): ${bad.join(", ")}`);
         console.error(this.engine === "composer"
           ? "[!] Expected format: vendor/package or vendor/package:constraint"
+          : this.engine === "poetry"
+            ? "[!] Expected format: a package name, optionally with extras and a constraint: requests, requests@^2.31 or requests[socks]>=2,<3 (no options, paths, URLs or git sources)"
           : this.engine === "conda"
             ? "[!] Expected format: a conda match spec such as numpy, numpy=1.26 or conda-forge::numpy>=1.26 (no options, paths or URLs)"
           : this.engine === "cargo"
@@ -4684,7 +4738,7 @@ export class UbelEngineInstance {
         purls         = resbom.inventory.map(c => c.id);
         reportContent = {};
       } else if (this.systemType === "pypi") {
-        // ── Python (pip / uv / pipx) firewall ────────────────────────────────
+        // ── Python (pip / uv / pipx / conda / poetry) firewall ───────────────
         if (needsRevert) {
           const venvDir = this.venvDir || path.join(projectRoot, "venv");
           if (this.engine === "pip") {
@@ -4694,6 +4748,11 @@ export class UbelEngineInstance {
           } else if (this.engine === "uv") {
             manager.initUvVenv(venvDir); // uv-native project + venv (`uv init` + `uv venv`), not a bare stdlib venv
             purls = manager.runDryRun(args, venvDir); // sets manager.engineVersion internally (uv --version)
+          } else if (this.engine === "poetry") {
+            // Resolves in a scratch copy of the project (`poetry add --lock`, or the project's own
+            // poetry.lock when there are no args), so `check` leaves the project untouched and there
+            // is nothing to revert (see poetry_runner.js).
+            purls = manager.runDryRun(args, projectRoot); // sets manager.engineVersion internally
           } else if (this.engine === "conda") {
             // No env pre-creation: the dry-run targets a scratch prefix that
             // never exists, so `check` leaves nothing behind (see conda_runner.js).
@@ -4823,11 +4882,11 @@ export class UbelEngineInstance {
           for (let j = 0; j < results.length; j++) {
             const r = results[j];
             if (r.value) vulnerabilities.push(r.value);
-            else if (batch[j]?.distro) notApplicable++;   // advisory is for another release
+            else notApplicable++;   // advisory is for another release, or installed version is already the fixed one
           }
         }
         if (notApplicable) {
-          console.log(`[*] Dropped ${notApplicable} OS advisor${notApplicable === 1 ? "y" : "ies"} that apply to a different distro release than the one scanned.`);
+          console.log(`[*] Dropped ${notApplicable} advisor${notApplicable === 1 ? "y" : "ies"} that do not apply (different distro release, or the installed version is already the fixed version).`);
         }
 
         // ── NVD query for CPE-based inventory items ──────────────────────────
@@ -5565,6 +5624,10 @@ export class UbelEngineInstance {
             const venvDir = this.venvDir || path.join(projectRoot, "venv");
             const reqFile = this._generateRequirementsFile(purls, projectRoot);
             manager.runRealInstall(reqFile, this.engine, venvDir);
+          } else if (this.engine === "poetry") {
+            // Writes the scanned pyproject.toml + poetry.lock into the project, then
+            // `poetry install --no-root`; restores the originals if the install fails.
+            manager.runRealInstall(projectRoot);
           } else if (this.engine === "conda") {
             const envDir   = this.venvDir || path.join(projectRoot, "conda-env");
             const specFile = manager.writeCondaSpecFile(purls, projectRoot);
@@ -5608,7 +5671,7 @@ export class UbelEngineInstance {
       return finalJson;
 
     } finally {
-      if (this.systemType === "cargo") manager.cleanup();
+      if (this.systemType === "cargo" || this.engine === "poetry") manager.cleanup();
       if (this.systemType === "npm" && !this.wasSuccessfulScan && needsRevert) {
         const revertResult = manager.revert_lock_to_original(this.engine, projectRoot);
         if (!revertResult.reverted) {
