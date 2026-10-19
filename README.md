@@ -9,7 +9,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | Module | What it does | Docs |
 | --- | --- | --- |
 | **SCA** | Resolves dependencies and scans them against OSV.dev and NVD in real time, with reachability analysis, KEV/EPSS exploit intelligence, license checks, CycloneDX SBOM and SARIF output. | [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) |
-| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`conda`/`cargo`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
+| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`conda`/`cargo`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. `yarn`/`bundle`/`go`/`dotnet`/`dart`/`flutter`/`swift` are gated on an existing lockfile instead (no lockfile, or any package argument, is refused). | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
@@ -22,16 +22,16 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Ecosystem | SCA | Firewall | SAST | Malware SAST | Reachability | License Compliance | Secrets |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node.js (yarn) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Python (pip/uv/pipx/conda/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Ruby (Bundler) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Go (modules) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| C# / .NET (NuGet) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ⚠️ (SwiftPM only, lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
@@ -40,7 +40,7 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Windows host | ✅ | ❌ | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
 
-✅ = built and shipped · ⚠️ = partial, see that ecosystem's section in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer.
+✅ = built and shipped ("lockfile required" = the firewall scans an existing lockfile instead of resolving a candidate) · ⚠️ = partial, see that ecosystem's section in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer.
 
 cargo caveat: only crates.io crates are scanned — git and alternative-registry dependencies are listed in a warning but not matched, and `build.rs`/proc-macros still run at `cargo build`, outside the firewall.
 
@@ -58,7 +58,8 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 
 | Binary | Purpose |
 | --- | --- |
-| `ubel-npm` / `ubel-pnpm` / `ubel-bun` / `ubel-yarn` | SCA (`health`) and firewall (`check` / `install`) for JS projects |
+| `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA (`health`) and firewall (`check` / `install`) for JS projects |
+| `ubel-yarn` / `ubel-bundle` / `ubel-go` / `ubel-dotnet` / `ubel-dart` / `ubel-flutter` / `ubel-swift` | SCA (`health`) plus a lockfile-required firewall for yarn, Bundler, Go, .NET, Dart/Flutter and SwiftPM: `check` / `install` need the lockfile to already exist and take no package arguments |
 | `ubel-composer` | Same, for PHP |
 | `ubel-pip` / `ubel-uv` / `ubel-pipx` / `ubel-conda` | Same, for Python (`ubel-conda`: `conda create --dry-run --json` against a scratch prefix, then an exact-pinned `--no-deps` install) |
 | `ubel-cargo` | Same, for Rust: `cargo add` + `cargo update --workspace` resolved in a scratch copy of the project, then `cargo fetch --locked` of the scanned lockfile |

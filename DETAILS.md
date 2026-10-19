@@ -9,7 +9,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 - **SCA** — resolves your dependency tree (and, in full-stack mode, other ecosystems present in the repo) and scans it against OSV.dev and NVD **in real time, on every scan** — not from a periodically-synced local database — with heuristic reachability analysis, SBOM (CycloneDX v1.6), and SARIF output. Both endpoints can be pointed at internal mirrors via `UBEL_OSV_ENDPOINT`/`UBEL_NVD_ENDPOINT` for air-gapped deployments (see [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables)); the KEV/EPSS exploit-intelligence feeds have no mirror setting and are simply reported as unavailable when unreachable. This is the audit/reporting side — `health` mode reads what's already installed. A **git pre-commit hook** (`ubel-<engine> install-hook`) can gate commits on this scan, dependency-only (no OS scan).
 - **Exploit intelligence** — every vulnerability is checked against CISA's [Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog and scored with [FIRST EPSS](https://www.first.org/epss/) (probability of exploitation in the next 30 days). By default the policy blocks on any KEV entry or an EPSS score of 10% or more, whatever the severity (tunable with `--block-kev` / `--epss-threshold`). The fields travel into the JSON, HTML, SBOM and SARIF outputs, and a feed outage degrades gracefully — the values become `null` (unknown, never "not exploited") and the matching rule isn't enforced — rather than aborting the scan. Applies to SCA, the firewall and EASM. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#exploit-intelligence-kev--epss).
 - **Executive summary & suggested fixes** — every SCA and EASM report opens with a plain-language executive summary for non-technical readers (risk rating, key findings, recommended actions, methodology; SCA adds the policy verdict), where known-exploited and likely-exploited issues raise the rating and the priority order. Each package also gets per-release-line upgrade suggestions (the fewest, highest versions that clear the most vulnerabilities, branch-aware; in SCA only vulnerabilities that violate the policy are counted), listed per component in the summary and carried in the JSON, SBOM and SARIF. See the SCA and EASM READMEs.
-- **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one.
+- **Firewall** — a distinct mode of the same CLI (`check` / `install`) that gates the install itself before anything touches `node_modules`, `pnpm`'s store, `bun`'s install path, or Composer's `vendor/` directory, with atomic lockfile revert on violation and SHA-256 TOCTOU checks between scan and install. The same pull → scan → keep-or-remove pattern also gates **Docker images** (`ubel-docker install <image>`) before you run them. **Also included in this same package:** `ubel-pip`/`ubel-uv`/`ubel-pipx` gate `pip`/`uv` installs and isolated CLI-tool installs behind a dry-run resolution, and `ubel-apt`/`ubel-dnf`/`ubel-yum` (one binary per package manager, same as npm/pnpm/bun) gate `apt`/`dnf`/`yum` installs behind each one's own native dry-run — neither has a lockfile to revert, so a rejected scan simply never runs the real install rather than reverting one. `ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter` and `ubel-swift` (Yarn, Bundler, Go, .NET, Dart, Flutter, SwiftPM) have no dry-run UBEL can safely drive, so they **require the project's lockfile to already exist** and gate on exactly what it pins: `check` scans it, `install` scans it and then runs the ecosystem's frozen install; no lockfile, or any package argument, is refused.
 - **SBOM re-scan** — `ubel-resbom <sbom.cdx.json>` takes an SBOM that UBEL generated earlier and scans it again against today's advisories: the components and dependency graph come from the SBOM, and the usual pipeline (OSV/NVD lookup, KEV/EPSS, policy, suggested fixes, executive summary, JSON / HTML / SBOM / SARIF) runs on them — no project, lockfile or package manager, and nothing is installed or reverted. It answers whether a release that was clean when scanned has become vulnerable since, and can gate a scheduled job on the policy. Reports are tagged `<source tag>_resbom` (`sca_resbom`, `npm_firewall_resbom`, …) and filed under the SBOM's own asset. See [Re-scanning an SBOM](#re-scanning-an-sbom--ubel-resbom).
 - **SBOM vulnerability fill** — `ubel-sbom <sbom.cdx.json>` takes any CycloneDX JSON SBOM (UBEL's or another tool's) and writes the known vulnerabilities of its components into the SBOM's own `vulnerabilities` array, each enriched with CISA KEV and FIRST EPSS. Components are looked up by **purl** (OSV); a component's **CPE** (NVD) is only used when it has no purl OSV can be asked about. Only `vulnerabilities` is written — no reachability, VEX analysis, policy, or JSON / HTML / SARIF report. See [Filling an SBOM's vulnerabilities](#filling-an-sboms-vulnerabilities--ubel-sbom).
 - **Secrets Detection** — built on Trivy's ported, Apache-2.0-attributed secret-scanning ruleset (see [NOTICE](https://github.com/AlaBouali/ubel/blob/main/sca/vendor/trivy/NOTICE)), extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault tokens, GCP API keys and OAuth tokens, Anthropic and OpenRouter keys, Stripe live restricted keys, and URL-embedded git credentials for GitHub, GitLab, Bitbucket, Azure DevOps and other git hosts, among others). Runs standalone via `ubel-secrets`, or as part of any `health`-mode SCA scan.
@@ -34,7 +34,8 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | Binary | Covers | What it does |
 |---|---|---|
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA + Firewall | Same binary, mode-dependent: `health` = SCA scan of installed deps; `check`/`install` = firewall gate on a lockfile dry-run. Also: `install-hook` / `uninstall-hook` to install a dependency-scan git pre-commit hook |
-| `ubel-yarn` | SCA | `health` only — yarn has no side-effect-free dry-run, so `check`/`install` exit non-zero with a clear "not supported" message instead of silently doing nothing. Supports `install-hook` / `uninstall-hook` (the hook only needs a `health` scan) |
+| `ubel-yarn` | SCA + Firewall | `health` = SCA scan of the installed graph; `check`/`install` = **lockfile-required** gate. yarn has no side-effect-free dry-run, so nothing is resolved: `yarn.lock` must already exist, `check` scans what it pins, and `install` scans it and then runs the frozen install (Yarn 1: `--frozen-lockfile --ignore-scripts`; Yarn 2+: `--immutable --mode=skip-build`). No package arguments. Supports `install-hook` / `uninstall-hook` |
+| `ubel-bundle` / `ubel-go` / `ubel-dotnet` / `ubel-dart` / `ubel-flutter` / `ubel-swift` | SCA + Firewall | Same lockfile-required model as `ubel-yarn`, for Bundler (`Gemfile.lock`), Go modules (`go.sum` + `go.mod`), .NET/NuGet (`packages.lock.json`), Dart and Flutter (`pubspec.lock`) and SwiftPM (`Package.resolved`). `health` = SCA scan; `check` = read the lockfile, scan what it pins, stop; `install` = same scan, then the frozen install of exactly that set (`BUNDLE_FROZEN=true bundle install`, `GOFLAGS=-mod=readonly go mod download`, `dotnet restore --locked-mode`, `dart`/`flutter pub get --enforce-lockfile`, `swift package resolve --force-resolved-versions`). No lockfile → refused; package arguments are refused in every mode. Supports `install-hook` / `uninstall-hook` |
 | `ubel-composer` | SCA + Firewall | `health` = SCA scan of `vendor/composer/installed.json` (falling back to `composer.lock`); `check`/`install` = firewall gate on a `composer require`/`update --no-install --no-scripts --no-plugins` dry-run, same lockfile-backed shape as npm/pnpm/bun. Also supports `install-hook` / `uninstall-hook` |
 | `ubel-pip` / `ubel-pipx` | SCA + Firewall | `health` = SCA scan of a venv's installed packages; `check`/`install` = firewall gate on a `pip install --dry-run` resolution. `ubel-pipx` additionally installs CLI tools into isolated, managed per-tool venvs with a global shim, reducing blast radius the way `pipx` itself does. Both support `install-hook` / `uninstall-hook` |
 | `ubel-uv` | SCA + Firewall | Same `health`/`check`/`install` split as `ubel-pip`, but targeting a uv-native venv (`uv init --bare` + `uv venv`, not a stdlib one) — the real install always still runs as `uv pip install -r <generated, exact-pinned file>`, same as pip; dry-run uses `uv pip install --dry-run` internally, which (unlike pip's JSON report) yields no dependency-graph data — see the Python section below. A real `install` on either engine also syncs any existing `requirements.txt`/`pyproject.toml` to the now-installed versions. Supports `install-hook` / `uninstall-hook` |
@@ -81,7 +82,7 @@ Every `health` report also carries a **Diffs** tab (`diffs` in the JSON): depend
 
 `health` mode also supports full-stack monorepo scanning (Python, PHP, Rust, Go, .NET, Java, Ruby, Swift, Flutter/Dart alongside Node) and host/platform scanning (Linux package managers, Windows registry) when invoked programmatically.
 
-**yarn** is supported in `health` mode only — it can't do a lockfile-only dry-run, so it has no firewall coverage below. It does support the dependency-scan pre-commit hook (`ubel-yarn install-hook`).
+**yarn** can't do a lockfile-only dry-run, so it is gated differently from npm/pnpm/bun: `ubel-yarn check`/`install` **require `yarn.lock` to already exist** and gate on what it pins (see [Firewall — Install-Time Gate](#firewall--install-time-gate)). The same lockfile-required model covers Bundler, Go, .NET, Dart, Flutter and SwiftPM (`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter` and `ubel-swift`). All of them support the dependency-scan pre-commit hook (`ubel-<engine> install-hook`).
 
 ### Pre-commit hook (dependency scanning)
 
@@ -90,7 +91,8 @@ ubel-npm install-hook                    # install the dependency-scan pre-commi
 ubel-npm install-hook --force            # chain to an existing foreign pre-commit hook
 ubel-npm uninstall-hook                  # remove it again
 # Same on: ubel-pnpm, ubel-bun, ubel-yarn, ubel-composer,
-#          ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-poetry, ubel-cargo
+#          ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-poetry, ubel-cargo,
+#          ubel-bundle, ubel-go, ubel-dotnet, ubel-dart, ubel-flutter, ubel-swift
 ```
 
 The hook runs `<engine> health` — a **dependency scan only**, no OS scan — on every commit, right after the secrets scan (it is the same single hook as `ubel-secrets --install-hook`). Set `UBEL_HOOK_SCA=auto` to run it only when a commit stages a package manifest or lockfile (a fixed pattern set covering npm/pnpm/bun/yarn/Composer/pip/uv/conda/Cargo/Go/Maven/Gradle/Bundler/SwiftPM/Carthage/pub manifests and lockfiles anywhere in the tree), or `UBEL_HOOK_SCA=off` to skip it. It does not run `check`, so no lockfile is written or reverted — a `health` scan is read-only against the installed graph, and a broken scan can never leave the working tree half-mutated.
@@ -112,6 +114,24 @@ The same block-before-you-touch-it pattern applies to `ubel-docker`: `install` m
 `ubel-composer` extends the same lockfile-backed pattern npm/pnpm/bun use to PHP: `composer require`/`update --no-install --no-scripts --no-plugins` (Composer's own equivalent of `--package-lock-only`) resolves the candidate tree and writes a candidate `composer.lock`/`composer.json` without touching `vendor/`, UBEL scans that candidate, and either proceeds via `composer install --no-scripts --no-plugins` or reverts both files from their on-disk backup — the same SHA-256 TOCTOU check and atomic revert as npm/pnpm/bun, just against Composer's own files. Lifecycle scripts are disabled with `--no-scripts` and Composer plugins (PHP code Composer loads in-process at startup, which `--no-scripts` does not cover) with `--no-plugins`, on both the dry-run and the real install.
 
 `ubel-pip`/`ubel-uv`/`ubel-pipx` extend the same before-you-touch-it approach to Python: `pip install --dry-run --report` (pip) or `uv pip install --dry-run` (uv) resolves the candidate set — including transitive dependencies — without installing anything, UBEL scans that resolution, and only then runs the real install (`pip install --only-binary=:all: --no-deps -r` / `uv pip install --only-binary=:all: --no-deps -r` against the same generated, exact-pinned file either way). A successful real install additionally syncs any `requirements.txt`/`pyproject.toml` already sitting in the project directory to the versions that actually got installed — see the Python section further down for exactly what that does and doesn't touch. There's no lockfile here, so there's nothing to revert — a blocked scan just means the real install never runs. Source distributions are refused rather than built (resolving a source-only package's metadata can require building an sdist, which runs arbitrary `setup.py`/build-backend code): the dry-run and the real install both pass `--only-binary=:all:`, so a package with no compatible wheel fails closed, and the real install also passes `--no-deps` so only the scanned, pinned set is installed. `ubel-conda` follows the same shape with a scratch-prefix dry-run: `conda create --dry-run --json` against a prefix that never exists resolves the full closure (so a fully-satisfied target still reports everything), UBEL scans it, and only then installs exactly the scanned builds (`--no-deps` plus exact pins, spec file SHA-256-checked immediately before conda runs). As with pip, there's no lockfile, so a blocked scan just means the real install never runs. `ubel-poetry` resolves the same way cargo does — in a scratch copy of the project (`poetry add --lock`, or the existing `poetry.lock` when no packages are given) — and scans the resulting `poetry.lock`, which carries the full dependency graph and the dependency groups. Only after a clean scan are the scanned `pyproject.toml`/`poetry.lock` written into the project (SHA-256-checked, and re-checked against the project's own `pyproject.toml` in case it changed mid-scan) and installed with `poetry install --no-root`, source distributions refused via `installer.only-binary` (verified against the installed Poetry first, so an older release fails closed); the originals are restored if the install fails. `ubel-cargo` resolves in a scratch copy of the project instead of editing it, so there's nothing to revert and `check` leaves the tree untouched: only after a clean scan are the scanned `Cargo.toml`/`Cargo.lock` written into the project (SHA-256-checked, and re-checked against the project's own files in case they changed mid-scan) and fetched with `cargo fetch --locked`. `ubel-apt`/`ubel-dnf`/`ubel-yum` mirror this for Linux host packages — three separate binaries, each bound to exactly one package manager's own native dry-run (`apt-get -s`, `dnf --assumeno`, `yum --assumeno` respectively, no auto-detection between them); their reports and policy live under `~/.ubel/local` so ordinary use never needs `sudo` — only the real install does.
+
+`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter` and `ubel-swift` cover the ecosystems where UBEL has no safe way to *resolve* a candidate lockfile first (`yarn add` always writes `node_modules`; SwiftPM resolving evaluates `Package.swift`; pub's dry-run prints a plan, not a lockfile). Instead of resolving, they **require the project's lockfile to already exist** and gate on what it pins:
+
+| Engine | Lockfile (required) | Manifest (required) | `install` runs, after a passing scan |
+|---|---|---|---|
+| `ubel-yarn` | `yarn.lock` | `package.json` | Yarn 1: `yarn install --frozen-lockfile --ignore-scripts`; Yarn 2+: `yarn install --immutable --mode=skip-build` |
+| `ubel-bundle` | `Gemfile.lock` | `Gemfile` | `bundle install` with `BUNDLE_FROZEN=true` |
+| `ubel-go` | `go.sum` | `go.mod` | `go mod download` with `GOFLAGS=-mod=readonly` |
+| `ubel-dotnet` | `packages.lock.json` | a `.csproj` / `.fsproj` / `.vbproj` / `.sln` | `dotnet restore --locked-mode` |
+| `ubel-dart` / `ubel-flutter` | `pubspec.lock` | `pubspec.yaml` | `dart pub get --enforce-lockfile` / `flutter pub get --enforce-lockfile` |
+| `ubel-swift` | `Package.resolved` | `Package.swift` | `swift package resolve --force-resolved-versions` |
+
+- **`check`** reads the lockfile (the same parsers `health` uses), looks the pinned packages up, applies the policy, and stops. Nothing is installed or written.
+- **`install`** does the same scan and, only if the policy passes, runs the frozen install of exactly that set; the installer fails rather than resolve anything that wasn't scanned.
+- **No lockfile → refused.** A missing or empty lockfile, a missing manifest, or **any package argument (in any mode, `health` included)** exits `1` before a package manager runs — adding a package means resolving it, which is the part that cannot be gated here. Add it with the package manager, review and commit the lockfile, then run `ubel-<engine> check|install` with no arguments. A lockfile that parses to zero packages is refused too, never reported as clean.
+- **Integrity:** the lockfile and manifest are SHA-256-hashed at scan time and re-checked right before the install (yarn goes through the same backup/TOCTOU/revert path as npm/pnpm/bun); if an installer rewrites the lockfile anyway, the original bytes are restored and the run fails. Reports are tagged `<engine>_firewall` (e.g. `go_firewall`).
+- **Install-time code:** only yarn skips lifecycle scripts. Bundler native extensions, SwiftPM manifests and NuGet-shipped MSBuild targets can run code during the install, after the scan has passed — the scan is the protection, not a sandbox. Dependencies from git/path/URL sources can't be matched against OSV and surface as `undetermined`.
+- **Not gated:** Maven (no lockfile), Gradle (its lockfile is opt-in and it has no install step apart from a build), CocoaPods and Carthage.
 
 ```bash
 
@@ -166,6 +186,12 @@ ubel-cargo check serde@1
 ubel-cargo install serde@1
 ubel-cargo install                     # no args → scans the project's existing Cargo.toml/Cargo.lock
 
+# Lockfile-required engines (yarn, Bundler, Go, .NET, Dart, Flutter, SwiftPM): the lockfile must already exist, no package arguments
+ubel-go check                          # scan what go.sum pins; installs nothing
+ubel-go install                        # same scan, then `go mod download` with -mod=readonly
+ubel-yarn install                      # yarn.lock scanned, then a frozen install
+# (ubel-bundle / ubel-dotnet / ubel-dart / ubel-flutter / ubel-swift work the same way)
+
 # Python CLI tool: scan-gated install into an isolated venv + global shim
 ubel-pipx install black
 
@@ -175,9 +201,9 @@ ubel-apt install curl
 # (ubel-dnf / ubel-yum work the same way, against dnf/yum instead)
 ```
 
-Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-composer`/`ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-poetry`/`ubel-cargo`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only (npm/pnpm/bun/composer) — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-poetry`/`ubel-cargo`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
+Policy (severity threshold, unknown-severity blocking) is configurable via `ubel-npm threshold <level>` and `ubel-npm block-unknown <bool>` (same subcommands under `ubel-composer`/`ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-poetry`/`ubel-cargo`/`ubel-yarn`/`ubel-bundle`/`ubel-go`/`ubel-dotnet`/`ubel-dart`/`ubel-flutter`/`ubel-swift`/`ubel-apt`/`ubel-dnf`/`ubel-yum`); malicious-package advisories are always blocked regardless of policy. License-risk policy (`license-risk`, `license-block-unknown`) is npm-family-only (npm/pnpm/bun/composer) — it isn't exposed as a subcommand on `ubel-pip`/`ubel-uv`/`ubel-pipx`/`ubel-conda`/`ubel-poetry`/`ubel-cargo`/`ubel-apt`/`ubel-dnf`/`ubel-yum`, matching those CLIs' narrower mode set.
 
-**Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — including when a vulnerability lookup against OSV or NVD can't be completed (network error, rate limit, outage, or a malformed response). A failed or incomplete scan is never treated as a pass: for `install`, nothing is installed and the lockfile is restored from backup.
+**Exit codes:** `check` and `install` exit `0` if policy passes, `1` if policy blocks or the scan itself fails — including when a vulnerability lookup against OSV or NVD can't be completed (network error, rate limit, outage, or a malformed response). A failed or incomplete scan is never treated as a pass: for `install`, nothing is installed and the lockfile is restored from backup. On the lockfile-required engines a missing or empty lockfile, or a package argument, also exits `1` before any package manager runs.
 
 **Full documentation — every mode, policy config, reachability decision ladder, the pre-commit hook, and programmatic API:**
 [**sca/README.md**](https://github.com/AlaBouali/ubel/blob/main/sca/README.md)
@@ -578,6 +604,11 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     command: cargo
     args: install                     # scan-gated: scans ./Cargo.lock, then `cargo fetch --locked`
 
+- uses: AlaBouali/ubel@<commit-sha>    # lockfile-required engine (also yarn, bundle, dotnet, dart, flutter, swift): go.sum must be committed, no package args
+  with:
+    command: go
+    args: check                       # `install` scans go.sum, then runs `go mod download` with -mod=readonly (needs Go on PATH, e.g. actions/setup-go; `check` needs no toolchain)
+
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: composer
@@ -589,7 +620,9 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `apt`, `dnf`, `yum` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `bundle`, `go`, `dotnet`, `dart`, `flutter`, `swift`, `apt`, `dnf`, `yum`, `resbom`, `sbom` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
+
+The lockfile-required commands (`yarn`, `bundle`, `go`, `dotnet`, `dart`, `flutter`, `swift`) fail the step with exit `1` when the lockfile is missing or `args` contains a package name — `args` is just the mode (`check` / `install` / `health`). `check` only reads files and needs no toolchain on the runner; `install` needs the package manager itself on `PATH` (the action doesn't provision it — add a setup step such as `actions/setup-go`).
 
 ### Calling the binaries directly
 
@@ -605,6 +638,9 @@ Equivalent, for self-hosted runners, non-GitHub CI, or a Dockerfile:
 
 - name: UBEL PHP firewall-gated install
   run: ubel-composer install
+
+- name: UBEL lockfile-gated install (yarn / Bundler / Go / .NET / Dart / Flutter / SwiftPM — the lockfile must be committed)
+  run: ubel-go install
 
 - name: UBEL SAST scan
   run: ubel-sast --fail-on exploitable
@@ -659,20 +695,31 @@ ecosystem it supports, across five capability axes:
 A quick note before the detail: **Firewall and SCA are not the same capability
 everywhere.** SCA (health scanning) works on anything UBEL can resolve a
 dependency tree for. Firewall (blocking a bad install *before* it lands)
-only exists where a package manager supports some form of dry-run
-resolution with no (or, for pip/uv, no *typical*) side effects — today
-that's **npm, pnpm, bun, and Docker images** via a true lockfile-only
-dry-run, **PHP (Composer)** via the same lockfile-backed mechanism
-(`composer require`/`update --no-install --no-scripts --no-plugins`), plus **pip/uv/pipx/conda/poetry**
-(`pip install --dry-run` / `uv pip install --dry-run` / `conda create --dry-run --json` / `poetry add --lock` in a scratch copy), **Rust (Cargo)**
-(`cargo add` + `cargo update --workspace` in a scratch copy of the project) and **Linux host
-packages** (`apt`/`dnf`/`yum`'s own native dry-run). Ruby, Go,
-Java/Kotlin, C#, and Windows remain SCA-covered but not firewall-covered
-below — their package managers genuinely have no dry-run-without-side-effects
-equivalent to gate against, which is a mechanical constraint of each
-ecosystem's tooling, not an oversight. **Swift (SwiftPM/Carthage)** and
-**Flutter/Dart (pub)** are SCA-only today as well — see their sections
-below.
+comes in two forms:
+
+1. **Dry-run resolution** — where a package manager can resolve a candidate
+   set with no (or, for pip/uv, no *typical*) side effects: **npm, pnpm, bun
+   and Docker images** via a true lockfile-only dry-run, **PHP (Composer)**
+   via the same lockfile-backed mechanism (`composer require`/`update
+   --no-install --no-scripts --no-plugins`), **pip/uv/pipx/conda/poetry**
+   (`pip install --dry-run` / `uv pip install --dry-run` / `conda create
+   --dry-run --json` / `poetry add --lock` in a scratch copy), **Rust
+   (Cargo)** (`cargo add` + `cargo update --workspace` in a scratch copy of
+   the project) and **Linux host packages** (`apt`/`dnf`/`yum`'s own native
+   dry-run).
+2. **Lockfile required** — where UBEL has no safe way to resolve a candidate
+   lockfile first: **yarn, Bundler (Ruby), Go modules, .NET/NuGet, Dart,
+   Flutter and SwiftPM**. Nothing is resolved: the project's lockfile must
+   already exist, `check` scans exactly what it pins, and `install` scans it
+   and then runs the ecosystem's frozen install of that same set. No
+   lockfile → refused, and package arguments are refused in every mode.
+
+Java/Kotlin (Maven) and Windows remain SCA-covered but not firewall-covered:
+Maven has no lockfile to require and no dry-run to hook into (Gradle's
+lockfile is opt-in and Gradle has no install step apart from a build), and
+Windows has no dry-run-without-side-effects equivalent to gate against —
+a mechanical constraint of each ecosystem's tooling, not an oversight.
+Carthage and CocoaPods are not gated either (SwiftPM's `Package.resolved` is).
 
 ---
 
@@ -681,16 +728,16 @@ below.
 | Ecosystem | SCA | Firewall | Pre-commit hook | SAST | Malware SAST | Reachability | License Compliance | Secrets |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Node.js (yarn) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node.js (yarn) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Python (pip/uv/pipx/conda/poetry/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Ruby (Bundler) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Go (modules) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Java / Kotlin (Maven) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| C# / .NET (NuGet) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ⚠️ (SwiftPM only, lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | ❌ | — | — | — | ✅ | ✅ (in image) |
 | Kubernetes manifests | — | — | ❌ | ✅ (misconfig) | — | — | — | ✅ |
@@ -701,7 +748,7 @@ below.
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
-> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where there's no per-engine binary to attach `install-hook` to: Go/Maven/NuGet/Ruby/Swift/pub have none of their own, so they show ⚠️ — a hook installed from an npm-family engine or `ubel-composer` runs a **full-stack** `health` scan, which also reads those ecosystems' manifests/lockfiles in the repo (their files are in the hook's `auto`-mode trigger list too), but there is no `ubel-go`/`ubel-maven`/… hook of their own. The pip/uv/pipx/conda/cargo hooks run a single-ecosystem `health`. The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
+> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where there's no per-engine binary to attach `install-hook` to: Maven/Kotlin has none of its own, so it shows ⚠️ — a hook installed from an npm-family engine or `ubel-composer` runs a **full-stack** `health` scan, which also reads Maven's manifests/lockfiles in the repo (its files are in the hook's `auto`-mode trigger list too), but there is no `ubel-maven` hook of its own. Yarn, Bundler, Go, .NET, Dart, Flutter and SwiftPM each have their own binary (`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter`, `ubel-swift`), so `ubel-<engine> install-hook` works for them like for the other engines. The pip/uv/pipx/conda/cargo hooks run a single-ecosystem `health`. The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
@@ -726,14 +773,19 @@ equivalent respectively) — UBEL resolves what *would* be installed, scans
 it against policy, and only proceeds if it's clean. TOCTOU is closed with
 SHA-256 integrity checks on the lockfile and `package.json` before and after
 resolution, and any policy-blocked change is rolled back atomically via
-`revert_lock_to_original`. **Yarn is deliberately excluded from firewalling**
-— not because UBEL doesn't support it, but because yarn itself has no
-side-effect-free dry-run equivalent to hook into: `yarn add` always writes
-to `node_modules` before you'd get a chance to block it. Yarn projects still
-get full SCA, SAST, secrets, license, and **pre-commit hook** coverage —
-they just can't be gated pre-install the way npm/pnpm/bun can, because
-yarn's own CLI doesn't offer a resolution step that stops short of writing
-to disk. (Python and Linux host packages also get a real pre-install gate
+`revert_lock_to_original`. **Yarn has no dry-run to resolve against** — `yarn add` always writes to
+`node_modules` before you'd get a chance to block it, and yarn's own CLI offers
+no resolution step that stops short of writing to disk — so `ubel-yarn` is
+gated the *lockfile-required* way instead: `yarn.lock` must already exist (no
+lockfile, or a package argument, is refused with exit `1`), `check` scans what
+it pins, and `install` scans it and then runs a frozen install
+(`yarn install --frozen-lockfile --ignore-scripts` on Yarn 1,
+`yarn install --immutable --mode=skip-build` on Yarn 2+), through the same
+backup, TOCTOU-hash and revert path npm/pnpm/bun use. Because nothing is
+resolved, adding a package is done with `yarn add` itself; review and commit
+the lockfile, then run `ubel-yarn` again. Yarn projects also get full SCA,
+SAST, secrets, license, and **pre-commit hook** coverage. (Python and Linux
+host packages also get a real pre-install gate
 now — see their sections below — just via a simpler revert-less mechanism,
 since neither has a lockfile to roll back.)
 
@@ -905,15 +957,18 @@ both a `Gemfile` and a `Gemfile.lock`); the `Gemfile` is read only to
 classify gems as dev/test/prod. Gems are reported as `pkg:gem/<name>@<version>`
 with license `unknown`.
 
-**Firewall:** Not available — same reasoning as Go/Java/.NET below: no
-side-effect-free dry-run install path in Bundler for UBEL to hook into.
+**Firewall:** Available via `ubel-bundle`, **lockfile required** — Bundler has no
+side-effect-free dry-run install path for UBEL to hook into, so nothing is
+resolved: `Gemfile.lock` and `Gemfile` must already exist (otherwise the run
+is refused, as is any package argument), `check` scans exactly the gems the
+lockfile pins, and `install` scans them and then runs `bundle install` with
+`BUNDLE_FROZEN=true`. Native extensions can still run code during that install,
+after the scan has passed.
 
-**Pre-commit hook:** Partial — there's no per-engine `ubel-bundler` binary
-to attach `install-hook` to (Ruby is read via `full_stack: true` monorepo
-scanning, not a dedicated CLI), but a hook installed from an npm-family
-engine or `ubel-composer` runs a full-stack `health` that includes
-`Gemfile.lock`, and `Gemfile`/`Gemfile.lock` are in the hook's
-`UBEL_HOOK_SCA=auto` trigger list.
+**Pre-commit hook:** `ubel-bundle install-hook` runs `ubel-bundle health` on
+each commit; `Gemfile`/`Gemfile.lock` are in the `UBEL_HOOK_SCA=auto` trigger
+list (and a hook installed from an npm-family engine or `ubel-composer` also
+covers Ruby through its full-stack `health`).
 
 **SAST / Malware SAST:** Full coverage, `.rb` chunking.
 
@@ -981,13 +1036,17 @@ exact versions and hashes, and may be absent or empty). The version in
 `!`-escaped module paths are restored — giving high-confidence version
 matching against OSV. License is `unknown`.
 
-**Firewall:** Not available.
+**Firewall:** Available via `ubel-go`, **lockfile required** — `go.sum` and `go.mod`
+must already exist (otherwise the run is refused, as is any package argument),
+`check` scans exactly the modules they pin, and `install` scans them and then
+runs `go mod download` with `GOFLAGS=-mod=readonly`, which verifies downloads
+against `go.sum` and cannot change it. Add a module with `go get`, review and
+commit `go.mod`/`go.sum`, then run `ubel-go` again.
 
-**Pre-commit hook:** Partial — there's no dedicated `ubel-go` binary to
-attach `install-hook` to (Go is read via `full_stack: true` monorepo
-scanning, not a dedicated CLI), but a hook installed from an npm-family
-engine or `ubel-composer` runs a full-stack `health` that includes it, and
-`go.mod`/`go.sum`/`go.work` are in the `UBEL_HOOK_SCA=auto` trigger list.
+**Pre-commit hook:** `ubel-go install-hook` runs `ubel-go health` on each
+commit; `go.mod`/`go.sum`/`go.work` are in the `UBEL_HOOK_SCA=auto` trigger list
+(a hook installed from an npm-family engine or `ubel-composer` also covers Go
+through its full-stack `health`).
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -1008,7 +1067,10 @@ tree in preference to the declarations. Versions that can't be resolved
 (e.g. managed by a remote-only parent) are inventoried without a version and
 not sent to OSV. License is `unknown`.
 
-**Firewall:** Not available.
+**Firewall:** Not available — Maven has no lockfile for UBEL to require and no
+side-effect-free dry-run to hook into. (Gradle's lockfile is opt-in and Gradle
+has no install step apart from a build, so there is no frozen install to gate
+either.)
 
 **Pre-commit hook:** Partial — no dedicated `ubel-maven` binary to attach
 `install-hook` to, but a full-stack `health` (from a hook installed via an
@@ -1041,13 +1103,20 @@ the project file's `<PackageReference>` entries (a `Condition` mentioning
 `debug`/`test` marks `dev`) and propagated down the graph. License is
 `unknown`.
 
-**Firewall:** Not available.
+**Firewall:** Available via `ubel-dotnet`, **lockfile required** — NuGet lock files
+are opt-in, so `packages.lock.json` (and a `.csproj`/`.fsproj`/`.vbproj`/`.sln`)
+must already exist; there is deliberately no fallback to `obj/project.assets.json`.
+Otherwise the run is refused, as is any package argument. `check` scans exactly
+what the lock file pins and `install` scans it and then runs
+`dotnet restore --locked-mode`. Create the lock file in a trusted environment
+with `dotnet restore --use-lock-file`. NuGet-shipped MSBuild targets can run code
+during the restore, after the scan has passed.
 
-**Pre-commit hook:** Partial — no dedicated `ubel-nuget` binary to attach
-`install-hook` to, but a full-stack `health` (from a hook installed via an
-npm-family engine or `ubel-composer`) includes it; `packages.lock.json`,
-`packages.config`, `Directory.Packages.props` and `*.csproj` are in the
-`auto`-mode trigger list.
+**Pre-commit hook:** `ubel-dotnet install-hook` runs `ubel-dotnet health` on each
+commit; `packages.lock.json`, `packages.config`, `Directory.Packages.props` and
+`*.csproj` are in the `auto`-mode trigger list (a hook installed from an
+npm-family engine or `ubel-composer` also covers .NET through its full-stack
+`health`).
 
 **SAST / Malware SAST:** Full coverage.
 
@@ -1084,13 +1153,20 @@ CocoaPods ecosystem, so those packages could never match an advisory.
 **Scopes:** None of these lockfiles distinguish dev from prod, so every
 Swift package is reported as `prod`.
 
-**Firewall:** Not available — Swift is SCA-only today.
+**Firewall:** Available via `ubel-swift` for **SwiftPM**, **lockfile required** —
+`Package.resolved` and `Package.swift` must already exist (otherwise the run is
+refused, as is any package argument), `check` scans exactly what
+`Package.resolved` pins (it does not fall back to `.build/workspace-state.json`
+or `Cartfile.resolved`), and `install` scans it and then runs
+`swift package resolve --force-resolved-versions`. Carthage and CocoaPods are
+not gated. Resolving evaluates `Package.swift`, which is code, after the scan
+has passed.
 
-**Pre-commit hook:** Partial — no dedicated `ubel-swift` binary to attach
-`install-hook` to, but a full-stack `health` (from a hook installed via an
-npm-family engine or `ubel-composer`) includes it; `Package.swift`,
-`Package.resolved`, `Cartfile(.resolved)` and `Podfile(.lock)` are in the
-`auto`-mode trigger list.
+**Pre-commit hook:** `ubel-swift install-hook` runs `ubel-swift health` on each
+commit; `Package.swift`, `Package.resolved`, `Cartfile(.resolved)` and
+`Podfile(.lock)` are in the `auto`-mode trigger list (a hook installed from an
+npm-family engine or `ubel-composer` also covers Swift through its full-stack
+`health`).
 
 **SAST / Malware SAST:** Covered — Swift is its own language family in both
 the vulnerability and malware catalogs (with dedicated mobile classes:
@@ -1140,12 +1216,17 @@ be matched against that package's advisories; the `repository_url` /
 `vcs_url` qualifier keeps the identity distinct in the inventory but doesn't
 stop the OSV lookup.
 
-**Firewall:** Not available — Flutter/Dart is SCA-only today.
+**Firewall:** Available via `ubel-dart` and `ubel-flutter`, **lockfile required** —
+`pubspec.lock` and `pubspec.yaml` must already exist (otherwise the run is
+refused, as is any package argument), `check` scans exactly what
+`pubspec.lock` pins, and `install` scans it and then runs
+`dart pub get --enforce-lockfile` / `flutter pub get --enforce-lockfile`, which
+fails instead of resolving anything the lockfile doesn't already pin.
 
-**Pre-commit hook:** Partial — no dedicated `ubel-pub` binary to attach
-`install-hook` to, but a full-stack `health` (from a hook installed via an
-npm-family engine or `ubel-composer`) includes it; `pubspec.yaml` /
-`pubspec.lock` are in the `auto`-mode trigger list.
+**Pre-commit hook:** `ubel-dart install-hook` / `ubel-flutter install-hook` run
+the engine's `health` on each commit; `pubspec.yaml` / `pubspec.lock` are in the
+`auto`-mode trigger list (a hook installed from an npm-family engine or
+`ubel-composer` also covers pub through its full-stack `health`).
 
 **SAST / Malware SAST:** Covered — Dart/Flutter is its own language family
 in both the vulnerability and malware catalogs (with the same dedicated
@@ -1525,20 +1606,26 @@ not treated as an afterthought bolted onto the dependency scanner.
 To keep this document honest rather than aspirational:
 
 - Firewall/pre-install gating is **npm, pnpm, bun, Composer, Docker,
-  pip/uv/pipx, conda, Poetry, Cargo, and Linux host packages (apt/dnf/yum) only** — not "every
+  pip/uv/pipx, conda, Poetry, Cargo, and Linux host packages (apt/dnf/yum)**
+  via a dry-run resolution, plus **yarn, Bundler, Go, .NET/NuGet, Dart,
+  Flutter and SwiftPM** via the *lockfile-required* model — not "every
   package manager," because most package managers genuinely don't offer a
-  dry-run resolution UBEL can safely gate against. Ruby (Bundler),
-  Go (modules), Java/Kotlin (Maven), C#/.NET (NuGet), and the
-  Windows host all remain without it for that reason — a hard mechanical
-  constraint, not a roadmap gap. Swift (SwiftPM/Carthage) and Flutter/Dart
-  (pub) are SCA-only as well, simply because no install gate has been built
-  for them yet.
-- **Yarn** is the one Node.js package manager left out of that list, for
-  the same kind of reason, not a different one: `yarn add` always writes
-  to `node_modules` immediately, with no lockfile-only/dry-run mode the
-  way npm/pnpm/bun each have. That's yarn's own CLI design, not a gap in
-  UBEL's implementation — there's no side-effect-free resolution step here
-  to hook a scan into before something's already been written to disk.
+  dry-run resolution UBEL can safely gate against. Java/Kotlin (Maven) and
+  the Windows host remain without it for that reason — Maven has no lockfile
+  to require — a hard mechanical constraint, not a roadmap gap. Carthage and
+  CocoaPods (SwiftPM's `Package.resolved` is gated, theirs are not) and
+  Gradle (its lockfile is opt-in and it has no install step apart from a
+  build) are not gated either.
+- **The lockfile-required engines don't resolve anything.** Yarn, Bundler,
+  Go, .NET, Dart, Flutter and SwiftPM refuse to run `check`/`install` without
+  an existing lockfile and refuse package arguments in every mode, because
+  adding a package means resolving it and that is the one step UBEL cannot
+  gate there. They scan exactly what the lockfile pins — not a candidate
+  resolution — and the frozen install fails rather than resolve anything
+  else. Only yarn skips lifecycle scripts; Bundler native extensions,
+  SwiftPM manifests and NuGet-shipped MSBuild targets can run code during the
+  install, after the scan has passed. Packages from git/path/URL sources
+  can't be matched against OSV and are reported `undetermined`.
 - pip's and uv's firewalls refuse source distributions: the dry-run and
   the real install pass `--only-binary=:all:`, so a package with no
   compatible wheel fails closed instead of running build-backend code. See
@@ -1564,12 +1651,13 @@ To keep this document honest rather than aspirational:
   License column); firewalling and inventory/license coverage are tracked
   and reported independently.
 - **Pre-commit hook coverage matches SCA coverage *among engines that
-  have a dedicated binary*.** Go, Maven/Kotlin, NuGet, Bundler, SwiftPM,
-  and pub are all SCA-covered via full-stack `health`, but there's no
-  per-engine CLI to attach `install-hook` to, so they're only covered
-  indirectly (⚠️): a hook installed from an npm-family engine or
-  `ubel-composer` scans them as part of its full-stack `health`. Docker and apt/dnf/yum have no hook at all
-  — Docker has no repo checkout, and apt/dnf/yum scan the host. The
+  have a dedicated binary*.** Maven/Kotlin is SCA-covered via full-stack
+  `health`, but there's no per-engine CLI to attach `install-hook` to, so
+  it's only covered indirectly (⚠️): a hook installed from an npm-family
+  engine or `ubel-composer` scans it as part of its full-stack `health`.
+  Yarn, Bundler, Go, .NET, Dart, Flutter and SwiftPM have their own
+  binaries and their own `install-hook`. Docker and apt/dnf/yum have no hook
+  at all — Docker has no repo checkout, and apt/dnf/yum scan the host. The
   secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate
   hook, separate feature, and separate scope (staged source files, not
   installed dependencies).

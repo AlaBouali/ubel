@@ -164,7 +164,7 @@ ubel-sbom    <sbom.cdx.json> [-o <file>]     # no <mode>: write vulnerabilities 
 # Pre-commit hook (any engine except docker and apt/dnf/yum):
 ubel-npm   install-hook [--force]      # install the pre-commit hook (secrets scan + dependency scan)
 ubel-npm   uninstall-hook              # remove it
-ubel-pip   install-hook                # works on pip/pipx/uv/conda/poetry/cargo/composer/yarn too
+ubel-pip   install-hook                # works on pip/pipx/uv/conda/poetry/cargo/composer/yarn/bundle/go/dotnet/dart/flutter/swift too
 
 # Any of the above, on health | check | install — one-off policy overrides, nothing saved:
 ubel-npm   check [packages...] [--threshold <level>] [--block-unknown [true|false]]
