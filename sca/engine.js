@@ -26,6 +26,7 @@ import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
 import { getComplianceForVulnerability, getComplianceForSecret, summarizeCompliance } from "./compliance_mappings.js";
 import { PypiManagerInstance } from "./pypi_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
+import { isLockfileGated, assertLockfileGate, assertNoPackageArgs, LockfileGateError } from "./lockfile_gate.js";
 import { getTailwindScript } from "./tailwindcss.js";
 import { getChartJSScript } from "./chartjs.js";
 import { getGoogleFontsScript } from "./googlefonts.js";
@@ -4608,6 +4609,25 @@ export class UbelEngineInstance {
       scan_secrets = false;  // secrets scanning is only supported in health mode
     }
 
+    // ── Lockfile-required engines (yarn / bundle / go / dotnet / dart / flutter / swift) ──
+    // check/install only proceed when the lockfile already exists (and no package arguments
+    // were given): the pinned set is scanned as-is, and `install` then runs the frozen install
+    // of exactly that set. Refused here, before any package manager is run — see lockfile_gate.js.
+    // Package names are refused in every mode (health included) — see assertNoPackageArgs().
+    if (!resbom && isLockfileGated(this.engine)) {
+      try {
+        assertNoPackageArgs(this.engine, args);
+        if (this.checkMode === "check" || this.checkMode === "install") {
+          assertLockfileGate(this.engine, projectRoot, args);
+        }
+      } catch (err) {
+        if (!(err instanceof LockfileGateError)) throw err;
+        if (!is_script) console.error(`[!] ${err.message}`);
+        // Handled like a policy block: the CLI exits 1, programmatic callers get the message.
+        throw new PolicyViolationError(err.message);
+      }
+    }
+
     // Scope and bare name must start with an alphanumeric so option-shaped
     // args ("--force", "-g", "--legacy-peer-deps", "--") are rejected rather
     // than passed to npm/pnpm/bun as flags. Keep in sync with
@@ -4790,6 +4810,17 @@ export class UbelEngineInstance {
         } else {
           purls         = manager.getLinuxPackages();
           reportContent = { system_info: manager.getOsInfo() };
+        }
+      } else if (this.systemType === "lockfile") {
+        // ── Lockfile-required firewall (bundle / go / dotnet / dart / flutter / swift) ──
+        // check/install scan exactly what the project's lockfile pins (the same parsers `health`
+        // uses); nothing is resolved, copied or modified (see lockfile_runner.js).
+        if (needsRevert) {
+          purls         = manager.runDryRun(args, projectRoot, { install: this.checkMode === "install" }); // sets manager.engineVersion
+          reportContent = manager.inventoryData;
+        } else {
+          purls         = await manager.getInstalled(projectRoot);
+          reportContent = {};
         }
       } else if (this.systemType === "cargo") {
         // ── Rust (cargo) firewall ────────────────────────────────────────────
@@ -5638,6 +5669,18 @@ export class UbelEngineInstance {
             const reqFile = this._generateRequirementsFile(purls, projectRoot);
             manager.installCli(args[0], undefined, null, reqFile);
           }
+        } catch (err) {
+          if (!is_script) console.error("[!] Failed to install package(s):", err.message);
+          process.exit(1);
+        }
+
+      } else if (this.systemType === "lockfile") {
+        // The lockfile was never modified, so there is nothing to write back or revert: the
+        // manager re-verifies the scanned lockfile/manifest fingerprints, then runs the frozen
+        // install (it fails rather than resolve anything that was not scanned) and restores
+        // the lockfile if an installer rewrote it anyway.
+        try {
+          manager.runRealInstall(projectRoot);
         } catch (err) {
           if (!is_script) console.error("[!] Failed to install package(s):", err.message);
           process.exit(1);

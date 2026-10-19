@@ -449,8 +449,12 @@ export class LockfileParser {
           continue;
         }
 
-        // key: "value"  or  key: value
-        const kv = trimmed.match(/^([\w.-]+|"[^"]+")\s*:\s*(.*)$/);
+        // `trimmed` still carries its indentation (only the end was trimmed); the field regex is
+        // anchored at ^, so it must be matched against the left-trimmed line — otherwise no field of
+        // any stanza is ever read and every yarn.lock parses to zero packages.
+        // Berry:   key: "value"   or  key: value
+        // Classic: key "value"    (yarn v1 writes no colon: `version "1.0.0"`, `lodash "^4.0.0"`)
+        const kv = trimmed.trimStart().match(/^([\w.-]+|"[^"]+")(?:\s*:\s*|\s+)(.*)$/);
         if (kv) {
           const key = kv[1].replace(/"/g, "");
           const val = kv[2].replace(/^"|"$/g, "").trim();

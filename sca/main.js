@@ -5,7 +5,8 @@
  * ── CLI usage (called by bin/* wrappers) ──────────────────────────────────────
  *   node src/main.js <engine> <mode> [...extra_args]
  *
- *   engine    : npm | pnpm | bun | composer | docker | pip | pipx | uv | conda | poetry | cargo | apt | dnf | yum
+ *   engine    : npm | pnpm | bun | yarn | composer | docker | pip | pipx | uv | conda | poetry | cargo | apt | dnf | yum
+ *               | bundle | go | dotnet | dart | flutter | swift      (the last seven: lockfile-required, see below)
  *   mode      : check | install | health | init | threshold | block-unknown | license-risk | license-block-unknown | install-hook | uninstall-hook
  *     license-risk and license-block-unknown are npm-family only — pip/pipx/uv/
  *     conda/poetry/cargo/apt/dnf/yum fall back to `health` for either (see PIP_LINUX_VALID_MODES).
@@ -115,6 +116,27 @@
  *     (asset id/name/type, machine id, runtime, git info, secrets findings, reachability verdicts)
  *     is carried over. No project, lockfile or package manager is needed and nothing is installed.
  *     See resbom.js.
+ *
+ *   Lockfile-required mode (yarn, bundle, go, dotnet, dart, flutter, swift — one bin/*.js each):
+ *     node src/main.js <yarn|bundle|go|dotnet|dart|flutter|swift> <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook>
+ *
+ *     These ecosystems have no dry-run resolution UBEL can safely drive (yarn add writes
+ *     node_modules, SwiftPM resolving evaluates Package.swift, ...), so instead of resolving a
+ *     candidate lockfile they REQUIRE the project's existing lockfile — see lockfile_gate.js:
+ *       check    the lockfile must exist (yarn.lock, Gemfile.lock, go.sum, packages.lock.json,
+ *                pubspec.lock, Package.resolved). What it pins is scanned, nothing is installed.
+ *       install  same scan; only if the policy passes, the frozen install of exactly that set
+ *                runs (yarn install --immutable | BUNDLE_FROZEN bundle install | go mod download |
+ *                dotnet restore --locked-mode | pub get --enforce-lockfile | swift package resolve
+ *                --force-resolved-versions).
+ *     No lockfile (or an empty one, or no manifest) → refused with exit 1 before any package
+ *     manager runs. Package arguments are refused too: adding a package means resolving it, which
+ *     is the part that cannot be gated. Add it with the package manager, review and commit the
+ *     lockfile, then run `ubel-<engine> check|install` with no arguments. Reports are tagged
+ *     <engine>_firewall. Maven (no lockfile) and Gradle (no install step) are not gated.
+ *     yarn goes through the npm-family path (lockfile backup/TOCTOU/revert, scripts skipped);
+ *     the others through LockfileGateManager (lockfile_runner.js: fingerprint check before the
+ *     install, lockfile restored if an installer rewrites it). `health` works on all of them.
  *
  *   Pip/pipx/uv/conda/apt/dnf/yum mode (each gets its own dedicated bin/*.js —
  *   ubel-pip, ubel-pipx, ubel-uv, ubel-conda, ubel-apt, ubel-dnf, ubel-yum; no
@@ -231,10 +253,14 @@
  *   npm    — yes  (--package-lock-only dry-run)
  *   pnpm   — yes  (--lockfile-only dry-run)
  *   bun    — yes  (--lockfile-only dry-run, node_modules untouched)
- *   yarn   — no   (no lockfile-only equivalent; yarn add always writes node_modules)
+ *   yarn   — yes, lockfile REQUIRED (no lockfile-only equivalent of `yarn add`; check scans yarn.lock, install runs the frozen install)
  *   composer — yes (`composer require/update --no-install --no-scripts` dry-run; vendor/ untouched)
- *   flutter/dart — no  (pub's dry-run prints a plan, not an installable candidate lockfile, so the scanned set can't be installed exactly)
- *   swift  — no   (SwiftPM has no dry-run: resolving clones the repo and evaluates its Package.swift, i.e. runs code)
+ *   flutter/dart — yes, lockfile REQUIRED (pub's dry-run prints a plan, not an installable candidate lockfile; pubspec.lock is scanned, then `pub get --enforce-lockfile`)
+ *   swift  — yes, lockfile REQUIRED (SwiftPM has no dry-run: resolving evaluates Package.swift; Package.resolved is scanned, then `resolve --force-resolved-versions`)
+ *   bundle — yes, lockfile REQUIRED (Gemfile.lock scanned, then a frozen `bundle install`)
+ *   go     — yes, lockfile REQUIRED (go.mod + go.sum; scanned, then `go mod download` with -mod=readonly)
+ *   dotnet — yes, lockfile REQUIRED (packages.lock.json scanned, then `dotnet restore --locked-mode`)
+ *   maven/gradle — not gated (Maven has no lockfile; Gradle has no install step apart from a build)
  *   docker — yes  (health/check/install all supported; see Docker mode above)
  *   pip    — yes  (`pip install --dry-run --report`; real install syncs requirements.txt/pyproject.toml after)
  *   uv     — yes  (`uv pip install --dry-run`; same post-install manifest sync as pip)
@@ -255,6 +281,8 @@ import { CondaManagerInstance } from "./conda_runner.js";
 import { PoetryManagerInstance } from "./poetry_runner.js";
 import { CargoManagerInstance } from "./cargo_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
+import { LockfileGateManager } from "./lockfile_runner.js";
+import { LOCKFILE_MANAGER_ENGINES } from "./lockfile_gate.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
@@ -392,7 +420,14 @@ const VALID_LICENSE_RISKS = new Set(["none", "low", "medium", "high"]);
 // ── Engines that support lockfile-only dry-runs ───────────────────────────────
 // composer joins this set via `--no-install`, composer's own equivalent of
 // npm's `--package-lock-only` — see php_runner.js's ENGINE_CONFIG.
-const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun", "composer"]);
+const CHECK_INSTALL_ENGINES = new Set(["npm", "pnpm", "bun", "composer", "yarn"]);
+
+// ── Lockfile-required engines ─────────────────────────────────────────────────
+// yarn (via the npm-family path above) and bundle/go/dotnet/dart/flutter/swift (via
+// LockfileGateManager) have no dry-run resolution UBEL can safely drive. Their check/install
+// REQUIRE the lockfile to exist: `check` scans what it pins and stops; `install` scans, and
+// only then runs the frozen install of exactly that set. See lockfile_gate.js for the rules.
+// LOCKFILE_MANAGER_ENGINES is everything in that family except yarn.
 
 // pip/pipx/uv/apt/dnf/yum are dispatched through their own dedicated CLI
 // branch below (mirroring __main__.py's _run_mode), not through the
@@ -412,6 +447,7 @@ const HOOK_ENGINES = new Set([
   "npm", "pnpm", "bun", "yarn", "composer",
   "pip", "pipx", "uv", "conda", "poetry",
   "cargo",
+  ...LOCKFILE_MANAGER_ENGINES,
 ]);
 
 // ── Per-run policy flags ──────────────────────────────────────────────────────
@@ -543,6 +579,12 @@ function applyPolicyOverrides(eng, overrides) {
  * apt/dnf/yum) is actually in play.
  */
 function resolveManager(engine) {
+  if (LOCKFILE_MANAGER_ENGINES.has(engine)) {
+    // Own systemType bucket: check/install read the project's EXISTING lockfile (refusing when
+    // there is none) and install it frozen — nothing is resolved, copied or reverted, so there
+    // is no scratch copy (cargo) or backup/revert (npm) step. See lockfile_runner.js.
+    return { manager: new LockfileGateManager(engine), systemType: "lockfile" };
+  }
   if (engine === "cargo") {
     // Own systemType bucket: the cargo firewall resolves in a scratch copy of
     // the project (no lockfile backup/revert like npm, no venv like pypi) —
@@ -647,7 +689,7 @@ async function handleHookMode(engine, mode, extraArgs) {
  *
  * @param {object|undefined} programmaticOptions
  * @param {string}  [programmaticOptions.projectRoot]          Absolute path to scan.
- * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"poetry"|"cargo"|"apt"|"dnf"|"yum".
+ * @param {string}  [programmaticOptions.engine="npm"]         "npm"|"pnpm"|"bun"|"yarn"|"composer"|"docker"|"pip"|"pipx"|"uv"|"conda"|"poetry"|"cargo"|"apt"|"dnf"|"yum"|"bundle"|"go"|"dotnet"|"dart"|"flutter"|"swift".
  * @param {string}  [programmaticOptions.mode="health"]        Scan mode.
  * @param {boolean} [programmaticOptions.is_script=true]
  * @param {boolean} [programmaticOptions.save_reports=true]
@@ -845,7 +887,7 @@ async function main(programmaticOptions) {
   if (mode === "install-hook" || mode === "uninstall-hook") {
     if (!HOOK_ENGINES.has(engine)) {
       console.error(`[!] ${mode} is not supported for the '${engine}' engine.`);
-      console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, poetry, cargo");
+      console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift");
       process.exit(1);
     }
     // The hook belongs to the repo in the cwd, so that is where its asset id lives.
@@ -953,10 +995,10 @@ async function main(programmaticOptions) {
   // real-install-via-generated-requirements-file behavior as pip — only the
   // dry-run mechanism differs internally (see pypi_runner.js).
   // ════════════════════════════════════════════════════════════════════════════
-  if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo") {
+  if (PYPI_ENGINES.has(engine) || LINUX_ENGINES.has(engine) || engine === "cargo" || LOCKFILE_MANAGER_ENGINES.has(engine)) {
     const PIP_LINUX_VALID_MODES = ["check", "install", "health", "init", "threshold", "block-unknown", "block-undetermined", "reachable-only"];
     const scanScope =
-      (engine === "pip" || engine === "uv" || engine === "conda" || engine === "poetry" || engine === "cargo") ? "repository" :
+      (engine === "pip" || engine === "uv" || engine === "conda" || engine === "poetry" || engine === "cargo" || LOCKFILE_MANAGER_ENGINES.has(engine)) ? "repository" :
       engine === "pipx" ? "cli_tool"   :
       "linux_machine"; // apt | dnf | yum
 
@@ -990,9 +1032,9 @@ async function main(programmaticOptions) {
 
     // cargo has no environment to provision, so there is nothing for `init` to build —
     // but it still creates the asset id, which is what init means for every ubel-* CLI.
-    if (engine === "cargo" && mode === "init") {
+    if ((engine === "cargo" || LOCKFILE_MANAGER_ENGINES.has(engine)) && mode === "init") {
       const asset = eng.provisionAsset(null, { announce: false });
-      console.log("[i] ubel-cargo has no environment to create; init only provisions the asset id.");
+      console.log(`[i] ubel-${engine} has no environment to create; init only provisions the asset id.`);
       process.exit(printInitAsset(asset) ? 0 : 1);
     }
 
@@ -1253,7 +1295,7 @@ async function main(programmaticOptions) {
   // ── check/install require lockfile-only dry-run support ─────────────────────
   if (!CHECK_INSTALL_ENGINES.has(engine) && (effectiveMode === "check" || effectiveMode === "install")) {
     console.error(`[!] '${engine}' is not supported.`);
-    console.error("[!] Supported engines: npm, pnpm, bun, composer");
+    console.error("[!] Supported engines: npm, pnpm, bun, yarn, composer");
     process.exit(1);
   }
 

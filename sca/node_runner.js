@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { createHash } from "crypto";
 
 import { LockfileParser, WorkspaceResolver } from "./lockfiles_parser.js";
+import { assertLockfileGate } from "./lockfile_gate.js";
 import { TOOL_NAME, TOOL_VERSION, TOOL_LICENSE } from "./info.js";
 import { PythonVenvScanner } from "./python_runner.js";
 import { PhpComposerScanner } from "./php_runner.js";
@@ -44,6 +45,12 @@ const ENGINE_CONFIG = {
   yarn: {
     lockfile:   "yarn.lock",
     binary:     "yarn",
+    // `yarn add` always writes node_modules, so there is no safe dry-run to resolve a
+    // candidate lockfile with. yarn is therefore a lockfile-REQUIRED engine (see
+    // lockfile_gate.js): runDryRun() refuses unless yarn.lock already exists and no package
+    // arguments were given, and this command is never reached. Kept only so the config shape
+    // matches the other engines.
+    lockfileRequired: true,
     dryRunCmd:  (args) => [
       "add",
       "--ignore-scripts",
@@ -51,6 +58,14 @@ const ENGINE_CONFIG = {
       ...args,
     ],
     installCmd: ["install", "--frozen-lockfile", "--ignore-scripts"],
+    // Yarn 2+ (Berry) dropped both Yarn 1 flags: --frozen-lockfile → --immutable, and
+    // --ignore-scripts → --mode=skip-build (skips the build step of every dependency).
+    installCmdFor: (version) => {
+      const major = parseInt(String(version || "").split(".")[0], 10);
+      return major >= 2
+        ? ["install", "--immutable", "--mode=skip-build"]
+        : ["install", "--frozen-lockfile", "--ignore-scripts"];
+    },
   },
 
   pnpm: {
@@ -507,6 +522,13 @@ export class NodeManagerInstance {
   const packageJsonPath = path.join(projectPath, "package.json");
   const lockPath        = path.join(projectPath, cfg.lockfile);
   const nodeModulesPath = path.join(projectPath, "node_modules");
+
+  // ── 1b. Lockfile-required engines (yarn) ────────────────────────────
+  // No yarn.lock, no package.json, an empty lockfile, or package arguments all refuse here —
+  // BEFORE the `npm init -y` and the `yarn add` below can touch the project.
+  if (cfg.lockfileRequired) {
+    assertLockfileGate(engine, projectPath, initialArgs);
+  }
 
   // ── 2. Determine if we can skip the dry‑run shell command ──────────
   const lockfileAlreadyPresent = fs.existsSync(lockPath);
@@ -1463,7 +1485,8 @@ export class NodeManagerInstance {
       );
     }
 
-    return spawnSync(cfg.binary, cfg.installCmd, {
+    const installCmd = cfg.installCmdFor ? cfg.installCmdFor(this.engineVersion) : cfg.installCmd;
+    return spawnSync(cfg.binary, installCmd, {
       cwd:   projectPath,
       shell: true,
       stdio: "inherit",

@@ -54,12 +54,17 @@ After installation, the following entry-point binaries are available:
 | `ubel-pnpm` | pnpm |
 | `ubel-bun` | bun |
 | `ubel-composer` | Composer (PHP) |
-| `ubel-yarn` | yarn — `health` mode only, no firewall (`check`/`install`) coverage; see note below |
+| `ubel-yarn` | yarn — `health`, plus `check`/`install` that **require `yarn.lock`**; see [Firewall Mechanics § Lockfile-required engines](#lockfile-required-engines) |
 | `ubel-pip` | pip — `health`/`check`/`install`, plus CLI-tool isolation via `ubel-pipx` below |
 | `ubel-uv` | uv — same `health`/`check`/`install` shape as `ubel-pip`, driven by `uv` instead; see note below |
 | `ubel-conda` | conda — same eight modes as `ubel-pip`; `check`/`install` driven by `conda create --dry-run`; see note below and [Firewall Mechanics § conda](#conda) |
 | `ubel-poetry` | Poetry — same eight modes as `ubel-pip`; `check`/`install` driven by `poetry add --lock` in a scratch copy of the project; see note below and [Firewall Mechanics § poetry](#poetry) |
 | `ubel-cargo` | Cargo (Rust) — `health`/`check`/`install` plus `threshold`/`block-unknown` (`init` only creates the [asset id](#asset-id-ubel_assetjson)); `check`/`install` resolve in a scratch copy of the project; see note below and [Firewall Mechanics § cargo](#cargo) |
+| `ubel-bundle` | Bundler (Ruby) — `check`/`install` require `Gemfile.lock`; see [§ Lockfile-required engines](#lockfile-required-engines) |
+| `ubel-go` | Go modules — `check`/`install` require `go.mod` + `go.sum`; see [§ Lockfile-required engines](#lockfile-required-engines) |
+| `ubel-dotnet` | .NET / NuGet — `check`/`install` require `packages.lock.json`; see [§ Lockfile-required engines](#lockfile-required-engines) |
+| `ubel-dart` / `ubel-flutter` | Dart / Flutter (pub) — `check`/`install` require `pubspec.lock`; see [§ Lockfile-required engines](#lockfile-required-engines) |
+| `ubel-swift` | SwiftPM — `check`/`install` require `Package.resolved`; see [§ Lockfile-required engines](#lockfile-required-engines) |
 | `ubel-pipx` | pip, CLI-tool isolation mode — installs into a dedicated per-tool venv with a global shim, same idea as upstream `pipx`, now scan-gated |
 | `ubel-apt` | apt (Debian/Ubuntu) |
 | `ubel-dnf` | dnf (RHEL 8+, AlmaLinux, Rocky) |
@@ -74,7 +79,7 @@ After installation, the following entry-point binaries are available:
 | `ubel-sbom` | fill a CycloneDX SBOM's `vulnerabilities` with its components' known vulnerabilities plus KEV / EPSS (purl → OSV first, CPE → NVD as fallback); changes nothing else in the file; see [Filling an SBOM with vulnerabilities](#filling-an-sbom-with-vulnerabilities-ubel-sbom) |
 
 
-> **yarn** does not support a lockfile-only dry-run — this is yarn's own CLI design, not a gap in UBEL's implementation: `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have. UBEL supports yarn in `health` scan mode only (via `ubel-yarn health`) and cannot provide install-blocking firewall coverage for it; `ubel-yarn check`/`install` exit non-zero immediately with a clear "not supported" message rather than silently doing nothing. **yarn does support the pre-commit hook** (`ubel-yarn install-hook`) since the hook only needs a `health` scan, which yarn does support.
+> **yarn** has no lockfile-only dry-run — `yarn add` always writes `node_modules` immediately, with no resolution step that stops short of that the way npm/pnpm/bun each have — so `ubel-yarn check`/`install` never resolve anything: they **require `yarn.lock` to already exist** and gate on what it pins (`check` scans it; `install` scans it and then runs the frozen install). No lockfile, or a package argument, is refused with exit `1`. See [Firewall Mechanics § Lockfile-required engines](#lockfile-required-engines). The same model covers Bundler, Go, .NET, Dart, Flutter and SwiftPM. **yarn also supports the pre-commit hook** (`ubel-yarn install-hook`), which only needs a `health` scan.
 >
 > **composer** gets the same lockfile-backed firewall treatment as npm/pnpm/bun — see [Firewall Mechanics § composer](#composer) — via `composer require`/`update --no-install --no-scripts --no-plugins`, Composer's own equivalent of `--package-lock-only`. It needs the `composer` binary itself on `PATH`, separate from PHP — same one-binary-per-tool requirement as `ubel-pnpm` needing `pnpm`.
 >
@@ -139,7 +144,7 @@ ubel-npm   <mode> [packages...]
 ubel-pnpm  <mode> [packages...]
 ubel-bun   <mode> [packages...]
 ubel-composer <mode> [packages...]
-ubel-yarn  health              # health only — check/install unsupported, see below
+ubel-yarn  <mode>             # health | check | install (no package args; requires yarn.lock) | ... see the lockfile-required line below
 
 ubel-pip   <mode> [packages...]        # health | check | install | init | threshold | block-unknown | block-undetermined | reachable-only
 ubel-uv    <mode> [packages...]        # same eight modes, same shape as ubel-pip
@@ -147,6 +152,7 @@ ubel-conda <mode> [packages...]        # same eight modes; check/install driven 
 ubel-poetry <mode> [package[@constraint]...]   # same eight modes; check/install driven by poetry (init = `poetry init` if there is no pyproject.toml)
 ubel-cargo <mode> [crate[@req]...]     # health | check | install | threshold | block-unknown | block-undetermined | reachable-only | init (asset id only)
 ubel-pipx  <mode> [package]
+ubel-yarn | ubel-bundle | ubel-go | ubel-dotnet | ubel-dart | ubel-flutter | ubel-swift  <mode>   # health | check | install | init (asset id only) | threshold | block-unknown | block-undetermined | reachable-only; every mode takes NO package arguments (any is an error, exit 1) and check/install require the lockfile
 
 ubel-apt   <mode> [packages...]        # dnf/yum below take the same shape
 ubel-dnf   <mode> [packages...]
@@ -438,6 +444,27 @@ Other differences worth knowing:
 - **Scopes** (`prod` / `dev` / `build`) come from `Cargo.toml`: `[dependencies]`, `[dev-dependencies]` and `[build-dependencies]`, written inline (`foo = "1"`), dotted (`foo.version = "1"`) or as a table (`[dev-dependencies.foo]`), including `[target.'cfg(…)'.…]` sections and renamed crates (`package = "real-name"`). The root manifest and every workspace member named in `[workspace] members` (minus `exclude`; `*` and `?` wildcards work within a path segment, `**` does not) are read. `[workspace.dependencies]` only declares versions, so it's skipped — what a member actually uses is taken from the member's own manifest. Scopes then propagate down `Cargo.lock` edges. This is a minimal TOML reader, not a full parser: a crate it can't attribute to any section defaults to `prod`, so an unusual manifest layout errs towards treating a dependency as production rather than hiding it.
 - `cargo install <binary-crate>` isn't covered — only a project's dependencies are gated.
 - Adding packages needs cargo ≥ 1.62 (`cargo add`).
+
+### Lockfile-required engines
+
+`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter` and `ubel-swift` cover ecosystems where UBEL has no safe way to *resolve* a candidate lockfile first (`yarn add` always writes `node_modules`; SwiftPM resolving evaluates `Package.swift`; pub's dry-run prints a plan, not a lockfile). Instead of resolving, they **require the project's lockfile to already exist** and gate on what it pins:
+
+| Engine | Lockfile (required) | Manifest (required) | `install` runs, after a passing scan |
+|---|---|---|---|
+| `ubel-yarn` | `yarn.lock` | `package.json` | Yarn 1: `yarn install --frozen-lockfile --ignore-scripts`; Yarn 2+: `yarn install --immutable --mode=skip-build` |
+| `ubel-bundle` | `Gemfile.lock` | `Gemfile` | `bundle install` with `BUNDLE_FROZEN=true` |
+| `ubel-go` | `go.sum` | `go.mod` | `go mod download` with `GOFLAGS=-mod=readonly` |
+| `ubel-dotnet` | `packages.lock.json` | a `.csproj` / `.fsproj` / `.vbproj` / `.sln` | `dotnet restore --locked-mode` |
+| `ubel-dart` / `ubel-flutter` | `pubspec.lock` | `pubspec.yaml` | `dart pub get --enforce-lockfile` / `flutter pub get --enforce-lockfile` |
+| `ubel-swift` | `Package.resolved` | `Package.swift` | `swift package resolve --force-resolved-versions` |
+
+- **`check`** reads the lockfile (the same parsers `health` uses), looks the pinned packages up, applies the policy, and stops. Nothing is installed or written.
+- **`install`** does the same, and only if the policy passes runs the frozen install of exactly that set. The installer fails rather than resolve anything that wasn't scanned.
+- **No lockfile → refused.** A missing or empty lockfile, a missing manifest, or any package argument (in any mode, `health` included) exits `1` before any package manager runs. Adding a package means resolving it, which is the part that cannot be gated here: add it with the package manager, review and commit the lockfile, then run `ubel-<engine> check|install` with no arguments. A lockfile that parses to zero packages is refused too, never reported as clean.
+- **Integrity:** the lockfile and manifest are hashed at scan time and re-checked right before the install; if either changed, the install aborts. If an installer rewrites the lockfile anyway, the original bytes are restored and the run fails. (yarn goes through the npm-family backup/TOCTOU/revert path instead.)
+- Reports are tagged `<engine>_firewall` (e.g. `go_firewall`). The package manager itself must be on `PATH` for `install` (not for `check`).
+- **Install-time code:** only yarn skips lifecycle scripts. Bundler native extensions, SwiftPM manifests and NuGet-shipped MSBuild targets can run code during the install, after the scan has passed.
+- **Not gated:** Maven (no lockfile), Gradle (its lockfile is opt-in and it has no install step apart from a build), CocoaPods and Carthage.
 
 ### apt / dnf / yum
 
