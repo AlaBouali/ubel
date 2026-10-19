@@ -740,11 +740,11 @@ Carthage and CocoaPods are not gated either (SwiftPM's `Package.resolved` is).
 | Swift (SwiftPM / Carthage) | ✅ | ⚠️ (SwiftPM only, lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| Docker images | ✅ (OS + app deps) | ✅ | ❌ | — | — | — | ✅ | ✅ (in image) |
-| Kubernetes manifests | — | — | ❌ | ✅ (misconfig) | — | — | — | ✅ |
-| Terraform / CloudFormation (IaC) | — | — | ❌ | ✅ (misconfig) | — | — | — | ✅ |
-| Linux host (apt/dnf/yum) | ✅ | ✅ | ❌ | — | — | — | ✅ | — |
-| Windows host | ✅ | ❌ | ❌ | — | — | — | ✅ | — |
+| Docker images | ✅ (OS + app deps) | ✅ | — | — | — | — | ✅ | ✅ (in image) |
+| Kubernetes manifests | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | — | ✅ | — |
+| Windows host | ✅ | ❌ | — | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — | — |
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer

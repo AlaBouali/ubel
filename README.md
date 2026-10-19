@@ -19,26 +19,26 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 
 ## Capability matrix
 
-| Ecosystem | SCA | Firewall | SAST | Malware SAST | Reachability | License Compliance | Secrets |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Node.js (yarn) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Python (pip/uv/pipx/conda/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Ruby (Bundler) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Go (modules) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Java / Kotlin (Maven) | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| C# / .NET (NuGet) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Swift (SwiftPM / Carthage) | ✅ | ⚠️ (SwiftPM only, lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ❌ | ✅ |
-| C/C++ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
-| Docker images | ✅ (OS + app deps) | ✅ | — | — | — | ✅ | ✅ (in image) |
-| Kubernetes manifests | — | — | ✅ (misconfig) | — | — | — | ✅ |
-| Terraform / CloudFormation (IaC) | — | — | ✅ (misconfig) | — | — | — | ✅ |
-| Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | ✅ | — |
-| Windows host | ✅ | ❌ | — | — | — | ✅ | — |
-| VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — |
+| Ecosystem | SCA | Firewall | Pre-commit hook | SAST | Malware SAST | Reachability | License Compliance | Secrets |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Node.js (npm/pnpm/bun) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Node.js (yarn) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Python (pip/uv/pipx/conda/poetry/venv) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| PHP (Composer) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ruby (Bundler) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Rust (Cargo) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Go (modules) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Java / Kotlin (Maven) | ✅ | ❌ | ⚠️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C# / .NET (NuGet) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Swift (SwiftPM / Carthage) | ✅ | ⚠️ (SwiftPM only, lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Docker images | ✅ (OS + app deps) | ✅ | — | — | — | — | ✅ | ✅ (in image) |
+| Kubernetes manifests | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | — | ✅ | — |
+| Windows host | ✅ | ❌ | — | — | — | — | ✅ | — |
+| VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — | — |
 
 ✅ = built and shipped ("lockfile required" = the firewall scans an existing lockfile instead of resolving a candidate) · ⚠️ = partial, see that ecosystem's section in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer.
 
