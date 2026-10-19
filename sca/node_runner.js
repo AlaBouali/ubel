@@ -775,10 +775,13 @@ export class NodeManagerInstance {
     // that package.json and the lockfile are still exactly what was scanned. Nothing is written.
     const readOnly = !!cfg.lockfileRequired;
 
-    const pkgExpectedHash  = this._candidatePackageJsonHash ?? this._original_package_json_hash;
-    const pkgCheck         = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
-    if (!pkgCheck.ok) {
-      return { reverted: false, reason: pkgCheck.reason, backupDir: tmpDir };
+    // yarn `check` reads the lockfile only, so package.json is not part of what was scanned.
+    if (!readOnly) {
+      const pkgExpectedHash  = this._candidatePackageJsonHash ?? this._original_package_json_hash;
+      const pkgCheck         = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
+      if (!pkgCheck.ok) {
+        return { reverted: false, reason: pkgCheck.reason, backupDir: tmpDir };
+      }
     }
 
     const lockExpectedHash = this._candidateLockfileHash ?? this._original_lockfile_hash;

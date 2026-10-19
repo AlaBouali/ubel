@@ -30,6 +30,21 @@
 import fs   from "fs";
 import path from "path";
 
+/**
+ * Master switch for `install` on the lockfile-required engines (yarn, bundle, go, dotnet, dart,
+ * flutter, swift). They are currently CHECK-ONLY: main.js refuses `install` for them at the entry
+ * point (CLI and programmatic). All the install machinery below and in lockfile_runner.js /
+ * node_runner.js / engine.js is kept; set this to `true` to switch it back on.
+ */
+export const LOCKFILE_INSTALL_ENABLED = false;
+
+/** Message shown when `install` is requested while LOCKFILE_INSTALL_ENABLED is false. */
+export function lockfileInstallDisabledMessage(engine) {
+  const cfg = LOCKFILE_GATE[engine];
+  return `ubel-${engine} has no install mode: it only scans the lockfile. Run \`ubel-${engine} check\`, ` +
+         `and only when it exits 0 install with ${cfg ? cfg.binary : engine}'s own frozen/locked command.`;
+}
+
 export class LockfileGateError extends Error {
   constructor(message, { engine, problems = [] } = {}) {
     super(message);

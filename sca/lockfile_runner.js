@@ -247,7 +247,9 @@ export class LockfileGateManager {
 
     this.inventoryData = this.buildDependencySequences(components);
 
-    const watched = [...gate.lockfiles, ...gate.manifests];
+    // check fingerprints the lockfile only (the manifest is not read); install also watches the
+    // manifest the frozen install reads.
+    const watched = install ? [...gate.lockfiles, ...gate.manifests] : [...gate.lockfiles];
     this._state = {
       root,
       lockfiles: gate.lockfiles,
@@ -256,6 +258,42 @@ export class LockfileGateManager {
     };
 
     return this.inventoryData.map(c => c.id);
+  }
+
+  // ── TOCTOU ──────────────────────────────────────────────────────────────────
+
+  /** basenames of the watched files whose bytes differ from what was fingerprinted at scan time. */
+  _changedSinceScan() {
+    const s = this._state;
+    const changed = [];
+    for (const f of s.watched) {
+      const now  = readOrNull(f);
+      const then = s.scanned[f];
+      if ((now ? sha256(now) : null) !== (then ? then.sha : null)) changed.push(path.basename(f));
+    }
+    return changed;
+  }
+
+  /**
+   * TOCTOU guard for `check`: the lockfile must still be byte-for-byte what was scanned. The scan
+   * spends time on network lookups, and the verdict is only meaningful for the file it was made on
+   * — whoever installs from this lockfile afterwards relies on that. Call it once the verdict is
+   * final. Returns { "<lockfile>": "<sha256>" } of what was scanned (surface it so a CI step can
+   * compare it with the lockfile it later installs from).
+   * @throws {Error} when a scanned file changed or is gone.
+   */
+  verifyScanned(projectRoot) {
+    const s = this._state;
+    if (!s) throw new Error("No scanned lockfile to verify — runDryRun() must run first.");
+    if (path.resolve(projectRoot) !== s.root) throw new Error("Refusing to verify a different project than the one that was scanned.");
+    const changed = this._changedSinceScan();
+    if (changed.length) {
+      throw new Error(
+        `${changed.join(", ")} changed while it was being scanned — the result does not describe what is on disk. ` +
+        `Nothing was installed; re-run.`
+      );
+    }
+    return Object.fromEntries(s.lockfiles.map(f => [path.basename(f), s.scanned[f].sha]));
   }
 
   // ── real install ────────────────────────────────────────────────────────────
@@ -277,13 +315,10 @@ export class LockfileGateManager {
     if (root !== s.root) throw new Error("Refusing to install into a different project than the one that was scanned.");
 
     // TOCTOU: the lockfile (and manifest) must still be byte-for-byte what was scanned.
-    for (const f of s.watched) {
-      const now  = readOrNull(f);
-      const then = s.scanned[f];
-      if ((now ? sha256(now) : null) !== (then ? then.sha : null)) {
-        console.error(`Scanned lockfile integrity check FAILED — ${path.basename(f)} changed after scanning.`);
-        throw new Error(`${path.basename(f)} changed between scan and install — install aborted; re-run.`);
-      }
+    const changed = this._changedSinceScan();
+    if (changed.length) {
+      console.error(`Scanned lockfile integrity check FAILED — ${changed[0]} changed after scanning.`);
+      throw new Error(`${changed[0]} changed between scan and install — install aborted; re-run.`);
     }
 
     const inst = INSTALLERS[this.engine];

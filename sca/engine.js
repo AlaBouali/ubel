@@ -26,7 +26,7 @@ import { enrichInventoryWithLicenseRisk } from "./license_checker.js";
 import { getComplianceForVulnerability, getComplianceForSecret, summarizeCompliance } from "./compliance_mappings.js";
 import { PypiManagerInstance } from "./pypi_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
-import { isLockfileGated, assertLockfileGate, assertNoPackageArgs, LockfileGateError } from "./lockfile_gate.js";
+import { isLockfileGated, assertLockfileGate, assertNoPackageArgs, LockfileGateError, LOCKFILE_GATE } from "./lockfile_gate.js";
 import { getTailwindScript } from "./tailwindcss.js";
 import { getChartJSScript } from "./chartjs.js";
 import { getGoogleFontsScript } from "./googlefonts.js";
@@ -5612,6 +5612,28 @@ export class UbelEngineInstance {
       }
 
       if (this.checkMode === "check") {
+        // TOCTOU: on the lockfile-required engines the verdict is only meaningful for the exact
+        // lockfile that was scanned, so it must still be byte-for-byte unchanged now that the
+        // verdict is final. The digest is printed so CI can compare it with what it installs from.
+        if (isLockfileGated(this.engine)) {
+          let digests = {};
+          try {
+            if (this.systemType === "lockfile") {
+              digests = manager.verifyScanned(projectRoot);
+            } else {
+              // yarn (npm-family path): readOnly, so this only compares the lockfile hash.
+              const v = manager.revert_lock_to_original(this.engine, projectRoot);
+              if (!v.reverted) throw new Error(`${v.reason} — the result does not describe what is on disk; re-run.`);
+              digests = { [LOCKFILE_GATE[this.engine].lockfiles[0]]: manager._original_lockfile_hash };
+            }
+          } catch (err) {
+            if (!is_script) console.error(`[!] Scanned lockfile integrity check FAILED — ${err.message}`);
+            throw new PolicyViolationError(`Scanned lockfile integrity check failed: ${err.message}`);
+          }
+          if (!is_script) {
+            for (const [name, sha] of Object.entries(digests)) console.log(`[i] ${name} sha256: ${sha}`);
+          }
+        }
         this.wasSuccessfulScan = true;
         if (this.systemType === "npm") {
           manager.revert_lock_to_original(this.engine, projectRoot);

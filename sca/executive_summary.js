@@ -155,12 +155,20 @@ function joinList(items) {
   return items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
 }
 
+// Engines whose firewall is check-only: nothing is resolved or installed, `check` scans exactly
+// what the project's lockfile pins (see lockfile_gate.js). Keep in sync with LOCKFILE_GATE there.
+const LOCKFILE_ONLY_ENGINES = new Set(["yarn", "bundle", "go", "dotnet", "dart", "flutter", "swift"]);
+
 function describeScan(report) {
   const type  = report?.scan_info?.type || "health";
   const scope = report?.scan_info?.scope || report?.scan_info?.scan_scope || "repository";
+  // report.engine.name is the package manager that ran the scan (scan_info.engine is the tool name).
+  const lockfileOnly = type === "check" && LOCKFILE_ONLY_ENGINES.has(report?.engine?.name);
   const what = {
     health:  "an assessment of the software components currently installed",
-    check:   "a pre-installation check of the software components that would be added or changed",
+    check:   lockfileOnly
+      ? "a pre-installation check of the project's dependency lockfile, covering exactly the software components it pins"
+      : "a pre-installation check of the software components that would be added or changed",
     install: "a gate check run before software components are installed",
   }[type] || "a software security assessment";
   const scopeText = {
@@ -175,7 +183,7 @@ function describeScan(report) {
     container_image:     "a container image",
     license:             "a license inventory",
   }[scope] || null;
-  return { type, what, scopeText };
+  return { type, what, scopeText, lockfileOnly };
 }
 
 // Suggest one upgrade target per component. For each vulnerability on the
@@ -517,7 +525,9 @@ function buildMethodology(report, ctx) {
 
   const inventoryText = {
     health:  "Listed the software components already installed in the scanned location, including components pulled in indirectly by other components.",
-    check:   "Worked out which components would be added or changed, including those they depend on, without installing anything.",
+    check:   scan.lockfileOnly
+      ? "Read the project's dependency lockfile and listed exactly the components it pins, including components pulled in indirectly, without installing or changing anything."
+      : "Worked out which components would be added or changed, including those they depend on, without installing anything.",
     install: "Worked out which components would be added or changed, including those they depend on, before deciding whether installation may proceed.",
   }[scan.type] || "Listed the software components in scope, including components pulled in indirectly.";
 
@@ -796,7 +806,9 @@ export function buildExecutiveSummary(report) {
   const risk = overallRisk(m);
 
   // ── Verdict ───────────────────────────────────────────────────────────────
-  const subject = scan.type === "health" ? "The scanned software" : "The proposed change";
+  const subject = scan.type === "health" ? "The scanned software"
+    : scan.lockfileOnly ? "The locked set of software components"
+    : "The proposed change";
   const verdict = decision.allowed
     ? {
         status: "pass",
@@ -812,7 +824,9 @@ export function buildExecutiveSummary(report) {
         label: "Does not meet security policy",
         statement: (scan.type === "health"
           ? "The scanned software does not meet the organization's configured security policy. The blocking items must be resolved to pass."
-          : "The change was stopped by the organization's security policy and should not go ahead until the blocking items are resolved.") +
+          : scan.lockfileOnly
+            ? "The locked set of software components does not meet the organization's configured security policy and should not be installed until the blocking items are resolved."
+            : "The change was stopped by the organization's security policy and should not go ahead until the blocking items are resolved.") +
           (decision.reason ? ` Reason given by the policy check: ${decision.reason}.` : ""),
       };
 

@@ -118,14 +118,15 @@
  *     See resbom.js.
  *
  *   Lockfile-required mode (yarn, bundle, go, dotnet, dart, flutter, swift — one bin/*.js each):
- *     node src/main.js <yarn|bundle|go|dotnet|dart|flutter|swift> <health|check|install|init|threshold|block-unknown|install-hook|uninstall-hook>
+ *     node src/main.js <yarn|bundle|go|dotnet|dart|flutter|swift> <health|check|init|threshold|block-unknown|install-hook|uninstall-hook>
+ *     (`install` is refused at this entry point — see LOCKFILE_INSTALL_ENABLED in lockfile_gate.js)
  *
  *     These ecosystems have no dry-run resolution UBEL can safely drive (yarn add writes
  *     node_modules, SwiftPM resolving evaluates Package.swift, ...), so instead of resolving a
  *     candidate lockfile they REQUIRE the project's existing lockfile — see lockfile_gate.js:
  *       check    the lockfile must exist (yarn.lock, Gemfile.lock, go.sum, packages.lock.json,
  *                pubspec.lock, Package.resolved). What it pins is scanned, nothing is installed.
- *       install  same scan; only if the policy passes, the frozen install of exactly that set
+ *       install  DISABLED for now (the code is kept; LOCKFILE_INSTALL_ENABLED = false). When enabled: same scan; only if the policy passes, the frozen install of exactly that set
  *                runs (yarn install --immutable | BUNDLE_FROZEN bundle install | go mod download |
  *                dotnet restore --locked-mode | pub get --enforce-lockfile | swift package resolve
  *                --force-resolved-versions).
@@ -282,7 +283,7 @@ import { PoetryManagerInstance } from "./poetry_runner.js";
 import { CargoManagerInstance } from "./cargo_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { LockfileGateManager } from "./lockfile_runner.js";
-import { LOCKFILE_MANAGER_ENGINES } from "./lockfile_gate.js";
+import { LOCKFILE_MANAGER_ENGINES, LOCKFILE_INSTALL_ENABLED, isLockfileGated, lockfileInstallDisabledMessage } from "./lockfile_gate.js";
 import { banner }               from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
@@ -744,6 +745,11 @@ async function main(programmaticOptions) {
       ...rest
     } = programmaticOptions;
 
+    // Lockfile-required engines are check-only while LOCKFILE_INSTALL_ENABLED is false.
+    if (mode === "install" && isLockfileGated(engine) && !LOCKFILE_INSTALL_ENABLED) {
+      throw new Error(lockfileInstallDisabledMessage(engine));
+    }
+
     // Resolve projectRoot to an absolute path.  When omitted, fall back to
     // the current working directory.  This is the ONLY place cwd() is called
     // in the programmatic path — the resolved absolute path is then passed
@@ -865,6 +871,14 @@ async function main(programmaticOptions) {
 
   if (!engine) {
     console.error("Usage: ubel-<engine> <mode> [args...] [--asset-id <asset-id>]");
+    process.exit(1);
+  }
+
+  // Lockfile-required engines (yarn, bundle, go, dotnet, dart, flutter, swift) are check-only
+  // while LOCKFILE_INSTALL_ENABLED (lockfile_gate.js) is false: refuse `install` before anything
+  // runs. The install code behind it is intentionally kept.
+  if (mode === "install" && isLockfileGated(engine) && !LOCKFILE_INSTALL_ENABLED) {
+    console.error(`[!] ${lockfileInstallDisabledMessage(engine)}`);
     process.exit(1);
   }
 
