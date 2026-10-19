@@ -253,6 +253,41 @@ export class GoModScanner {
   }
 
   // ─────────────────────────────
+  // Lockfile-only scan (firewall `check` / `install`)
+  //
+  // Reads go.sum ONLY — go.mod (require / replace / // indirect) is not consulted. Without
+  // go.mod the versions cannot be narrowed to the build list, so every source entry in go.sum
+  // is reported, stale versions included: over-reporting is the safe direction for a firewall.
+  // `/go.mod` hash lines are already excluded by _parseGoSum(). `health` mode keeps using
+  // _scanProject(), which merges go.mod.
+  // ─────────────────────────────
+  _scanLockfileOnly(projectRoot) {
+    const sumEntries = this._parseGoSum(path.join(projectRoot, "go.sum"));
+    const components = [];
+
+    for (const [, { path: mp, versions }] of sumEntries.entries()) {
+      for (const version of versions) {
+        components.push({
+          id:           this._goPurl(mp, version),
+          name:         mp.toLowerCase(),
+          version:      version.replace(/^v/, ""),
+          type:         "library",
+          license:      "unknown",
+          ecosystem:    "golang",
+          state:        "undetermined",
+          scopes:       [],
+          dependencies: [],
+          paths:        [projectRoot],
+          project_root: projectRoot,
+          _indirect:    true
+        });
+      }
+    }
+
+    return components;
+  }
+
+  // ─────────────────────────────
   // Assign scopes
   // Go doesn't have a native dev-dep concept in go.mod; the only reliable
   // signal is whether a module is "indirect" (transitive) or direct.

@@ -4618,7 +4618,8 @@ export class UbelEngineInstance {
       try {
         assertNoPackageArgs(this.engine, args);
         if (this.checkMode === "check" || this.checkMode === "install") {
-          assertLockfileGate(this.engine, projectRoot, args);
+          // check only reads the lockfile; only install needs the manifest the frozen install reads.
+          assertLockfileGate(this.engine, projectRoot, args, { requireManifest: this.checkMode === "install" });
         }
       } catch (err) {
         if (!(err instanceof LockfileGateError)) throw err;
@@ -4835,7 +4836,7 @@ export class UbelEngineInstance {
           reportContent = {};
         }
       } else if (needsRevert) {
-        purls         = await manager.runDryRun(this.engine, args, projectRoot);
+        purls         = await manager.runDryRun(this.engine, args, projectRoot, { install: this.checkMode === "install" });
         for (const inventoryItem of manager.inventoryData) {
           inventoryItem.paths = [];
         }

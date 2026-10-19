@@ -489,8 +489,10 @@ export class NodeManagerInstance {
    * @param {string[]} initialArgs - Package specifiers for check/install mode
    * @param {string} projectRoot  - Absolute path of the project being scanned.
    *                                Passed explicitly so no process.chdir() is needed.
+   * @param {{install?: boolean}} [opts] - lockfile-required engines (yarn): install=true also
+   *                                requires package.json; check reads the lockfile only.
    */
-  async runDryRun(engine, initialArgs, projectRoot) {
+  async runDryRun(engine, initialArgs, projectRoot, { install = false } = {}) {
 
   // ── 0. Reset instance state ──────────────────────────────────────────
   this.inventoryData               = [];
@@ -527,15 +529,23 @@ export class NodeManagerInstance {
   // No yarn.lock, no package.json, an empty lockfile, or package arguments all refuse here —
   // BEFORE the `npm init -y` and the `yarn add` below can touch the project.
   if (cfg.lockfileRequired) {
-    assertLockfileGate(engine, projectPath, initialArgs);
+    assertLockfileGate(engine, projectPath, initialArgs, { requireManifest: install });
   }
+  const readOnly = !!cfg.lockfileRequired;   // yarn: nothing is ever written, backed up or reverted
 
   // ── 2. Determine if we can skip the dry‑run shell command ──────────
   const lockfileAlreadyPresent = fs.existsSync(lockPath);
   const skipDryRun = initialArgs.length === 0 && lockfileAlreadyPresent;
 
+  if (readOnly && !skipDryRun) {
+    // Unreachable after the gate (it refuses args and a missing lockfile); kept as a hard stop so a
+    // lockfile-required engine can never shell out to `yarn add`.
+    throw new Error(`Refusing to run '${cfg.binary} add' for ${engine}: lockfile-required engines only read ${cfg.lockfile}.`);
+  }
+
   // ── 3. Ensure a package.json exists (if missing, run npm init) ────
-  if (!fs.existsSync(packageJsonPath)) {
+  // Never for lockfile-required engines: they must not create files in the project.
+  if (!readOnly && !fs.existsSync(packageJsonPath)) {
     console.log(`No package.json found. Running 'npm init -y' in ${projectPath}`);
     const initResult = spawnSync("npm", ["init", "-y"], {
       cwd:   projectPath,
@@ -572,18 +582,21 @@ export class NodeManagerInstance {
     this._original_lockfile_hash = "absent";
   }
 
-  const backupParent = path.join(projectPath, ".ubel", "lockfiles");
-  fs.mkdirSync(backupParent, { recursive: true });
-  const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
+  // Read-only engines (yarn) write nothing, so no backup directory is created in the project.
+  if (!readOnly) {
+    const backupParent = path.join(projectPath, ".ubel", "lockfiles");
+    fs.mkdirSync(backupParent, { recursive: true });
+    const tmpDir = fs.mkdtempSync(path.join(backupParent, "backup-"));
 
-  if (this._original_package_json !== null) {
-    fs.writeFileSync(path.join(tmpDir, "package.json"), this._original_package_json, "utf8");
-  }
-  if (this._original_lockfile !== null) {
-    fs.writeFileSync(path.join(tmpDir, cfg.lockfile), this._original_lockfile, "utf8");
-  }
+    if (this._original_package_json !== null) {
+      fs.writeFileSync(path.join(tmpDir, "package.json"), this._original_package_json, "utf8");
+    }
+    if (this._original_lockfile !== null) {
+      fs.writeFileSync(path.join(tmpDir, cfg.lockfile), this._original_lockfile, "utf8");
+    }
 
-  this._lockfileBackupDir = tmpDir;
+    this._lockfileBackupDir = tmpDir;
+  }
 
   // ── 5. Validate package args ─────────────────────────────────────────
   this._validatePackageArgs(initialArgs);
@@ -758,6 +771,10 @@ export class NodeManagerInstance {
       return { ok: true };
     };
 
+    // Lockfile-required engines (yarn) never modify the project, so "reverting" is only a check
+    // that package.json and the lockfile are still exactly what was scanned. Nothing is written.
+    const readOnly = !!cfg.lockfileRequired;
+
     const pkgExpectedHash  = this._candidatePackageJsonHash ?? this._original_package_json_hash;
     const pkgCheck         = verifyFile(packageJsonPath, pkgExpectedHash, "package.json");
     if (!pkgCheck.ok) {
@@ -769,6 +786,8 @@ export class NodeManagerInstance {
     if (!lockCheck.ok) {
       return { reverted: false, reason: lockCheck.reason, backupDir: tmpDir };
     }
+
+    if (readOnly) return { reverted: true, readOnly: true, backupDir: tmpDir };
 
     try {
       let pkgContent = this._original_package_json;
@@ -825,6 +844,12 @@ export class NodeManagerInstance {
 
     const cfg          = ENGINE_CONFIG[engine] || ENGINE_CONFIG.npm;
     const lockfilePath = path.join(projectPath, cfg.lockfile);
+
+    // Lockfile-required engines (yarn): the candidate IS the lockfile on disk, and runRealInstall()
+    // re-verifies its hash. Rewriting it would only risk changing what was scanned.
+    if (cfg.lockfileRequired) {
+      return { written: true, filePath: lockfilePath, packageJsonPath: path.join(projectPath, "package.json"), unchanged: true };
+    }
 
     if (!this.candidate_lockfile_content) {
       return {

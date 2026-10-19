@@ -135,9 +135,12 @@ export function findManifests(engine, root) {
 /**
  * Inspect `root` against the gate for `engine`. Never throws.
  *
+ * @param {{requireManifest?: boolean}} [opts]  requireManifest (default true): when false the manifest
+ *        is not required (and its absence is not a problem) — `check` only reads the lockfile; `install`
+ *        needs the manifest because the frozen install reads it.
  * @returns {{ ok: boolean, problems: string[], lockfiles: string[], manifests: string[] }}
  */
-export function checkLockfileGate(engine, root, args = []) {
+export function checkLockfileGate(engine, root, args = [], { requireManifest = true } = {}) {
   const cfg = LOCKFILE_GATE[engine];
   if (!cfg) {
     return { ok: false, problems: [`'${engine}' is not a lockfile-gated engine.`], lockfiles: [], manifests: [] };
@@ -156,7 +159,7 @@ export function checkLockfileGate(engine, root, args = []) {
   }
 
   const manifests = findManifests(engine, abs);
-  if (!manifests.length) {
+  if (requireManifest && !manifests.length) {
     const want = cfg.manifest.names ? cfg.manifest.names.join(" or ") : "a .NET project or solution file";
     problems.push(`no ${want} found in ${abs} — there is nothing to install here.`);
   }
@@ -199,10 +202,11 @@ export function assertNoPackageArgs(engine, args = []) {
 
 /**
  * Throwing form of checkLockfileGate().
+ * @param {{requireManifest?: boolean}} [opts]  see checkLockfileGate()
  * @throws {LockfileGateError}
  */
-export function assertLockfileGate(engine, root, args = []) {
-  const r = checkLockfileGate(engine, root, args);
+export function assertLockfileGate(engine, root, args = [], opts = {}) {
+  const r = checkLockfileGate(engine, root, args, opts);
   if (!r.ok) {
     throw new LockfileGateError(
       `Installation refused (${LOCKFILE_GATE[engine]?.label ?? engine}): ${r.problems.join(" ")}`,

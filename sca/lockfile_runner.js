@@ -165,10 +165,16 @@ export class LockfileGateManager {
 
     switch (this.engine) {
       case "bundle":
+        comps = s._scanProject(root);
+        break;
       case "go":
+        // go.sum only — go.mod's require/replace/indirect are not merged in (health mode still does).
+        comps = s._scanLockfileOnly(root);
+        break;
       case "dart":
       case "flutter":
-        comps = s._scanProject(root);
+        // pubspec.lock only — _scanProject() can fall back to .dart_tool/package_config.json.
+        comps = s._componentsFromLock(path.join(root, "pubspec.lock"), root);
         break;
       case "dotnet":
         // _scanProject() falls back to obj/project.assets.json when there is no
@@ -217,7 +223,8 @@ export class LockfileGateManager {
    */
   runDryRun(args, projectRoot, { install = false } = {}) {
     const root = path.resolve(projectRoot);
-    const gate = assertLockfileGate(this.engine, root, args);   // throws LockfileGateError
+    // check reads the lockfile only; install also needs the manifest the frozen install reads.
+    const gate = assertLockfileGate(this.engine, root, args, { requireManifest: install });   // throws LockfileGateError
 
     // engine.js usually captured it already (_captureEngineVersion); probe again only if that found nothing.
     if (!this.engineVersion) this.engineVersion = this._probeVersion();
