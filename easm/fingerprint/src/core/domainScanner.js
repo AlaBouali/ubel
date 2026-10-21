@@ -2,7 +2,7 @@
 
 import { WebApplicationScanner } from "./webApplicationScanner.js";
 import { ProductChecker } from "./productChecker.js";
-import { DomainInfo, IpInfo } from "./net.js";
+import { DomainInfo, IpInfo, extractHostname, runWithAddressGuard } from "./net.js";
 import { httpClient } from "./httpClient.js";
 import { randomUserAgent } from "./commonVariables.js";
 import { normalizeComponents } from "./normalize.js";
@@ -24,13 +24,28 @@ export class DomainScanner {
     const { cookie = null, headers = {} } = opts;
 
     if (!skipVerification) {
-      if (DomainScanner.blackListDomains.includes(domain)) return [];
-      const domainIp = await DomainInfo.getIpFromDomain(domain);
-      // Private ranges, plus any address bound to one of this machine's own
-      // interfaces (checked locally - no third-party "what is my IP" lookup).
-      if (IpInfo.ipIsPrivate(domainIp) || IpInfo.isLocalAddress(domainIp)) return [];
+      // `domain` may be a bare host, "host:port", or a full URL — classify the HOSTNAME it
+      // names (parsed the same way the HTTP client parses it), not the raw string. A target
+      // we can't extract a host from is refused: we can't say what it would contact.
+      const host = extractHostname(domain);
+      if (!host) return [];
+      if (DomainScanner.blackListDomains.includes(domain) || DomainScanner.blackListDomains.includes(host)) return [];
+      // Every address the name resolves to, IPv4 and IPv6. Private ranges, plus any address
+      // bound to one of this machine's own interfaces (checked locally - no third-party
+      // "what is my IP" lookup). This early exit only avoids pointless work: the enforcement
+      // is the connect-time guard below, which re-validates whatever address each socket
+      // actually uses.
+      const addrs = await DomainInfo.resolveAll(host);
+      if (addrs.some((ip) => IpInfo.isBlocked(ip))) return [];
     }
 
+    // With verification on, every request this scan makes - the scheme probe, each fingerprint
+    // probe, every redirect hop - is checked against the same restriction when it connects
+    // (see runWithAddressGuard in ./net.js).
+    return runWithAddressGuard(!skipVerification, () => DomainScanner.#scanTarget(domain, cookie, headers));
+  }
+
+  static async #scanTarget(domain, cookie, headers) {
     const data = { asset: domain, type: "domain", url: null, components: [] };
 
     // The same Cookie/custom headers a caller supplied apply here too, not just

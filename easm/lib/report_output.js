@@ -243,6 +243,23 @@ export function printScanSummary(reportPayload, headerLabel) {
     `  infections: ${s.infections}  critical: ${s.severity.critical}  high: ${s.severity.high}  ` +
     `medium: ${s.severity.medium}  low: ${s.severity.low}  unknown: ${s.severity.unknown}`
   );
+  // Web misconfigurations count toward --fail-on exactly like vulnerabilities (see
+  // failOnExitCode), so they are summarised here too — otherwise a run that fails the
+  // gate on a misconfiguration prints all-zero columns. Counted per occurrence (one
+  // per host/URL a rule fired on), the same unit the gate counts.
+  const mc = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  let mcTotal = 0;
+  for (const g of (reportPayload.misconfigurations || [])) {
+    for (const o of (g.occurrences || [])) {
+      const k = String(o.severity || "unknown").toLowerCase();
+      mc[k in mc ? k : "unknown"]++;
+      mcTotal++;
+    }
+  }
+  console.log(
+    `  misconfigurations: ${mcTotal}  critical: ${mc.critical}  high: ${mc.high}  ` +
+    `medium: ${mc.medium}  low: ${mc.low}  unknown: ${mc.unknown}`
+  );
   // KEV / EPSS — "unknown" (never 0) when a feed was down, so a clean-looking
   // count can't be mistaken for "checked and none found".
   const ti   = reportPayload.threat_intel || {};

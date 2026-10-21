@@ -48,6 +48,7 @@
 // running and exposed, not a dev-only or build-only dependency.
 
 import { DomainScanner } from "../fingerprint/src/index.js";
+import { runWithAddressGuard } from "../fingerprint/src/core/net.js";
 import { mapLimit } from "../../cloud/lib/concurrency.js";
 import { resolveTargets } from "./resolve.js";
 import { crawlAndScanSecrets } from "./secrets_crawl.js";
@@ -151,7 +152,7 @@ async function fingerprintTarget(target, allowPrivate, inventoryByKey, reqOpts =
     // never reads as "clean" for a target that was actually never probed.
     assetResult.status = "skipped";
     assetResult.error =
-      "resolved to a private/self IP and was skipped by the fingerprinter's safety guard " +
+      "resolved to a private/self IP (or could not be verified) and was skipped by the fingerprinter's safety guard " +
       "(pass --allow-private only for lab/localhost targets you own)";
     return assetResult;
   }
@@ -289,7 +290,14 @@ async function lookupWpItem(item, log) {
  *
  * @returns {Promise<{assets: object[], inventory: object[], vulnerabilities: object[], misconfigurations: object}>}
  */
-export async function scanTargets(targets, opts = {}) {
+export function scanTargets(targets, opts = {}) {
+  // Everything below that talks to a scanned host (fingerprinting, secrets crawl,
+  // misconfiguration probes) runs with the private/self-address guard on unless
+  // --allow-private was given: see runWithAddressGuard in ../fingerprint/src/core/net.js.
+  return runWithAddressGuard(!opts.allowPrivate, () => scanTargetsGuarded(targets, opts));
+}
+
+async function scanTargetsGuarded(targets, opts = {}) {
   const {
     allowPrivate = false,
     concurrency = 4,

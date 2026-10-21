@@ -9,6 +9,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import zlib from "node:zlib";
+import { addressGuardActive, assertHostAllowed, guardedLookup, stripBrackets } from "./net.js";
 
 // Default ceilings for one response. A body larger than this is aborted while it
 // streams in (rather than buffered whole and rejected afterwards), and so is a
@@ -98,6 +99,9 @@ export function request(targetUrl, opts = {}) {
     maxBytes = DEFAULT_MAX_BYTES,
   } = opts;
   const totalTimeout = opts.totalTimeout ?? Math.max(1, timeout) * 5;
+  // Read once, here, in the caller's async context (see runWithAddressGuard in net.js) and
+  // reused for every redirect hop — response callbacks don't reliably carry that context.
+  const guardOn = addressGuardActive();
 
   return new Promise((resolve, reject) => {
     let redirectsLeft = maxRedirects;
@@ -137,8 +141,21 @@ export function request(targetUrl, opts = {}) {
       // port: URL#port is "" for a default port, so any port-based rewrite silently
       // turns every plain https://host into http://host:80.
       const lib = parsed.protocol === "https:" ? https : http;
+      // URL#hostname keeps the brackets of an IPv6 literal ("[::1]"); a socket needs it bare.
+      const hostname = stripBrackets(parsed.hostname);
+      // Private/self-address guard, applied to EVERY hop (the first request, each redirect
+      // target, each probe): an IP literal is checked here; a name is checked by
+      // guardedLookup at connect time, against the very address the socket then uses.
+      if (guardOn) {
+        try {
+          assertHostAllowed(hostname);
+        } catch (e) {
+          fail(e);
+          return;
+        }
+      }
       const reqOptions = {
-        hostname: parsed.hostname,
+        hostname,
         port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
         path: parsed.pathname + parsed.search,
         method,
@@ -146,6 +163,7 @@ export function request(targetUrl, opts = {}) {
         timeout: Math.max(1, timeout) * 1000,
         // verify=False equivalent - scanners intentionally probe self-signed/expired certs
         rejectUnauthorized: false,
+        ...(guardOn ? { lookup: guardedLookup } : {}),
       };
 
       const req = lib.request(reqOptions, (res) => {

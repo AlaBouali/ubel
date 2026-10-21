@@ -364,8 +364,8 @@ Supports OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, NVIDIA, local/Docker-h
 Like the SCA binaries, `ubel-sast` and `ubel-mal` make sure `.gitignore` and `.dockerignore` in the scanned directory ignore `.ubel/` and `.ubelignore` before they write their reports there, creating the files if needed — idempotent, append-only, and it respects an explicit `!.ubelignore`. Opt out with `UBEL_NO_IGNORE_FILES=1`.
 
 **Exit codes:** governed by `--fail-on`, which only changes the process exit code — reports on disk always contain every finding regardless of this flag.
-- `ubel-sast` (`analyze`): `any` *(default)* fails on any finding, including unresolved ones; `valid` fails only on findings verified `is_valid: true`; `exploitable` fails only on findings taint-traced `exploitable: true` (classes that need no attacker input, such as hardcoded secrets, are never traced — gate on them with `valid` or `any`). SAST also packs small chunks into shared calls, batches verification and tracing per chunk, records real token usage in the report, and reports anything it did not scan (chunk cap, oversized files, cut-off replies) instead of presenting it as a clean result — see the SAST documentation.
-- `ubel-mal` (`malware`): `any` *(default)* fails on any finding, including unresolved ones; `confirmed` fails only on findings verified `is_valid: true` — an unresolved finding still fails the build, since "couldn't determine" is never treated as clean.
+- `ubel-sast` (`analyze`): `any` *(default)* fails on any finding, including unresolved ones; `valid` fails only on findings verified `is_valid: true`; `exploitable` fails only on findings taint-traced `exploitable: true` (classes that need no attacker input, such as hardcoded secrets, are never traced — gate on them with `valid` or `any`). SAST also packs small chunks into shared calls, batches verification and tracing per chunk, records real token usage in the report, and reports anything it did not scan (chunk cap, oversized files, cut-off replies) instead of presenting it as a clean result: code that was not analyzed (a failed or unreadable AI call, a cut-off reply, an oversized file, chunks dropped by the default chunk limit) also fails the gate under every `--fail-on` level — see the SAST documentation.
+- `ubel-mal` (`malware`): `any` *(default)* fails on any finding, including unresolved ones; `confirmed` fails only on findings verified `is_valid: true` — an unresolved finding still fails the build, since "couldn't determine" is never treated as clean, and so does code that was not analyzed.
 
 **Full documentation — pipeline mechanics, every flag, token-cost breakdown, and CI examples:**
 [**sast/README.md**](https://github.com/AlaBouali/ubel/blob/main/sast/README.md)
@@ -379,7 +379,7 @@ Scans your AWS, GCP, and Azure accounts directly via each provider's own read-on
 Every cloud report also carries a **Diffs** tab (`diffs` in the JSON): the findings, services, providers and — per compliance framework — mapped findings that are new, still present or fixed since the asset's previous cloud report, read back from the asset's history folder. Findings are matched on provider + service + check + resource + region; providers that were skipped, regions not scanned in both runs, and (with `--min-severity`) earlier findings below the current filter are left out so they never read as "fixed", and a note is shown when the scanned account or the filter changed. See [Cloud § Diffs against the previous report](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md#diffs-against-the-previous-report).
 
 ```bash
-# Scan whichever providers you have credentials for (default: aws,gcp,azure)
+# Scan all three providers (default: aws,gcp,azure) — a provider without credentials is skipped and the run exits 3
 ubel-cloud
 
 # Scan a specific provider only
@@ -387,9 +387,12 @@ ubel-cloud --provider aws
 
 # Explicit AWS region override — skips DescribeRegions auto-discovery
 ubel-cloud --provider aws --regions us-east-1,eu-west-1
+
+# Knowingly accept a skipped / part-way provider instead of exiting 3
+ubel-cloud --allow-partial
 ```
 
-Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Exit codes:** governed by `--fail-on` (default `critical`), same severity-threshold/count syntax as the rest of UBEL — reports on disk always contain every finding regardless of this flag.
+Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Exit codes:** governed by `--fail-on` (default `critical`), same severity-threshold/count syntax as the rest of UBEL — reports on disk always contain every finding regardless of this flag. A requested provider that was skipped (no credentials) or stopped part-way makes the run exit `3` when no finding tripped `--fail-on`; `--allow-partial` accepts partial coverage, and `--fail-on none` always exits `0`.
 
 **Full documentation — every check, per-provider credential setup, and all flags:**
 [**cloud/README.md**](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md)
@@ -553,7 +556,7 @@ misconfiguration-check list:**
 
 ## CI/CD Integration
 
-All binaries exit non-zero on findings that clear their respective gate, so any of them fit natively into a CI runner.
+All binaries exit non-zero on findings that clear their respective gate, so any of them fit natively into a CI runner. `ubel-sast`, `ubel-mal` and `ubel-cloud` also exit non-zero when part of the assessment did not run — code that was not analyzed, or a requested cloud provider that was skipped or stopped part-way (`ubel-cloud --allow-partial` accepts the latter).
 
 ### GitHub Actions — using the packaged action
 

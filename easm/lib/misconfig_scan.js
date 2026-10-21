@@ -94,6 +94,7 @@
 // regardless of what Allow advertises.
 
 import { httpClient } from "../fingerprint/src/core/httpClient.js";
+import { addressGuardActive, assertHostAllowed, guardedLookup } from "../fingerprint/src/core/net.js";
 import { mapLimit } from "../../cloud/lib/concurrency.js";
 import { scanContent } from "../../sca/secrets.js";
 import tls from "node:tls";
@@ -1082,15 +1083,34 @@ function originHostPort(asset) {
   return { hostname: u.hostname, port, isHttps };
 }
 
+/**
+ * The private/self-address guard for a raw TLS connect (the HTTP probes get it from
+ * httpClient). With the guard off this adds nothing; with it on, an IP literal is
+ * checked here and a name is checked by guardedLookup against the address the socket uses.
+ * @returns {{options: object, error?: Error}}
+ */
+function guardedTlsOptions(host) {
+  if (!addressGuardActive()) return { options: {} };
+  try {
+    assertHostAllowed(host);
+  } catch (error) {
+    return { options: {}, error };
+  }
+  return { options: { lookup: guardedLookup } };
+}
+
 function tlsConnectOnce(hostname, ip, port, tlsOpts, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const guard = guardedTlsOptions(ip || hostname);
+    if (guard.error) { reject(guard.error); return; }
     const socket = tls.connect({
       host: ip || hostname,
       port,
       servername: hostname,
       timeout: timeoutMs,
       rejectUnauthorized: false,
+      ...guard.options,
       ...tlsOpts,
     });
     const done = (fn, val) => {
@@ -1133,6 +1153,8 @@ function tlsConnectOnce(hostname, ip, port, tlsOpts, timeoutMs) {
 function checkOcspStapling(hostname, ip, port, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const guard = guardedTlsOptions(ip || hostname);
+    if (guard.error) { reject(guard.error); return; }
     const socket = tls.connect({
       host: ip || hostname,
       port,
@@ -1140,6 +1162,7 @@ function checkOcspStapling(hostname, ip, port, timeoutMs) {
       timeout: timeoutMs,
       rejectUnauthorized: false,
       requestOCSP: true,
+      ...guard.options,
     });
     const done = (fn, val) => {
       if (settled) return;

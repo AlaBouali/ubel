@@ -682,7 +682,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   let gate = null;
   let verdict = null;
   if (typeof opts.fail_on === "string" && opts.fail_on) {
-    gate = evaluateSastGate(chunks, { mode, failOn: opts.fail_on, verify: verifyRan !== false, taintTrace: taintRan !== false });
+    gate = evaluateSastGate(chunks, { mode, failOn: opts.fail_on, verify: verifyRan !== false, taintTrace: taintRan !== false, scanOptions: opts });
     const blockingTotal = gate.triggers.reduce((n, t) => n + t.count, 0);
     const pass = !gate.shouldFail;
     let statement;

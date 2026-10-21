@@ -26,7 +26,7 @@ Usage:
                     [--working-dir <path>] [--regions us-east-1,eu-west-1]
                     [--profile <aws-profile>] [--min-severity critical|high|medium|low|info]
                     [--fail-on critical|high|medium|low|info|none|<count>:<severity>]
-                    [--verbose] [--quiet]
+                    [--allow-partial] [--verbose] [--quiet]
 
 Every run bundles a report.cloud.json + report.cloud.html into a timestamped zip under
 $HOME/.ubel/history/<asset_id>/<timestamp>.cloud.zip, and
@@ -44,6 +44,10 @@ Options:
                           "none" always exits 0. "N:sev" instead fails only once MORE than N
                           findings at or above <sev> exist, e.g. "5:high" fails on the 6th+
                           high-or-above finding — for CI gates that tolerate a known baseline.
+  --allow-partial        Accept an incomplete assessment. Without it, a requested provider that was
+                          skipped (no credentials, setup error) or stopped part-way makes the run exit
+                          3 (when no --fail-on finding already failed it) — "no findings in the checks
+                          that ran" is not "the requested assessment passed". Ignored by --fail-on none.
   --verbose              Print per-check progress
   --quiet                Suppress the console findings summary (reports are still written)
   --help, -h             Show this help
@@ -77,8 +81,9 @@ Credentials, in resolution order (environment variables unless noted):
              (AZURE_CLIENT_ID optionally selects a user-assigned identity)
           AZURE_SUBSCRIPTION_ID is always required.
 
-Any provider whose credentials aren't set is skipped with a warning, so you
-can run this against just one cloud at a time.
+Any provider whose credentials aren't set is skipped with a warning and the others
+still run. Name the clouds you need with --provider: a requested provider that was
+skipped or stopped part-way fails the run (exit 3) unless --allow-partial is given.
 `;
 
 const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -90,6 +95,7 @@ function parseArgs(argv) {
     provider: 'aws,gcp,azure',
     minSeverity: 'info',
     failOn: 'critical',
+    allowPartial: false,
     verbose: false,
     quiet: false,
   };
@@ -115,6 +121,7 @@ function parseArgs(argv) {
     else if (a === '--profile') args.profile = value(a, i++);
     else if (a === '--min-severity') args.minSeverity = value(a, i++);
     else if (a === '--fail-on') args.failOn = value(a, i++);
+    else if (a === '--allow-partial') args.allowPartial = true;
     else if (a === '--verbose') args.verbose = true;
     else if (a === '--quiet') args.quiet = true;
     else {
@@ -404,17 +411,42 @@ async function main() {
 
   await writeCloudReports(reporter, meta, args);
 
+  let exitCode;
   if (args.failOn.mode === 'none') {
-    process.exitCode = 0;
+    exitCode = 0;
   } else if (args.failOn.mode === 'threshold') {
     const failRank = SEVERITY_RANK[args.failOn.severity];
     const matchCount = reporter.findings.filter((f) => (SEVERITY_RANK[f.severity] ?? 4) <= failRank).length;
-    process.exitCode = matchCount > args.failOn.count ? 2 : 0;
+    exitCode = matchCount > args.failOn.count ? 2 : 0;
   } else {
     const failRank = SEVERITY_RANK[args.failOn.severity];
     const shouldFail = reporter.findings.some((f) => (SEVERITY_RANK[f.severity] ?? 4) <= failRank);
-    process.exitCode = shouldFail ? 2 : 0;
+    exitCode = shouldFail ? 2 : 0;
   }
+
+  // "No findings in the checks that ran" is not "the requested assessment passed": a provider
+  // that was skipped or stopped part-way leaves part of what was asked for unchecked. That is a
+  // failed run (exit 3 — distinct from 2, "a --fail-on finding exists") unless the caller has
+  // knowingly accepted partial coverage with --allow-partial. --fail-on none stays "always exit 0".
+  const notComplete = providerStatus.filter((p) => p.status !== 'scanned');
+  if (notComplete.length) {
+    const describe = (p) =>
+      `${p.provider} (${p.status === 'partial' ? 'stopped part-way — results incomplete' : 'not scanned'}${p.reason ? `: ${p.reason}` : ''})`;
+    const list = notComplete.map(describe).join('; ');
+    if (args.failOn.mode === 'none') {
+      console.log(`\n[ubel-cloud] Warning: the assessment is incomplete — ${list}.`);
+    } else if (args.allowPartial) {
+      console.log(`\n[ubel-cloud] Warning: the assessment is incomplete — ${list}. Accepted via --allow-partial.`);
+    } else {
+      console.log(
+        `\n[ubel-cloud] The requested assessment is incomplete — ${list}. ` +
+        'Absence of findings there is not evidence of a clean result. Fix the cause, scan only the clouds you need ' +
+        'with --provider, or pass --allow-partial to accept partial coverage.'
+      );
+      if (exitCode === 0) exitCode = 3;
+    }
+  }
+  process.exitCode = exitCode;
 }
 
 export { main, parseArgs };

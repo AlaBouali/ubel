@@ -9,7 +9,7 @@ import { analyzeSast, analyzeMalware } from './src/analyzer/index.js';
 import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
 import { buildSastExecutiveSummary } from './executive_summary.js';
-import { evaluateSastGate, isUnresolvedSastFinding } from './sast_gate.js';
+import { evaluateSastGate, isUnresolvedSastFinding, COVERAGE_TRIGGER_KEYS } from './sast_gate.js';
 import { loadPreviousSastReport, buildSastDiffs } from './diffs.js';
 import { getGitMetadata }         from '../sca/git_info.js';
 import { getOSMetadata }          from '../sca/os_metadata.js';
@@ -387,7 +387,7 @@ async function writeAnalyzeReports(results, opts) {
   // verdict from the same function, so the report and the exit code always agree.
   const failOn = opts.failOn || 'any';
   const gate = evaluateSastGate(results, {
-    mode: 'analyze', failOn, verify: opts.verify, taintTrace: opts.taintTrace,
+    mode: 'analyze', failOn, verify: opts.verify, taintTrace: opts.taintTrace, scanOptions: meta.scan_options,
   });
   const shouldFail    = gate.shouldFail;
   const hasExploitable = gate.counts.exploitable > 0;
@@ -396,6 +396,11 @@ async function writeAnalyzeReports(results, opts) {
 
   if (shouldFail && hasUnresolved && !(failOn === 'exploitable' ? hasExploitable : failOn === 'valid' ? hasValid : true)) {
     console.log(`\n[ubel-sast] Exiting non-zero: no finding met the --fail-on ${failOn} bar, but ${unresolvedFindings.length} finding(s) could not be resolved either way (see "Unverified / untraced findings" above).`);
+  }
+
+  const incomplete = gate.triggers.filter(t => COVERAGE_TRIGGER_KEYS.has(t.key));
+  if (shouldFail && incomplete.length) {
+    console.log(`\n[ubel-sast] Exiting non-zero: the analysis was incomplete — ${incomplete.map(t => t.text).join('; ')}. Code that was not analyzed is not evidence of a clean result.`);
   }
 
   return { zipPath, meta, shouldFail };
@@ -529,7 +534,12 @@ async function writeMalwareReports(results, opts) {
   }
 
   const failOn = opts.failOn || 'any';
-  const shouldFail = evaluateSastGate(results, { mode: 'malware', failOn }).shouldFail;
+  const gate = evaluateSastGate(results, { mode: 'malware', failOn, scanOptions: meta.scan_options });
+  const shouldFail = gate.shouldFail;
+  const incomplete = gate.triggers.filter(t => COVERAGE_TRIGGER_KEYS.has(t.key));
+  if (shouldFail && incomplete.length) {
+    console.log(`\n[ubel-malware] Exiting non-zero: the analysis was incomplete — ${incomplete.map(t => t.text).join('; ')}. Code that was not analyzed is not evidence of a clean result.`);
+  }
 
   return { zipPath, meta, shouldFail };
 }

@@ -52,7 +52,7 @@ cloud scanner ships as part of `@arcane-spark/ubel-node`.
 
 - Node.js `>=18.0.0` (for the built-in global `fetch`)
 - Read-only credentials for whichever of AWS/GCP/Azure you're scanning — see [Setup](#setup) for the exact permissions and resolution order per provider
-- Any provider without credentials set is skipped with a warning rather than aborting the whole scan, so a partial credential setup (e.g. AWS-only) works fine
+- Any provider without credentials set is skipped with a warning rather than aborting the whole scan. A skipped (or part-way) provider still fails the run (exit `3`) unless you scan only the clouds you need with `--provider` or pass `--allow-partial` — see [Usage](#usage)
 
 ---
 
@@ -320,16 +320,21 @@ ubel-cloud --min-severity high                         # only report high/critic
 ubel-cloud --fail-on high                              # non-zero exit on high or critical (default: critical)
 ubel-cloud --fail-on 5:high                            # non-zero exit only once MORE than 5 high-or-above findings exist
 ubel-cloud --fail-on none                              # always exit 0 (reports are still written)
+ubel-cloud --allow-partial                             # accept skipped / part-way providers instead of exiting 3
 ubel-cloud --quiet                                     # suppress the console summary; reports still written
 ubel-cloud --help
 ```
 
 Any provider whose credentials aren't set is skipped with a warning rather
-than aborting the whole scan, so you can run this incrementally. Each
+than aborting the whole scan. Each
 requested provider is recorded in the report's `provider_status` as `scanned`,
 `partial` (the scan threw part-way — findings gathered so far are kept, but
 the results are incomplete) or `skipped`, and the Executive Summary says so.
-Provider names other than `aws`, `gcp` and `azure` are rejected with exit
+The exit code accounts for it too: a requested provider that is `partial` or
+`skipped` makes the run exit `3`, because "no findings in the checks that ran"
+is not "the requested assessment passed". Name only the clouds you need with
+`--provider`, or pass `--allow-partial` to knowingly accept partial coverage
+(the incomplete providers are then printed as a warning). Provider names other than `aws`, `gcp` and `azure` are rejected with exit
 code `2`, and a flag that needs a value but has none is a usage error — both
 previously fell through silently.
 
@@ -345,7 +350,9 @@ at `critical` severity; pass `--fail-on none` to always exit `0`, or
 `--fail-on <count>:<severity>` — e.g. `5:high` — to fail only once MORE
 than `<count>` findings at or above `<severity>` exist, for a CI gate that
 tolerates a known/accepted baseline instead of an all-or-nothing
-threshold), `0` otherwise, `1` on a fatal/unexpected error.
+threshold), `3` if no finding tripped `--fail-on` but a requested provider was
+skipped or stopped part-way (override with `--allow-partial`; `--fail-on none`
+always exits `0`), `0` otherwise, `1` on a fatal/unexpected error.
 
 ---
 

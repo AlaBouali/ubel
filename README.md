@@ -91,9 +91,11 @@ ubel-url staging.your-domain.example --fail-on high   # EASM, your own infrastru
 
 - **SCA / firewall:** exit `1` if policy blocks or the scan fails (including an incomplete OSV/NVD lookup — never treated as a pass).
 
+- **SAST / malware SAST:** exit `1` when the `--fail-on` rule is met, or when code was not analyzed (a failed or unreadable AI call, a cut-off reply, a file skipped for size, chunks dropped by the default limit) — never treated as a pass.
+
 - **EASM:** exit `2` when `--fail-on` is met. It gates on vulnerabilities, infections **and web misconfigurations**; KEV/EPSS rules apply to vulnerabilities. `--fail-on none` disables the gate.
 
-- **Cloud:** governed by its own `--fail-on`.
+- **Cloud:** governed by its own `--fail-on`; exits `3` when no finding trips it but a requested provider was skipped or stopped part-way (`--allow-partial` accepts that).
 
 See the [CI/CD integration details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#cicd-integration) for GitHub Actions and Docker examples.
 
