@@ -9,7 +9,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | Module | What it does | Docs |
 | --- | --- | --- |
 | **SCA** | Resolves dependencies and scans them against OSV.dev and NVD in real time, with reachability analysis, KEV/EPSS exploit intelligence, license checks, CycloneDX SBOM and SARIF output. | [SCA documentation](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) |
-| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`conda`/`cargo`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. `yarn`/`bundle`/`go`/`dotnet`/`dart`/`flutter`/`swift` are gated on an existing lockfile instead (no lockfile, or any package argument, is refused). | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
+| **Firewall** | Gates `npm`/`pnpm`/`bun`/`composer`/`pip`/`uv`/`pipx`/`poetry`/`conda`/`cargo`/`apt`/`dnf`/`yum` installs and Docker images behind a scan before anything is installed. `yarn`/`bundle`/`go`/`dotnet`/`dart`/`flutter`/`swift` are gated on an existing lockfile instead (no lockfile, or any package argument, is refused). | [Firewall details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#firewall--install-time-gate) |
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
@@ -34,8 +34,8 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | — | ✅ | ✅ (in image) |
-| Kubernetes manifests | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
-| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Kubernetes manifests | — | — | — | ✅ (misconfig) | ✅ | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | ✅ | — | — | ✅ |
 | Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | — | ✅ | — |
 | Windows host | ✅ | ❌ | — | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — | — |
@@ -54,19 +54,20 @@ Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't 
 npm install -g @arcane-spark/ubel-node
 ```
 
-Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PATH`; `ubel-uv`, `ubel-conda`, `ubel-cargo` and `ubel-composer` need their own binaries (`ubel-cargo` needs the Rust toolchain).
+Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PATH`; `ubel-uv`, `ubel-poetry`, `ubel-conda`, `ubel-cargo` and `ubel-composer` need their own binaries (`ubel-cargo` needs the Rust toolchain).
 
 | Binary | Purpose |
 | --- | --- |
 | `ubel-npm` / `ubel-pnpm` / `ubel-bun` | SCA (`health`) and firewall (`check` / `install`) for JS projects |
 | `ubel-yarn` / `ubel-bundle` / `ubel-go` / `ubel-dotnet` / `ubel-dart` / `ubel-flutter` / `ubel-swift` | SCA (`health`) plus a lockfile-required firewall for yarn, Bundler, Go, .NET, Dart/Flutter and SwiftPM: `check` / `install` need the lockfile to already exist and take no package arguments |
 | `ubel-composer` | Same, for PHP |
-| `ubel-pip` / `ubel-uv` / `ubel-pipx` / `ubel-conda` | Same, for Python (`ubel-conda`: `conda create --dry-run --json` against a scratch prefix, then an exact-pinned `--no-deps` install) |
+| `ubel-pip` / `ubel-uv` / `ubel-pipx` / `ubel-poetry` / `ubel-conda` | Same, for Python (`ubel-poetry`: `poetry add --lock` resolved in a scratch copy of the project, then `poetry install --no-root` of exactly the scanned `pyproject.toml` + `poetry.lock`, source distributions refused; `ubel-conda`: `conda create --dry-run --json` against a scratch prefix, then an exact-pinned `--no-deps` install) |
 | `ubel-cargo` | Same, for Rust: `cargo add` + `cargo update --workspace` resolved in a scratch copy of the project, then `cargo fetch --locked` of the scanned lockfile |
 | `ubel-apt` / `ubel-dnf` / `ubel-yum` | Same, for Linux packages |
 | `ubel-docker` | Scan or gate a container image |
 | `ubel-secrets` / `ubel-license` | Standalone secrets / license scans |
 | `ubel-sbom` | Fills a CycloneDX SBOM's `vulnerabilities` with its components' known vulnerabilities, enriched with CISA KEV and FIRST EPSS — looked up by purl (OSV), by CPE (NVD) only when a component has no usable purl. Writes nothing else: no reachability, no reports |
+| `ubel-resbom` | Re-scans an SBOM that UBEL generated earlier against today's advisories — components and dependency graph come from the SBOM, no project, lockfile or package manager needed, nothing installed. Same per-run policy flags as the SCA CLIs; writes JSON, HTML and SBOM reports (plus SARIF for `sca`-type sources) |
 | `ubel-agent` / `ubel-cicd` / `ubel-platform` | Fixed-configuration scans: AI-agent workspace, built CI/CD workspace, host |
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |

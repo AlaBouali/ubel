@@ -538,8 +538,20 @@ const WEB_MISCONFIG_CATEGORY = {
   'exposed-env-file': ['sensitive_data_exposure'],
   'exposed-git-directory': ['sensitive_data_exposure'],
   'exposed-phpinfo': ['sensitive_data_exposure'],
+  // A publicly served compose file is the same kind of leak as .env / .git:
+  // internal architecture plus, often, literal credentials.
+  'docker-compose-config': ['sensitive_data_exposure'],
   'wp-user-enumeration': ['sensitive_data_exposure'],
   'wp-xmlrpc-exposed': ['security_misconfiguration'],
+
+  // Exposed management / documentation endpoints. An unauthenticated
+  // Actuator /env is both a disclosure (config, paths and, when unmasked,
+  // credentials — the same family as phpinfo) and a textbook A05 / CM-7
+  // case (a management interface that should not be reachable), so it gets
+  // both categories. A public Swagger/OpenAPI spec or UI is informational
+  // exposure of an interface that should not be public: A05 / CM-7 only.
+  'springboot-env': ['sensitive_data_exposure', 'security_misconfiguration'],
+  'swagger-api': ['security_misconfiguration'],
 
   // TLS — transport encryption, same category cloud's TLS/SSL checks use
   // (azure-storage-outdated-tls, cloudsql-ssl-not-required, ...)
@@ -578,6 +590,7 @@ const WEB_MISCONFIG_CATEGORY = {
   'cookie-missing-httponly': ['session_management'],
   'cookie-samesite-none-insecure': ['session_management'],
   'cookie-missing-samesite': ['session_management'],
+  'cookie-prefix-violation': ['session_management'],
 
   // HTTP methods / CORS — same category as SAST's 'insecure cors policy' (CWE-942)
   'risky-http-methods-allowed': ['security_misconfiguration'],
@@ -586,6 +599,19 @@ const WEB_MISCONFIG_CATEGORY = {
   'cors-reflected-origin': ['security_misconfiguration'],
   'cors-wildcard-with-credentials': ['security_misconfiguration'],
   'cors-null-origin-allowed': ['security_misconfiguration'],
+
+  // Email authentication (SPF / DMARC / DKIM) — spoofable mail is a
+  // configuration gap; same category these rules already resolved to via the
+  // default, now stated explicitly.
+  'email-spf-missing': ['security_misconfiguration'],
+  'email-spf-multiple-records': ['security_misconfiguration'],
+  'email-spf-permissive-all': ['security_misconfiguration'],
+  'email-dmarc-missing': ['security_misconfiguration'],
+  'email-dmarc-multiple-records': ['security_misconfiguration'],
+  'email-dmarc-policy-none': ['security_misconfiguration'],
+  'email-dmarc-reduced-enforcement-pct': ['security_misconfiguration'],
+  'email-dmarc-no-reports': ['security_misconfiguration'],
+  'email-dkim-not-found-common-selectors': ['security_misconfiguration'],
 };
 
 // Fallback for a misconfig_scan.js rule id added later without a matching
@@ -600,6 +626,8 @@ const WEB_MISCONFIG_CATEGORY_FALLBACK = {
   'CORS': ['security_misconfiguration'],
   'HTTP Methods': ['security_misconfiguration'],
   'Exposed File': ['sensitive_data_exposure'],
+  'Exposed Endpoint': ['security_misconfiguration'],
+  'Email Security': ['security_misconfiguration'],
   'WordPress': ['sensitive_data_exposure'],
 };
 
@@ -885,6 +913,8 @@ export {
   getCwesForMalwareClass,
   getComplianceForCloudCheck,
   getComplianceForMisconfig,
+  WEB_MISCONFIG_CATEGORY,
+  WEB_MISCONFIG_CATEGORY_FALLBACK,
   summarizeCompliance,
   findCategoryDivergences,
   CIS_BENCHMARK_CONTROLS,

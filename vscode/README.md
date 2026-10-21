@@ -848,7 +848,7 @@ The extension has no `threshold` / `block-unknown` / per-run-flag commands (thos
   "block_unknown_license_risk": false,
   "block_kev": true,
   "epss_threshold": 0.1,
-  "block_undetermined": false,
+  "block_undetermined": true,
   "reachable_only": false
 }
 ```
@@ -861,7 +861,7 @@ The extension has no `threshold` / `block-unknown` / per-run-flag commands (thos
 | `block_unknown_license_risk` | `true` `false` | `false` | Separately block packages whose license couldn't be classified at all |
 | `block_kev` | `true` `false` | `true` | Block any vulnerability listed in the CISA KEV catalog, regardless of severity |
 | `epss_threshold` | fraction in (0, 1], or `"none"` | `0.1` | Block any vulnerability whose EPSS score is at or above this value (`0.1` = 10%), regardless of severity |
-| `block_undetermined` | `true` `false` | `false` | Block when any component's state is `undetermined` — no version, resolved from git / a tarball URL / a local path, or a non-Python conda package. These aren't matched against OSV/NVD, so a clean result says nothing about them. Not affected by `reachable_only` |
+| `block_undetermined` | `true` `false` | `true` | Block when any component's state is `undetermined` — no version, resolved from git / a tarball URL / a local path, or a non-Python conda package. These aren't matched against OSV/NVD, so a clean result says nothing about them. Not affected by `reachable_only` |
 | `reachable_only` | `true` `false` | `false` | Apply the severity / unknown-severity / KEV / EPSS rules to **reachable vulnerabilities only**. One the [reachability analysis](#reachability-analysis) confirms is unreachable is still listed in the report but marked `allow` (`policy_exempt: "unreachable"`) and never blocks; one with no reachability result is not exempted. By default reachability is informational and does not change the verdict |
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
@@ -1018,7 +1018,7 @@ It is a copy of the zip the scan just wrote and has the same contents (`report.<
 
 The extension runs the same engine as the CLI's `health` mode. These parts of the [`@arcane-spark/ubel-node`](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) package are **not** in the extension:
 
-- The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, conda, cargo, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection (always with install scripts blocked)
+- The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, poetry, conda, cargo, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection (always with install scripts blocked)
 - `ubel-docker` container-image scanning
 - Fixed-configuration CLIs for AI-agent sandboxes and CI/CD (`ubel-agent`, `ubel-cicd`)
 - The git pre-commit hook (`install-hook` / `uninstall-hook`) and the `ubel-secrets` extras: git-history scanning (`--history`), staged-changes scanning (`--staged`), and baselining (`--write-baseline`) — the extension scans the working tree only

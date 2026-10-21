@@ -100,7 +100,11 @@ function stripUserinfo(value) {
 const CONFIG_THEMES = {
   "Exposed File": {
     title: "Sensitive files reachable from the internet",
-    plain: "Configuration, source-code or diagnostic files (such as environment files, version-control folders or PHP information pages) can be downloaded by anyone. They often contain passwords, keys and internal details.",
+    plain: "Configuration, source-code or diagnostic files (such as environment files, deployment files, version-control folders or PHP information pages) can be downloaded by anyone. They often contain passwords, keys and internal details.",
+  },
+  "Exposed Endpoint": {
+    title: "Management and documentation pages open to the internet",
+    plain: "Internal management or API-documentation pages (such as a Spring Boot configuration endpoint or a Swagger/OpenAPI page) can be opened by anyone without logging in. They can reveal internal settings, sometimes credentials, and a complete map of the application's interfaces.",
   },
   "Email Security": {
     title: "Email impersonation protections missing or weak",
@@ -1126,7 +1130,14 @@ export function buildExecutiveSummary(report) {
   if (exposedFiles.length) {
     push("Immediately",
       "Remove public access to the exposed sensitive files, and treat anything they contained as compromised.",
-      "Environment files and version-control folders often hold passwords, keys and source code. If they were downloadable, assume someone has already copied them.",
+      "Environment files, deployment files and version-control folders often hold passwords, keys and source code. If they were downloadable, assume someone has already copied them.",
+      "Web / infrastructure team");
+  }
+  const exposedEndpoints = misconfigs.filter(g => g.category === "Exposed Endpoint" && SEV_RANK[sevKey(g.severity)] >= SEV_RANK.high);
+  if (exposedEndpoints.length) {
+    push("Immediately",
+      "Close the exposed management endpoints or require a login, and replace any credential they revealed.",
+      "These pages were readable by anyone and were rated serious because they showed credential-like settings. If they were reachable, assume the values have already been copied.",
       "Web / infrastructure team");
   }
 
@@ -1144,7 +1155,9 @@ export function buildExecutiveSummary(report) {
       "Choose between replacing the software, restricting who can reach it, or accepting the risk with a documented sign-off and a date to review.",
       "Security team with system owners");
   }
-  const otherSeriousThemes = themes.filter(t => t.worst_rank >= SEV_RANK.high && !(t.category === "Exposed File" && exposedFiles.length));
+  const otherSeriousThemes = themes.filter(t => t.worst_rank >= SEV_RANK.high
+    && !(t.category === "Exposed File" && exposedFiles.length)
+    && !(t.category === "Exposed Endpoint" && exposedEndpoints.length));
   if (otherSeriousThemes.length) {
     push("Within days",
       `Fix the serious configuration issues: ${joinList(otherSeriousThemes.map(t => t.title.charAt(0).toLowerCase() + t.title.slice(1)))}.`,

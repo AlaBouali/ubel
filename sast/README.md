@@ -347,6 +347,8 @@ Dart/Flutter and Swift are mobile/client languages, so they intentionally do **n
 
 A deliberately separate catalog and prompt from the vulnerability scan — "was this written on purpose to do something the codebase owner would not approve of" is a different judgement from "is this an accidental bug," and mixing the two measurably increases false negatives on subtle backdoors because the model anchors on the larger, more familiar accidental-bug catalog.
 
+`ubel-mal` scans all 15 language families. The classes below are tagged for the 12 source-code families; chunks from the Docker, IaC and Kubernetes families match none of those tags, so they are scanned against the full 15-class catalog instead of being skipped.
+
 | Class |
 |---|
 | Reverse shell / remote command execution backdoor |
@@ -381,7 +383,7 @@ Unlike the vuln catalog, per-language filtering here is shallow — 14–15 of 1
 | `nvidia` | `deepseek-ai/deepseek-v4-flash` | `NVIDIA_KEY` |
 | `local` | `llama3` | *(none — Ollama-compatible endpoint on localhost)* |
 | `docker` / `docker-desktop` | `llama3` | *(none — Ollama-compatible endpoint via Docker)* |
-| `custom` | *(none — the user must set all the flags of the LLM)* | `CUSTOM_API_KEY` |
+| `custom` | *(none — `--endpoint` and `--model` are required)* | `CUSTOM_API_KEY` (optional) |
 
 Override endpoint, model, auth header, and header prefix per-run with `--endpoint`, `--model`, `--api-key-header`, and `--api-key-prefix` — useful for self-hosted or OpenAI-compatible gateways not in the registry above.
 

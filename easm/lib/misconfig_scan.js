@@ -6,6 +6,9 @@
 //
 //   - exposed .env file
 //   - exposed .git directory (via .git/HEAD, enriched with .git/config)
+//   - exposed Spring Boot Actuator env endpoint (/actuator/env, /env)
+//   - exposed docker-compose file (docker-compose.yml / compose.yaml)
+//   - publicly reachable Swagger / OpenAPI spec or Swagger UI
 //   - WordPress xmlrpc.php reachable (only on hosts WordPress was already
 //     detected on, per the fingerprinter's own component inventory)
 //   - WordPress user enumeration via wp-json/wp/v2/users (same gating)
@@ -261,6 +264,7 @@ async function checkEnvFile(origin, asset, baseline, timeout, findings, errors) 
 
 async function checkGitExposure(origin, asset, baseline, timeout, findings, errors) {
   const headUrl = origin + "/.git/HEAD";
+  const configUrl = origin + "/.git/config";
   let res;
   try {
     res = await httpClient.get(headUrl, { timeout, maxRedirects: 0 });
@@ -268,17 +272,22 @@ async function checkGitExposure(origin, asset, baseline, timeout, findings, erro
     errors.push({ target: asset.target, check: "exposed-git-directory", url: headUrl, error: e.message });
     return;
   }
-  if (res.status_code !== 200 || isSoft404(res, baseline)) return;
 
-  const body = res.text.trim();
-  const looksLikeGitHead = /^ref:\s*refs\/\S+$/.test(body) || /^[0-9a-f]{40}$/i.test(body);
-  if (!looksLikeGitHead) return;
+  let headBody = null;
+  if (res.status_code === 200 && !isSoft404(res, baseline)) {
+    const body = res.text.trim();
+    if (/^ref:\s*refs\/\S+$/.test(body) || /^[0-9a-f]{40}$/i.test(body)) headBody = body;
+  }
 
-  // Best-effort enrichment only — the finding already stands on HEAD alone.
+  // .git/config is read both as enrichment for a HEAD hit and as an
+  // independent signal: some servers block HEAD (or rewrite it) yet still
+  // serve config, which exposes the repo just the same.
   let remote = null;
+  let configExposed = false;
   try {
-    const cfgRes = await httpClient.get(origin + "/.git/config", { timeout, maxRedirects: 0 });
-    if (cfgRes.status_code === 200 && /\[core\]/.test(cfgRes.text)) {
+    const cfgRes = await httpClient.get(configUrl, { timeout, maxRedirects: 0 });
+    if (cfgRes.status_code === 200 && !isSoft404(cfgRes, baseline) && /\[core\]/.test(cfgRes.text)) {
+      configExposed = true;
       const m = cfgRes.text.match(/\[remote\s+"[^"]+"\][^[]*?url\s*=\s*(\S+)/i);
       // A remote URL can embed credentials (https://user:token@host/...) —
       // never copy those into a report that gets stored and shared.
@@ -288,17 +297,24 @@ async function checkGitExposure(origin, asset, baseline, timeout, findings, erro
     /* best-effort only */
   }
 
+  if (headBody === null && !configExposed) return;
+
+  const evidence = [];
+  if (remote) evidence.push(`remote: ${remote}`);
+  if (headBody !== null) evidence.push(`HEAD: ${headBody}`);
+  if (configExposed) evidence.push("/.git/config is readable");
+
   findings.push({
     id: "exposed-git-directory",
     title: "Exposed .git directory",
     category: "Exposed File",
     severity: "critical",
-    url: headUrl,
+    url: headBody !== null ? headUrl : configUrl,
     target: asset.target,
     description:
-      `The .git directory is publicly accessible (HEAD: ${body}${remote ? `, remote: ${remote}` : ""}). ` +
+      `The .git directory is publicly accessible (${headBody !== null ? `HEAD: ${headBody}` : "/.git/config readable"}${remote ? `, remote: ${remote}` : ""}). ` +
       "The entire repository — full commit history, deleted branches, and anything ever committed — can typically be reconstructed from this alone, not just the current checkout.",
-    evidence: remote ? [`remote: ${remote}`, `HEAD: ${body}`] : [`HEAD: ${body}`],
+    evidence,
     remediation:
       "Remove the .git directory from the production web root — deploy a build artifact or a git archive/export, never the raw working checkout. Treat the repository's full history as disclosed: rotate any credential that ever appeared in any commit, including on deleted branches, not just the current HEAD. Blocking /.git/ at the web server level is reasonable defense in depth, but is not the underlying fix.",
   });
@@ -368,6 +384,7 @@ async function checkWpUserEnum(origin, asset, baseline, timeout, findings, error
   });
 }
 
+
 const INFO_PHP_PATHS = ["/info.php", "/phpinfo.php"];
 
 async function checkInfoPhp(origin, asset, baseline, timeout, findings, errors) {
@@ -406,6 +423,246 @@ async function checkInfoPhp(origin, asset, baseline, timeout, findings, errors) 
         "Delete this file from the server immediately — it should never exist in a production deployment. If phpinfo() output is genuinely needed for debugging, gate it behind authentication or an IP allowlist, and remove it again once done.",
     });
     return; // one finding covers the underlying mistake; no need to flag every alias
+  }
+}
+
+// ── Spring Boot Actuator env ─────────────────────────────────────────────
+
+const SPRING_ENV_PATHS = ["/actuator/env", "/env"];
+const SENSITIVE_KEY_RE = /(pass(word|wd)?|secret|token|credential|api[-_.]?key|private[-_.]?key|access[-_.]?key)/i;
+
+/** Flattens both the Boot 2.x ({propertySources:[{properties:{k:{value}}}]})
+ *  and Boot 1.x (top-level {section:{k:v}}) /env shapes into [key, value] pairs. */
+function collectSpringProps(json) {
+  const out = [];
+  const add = (obj) => {
+    for (const [k, v] of Object.entries(obj || {})) {
+      out.push([k, v && typeof v === "object" && "value" in v ? v.value : v]);
+    }
+  };
+  if (Array.isArray(json.propertySources)) {
+    for (const ps of json.propertySources) add(ps?.properties);
+  } else {
+    for (const v of Object.values(json)) {
+      if (v && typeof v === "object" && !Array.isArray(v)) add(v);
+    }
+  }
+  return out;
+}
+
+async function checkSpringBootEnv(origin, asset, baseline, timeout, findings, errors) {
+  for (const p of SPRING_ENV_PATHS) {
+    const url = origin + p;
+    let res;
+    try {
+      res = await httpClient.get(url, { timeout, maxRedirects: 0 });
+    } catch (e) {
+      errors.push({ target: asset.target, check: "springboot-env", url, error: e.message });
+      continue;
+    }
+    if (res.status_code !== 200 || isSoft404(res, baseline)) continue;
+
+    const body = res.text;
+    if (!body || body.length > MAX_CHECK_BODY_BYTES) continue;
+    let json;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      continue;
+    }
+    if (!json || typeof json !== "object" || Array.isArray(json)) continue;
+    const looksLikeSpringEnv =
+      Array.isArray(json.propertySources) ||
+      Array.isArray(json.activeProfiles) ||
+      (Array.isArray(json.profiles) && json.systemProperties && typeof json.systemProperties === "object");
+    if (!looksLikeSpringEnv) continue;
+
+    const props = collectSpringProps(json);
+    // Actuator masks sensitive keys as "******" by default; anything that
+    // isn't a mask on a sensitive-looking key is a real disclosure. Only key
+    // NAMES go into the report, never values.
+    const unmasked = props
+      .filter(([k, v]) => SENSITIVE_KEY_RE.test(k) && typeof v === "string" && v !== "" && !/^\*+$/.test(v))
+      .map(([k]) => k);
+
+    let secretHits = [];
+    try {
+      secretHits = scanContent(body, { filePath: "env.json", projectRoot: "/" });
+    } catch {
+      /* non-fatal */
+    }
+
+    const profiles = Array.isArray(json.activeProfiles) ? json.activeProfiles : Array.isArray(json.profiles) ? json.profiles : [];
+    const leaking = unmasked.length > 0 || secretHits.length > 0;
+    const evidence = [];
+    if (profiles.length) evidence.push(`active profiles: ${profiles.join(", ")}`);
+    evidence.push(`${props.length} propert${props.length === 1 ? "y" : "ies"} exposed`);
+    for (const k of unmasked.slice(0, 10)) evidence.push(`unmasked sensitive property: ${k}`);
+    for (const sh of secretHits.slice(0, 5)) evidence.push(`${sh.secret_type}: ${sh.match_preview}`);
+
+    findings.push({
+      id: "springboot-env",
+      title: "Spring Boot Actuator env endpoint exposed",
+      category: "Exposed Endpoint",
+      severity: leaking ? "high" : "low",
+      url,
+      target: asset.target,
+      description: leaking
+        ? `${p} is reachable without authentication and returns configuration values that appear to include credentials (${unmasked.length} sensitive-named propert${unmasked.length === 1 ? "y" : "ies"} not masked${secretHits.length ? `, ${secretHits.length} matching known secret patterns` : ""}).`
+        : `${p} is reachable without authentication. Sensitive values are masked, but the response still discloses environment variables, system properties, file paths, and active profiles.`,
+      evidence,
+      remediation:
+        "Restrict Actuator endpoints: expose only health/info over the web (management.endpoints.web.exposure.include=health,info), move management to a separate internal port, and require authentication on the rest. If any unmasked value was served, rotate it.",
+    });
+    return;
+  }
+}
+
+// ── Docker Compose file ──────────────────────────────────────────────────
+
+const COMPOSE_PATHS = ["/docker-compose.yml", "/docker-compose.yaml", "/compose.yaml", "/compose.yml"];
+
+async function checkDockerCompose(origin, asset, baseline, timeout, findings, errors) {
+  for (const p of COMPOSE_PATHS) {
+    const url = origin + p;
+    let res;
+    try {
+      res = await httpClient.get(url, { timeout, maxRedirects: 0 });
+    } catch (e) {
+      errors.push({ target: asset.target, check: "docker-compose-config", url, error: e.message });
+      continue;
+    }
+    if (res.status_code !== 200 || isSoft404(res, baseline)) continue;
+
+    const body = res.text;
+    if (!body || body.length > MAX_CHECK_BODY_BYTES) continue;
+    if (/<html[\s>]/i.test(body.slice(0, 500))) continue;
+    const svcIdx = body.search(/^services:\s*$/m);
+    if (svcIdx === -1 || !/^\s+(image|build):\s*\S*/m.test(body.slice(svcIdx))) continue;
+
+    // Service names: 2-space-indented keys between "services:" and the next top-level key.
+    const afterServices = body.slice(svcIdx).replace(/^services:\s*\n/, "");
+    const nextTop = afterServices.search(/^\S/m);
+    const block = nextTop === -1 ? afterServices : afterServices.slice(0, nextTop);
+    const services = [...block.matchAll(/^ {2}([A-Za-z0-9_.-]+):\s*$/gm)].map((m) => m[1]);
+    const images = [...block.matchAll(/^\s+image:\s*["']?([^\s"']+)/gm)].map((m) => m[1]);
+
+    // Literal credentials in environment entries (not ${VAR} references).
+    const inlineCreds = [
+      ...block.matchAll(/^\s*-?\s*["']?([A-Za-z0-9_.]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY)[A-Za-z0-9_.]*)["']?\s*[:=]\s*(?!\$\{|["']?\s*$)\S/gim),
+    ].map((m) => m[1]);
+
+    let secretHits = [];
+    try {
+      secretHits = scanContent(body, { filePath: "docker-compose.yml", projectRoot: "/" });
+    } catch {
+      /* non-fatal */
+    }
+
+    const leaking = inlineCreds.length > 0 || secretHits.length > 0;
+    const evidence = [];
+    if (services.length) evidence.push(`services: ${services.slice(0, 10).join(", ")}`);
+    if (images.length) evidence.push(`images: ${[...new Set(images)].slice(0, 10).join(", ")}`);
+    for (const k of [...new Set(inlineCreds)].slice(0, 10)) evidence.push(`inline credential variable: ${k}`);
+    for (const sh of secretHits.slice(0, 5)) evidence.push(`${sh.secret_type}: ${sh.match_preview}`);
+
+    findings.push({
+      id: "docker-compose-config",
+      title: "Docker Compose file publicly accessible",
+      category: "Exposed File",
+      severity: leaking ? "high" : "medium",
+      url,
+      target: asset.target,
+      description:
+        `${p} is publicly readable${services.length ? ` and defines ${services.length} service(s)` : ""}. ` +
+        "It reveals the internal architecture — service names, images and versions, ports, volumes, networks" +
+        (leaking ? " — and contains literal credential values." : ", and often environment variables."),
+      evidence,
+      remediation:
+        "Remove the compose file from the web root; deployment manifests should never be served. Keep secrets out of the file (use env files outside the web root, Docker/Compose secrets, or a secret manager), and rotate any credential that was exposed.",
+    });
+    return;
+  }
+}
+
+// ── Swagger / OpenAPI ────────────────────────────────────────────────────
+
+// Swagger/OpenAPI exposure is informational by nature. UBEL's severity scale
+// has no "info" tier (see SEVERITY_RANK in report_output.js and
+// MISCONFIG_SEVERITY_RANK in html_report.js), so it is reported as "low".
+const SWAGGER_SEVERITY = "low";
+const SWAGGER_SPEC_PATHS = ["/swagger.json", "/swagger/v1/swagger.json", "/v2/api-docs", "/v3/api-docs", "/openapi.json", "/api-docs"];
+const SWAGGER_UI_PATHS = ["/swagger-ui.html", "/swagger-ui/index.html"];
+
+async function checkSwaggerApi(origin, asset, baseline, timeout, findings, errors) {
+  const get = async (p) => {
+    const url = origin + p;
+    try {
+      const res = await httpClient.get(url, { timeout, maxRedirects: 0 });
+      return { url, res };
+    } catch (e) {
+      errors.push({ target: asset.target, check: "swagger-api", url, error: e.message });
+      return null;
+    }
+  };
+
+  for (const p of SWAGGER_SPEC_PATHS) {
+    const r = await get(p);
+    if (!r || r.res.status_code !== 200 || isSoft404(r.res, baseline)) continue;
+    const body = r.res.text || "";
+
+    let spec = null;
+    try {
+      spec = JSON.parse(body);
+    } catch {
+      /* may be truncated — fall back to a marker check below */
+    }
+    let evidence;
+    if (spec && typeof spec === "object" && (spec.swagger || spec.openapi) && spec.paths && typeof spec.paths === "object") {
+      evidence = [`${spec.openapi ? "OpenAPI" : "Swagger"} ${spec.openapi || spec.swagger}`];
+      if (spec.info?.title) evidence.push(`title: ${String(spec.info.title).slice(0, 100)}`);
+      if (spec.info?.version) evidence.push(`api version: ${String(spec.info.version).slice(0, 50)}`);
+      evidence.push(`${Object.keys(spec.paths).length} documented path(s)`);
+    } else if (!spec && /"(swagger|openapi)"\s*:\s*"[\d.]+"/.test(body.slice(0, 4096)) && /"paths"\s*:/.test(body)) {
+      evidence = ["API specification detected (large response, not fully parsed)"];
+    } else {
+      continue;
+    }
+
+    findings.push({
+      id: "swagger-api",
+      title: "Public Swagger / OpenAPI specification",
+      category: "Exposed Endpoint",
+      severity: SWAGGER_SEVERITY,
+      url: r.url,
+      target: asset.target,
+      description: `${p} serves the API's machine-readable specification without authentication, handing anyone a complete map of its endpoints, parameters, and data models.`,
+      evidence,
+      remediation:
+        "Disable or authenticate API documentation endpoints in production (e.g. springdoc.api-docs.enabled=false, or restrict by network/auth). If the API is intentionally public, confirm every documented endpoint enforces its own authorization.",
+    });
+    return;
+  }
+
+  for (const p of SWAGGER_UI_PATHS) {
+    const r = await get(p);
+    if (!r || r.res.status_code !== 200 || isSoft404(r.res, baseline)) continue;
+    const body = r.res.text || "";
+    if (!/<title>[^<]*swagger ui[^<]*<\/title>|id=["']swagger-ui["']/i.test(body)) continue;
+
+    findings.push({
+      id: "swagger-api",
+      title: "Public Swagger UI",
+      category: "Exposed Endpoint",
+      severity: SWAGGER_SEVERITY,
+      url: r.url,
+      target: asset.target,
+      description: `${p} serves an interactive Swagger UI without authentication, allowing anyone to browse and call the documented API endpoints.`,
+      evidence: [`Swagger UI served at ${p}`],
+      remediation:
+        "Disable or authenticate API documentation endpoints in production. If the API is intentionally public, confirm every documented endpoint enforces its own authorization.",
+    });
+    return;
   }
 }
 
@@ -1903,6 +2160,9 @@ export async function scanMisconfigurations(assets, inventory, opts = {}) {
       await checkWpUserEnum(origin, asset, baseline, timeout, findings, errors);
     }
     await checkInfoPhp(origin, asset, baseline, timeout, findings, errors);
+    await checkSpringBootEnv(origin, asset, baseline, timeout, findings, errors);
+    await checkDockerCompose(origin, asset, baseline, timeout, findings, errors);
+    await checkSwaggerApi(origin, asset, baseline, timeout, findings, errors);
     await checkHttpMethods(origin, asset, timeout, findings, errors);
     await checkCorsMisconfig(origin, asset, timeout, findings, errors);
 

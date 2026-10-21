@@ -2,8 +2,8 @@
 ### EASM — External Attack Surface Fingerprinting (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`)
 
 > ## ⚠ Authorized use only
-> `ubel-url` sends live, unauthenticated HTTP(S) requests to every target you
-> give it, then discloses what it fingerprints (product/version banners) to
+> `ubel-url` sends live HTTP(S) requests to every target you give it
+> (unauthenticated, unless you pass `--cookie` / `--header`), then discloses what it fingerprints (product/version banners) to
 > OSV.dev, NVD, and/or wpvulnerability.net to look up known vulnerabilities,
 > then sends the CVE ids of whatever it finds to FIRST.org's EPSS API (and
 > downloads CISA's public KEV catalog) — see
@@ -134,8 +134,11 @@ is likewise zero-npm-dependency, stdlib-only HTTP.
 
 `ubel-url` is a **known-vulnerability lookup against passively fingerprinted
 software**, not a vulnerability scanner, exploitation tool, or brute-forcer.
-It never authenticates, never sends anything beyond an ordinary GET request,
-never attempts to exploit anything it finds, and never brute-forces logins
+It never logs in or attempts any authentication flow (the only credentials it
+ever sends are a session cookie or headers *you* supply with `--cookie` /
+`--header`, see [Shared behavior](#shared-behavior)), never sends anything
+beyond ordinary GET requests (the HTTP-methods check adds one OPTIONS and one
+TRACE request), never attempts to exploit anything it finds, and never brute-forces logins
 or paths beyond a small fixed list of well-known ones (see
 [`fingerprint/NOTICE.md`](./fingerprint/NOTICE.md)). A finding here means
 "this product/version has a publicly known CVE" — it says nothing about
@@ -152,7 +155,7 @@ across a port range (1-30000 by default) — a real, if unauthenticated and
 non-exploitative, port scan, not just a fingerprint request. That scan does
 nothing beyond attempting a TCP handshake on each port (no banner-grabbing,
 no protocol negotiation beyond the HTTP(S) liveness probe that follows it),
-and still never authenticates, exploits, or brute-forces anything — but it
+and still never logs in, exploits, or brute-forces anything — but it
 is a materially more active reconnaissance step than `ubel-url`/
 `ubel-domain`'s single GET per target, is likely to be logged/alerted on by
 anything watching the target's network (an IDS, a cloud provider's port-scan
@@ -161,14 +164,15 @@ of connection attempts in a short time. Treat "authorized use only" as
 applying with extra weight to these two entry points.
 
 Alongside that CVE lookup, every scan also runs a small, fixed set of
-**misconfiguration checks** against each live host — exposed `.env`/`.git`,
-WordPress-specific probes, TLS/certificate weaknesses, missing/weak security
+**misconfiguration checks** against each live host — exposed `.env`/`.git`/`docker-compose.yml`,
+Spring Boot Actuator `env` and Swagger/OpenAPI exposure, WordPress-specific probes, TLS/certificate weaknesses, missing/weak security
 headers and cookie flags, risky HTTP methods, CORS misconfiguration, and
 SPF/DMARC/DKIM email-authentication gaps — see
 [Misconfiguration checks](#misconfiguration-checks) below. These stay within
-the same posture as everything else here: a single well-known path per HTTP
-check (or one TLS handshake, or a short list of well-known DNS names for the
-email-authentication checks), no exploitation, no brute-forcing. It's a
+the same posture as everything else here: a short fixed list of well-known paths per HTTP
+check (usually just one; the first valid hit ends that check), one TLS
+handshake, or a short list of well-known DNS names for the
+email-authentication checks — no exploitation, no brute-forcing. It's a
 second, independent finding type layered on the same passive scan, not a
 change to what the module does or how it behaves.
 
@@ -261,8 +265,11 @@ dependency; if it's answering HTTP requests, it's running.
   redacted in the report). Disable with `--no-secrets`
 - **Web misconfiguration checks** — every live host is also probed for a
   fixed set of well-known issues: an exposed `.env` file (cross-referenced
-  against the same secrets rule set), an exposed `.git` directory (readable
-  `HEAD`, with a best-effort remote-URL read from `.git/config`), exposed
+  against the same secrets rule set), an exposed `.git` directory (a readable
+  `HEAD` or a readable `.git/config`, with the remote URL read from the
+  latter when available), an exposed `docker-compose.yml` /
+  `compose.yaml`, an unauthenticated Spring Boot Actuator `env` endpoint,
+  a publicly reachable Swagger/OpenAPI specification or Swagger UI, exposed
   `phpinfo()` output, and — only on hosts the fingerprinter already
   identified as WordPress — a reachable `xmlrpc.php` and unauthenticated
   user enumeration via `wp-json/wp/v2/users`. Every host is also checked for
@@ -321,7 +328,9 @@ EASM ships as part of `@arcane-spark/ubel-node`.
   firewall on the scanning machine itself will silently look like "nothing
   is open" rather than error, since a blocked outbound connect and a closed
   remote port both just time out
-- No credentials of any kind — this doesn't authenticate to anything
+- No credentials needed — by default this doesn't authenticate to anything.
+  `--cookie` / `--header` are optional and only ever attach what you supply
+  to the fingerprinting requests (see [Shared behavior](#shared-behavior))
 
 ---
 
@@ -363,6 +372,8 @@ ubel-url --targets-file targets.txt                    # newline-separated targe
 ubel-url --targets-file targets.txt extra.example.com  # file + arguments combine
 ubel-url staging.internal:8443 --allow-private          # a lab/internal target you own
 ubel-url example.com --concurrency 8                    # fingerprint up to 8 targets in parallel
+ubel-url example.com --cookie "session=abc123"          # send this Cookie header on every fingerprinting request (e.g. to fingerprint behind a login)
+ubel-url example.com --header "X-Api-Key: xyz"          # send an extra request header on every fingerprinting request (repeatable)
 ubel-url example.com --working-dir /path/to/project     # reports written under <path>/.ubel/ instead of cwd
 ubel-url example.com --min-severity high                # only list high/critical vulnerabilities in the report
 ubel-url example.com --fail-on high                     # non-zero exit on a high or critical vulnerability/misconfiguration (default: critical)
@@ -407,7 +418,7 @@ for a one-domain run, or a short `"a.com and N other domains"` label
 otherwise, with the full list in `domains`. It shares every
 scanning/reporting flag with `ubel-url` (`--allow-private`, `--concurrency`,
 `--working-dir`, `--min-severity`, `--fail-on`, `--block-kev`,
-`--epss-threshold`, `--verbose`, `--quiet`) and
+`--epss-threshold`, `--cookie`, `--header`, `--verbose`, `--quiet`) and
 behaves identically for all of them, because both drive the same engine.
 
 Discovery is **passive** — Certificate Transparency logs only, via
@@ -481,8 +492,8 @@ crt.sh** — both call the same functions in `lib/ip_scan.js`:
 
 It shares every scanning/reporting flag with `ubel-url` (`--allow-private`,
 `--concurrency`, `--working-dir`, `--min-severity`, `--fail-on`,
-`--block-kev`, `--epss-threshold`, `--no-secrets`, `--verbose`, `--quiet`),
-plus `ubel-easm`'s own `--exclude`, `--exclude-ip`, `--ip-concurrency` and
+`--block-kev`, `--epss-threshold`, `--no-secrets`, `--cookie`, `--header`,
+`--verbose`, `--quiet`), plus `ubel-easm`'s own `--exclude`, `--exclude-ip`, `--ip-concurrency` and
 `--subdomain-ports`, and its discovery-stage flags (`--ports`,
 `--port-concurrency`, `--port-timeout`, `--http-concurrency`,
 `--http-timeout`).
@@ -632,6 +643,26 @@ unfiltered set. KEV/EPSS apply to vulnerabilities only. `--list-only` (on
 independent of `--fail-on`, since it never reaches the vulnerability-lookup
 stage the gate evaluates.
 
+`--cookie <value>` and `--header "Name: Value"` (repeatable) are accepted by
+all four CLIs and attach a session cookie / extra request header to every
+**fingerprinting** request — the initial probe and the directory-list checks —
+for each target, so a login-gated application can be fingerprinted. They are
+deliberately **not** used for the port scan, the client-side secrets crawl or
+the [misconfiguration checks](#misconfiguration-checks): those stay
+unauthenticated, because some of them (CORS, TRACE) depend on a
+credential-free baseline response. A `--header` can override the default
+`User-Agent` or a cookie set via `--cookie`.
+
+> **Caution:** the value is sent on *every* fingerprinting request to *every*
+> target of the run — with `ubel-domain`, `ubel-host` and `ubel-easm` that
+> includes every discovered subdomain and every `IP:port`, not just the host
+> the credential belongs to. Only pass a cookie or token you are prepared to
+> present to all of them, and prefer `ubel-url` against a single host. The
+> report never stores the values: it records only a `usedCookie` boolean and
+> the *names* of the custom headers (`customHeaderNames`), and the executive
+> summary says the software identification used them while the configuration
+> and credential checks did not.
+
 ---
 
 ## Misconfiguration checks
@@ -644,7 +675,9 @@ describes — implemented in
 on every scan; there's currently no CLI flag to disable or retime it (see
 [Known limitations](#known-limitations--natural-next-steps)).
 
-Every HTTP-based check fetches one specific, well-known path with redirects
+Every HTTP-based check fetches a specific, well-known path (or, for the
+Docker Compose, Spring Boot `env` and Swagger/OpenAPI checks, a short fixed
+list of them — the first valid hit ends the check) with redirects
 disabled (a redirect away from `/.env` means it isn't directly exposed,
 which is the opposite of a finding). A single baseline request to a random,
 guaranteed-nonexistent path is made per host first, so a target that returns
@@ -658,9 +691,11 @@ instead; see **Email Security** below.
   the same rule set `ubel-secrets` uses: `critical` if it matches a known
   credential pattern, `high` otherwise.
 - `exposed-git-directory` — a publicly readable `.git/HEAD` (validated as an
-  actual ref or commit hash, not just a 200 response), with a best-effort
-  remote URL read from `.git/config` when available (any credentials embedded
-  in that URL are redacted before they reach the report). Always `critical` — the
+  actual ref or commit hash, not just a 200 response) **or** a publicly
+  readable `.git/config` (validated by its `[core]` section — some servers
+  block `HEAD` but still serve `config`). `.git/config` is also read to report
+  the remote URL when available (any credentials embedded in that URL are
+  redacted before they reach the report). Always `critical` — the
   entire repository history, including deleted branches, is typically
   reconstructable from this alone.
 - `exposed-phpinfo` — `phpinfo()` output reachable at `/info.php` or
@@ -668,6 +703,39 @@ instead; see **Email Security** below.
   a marker only real phpinfo output has, so an ordinary page that mentions a
   PHP version isn't flagged), disclosing the PHP version, loaded extensions,
   and absolute server paths. `high`.
+- `docker-compose-config` — a publicly readable `docker-compose.yml`,
+  `docker-compose.yaml`, `compose.yaml` or `compose.yml` (checked in that
+  order). It has to look like a real Compose file — a `services:` section
+  whose entries declare an `image` or `build`, and not an HTML page — so a
+  catch-all route isn't flagged. It reveals the internal architecture: service
+  names, images and versions, ports, volumes, networks. `high` when it holds
+  literal credential values (a `PASSWORD`/`SECRET`/`TOKEN`/`API_KEY`-style
+  variable set to a literal rather than a `${VAR}` reference, or a match
+  against the `ubel-secrets` rule set), otherwise `medium`. The report lists
+  service names, images and the *names* of the inline credential variables,
+  plus redacted previews — never the raw values.
+
+**Exposed Endpoint**
+- `springboot-env` — an unauthenticated Spring Boot Actuator `env` endpoint
+  at `/actuator/env` or `/env` (checked in that order). The response must be
+  the Spring environment JSON (Boot 1.x and 2.x+ shapes), not just a 200.
+  `high` when sensitive-named properties (password, secret, token,
+  credential, API/private/access key) are served **unmasked**, or when the
+  body matches the `ubel-secrets` rule set; otherwise `low` — the values are
+  masked, but the response still discloses environment variables, system
+  properties, file paths and active profiles. The report lists the active
+  profiles, the property count, the *names* of unmasked sensitive properties
+  and redacted previews — never the raw values.
+- `swagger-api` — a publicly reachable Swagger/OpenAPI specification
+  (`/swagger.json`, `/swagger/v1/swagger.json`, `/v2/api-docs`,
+  `/v3/api-docs`, `/openapi.json`, `/api-docs`) or, failing that, a Swagger UI
+  (`/swagger-ui.html`, `/swagger-ui/index.html`). A specification must parse as
+  JSON with a `swagger`/`openapi` version and a `paths` object (a response too
+  large to parse is accepted on those markers); the report records its
+  version, title, API version and the number of documented paths. Always
+  `low`: UBEL's severity scale has no informational tier and a public spec is
+  informational by nature, but it hands anyone a complete map of the API's
+  endpoints, parameters and data models.
 
 **WordPress** — only run on hosts the fingerprinter's own component
 inventory already flagged as WordPress (`wp_kind` set on a detected
@@ -1125,8 +1193,9 @@ other UBEL report vendors them) and includes:
 - **Misconfigurations tab** — findings from
   [Misconfiguration checks](#misconfiguration-checks), one row per rule id
   (e.g. `missing-hsts`, `exposed-git-directory`) rather than one per
-  occurrence — each row shows severity, category (Exposed File / WordPress /
-  TLS-SSL / Security Headers), and how many distinct hosts it was seen on.
+  occurrence — each row shows severity, category (Exposed File / Exposed Endpoint /
+  WordPress / TLS/SSL / Security Headers / Cookies / HTTP Methods / CORS /
+  Email Security), and how many distinct hosts it was seen on.
   Filterable by severity, category, and free text; a per-finding modal lists
   every occurrence (host, URL, description, evidence, remediation). An
   errors panel lists probes that couldn't complete, same pattern as Secrets'
@@ -1596,8 +1665,13 @@ rather than every push.
   [`fingerprint/NOTICE.md`](./fingerprint/NOTICE.md)) since it wasn't
   fingerprinting logic; reintroducing it for engagements that need to route
   through a specific egress point is a reasonable follow-up.
-- No authenticated/credentialed scanning mode — everything is unauthenticated
-  GETs by design (see [What this is, and isn't](#what-this-is-and-isnt)).
+- No login or session-handling flow — the module never authenticates by
+  itself. `--cookie` / `--header` let you attach a session cookie or headers
+  you obtained yourself, but only to the fingerprinting requests; the port
+  scan, the secrets crawl and the misconfiguration probes stay
+  unauthenticated, so anything only visible behind a login is not covered by
+  those (see [Shared behavior](#shared-behavior) and
+  [What this is, and isn't](#what-this-is-and-isnt)).
 - [Misconfiguration checks](#misconfiguration-checks) run unconditionally on
   every scan. `scanTargets()` already accepts `scanMisconfigs`/
   `misconfigTimeout` options to disable or retime them, but — unlike
@@ -1624,9 +1698,11 @@ rather than every push.
   a heavily customized theme that strips every usual marker) won't get
   those two checks, even though the ungated ones (exposed files, TLS,
   headers) still run against it like any other host.
-- Every misconfiguration check probes exactly one well-known path (or, for
-  TLS, one handshake; for email authentication, a short fixed list of DNS
-  names) per host — the same fixed-list, no-wordlist posture as the rest of
+- Every misconfiguration check probes a short fixed list of well-known paths
+  per host — just one for most checks; the Docker Compose, Spring Boot `env`
+  and Swagger/OpenAPI checks try a few alternatives and stop at the first
+  valid hit (for TLS, one handshake; for email authentication, a short fixed
+  list of DNS names) — the same fixed-list, no-wordlist posture as the rest of
   this module. A non-default `.env` location, a `.git` directory served from
   somewhere other than the web root, or any issue outside the fixed rule
   list in [Misconfiguration checks](#misconfiguration-checks) simply isn't

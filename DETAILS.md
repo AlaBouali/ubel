@@ -17,7 +17,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](#l
 - **Compliance Framework Mapping** — every finding across SCA (vulnerabilities, secrets), SAST (vulnerability and malicious-code findings), and Cloud (misconfigurations) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, via one shared mapping engine so the same underlying risk maps identically regardless of which module found it. Included by default in every scan, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (where the module emits SARIF). Best-effort guidance, not a certified compliance assessment — see the per-module docs for the full framework list and the disclaimer carried in every report.
 - **SAST / Malicious-Code Scanner** — a separate module: an LLM-powered pipeline (**scan → verify → taint-trace**) that reads your actual source code, cross-references a structured CWE-mapped vulnerability catalog, and separately screens for intentionally malicious code (backdoors, C2 beacons, supply-chain implants). It also scans IaC, Docker, and Kubernetes manifest files — each as its own dedicated language family, not lumped together.
 - **Cloud** — scans your AWS, GCP, and Azure accounts directly via each provider's own read-only API (live account state, not static IaC files) for misconfigurations: public storage/database/network exposure, over-permissive IAM and cluster (AKS/GKE) authorization, missing encryption, and disabled audit logging (CloudTrail/GuardDuty/VPC flow logs), with a Diffs tab showing what changed since the previous scan. Runs via `ubel-cloud`. See [cloud/README.md](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md).
-- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no auth, no brute force, no exploitation), checks the result against OSV.dev/NVD/wpvulnerability.net (the same vulnerability-lookup engine the SCA module uses, plus a dedicated WordPress plugin/theme/core lookup), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run, `ubel-host` to connect-scan every port on one or more hosts and fingerprint whatever answers HTTP(S), or `ubel-easm` to combine both — discover a domain's subdomains, resolve them to distinct IPs, port-scan each, and fingerprint the combined result. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
+- **EASM** — passively fingerprints the software exposed on a domain/URL over plain HTTP(S) (server banners, version headers, page markup — no login flow, no brute force, no exploitation; an operator-supplied `--cookie` / `--header` is attached to the fingerprinting requests only), checks the result against OSV.dev/NVD/wpvulnerability.net (the same vulnerability-lookup engine the SCA module uses, plus a dedicated WordPress plugin/theme/core lookup), and separately checks every host for a fixed set of common misconfigurations: exposed `.env`/`.git`/`docker-compose.yml`, an unauthenticated Spring Boot Actuator `env` endpoint, a public Swagger/OpenAPI spec or Swagger UI, WordPress `xmlrpc.php`/user enumeration, TLS/certificate weaknesses, missing/weak security headers and cookie flags, risky HTTP methods (TRACE/PUT/DELETE), CORS misconfiguration, and SPF/DMARC/DKIM email-authentication gaps. Runs via `ubel-url` against hosts you already know, `ubel-domain` to discover a domain's subdomains from Certificate Transparency logs (crt.sh) first — no DNS brute-forcing, no wordlists — and scan all of them in one run, `ubel-host` to connect-scan every port on one or more hosts and fingerprint whatever answers HTTP(S), or `ubel-easm` to combine both — discover a domain's subdomains, resolve them to distinct IPs, port-scan each, and fingerprint the combined result. **Authorized use only — see [easm/README.md](https://github.com/AlaBouali/ubel/blob/main/easm/README.md).**
 
 UBEL has no telemetry and no UBEL-operated backend. The dependency-scanning CLIs send only package identifiers (PURLs / CPE names) to OSV.dev and NVD, both mirror-configurable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`. For exploit intelligence they also send the CVE ids of whatever vulnerabilities they find to FIRST.org's EPSS API and download CISA's public KEV catalog (nothing is sent for that one); neither of those two has an endpoint override, and if they can't be reached the scan still completes with those fields marked unknown. Everything else runs on your own infrastructure. **SAST is the exception to "fully local":** the code chunks `ubel-sast` / `ubel-mal` analyze are sent to the LLM provider you configure (OpenRouter by default, and its API key is the only credential UBEL needs) — point it at a local or self-hosted model endpoint if source code must not leave your network. The EASM and cloud scanners contact only the targets and cloud APIs you point them at, plus the public data sources documented in their READMEs (for example crt.sh and wpvulnerability.net).
 
@@ -398,7 +398,8 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 
 ## EASM — External Attack Surface Fingerprinting
 
-> **⚠ Authorized use only.** `ubel-url` sends live, unauthenticated requests to
+> **⚠ Authorized use only.** `ubel-url` sends live requests (unauthenticated,
+> unless you pass `--cookie` / `--header`) to
 > every target you give it and discloses what it fingerprints to OSV.dev/NVD/
 > wpvulnerability.net. `ubel-domain` does the same, but discovers its own
 > target list from Certificate Transparency logs first — so it can end up
@@ -464,7 +465,10 @@ the same name+version dedup `ubel-domain` gets across subdomains.
 
 Every host is also checked, automatically, for a fixed set of common
 misconfigurations, independent of the CVE lookup above: an exposed
-`.env`/`.git`, exposed `phpinfo()` output, TLS/certificate weaknesses
+`.env`/`.git`/`docker-compose.yml`, exposed `phpinfo()` output, an
+unauthenticated Spring Boot Actuator `env` endpoint (`/actuator/env`,
+`/env`), a publicly reachable Swagger/OpenAPI specification or Swagger UI,
+TLS/certificate weaknesses
 (expiry, trust, hostname mismatch, weak/legacy protocol and cipher support),
 missing/weak security headers and cookie flags (HSTS, CSP, clickjacking
 protection, `X-Content-Type-Options`, `Referrer-Policy`,
@@ -475,6 +479,14 @@ reflection, a wildcard paired with credentials, the `null` Origin), SPF/
 DMARC/DKIM email-authentication gaps, and — on hosts already identified as
 WordPress — a reachable `xmlrpc.php` and unauthenticated user enumeration.
 This runs the same way across all four entry points.
+
+All four also accept `--cookie <value>` and `--header "Name: Value"`
+(repeatable) to fingerprint behind a login. They are sent on the
+fingerprinting requests only — the port scan, the secrets crawl and the
+misconfiguration probes stay unauthenticated — and, with `ubel-domain`,
+`ubel-host` and `ubel-easm`, on every discovered subdomain and `IP:port`, so
+pass only a credential you are prepared to present to all of them. Reports
+record only that a cookie was used and the header *names*.
 
 It's a deliberate subset of an SCA report: no license compliance (no
 manifest to read one off of), no dependency sequences/graph (nothing here
@@ -527,9 +539,10 @@ ubel-easm your-company.example --fail-on high
 Outputs JSON and HTML only. **Exit codes:** governed by `--fail-on` (default
 `critical`), same severity-threshold/count syntax as the rest of UBEL —
 reports on disk always contain every finding (vulnerabilities and
-misconfigurations alike) regardless of this flag; note that `--fail-on`
-itself currently gates on vulnerabilities/infections only, not on
-misconfiguration findings.
+misconfigurations alike) regardless of this flag. `--fail-on` gates on
+vulnerabilities, infections and web misconfigurations together: a
+misconfiguration counts toward the severity bar and the `N:sev` count
+exactly like a vulnerability of the same severity.
 
 **Full documentation — the responsible-use notice, safety guard, every
 `ubel-host`/`ubel-easm` flag, the "Shared IPs" warning, and the full
@@ -741,15 +754,15 @@ Carthage and CocoaPods are not gated either (SwiftPM's `Package.resolved` is).
 | Flutter / Dart (pub) | ✅ | ✅ (lockfile required) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | C/C++ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ |
 | Docker images | ✅ (OS + app deps) | ✅ | — | — | — | — | ✅ | ✅ (in image) |
-| Kubernetes manifests | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
-| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | — | — | — | ✅ |
+| Kubernetes manifests | — | — | — | ✅ (misconfig) | ✅ | — | — | ✅ |
+| Terraform / CloudFormation (IaC) | — | — | — | ✅ (misconfig) | ✅ | — | — | ✅ |
 | Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | — | ✅ | — |
 | Windows host | ✅ | ❌ | — | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — | — |
 
 ✅ = built and shipped · ⚠️ = partial, see that ecosystem's section · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer
 
-> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where there's no per-engine binary to attach `install-hook` to: Maven/Kotlin has none of its own, so it shows ⚠️ — a hook installed from an npm-family engine or `ubel-composer` runs a **full-stack** `health` scan, which also reads Maven's manifests/lockfiles in the repo (its files are in the hook's `auto`-mode trigger list too), but there is no `ubel-maven` hook of its own. Yarn, Bundler, Go, .NET, Dart, Flutter and SwiftPM each have their own binary (`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter`, `ubel-swift`), so `ubel-<engine> install-hook` works for them like for the other engines. The pip/uv/pipx/conda/cargo hooks run a single-ecosystem `health`. The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
+> **Pre-commit hook** column = the dependency-scanning git hook installed by `ubel-<engine> install-hook`. It runs `<engine> health` — a dependency scan, no OS scan — on every commit (`UBEL_HOOK_SCA=auto`: only when a manifest/lockfile is staged). Since it's gated on `health` support, its coverage matches the SCA column except where there's no per-engine binary to attach `install-hook` to: Maven/Kotlin has none of its own, so it shows ⚠️ — a hook installed from an npm-family engine or `ubel-composer` runs a **full-stack** `health` scan, which also reads Maven's manifests/lockfiles in the repo (its files are in the hook's `auto`-mode trigger list too), but there is no `ubel-maven` hook of its own. Yarn, Bundler, Go, .NET, Dart, Flutter and SwiftPM each have their own binary (`ubel-yarn`, `ubel-bundle`, `ubel-go`, `ubel-dotnet`, `ubel-dart`, `ubel-flutter`, `ubel-swift`), so `ubel-<engine> install-hook` works for them like for the other engines. The pip/uv/pipx/poetry/conda/cargo hooks run a single-ecosystem `health`. The secrets pre-commit hook (`ubel-secrets --install-hook`) is a separate hook and separate feature — see [Secrets Detection](#secrets-detection).
 
 Cloud account misconfiguration scanning (AWS/GCP/Azure, via `ubel-cloud`) isn't tied to a dependency ecosystem, so it doesn't have a row here — see the [Cloud section](#cloud--aws--gcp--azure-misconfiguration-scanning) above.
 
@@ -907,7 +920,7 @@ Honesty notes specific to conda:
 **poetry firewall (`ubel-poetry`):** `check`/`install` resolve in a scratch copy of the project — `pyproject.toml`, `poetry.lock`, `poetry.toml` and the declared readme are copied to a temporary directory and Poetry runs there, so the project is never modified before the scan passes. With package arguments the command is `poetry add --lock <packages>` (main group only; locks, installs nothing); with none, the project's existing `poetry.lock` is scanned as-is, and `poetry lock` runs in the scratch copy only if there is no lockfile yet. The scanned `poetry.lock` is the inventory: it holds the full closure, the dependency edges (so `introduced_by`/`parents` are populated, unlike uv/conda) and the dependency groups (packages outside `main` are scoped `dev`). On a clean scan UBEL writes the scanned `pyproject.toml` and `poetry.lock` into the project and runs `poetry install --no-root`; both files are SHA-256 recorded after resolution and re-checked immediately before the install, the project's own `pyproject.toml` must be unchanged since the scan (so a concurrent edit is never overwritten), and the originals are restored if the install fails. `--no-root` keeps the project's own build backend from running. Source distributions are refused with Poetry's `installer.only-binary = :all:`; because older Poetry releases silently ignore unknown settings, UBEL asks the installed Poetry for the value it will actually use first and aborts the install if it isn't honoured. Package sources come from Poetry's own configuration — option-shaped arguments, paths, URLs, whitespace, `:` and `;` are rejected before Poetry is invoked. `ubel-poetry init` runs `poetry init --no-interaction` when there is no `pyproject.toml`; `ubel-poetry health` scans a project-local `.venv` and also the environment reported by `poetry env info --path`.
 
 Honesty notes specific to poetry:
-- Registry packages (PyPI or any Poetry `legacy` index, treated like pip with a custom `--index-url`) are matched against OSV as `pkg:pypi/…`. Packages locked from git, a URL or a local file/directory are not the registry package of the same name: they are not queried, carry the `?vcs_url=`/`?download_url=`/`?file=` purl qualifier, and stay `undetermined` rather than `safe` (enable `block-undetermined` to fail on them).
+- Registry packages (PyPI or any Poetry `legacy` index, treated like pip with a custom `--index-url`) are matched against OSV as `pkg:pypi/…`. Packages locked from git, a URL or a local file/directory are not the registry package of the same name: they are not queried, carry the `?vcs_url=`/`?download_url=`/`?file=` purl qualifier, and stay `undetermined` rather than `safe` (`block-undetermined` is on by default, so they fail the check/install unless you turn it off with `ubel-poetry block-undetermined false`).
 - Poetry can still build a source distribution while *locking* when an index publishes no wheel metadata for a package (rare on PyPI). That is Poetry's own step and can't be disabled from outside; it never happens at install time.
 - `license` is `unknown` on `check`/`install`, and no `requirements.txt` sync happens after install — Poetry owns `pyproject.toml`/`poetry.lock`, which are overwritten with the scanned versions. `--group`/`--dev` and other `poetry add` options are not accepted, and `venvDir` is not used because Poetry manages its own virtualenv.
 
@@ -1552,12 +1565,15 @@ classified at all — both enforced only against health-mode scans, since
 license risk is a compliance concern on what's already installed, not an
 install-time security gate.
 
-### Malware SAST — 12 source-code language families, universally
+### Malware SAST — all 15 language families
 
 Malware detection is a two-pass LLM pipeline covering 15 intentional-malice
-classes, applied identically across all 12 source-code families (JS,
-Python, PHP, Ruby, Go, Rust, Java, Kotlin, Dart, Swift, C#, C) — every malware catalog
-entry is tagged for `ALL_LANGUAGES`, so there's no ecosystem where malware
+classes, applied across all 15 language families: the 12 source-code
+families (JS, Python, PHP, Ruby, Go, Rust, Java, Kotlin, Dart, Swift, C#, C)
+plus Docker, IaC and Kubernetes manifests. The malware catalog entries are
+tagged for the 12 source-code families; a chunk from one of the three config
+families matches none of them, so it is scanned against the full 15-class
+catalog rather than skipped — there's no ecosystem where malware
 detection is a second-class capability. It's explicitly separate from the
 vulnerability SAST catalog (different pipeline, different intent: is this
 code *deliberately* malicious vs. *accidentally* exploitable) and ships as

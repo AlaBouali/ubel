@@ -401,7 +401,7 @@ ubel-poetry install                  # no args → scan the existing poetry.lock
 ubel-poetry init                     # optional: `poetry init --no-interaction` if there is no pyproject.toml
 ```
 
-**What is and isn't matched against vulnerability data.** Registry packages — PyPI or any Poetry `legacy` index, treated the way pip treats a custom `--index-url` — are reported as `pkg:pypi/<name>@<version>` and matched against OSV like any other Python package. A package locked from **git, a URL, or a local file/directory** is not the registry package of the same name, so it is not queried and stays `undetermined` (reported with the `?vcs_url=` / `?download_url=` / `?file=` purl qualifier, never "safe"); enable `block-undetermined` to make those fail the install.
+**What is and isn't matched against vulnerability data.** Registry packages — PyPI or any Poetry `legacy` index, treated the way pip treats a custom `--index-url` — are reported as `pkg:pypi/<name>@<version>` and matched against OSV like any other Python package. A package locked from **git, a URL, or a local file/directory** is not the registry package of the same name, so it is not queried and stays `undetermined` (reported with the `?vcs_url=` / `?download_url=` / `?file=` purl qualifier, never "safe"); they fail the install by default (`block-undetermined` is on; turn it off with `ubel-poetry block-undetermined false`).
 
 Other differences worth knowing:
 
@@ -770,11 +770,11 @@ ubel-npm license-block-unknown false   # default
 **All engines.** Blocks the scan when any component is left `undetermined` — it has no version, or it was resolved from git, a tarball URL or a local path (or is a non-Python conda package), so it was never matched against a vulnerability database. See [Policy](#policy) for the full semantics.
 
 ```bash
-ubel-npm block-undetermined true
-ubel-npm block-undetermined false   # default
+ubel-npm block-undetermined true    # default
+ubel-npm block-undetermined false
 ```
 
-Off by default, because conda and VCS/URL dependencies are common and a fresh scan would otherwise block on them. Turn it on where "could not be checked" should be a failure rather than a warning — typically the install firewall. The block reason names the offending components.
+On by default: a component UBEL could not check against vulnerability data is a failure rather than a warning, so a clean result is never silently partial. Turn it off where conda and VCS/URL dependencies are common and a warning is enough. The block reason names the offending components.
 
 ---
 
@@ -808,7 +808,7 @@ Every policy field that has a mode can also be passed as a flag on `health`, `ch
 | `--block-undetermined [true\|false]` | `block_undetermined` | `true` \| `false` (bare flag = `true`) | all |
 | `--reachable-only [true\|false]` | `reachable_only` | `true` \| `false` (bare flag = `true`) | all |
 
-Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/conda/cargo/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
+Both `--flag value` and `--flag=value` are accepted, and flags can sit anywhere among the package arguments. Anything that isn't one of these flags is treated exactly as before. An invalid value, or a license flag on pip/uv/pipx/poetry/conda/cargo/apt/dnf/yum, exits `1` with an error before any scan starts. For `--epss-threshold`, a bare number above 1 (e.g. `10`) is rejected as ambiguous — write `0.1` or `10%` — and `0` is rejected because it would block everything; use `none` to disable. `--block-kev` and `--epss-threshold` have no persistent mode: to change them permanently, edit `config.json` (see [Policy](#policy)). `ubel-docker` has its own flags (`--no-pull`, `--keep`) and doesn't take these.
 
 ```bash
 # Block only critical vulnerabilities for this run; saved policy untouched
@@ -850,7 +850,7 @@ Default policy created on first run:
     "block_unknown_vulnerabilities": true,
     "license_risk_threshold": "none",
     "block_unknown_license_risk": false,
-    "block_undetermined": false,
+    "block_undetermined": true,
     "block_kev": true,
     "epss_threshold": 0.1,
     "reachable_only": false
@@ -865,7 +865,7 @@ Default policy created on first run:
 
 **Block unknown license risk** — separately controls whether packages whose license couldn't be classified at all cause a block. Defaults to `false`, for the same reason `license_risk_threshold` excludes `unknown` from its ordered levels: an unclassified license is more often a detection gap than a real finding. Same `health`-mode-only scope.
 
-**Block undetermined** — when `true`, any component whose state is `undetermined` causes a block: a component with no version, one resolved from git, a tarball URL or a local path (the lockfile parser marks these with a `vcs_url` / `download_url` / `file` purl qualifier), or a non-Python conda package. None of these is matched against OSV/NVD, so a clean result says nothing about them. Defaults to `false`; the block reason lists the component names. It is not affected by `reachable_only`, since there is no vulnerability to be unreachable. Set it persistently with `ubel-npm block-undetermined true`, or for one run with `--block-undetermined`.
+**Block undetermined** — when `true`, any component whose state is `undetermined` causes a block: a component with no version, one resolved from git, a tarball URL or a local path (the lockfile parser marks these with a `vcs_url` / `download_url` / `file` purl qualifier), or a non-Python conda package. None of these is matched against OSV/NVD, so a clean result says nothing about them. Defaults to `true`; the block reason lists the component names. It is not affected by `reachable_only`, since there is no vulnerability to be unreachable. Set it persistently with `ubel-npm block-undetermined true`, or for one run with `--block-undetermined`.
 
 **Block KEV** — when `true` (the default), any vulnerability listed in the CISA Known Exploited Vulnerabilities catalog causes a block, regardless of its severity. Policy files created before this field existed pick up the default automatically.
 
