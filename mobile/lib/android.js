@@ -135,7 +135,7 @@ export function analyzeApk(zip, ctx) {
     platform: 'android', package: pkg, version_name: manifest.attrs.versionName ?? null, version_code: manifest.attrs.versionCode ?? null,
     min_sdk: minSdk, target_sdk: targetSdk, debuggable: application.attrs.debuggable === true,
     permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], libraries: [],
-    signing: null, frameworks: [],
+    signing: null, frameworks: [], _detected_dependencies: [],
   };
   const urls = new Map();          // url -> artifact
   const addUrl = (u, a) => { if (!urls.has(u)) urls.set(u, a); };
@@ -168,6 +168,7 @@ export function analyzeApk(zip, ctx) {
     try {
       const dex = new Dex(zip.read(e, 160 * MB), e.name);
       app.dex_files.push(e.name);
+      collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
       if (analyzeDex(dex, { findings, base, at, scanner, addUrl })) pinning = true;
     } catch (err) { notes.push(`${at(e.name)}: not analysed (${err.message}).`); }
   }
@@ -478,6 +479,52 @@ function signing(zip, { findings, base, at, app, minSdk }) {
   const modern = ['v2', 'v3', 'v3.1'].some(s => schemes.has(s));
   if (schemes.has('v1') && !modern) findings.add('android.signing.v1_only', { ...base, artifact: art, description: 'Only the JAR (v1) signature is present; it does not cover the whole file and is vulnerable to Janus-style tampering on Android 5.0–8.0.', evidence: ['v1'], key: 'v1only' });
   else if (schemes.has('v1') && minSdk !== null && minSdk < 24) findings.add('android.signing.janus', { ...base, artifact: art, description: `minSdkVersion ${minSdk} keeps Android 5.0–8.0 devices in scope, where the v1 signature is what gets checked and can be bypassed (Janus).`, evidence: [`minSdkVersion=${minSdk}`], key: 'janus' });
+}
+
+
+// Class namespace evidence helps inventory popular Android dependencies when build-time
+// dependency metadata was stripped from the APK. It does not reveal the installed version,
+// so these entries are only eligible for OSV lookup if exact Maven metadata is also present.
+const THIRD_PARTY_CLASS_NAMESPACES = [
+  { re: /^okhttp3\./, coordinate: 'com.squareup.okhttp3:okhttp', name: 'OkHttp' },
+  { re: /^okio\./, coordinate: 'com.squareup.okio:okio', name: 'Okio' },
+  { re: /^com\.google\.gson\./, coordinate: 'com.google.code.gson:gson', name: 'Gson' },
+  { re: /^com\.squareup\.retrofit2\./, coordinate: 'com.squareup.retrofit2:retrofit', name: 'Retrofit' },
+  { re: /^com\.squareup\.moshi\./, coordinate: 'com.squareup.moshi:moshi', name: 'Moshi' },
+  { re: /^kotlinx\.coroutines\./, coordinate: 'org.jetbrains.kotlinx:kotlinx-coroutines-core', name: 'Kotlinx Coroutines Core' },
+  { re: /^com\.facebook\.react\./, coordinate: 'com.facebook.react:react-android', name: 'React Native Android' },
+  { re: /^io\.sentry\./, coordinate: 'io.sentry:sentry-android', name: 'Sentry Android' },
+  { re: /^com\.bugsnag\.android\./, coordinate: 'com.bugsnag:bugsnag-android', name: 'Bugsnag Android' },
+  { re: /^com\.google\.firebase\./, name: 'Firebase Android SDK' },
+  { re: /^com\.google\.android\.gms\./, name: 'Google Play Services' },
+  { re: /^androidx\./, name: 'AndroidX libraries' },
+  { re: /^org\.bouncycastle\./, name: 'Bouncy Castle' },
+  { re: /^org\.apache\.commons\./, name: 'Apache Commons libraries' },
+  { re: /^io\.grpc\./, name: 'gRPC Java' },
+  { re: /^com\.google\.protobuf\./, name: 'Protocol Buffers Java' },
+];
+
+function collectThirdPartyNamespaces(dex, source, out) {
+  const found = new Map();
+  for (const cls of dex.classes()) {
+    const dotted = String(cls.type || '').replace(/^L/, '').replace(/;$/, '').replace(/\//g, '.');
+    if (!dotted) continue;
+    for (const item of THIRD_PARTY_CLASS_NAMESPACES) {
+      if (!item.re.test(dotted)) continue;
+      const key = item.coordinate || item.name;
+      if (!found.has(key)) found.set(key, {
+        name: item.name,
+        ecosystem: 'Maven',
+        coordinate: item.coordinate || null,
+        version: null,
+        purl: null,
+        source,
+        reason: 'A third-party class namespace was detected, but the package version is not embedded in a reliable form; it was not queried by version against OSV.',
+      });
+      break;
+    }
+  }
+  out.push(...found.values());
 }
 
 // ── inventory ──────────────────────────────────────────────────────────────────────────────────────

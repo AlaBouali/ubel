@@ -6,7 +6,7 @@
 - **insecure storage and data handling** — backups enabled, world-readable files, weak or constant crypto keys/IVs, bundled keystores and databases, Keychain / data-protection attributes;
 - **misconfigurations** — debuggable builds, cleartext traffic, ATS exceptions, exported components, WebView settings, TLS-validation bypasses, weak signing, missing binary hardening.
 
-Nothing is executed and nothing is sent anywhere: the package is only read. **No third-party libraries and no external binaries** are used — ZIP, Android binary XML, `resources.arsc`, DEX, plist (XML and binary), Mach-O, ELF and PKCS#7/X.509 are all read by UBEL's own code on Node built-ins (`zlib`, `crypto`, `fs`). There is no `aapt`, `apktool`, `jadx`, `otool` or `codesign` to install.
+Nothing in the app is executed or uploaded. **No third-party libraries and no external binaries** are used — ZIP, Android binary XML, `resources.arsc`, DEX, plist (XML and binary), Mach-O, ELF and PKCS#7/X.509 are read by UBEL's own code on Node built-ins (`zlib`, `crypto`, `fs`). When exact supported package identities and versions can be extracted, the scanner sends only those package URLs (PURLs) to OSV.dev via UBEL's shared `sca/engine.js` lookup/enrichment functions. App source, binaries, manifests, and secret values are not uploaded. There is no `aapt`, `apktool`, `jadx`, `otool` or `codesign` to install.
 
 ```bash
 ubel-mobile app-release.apk
@@ -29,7 +29,7 @@ Exit codes: `0` ok · `1` the package could not be read or is not an APK/IPA · 
 
 ## Output
 
-JSON and HTML only.
+JSON and HTML only. The HTML report includes a **Dependencies** tab with extracted package evidence, package URLs, OSV lookup state, and advisory details/fix versions where OSV provides them. Android Maven identities are recovered from `pom.properties` and Maven-style `META-INF/*.version` markers when present; iOS checks use embedded Swift Package Manager pins and CocoaPods lock metadata when present. Native `.so` / `.dylib` binaries and embedded native frameworks are excluded from dependency enumeration and are never queried against OSV. Separate native binary hardening and secret checks are unchanged.
 
 - `.ubel/reports/latest.mobile.json` and `.ubel/reports/latest.mobile.html` — overwritten on every run;
 - `$HOME/.ubel/history/<asset_id>/<timestamp>.mobile.zip` — `report.mobile.json` + `report.mobile.html`, kept for the asset's history.
@@ -64,7 +64,7 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 
 ## Limits
 
-- **Static only.** Nothing runs, no network request is made — so e.g. Firebase database rules or the validity of a found key are *not* tested.
+- **Static only.** Nothing in the app runs. The only network requests made by the dependency lookup are OSV.dev requests for extracted, versioned package URLs. Backend behavior, Firebase database rules, and the validity of a found key are *not* tested.
 - **No decompiler.** Findings come from configuration, constant tables, API references and call arguments, and binary metadata — not data-flow analysis. The DEX walker tracks constants straight-line within a method, so it sees `Cipher.getInstance("DES/ECB/…")` and constant keys, but not values assembled at runtime. Findings marked `confidence: low|medium` are leads to verify.
 - **Obfuscation.** R8/ProGuard renames app classes but not framework calls or string constants, so most checks still work; packers, DexGuard-style string encryption, Hermes bytecode and code downloaded at runtime are only partly visible.
 - **App Store IPAs are FairPlay-encrypted** (`cryptid=1`): `Info.plist`, provisioning, entitlements, bundled files and imported symbols are analysed, but strings inside the binary are not. Scan a development-signed or decrypted build for full coverage. The report says so.
@@ -75,12 +75,15 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 ## Programmatic use
 
 ```js
-import { scanPackage } from '@arcane-spark/ubel-node/mobile';
-const { findings, apps, notes, target } = scanPackage('/path/app.apk', { maxEntryMb: 256 });
-findings.sorted();   // [{ rule, severity, title, description, remediation, masvs, cwe, artifact, evidence, confidence, origin, fingerprint, ... }]
+import { scanPackage, scanMobileDependencies } from '@arcane-spark/ubel-node/mobile';
+const scan = scanPackage('/path/app.apk', { maxEntryMb: 256 });
+const checked = await scanMobileDependencies(scan.dependencies);
+scan.findings.sorted();   // [{ rule, severity, title, description, remediation, masvs, cwe, artifact, evidence, confidence, origin, fingerprint, ... }]
+checked.dependencies;      // inventory entries with OSV lookup status and advisory details
+checked.summary;           // counts for queryable, vulnerable, clean, not-queryable, and failed lookups
 ```
 
-`scanPackage` reads the package and returns the findings; it writes no files (the CLI does that).
+`scanPackage` reads the package and returns the findings and dependency inventory candidates; it writes no files and does not itself perform network lookups (the CLI does that before writing reports). For programmatic OSV lookup, `scanMobileDependencies` is also exported from `@arcane-spark/ubel-node/mobile` and returns the inventory, lookup statuses, advisory details, and summary.
 
 ## Rules
 
