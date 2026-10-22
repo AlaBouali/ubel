@@ -2,7 +2,7 @@
 // report.js — turns findings into the report payload (JSON), the plain-language executive summary
 // and a self-contained HTML report (no external assets, everything escaped).
 
-import { SEVERITIES } from './rules.js';
+import { SEVERITIES, SEVERITY_RANK } from './rules.js';
 import { getTailwindScript } from '../../sca/tailwindcss.js';
 import { getChartJSScript } from '../../sca/chartjs.js';
 import { getGoogleFontsScript } from '../../sca/googlefonts.js';
@@ -29,6 +29,32 @@ export function isMisconfigurationFinding(finding) {
 
 export function isSecretFinding(finding) {
   return String(finding?.rule || '').startsWith('secret.');
+}
+
+/** Everything that is neither a hardcoded secret nor a misconfiguration: insecure code, crypto, storage and data handling. */
+export function isVulnerabilityFinding(finding) {
+  return !isSecretFinding(finding) && !isMisconfigurationFinding(finding);
+}
+
+/**
+ * Every issue belongs to exactly one category, so the three report lists never overlap:
+ *   secret            — hardcoded secrets (`secret.*`)
+ *   misconfiguration  — manifest / plist / signing / binary-hardening / TLS-and-WebView settings (MISCONFIG_RULE)
+ *   vulnerability     — all the rest
+ */
+export function findingCategory(finding) {
+  if (isSecretFinding(finding)) return 'secret';
+  if (isMisconfigurationFinding(finding)) return 'misconfiguration';
+  return 'vulnerability';
+}
+
+/** The three disjoint lists of a report payload, concatenated in a fixed order (vulnerabilities, secrets, misconfigurations). */
+export function flattenFindings(payload) {
+  return [
+    ...(payload?.vulnerabilities || []),
+    ...(payload?.secrets || []),
+    ...(payload?.misconfigurations || []),
+  ];
 }
 
 export function complianceForMobileFinding(finding) {
@@ -71,7 +97,11 @@ function buildMobileStats(findings, apps) {
 }
 
 export function buildPayload({ meta, target, apps, findings, dependencies = [], dependencySummary = null, notes, diffs }) {
-  const sorted = findings.sorted().map(f => ({ ...f, compliance: complianceForMobileFinding(f) }));
+  const sorted = findings.sorted().map(f => ({ ...f, category: findingCategory(f), compliance: complianceForMobileFinding(f) }));
+  // Disjoint partition: each issue lands in exactly one of these lists.
+  const vulnerabilities = sorted.filter(f => f.category === 'vulnerability');
+  const secrets = sorted.filter(f => f.category === 'secret');
+  const misconfigurations = sorted.filter(f => f.category === 'misconfiguration');
   const counts = Object.fromEntries(SEVERITIES.map(severity => [severity, 0]));
   const byMasvs = {};
   for (const f of sorted) {
@@ -81,14 +111,20 @@ export function buildPayload({ meta, target, apps, findings, dependencies = [], 
   }
   const highest = SEVERITIES.find(s => counts[s] > 0) || 'none';
   const payload = {
-    schema: 'ubel-mobile/1', tool: 'ubel-mobile', ...meta,
+    schema: 'ubel-mobile/2', tool: 'ubel-mobile', ...meta,
     target, apps,
-    summary: { total: sorted.length, counts, highest_severity: highest, by_masvs: byMasvs },
+    // `total` / `counts` / `by_masvs` cover all three lists together (they drive the risk rating and the --fail-on gate);
+    // `by_category` says how that total splits.
+    summary: {
+      total: sorted.length, counts, highest_severity: highest, by_masvs: byMasvs,
+      by_category: { vulnerabilities: vulnerabilities.length, secrets: secrets.length, misconfigurations: misconfigurations.length },
+    },
     stats: buildMobileStats(sorted, apps),
-    findings: sorted,
+    vulnerabilities,
+    secrets,
+    misconfigurations,
     dependencies: Array.isArray(dependencies) ? dependencies : [],
     dependency_summary: dependencySummary || { total: 0, queryable: 0, vulnerable_dependencies: 0, vulnerabilities: 0, clean_dependencies: 0, not_queryable: 0, lookup_errors: 0, by_severity: { critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 } },
-    misconfigurations: sorted.filter(isMisconfigurationFinding),
     analysis_notes: notes,
     limits: LIMITS,
     diffs: diffs || null,
@@ -116,19 +152,22 @@ export function executiveSummary(p) {
   else if (c.medium > 0) { rating = 'Moderate risk'; headline = 'No severe problems were found, but several configuration weaknesses deserve attention.'; }
   else if (c.low + c.info > 0) { rating = 'Low risk'; headline = 'Only minor or informational points were found.'; }
   else { rating = 'No issues found'; headline = 'The automated checks found nothing to report.'; }
-  const top = p.findings.filter(f => f.severity === 'critical' || f.severity === 'high').slice(0, 6)
-    .map(f => ({ severity: f.severity, title: f.title, where: f.artifact }));
+  // The three lists are disjoint; merge and re-rank them so the most severe issues come first whatever their category.
+  const all = flattenFindings(p).sort((a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9));
+  const top = all.filter(f => f.severity === 'critical' || f.severity === 'high').slice(0, 6)
+    .map(f => ({ severity: f.severity, title: f.title, where: f.artifact, category: f.category || findingCategory(f) }));
+  const bc = p.summary.by_category || {};
   const areas = Object.entries(p.summary.by_masvs).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => MASVS_LABEL[k] || k.toLowerCase());
   const paragraphs = [
-    `This report covers the ${platform} app ${appNames.join(', ') || 'in the scanned package'}. The package was examined without running it: its configuration, embedded files, code and resources were inspected for hardcoded secrets, insecure data handling and risky settings, and the findings are mapped to the OWASP Mobile Application Security Verification Standard (MASVS).`,
-    `${p.summary.total} finding(s) were recorded: ${c.critical} critical, ${c.high} high, ${c.medium} medium, ${c.low} low and ${c.info} informational.${areas.length ? ` Most of them concern ${areas.join(', ')}.` : ''}`,
+    `This report covers the ${platform} app ${appNames.join(', ') || 'in the scanned package'}. The package was examined without running it: its configuration, embedded files, code and resources were inspected for hardcoded secrets, insecure data handling and risky settings, and the results are mapped to the OWASP Mobile Application Security Verification Standard (MASVS).`,
+    `${p.summary.total} issue(s) were recorded — ${bc.vulnerabilities || 0} vulnerabilit${bc.vulnerabilities === 1 ? 'y' : 'ies'}, ${bc.secrets || 0} hardcoded secret(s) and ${bc.misconfigurations || 0} misconfiguration(s) — rated ${c.critical} critical, ${c.high} high, ${c.medium} medium, ${c.low} low and ${c.info} informational.${areas.length ? ` Most of them concern ${areas.join(', ')}.` : ''}`,
     c.critical + c.high > 0
-      ? 'Critical and high findings can usually be exploited by anyone who can download the app (for example by extracting a secret from the package) or by another app on the same device. They are listed first below.'
-      : 'None of the findings is rated critical or high.',
+      ? 'Critical and high issues can usually be exploited by anyone who can download the app (for example by extracting a secret from the package) or by another app on the same device. They are listed first below.'
+      : 'None of the issues is rated critical or high.',
   ];
   const actions = [];
   const seen = new Set();
-  for (const f of p.findings) {
+  for (const f of all) {
     if (seen.has(f.rule) || f.severity === 'info') continue;
     seen.add(f.rule);
     actions.push(f.remediation);
@@ -149,13 +188,16 @@ export async function buildHtml(p) {
   const targetFile = p.target?.file || 'Unknown file';
   const appNames = (p.apps || []).map(a => a.package || a.bundle_id || a.name).filter(Boolean);
   const appLabel = appNames.join(', ') || targetFile;
-  const findings = p.findings || [];
+  // Three disjoint lists; `all` (same order the page script rebuilds) is what the detail modal indexes into.
+  const vulns = p.vulnerabilities || [];
+  const secrets = p.secrets || [];
   const misconfigs = p.misconfigurations || [];
+  const all = flattenFindings(p);
   const dependencies = p.dependencies || [];
   const dependencySummary = p.dependency_summary || {};
   const dependencyStatusLabel = { vulnerable: 'Vulnerable', clean: 'Safe', not_queryable: 'Not queried', lookup_error: 'Lookup failed', lookup_incomplete: 'Lookup incomplete', pending: 'Pending' };
   const severityColors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3' };
-  const total = findings.length;
+  const total = all.length;
   const appIdentity = a => a.platform === 'ios' ? (a.name || a.bundle_id || 'iOS app') : (a.package || a.name || 'Android app');
   const appVersion = a => a.platform === 'ios' ? `${a.version || '?'} (${a.build || '?'})` : `${a.version_name || '?'} (${a.version_code || '?'})`;
   const appPlatform = a => a.platform === 'ios' ? 'iOS' : 'Android';
@@ -191,7 +233,7 @@ export async function buildHtml(p) {
   }).join('');
 
   const findingRows = (list, { clickable = true } = {}) => (list || []).map(f => {
-    const index = findings.indexOf(f);
+    const index = all.indexOf(f);
     const origin = f.origin === 'library' ? 'library' : f.origin === 'unknown' ? 'unknown' : 'app';
     const app = f.app || (p.apps?.length === 1 ? appIdentity(p.apps[0]) : '—');
     return `<tr class="border-b border-neutral-800 ${clickable ? 'hover:bg-neutral-900 cursor-pointer' : ''}"
@@ -207,9 +249,9 @@ export async function buildHtml(p) {
     </tr>`;
   }).join('');
 
-  const allFindingRows = findingRows(findings);
+  const vulnRows = findingRows(vulns);
+  const secretRows = findingRows(secrets);
   const misconfigRows = findingRows(misconfigs);
-
 
   const statsByMasvs = Object.entries(p.summary?.by_masvs || {}).sort((a, b) => b[1] - a[1]);
   const statsByRule = Object.entries(p.stats?.by_rule || {}).sort((a, b) => b[1] - a[1]).slice(0, 30);
@@ -220,16 +262,18 @@ export async function buildHtml(p) {
     : '<p class="text-sm text-neutral-500">No remediation actions were generated.</p>';
   const topFindings = es.top_findings?.length
     ? es.top_findings.map(f => `<div class="glass p-4 rounded-xl" style="border-left:4px solid ${severityColors[f.severity] || '#a3a3a3'}"><h4 class="font-semibold text-sm mb-1">${esc(f.title)}</h4><p class="text-xs text-neutral-400">${esc(f.where || '')}</p></div>`).join('')
-    : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No critical or high findings were reported.</div>';
+    : '<div class="glass p-4 rounded-xl text-sm text-neutral-400">No critical or high issues were reported.</div>';
   const scopeLimits = (es.scope_and_limits || p.limits || []).map(x => `<li>${esc(x)}</li>`).join('');
   const safeJson = JSON.stringify(p).replace(/[<>&\u2028\u2029]/g, ch => ({ '<': '\\u003c', '>': '\\u003e', '&': '\\u0026', '\u2028': '\\u2028', '\u2029': '\\u2029' }[ch]));
   const countCards = [
     ['critical', 'Critical', 'red-500'], ['high', 'High', 'red-400'], ['medium', 'Medium', 'orange-400'],
-    ['low', 'Low', 'blue-400'], ['info', 'Info', 'neutral-500'], ['total', 'Total Findings', 'neutral-500'],
+    ['low', 'Low', 'blue-400'], ['info', 'Info', 'neutral-500'], ['total', 'Total Issues', 'neutral-500'],
   ].map(([key, label, color]) => `<div class="glass p-6 rounded-xl border-l-4 border-l-${color}"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">${label}</p><p class="text-3xl font-bold ${key === 'total' ? 'text-neutral-300' : `text-${color}`}" id="stat-${key}">${key === 'total' ? total : Number(c[key] || 0)}</p></div>`).join('');
   const severityChartColors = ['#ef4444', '#f87171', '#fb923c', '#60a5fa', '#a3a3a3'];
-  const misconfigOptions = [...new Set(misconfigs.map(f => f.rule).filter(Boolean))].sort().map(rule => `<option value="${esc(rule)}">${esc(rule)}</option>`).join('');
-  const masvsOptions = [...new Set(findings.map(f => String(f.masvs || 'Unmapped').replace(/-\d+$/, '')))].sort().map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
+  const ruleOptions = list => [...new Set(list.map(f => f.rule).filter(Boolean))].sort().map(rule => `<option value="${esc(rule)}">${esc(rule)}</option>`).join('');
+  const misconfigOptions = ruleOptions(misconfigs);
+  const secretOptions = ruleOptions(secrets);
+  const masvsOptions = [...new Set(vulns.map(f => String(f.masvs || 'Unmapped').replace(/-\d+$/, '')))].sort().map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
 
   return `<!DOCTYPE html>
 <html lang="en" class="dark">
@@ -326,7 +370,8 @@ export async function buildHtml(p) {
       <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">App Inventory(${(p.apps || []).length})</button>
       <button onclick="switchTab('dependencies')" id="tab-dependencies" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependencies(${dependencies.length})</button>
-      <button onclick="switchTab('findings')" id="tab-findings" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(${total})</button>
+      <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities(${vulns.length})</button>
+      <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets(${secrets.length})</button>
       <button onclick="switchTab('misconfigs')" id="tab-misconfigs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Misconfigurations(${misconfigs.length})</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(${(p.compliance_summary?.frameworks || []).length})</button>
       <button onclick="switchTab('diffs')" id="tab-diffs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
@@ -339,9 +384,9 @@ export async function buildHtml(p) {
     <section id="section-dashboard" class="space-y-8">
       <div class="grid grid-cols-2 md:grid-cols-6 gap-4">${countCards}</div>
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Findings by Severity</h3><div class="h-56"><canvas id="severityChart"></canvas></div></div>
-        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Findings by MASVS Area</h3><div class="h-56"><canvas id="masvsChart"></canvas></div></div>
-        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Findings by Origin</h3><div class="h-56"><canvas id="originChart"></canvas></div></div>
+        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Issues by Severity</h3><div class="h-56"><canvas id="severityChart"></canvas></div></div>
+        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Issues by MASVS Area</h3><div class="h-56"><canvas id="masvsChart"></canvas></div></div>
+        <div class="glass p-6 rounded-xl"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 mb-4">Issues by Origin</h3><div class="h-56"><canvas id="originChart"></canvas></div></div>
       </div>
     </section>
 
@@ -361,7 +406,7 @@ export async function buildHtml(p) {
           <div><h3 class="text-sm font-semibold mb-4 uppercase tracking-widest text-neutral-400">Recommended actions</h3><div class="glass p-5 rounded-xl">${actions}</div></div>
         </div>
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 exec-figs">
-          ${[['Total findings', total, '#a3a3a3'], ['Critical', Number(c.critical || 0), '#ef4444'], ['High', Number(c.high || 0), '#f87171'], ['Misconfigurations', misconfigs.length, '#fb923c']].map(([label, value, color]) => `<div class="glass p-5 rounded-xl" style="border-left:4px solid ${color}"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">${esc(label)}</p><p class="text-3xl font-bold" style="color:${color}">${value}</p></div>`).join('')}
+          ${[['Vulnerabilities', vulns.length, '#f87171'], ['Secrets', secrets.length, '#ef4444'], ['Misconfigurations', misconfigs.length, '#fb923c'], ['Critical + High', Number(c.critical || 0) + Number(c.high || 0), '#a3a3a3']].map(([label, value, color]) => `<div class="glass p-5 rounded-xl" style="border-left:4px solid ${color}"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">${esc(label)}</p><p class="text-3xl font-bold" style="color:${color}">${value}</p></div>`).join('')}
         </div>
         <div class="glass p-5 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Scope and limits</h3><ul class="list-disc pl-5 text-sm text-neutral-400 space-y-2">${scopeLimits || '<li>No scope notes were recorded.</li>'}</ul></div>
       </div>
@@ -396,28 +441,46 @@ export async function buildHtml(p) {
       <p class="text-xs text-neutral-500">Only exact, supported, versioned package URLs are queried. Native .so/.dylib binaries and embedded native frameworks are excluded from the Dependencies tab and are never submitted to OSV; native hardening and secret checks remain separate. If an APK/IPA omits its build lockfiles or package metadata, a package may remain Not queried rather than being reported as clean. Click a row to inspect advisory details and source evidence.</p>
     </section>
 
-    <section id="section-findings" class="hidden space-y-4">
+    <section id="section-vulnerabilities" class="hidden space-y-4">
       <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="f-search" type="text" placeholder="Search title, rule, artifact, evidence..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500" oninput="applyFindingFilters()">
-        <select id="f-severity" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="f-origin" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All origins</option><option value="app">App / package</option><option value="unknown">Unattributed (renamed classes)</option><option value="library">Third-party library</option></select>
-        <select id="f-masvs" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All MASVS areas</option>${masvsOptions}</select>
+        <input id="v-search" type="text" placeholder="Search title, rule, artifact, evidence..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
+        <select id="v-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="v-origin" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All origins</option><option value="app">App / package</option><option value="unknown">Unattributed (renamed classes)</option><option value="library">Third-party library</option></select>
+        <select id="v-masvs" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All MASVS areas</option>${masvsOptions}</select>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
         <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Finding</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">MASVS</th><th class="px-4 py-3">Confidence</th></tr></thead>
-          <tbody id="findings-table-body" class="divide-y divide-neutral-800">${allFindingRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No findings.</td></tr>'}</tbody>
+          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Vulnerability</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">MASVS</th><th class="px-4 py-3">Confidence</th></tr></thead>
+          <tbody id="vulnerabilities-table-body" class="divide-y divide-neutral-800">${vulnRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No vulnerabilities detected.</td></tr>'}</tbody>
         </table>
       </div>
-      <p id="findings-empty" class="hidden text-sm text-neutral-500 italic">No findings match the selected filters.</p>
-      <p id="findings-filter-count" class="text-xs text-neutral-500"></p>
+      <p id="vulnerabilities-empty" class="hidden text-sm text-neutral-500 italic">No vulnerabilities match the selected filters.</p>
+      <p id="vulnerabilities-filter-count" class="text-xs text-neutral-500"></p>
+      <p class="text-xs text-neutral-500">Insecure code, cryptography, storage and data handling. Hardcoded secrets and configuration weaknesses are listed in their own tabs and never repeated here. Known-vulnerable third-party packages are on the Dependencies tab.</p>
+    </section>
+
+    <section id="section-secrets" class="hidden space-y-4">
+      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
+        <input id="s-search" type="text" placeholder="Search title, rule, artifact, app..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
+        <select id="s-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="s-rule" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All secret types</option>${secretOptions}</select>
+      </div>
+      <div class="glass rounded-xl overflow-x-auto">
+        <table class="w-full text-left">
+          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Title</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">Rule</th><th class="px-4 py-3">MASVS</th></tr></thead>
+          <tbody id="secrets-table-body" class="divide-y divide-neutral-800">${secretRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No hardcoded secrets detected.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <p id="secrets-empty" class="hidden text-sm text-neutral-500 italic">No secrets match the selected filters.</p>
+      <p id="secrets-filter-count" class="text-xs text-neutral-500"></p>
+      <p class="text-xs text-neutral-500">Secret values are never written to the report; only a masked preview is shown. A match proves the string is in the package, not that the credential is still valid.</p>
     </section>
 
     <section id="section-misconfigs" class="hidden space-y-4">
       <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="m-search" type="text" placeholder="Search title, rule, artifact, app..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500" oninput="applyMisconfigFilters()">
-        <select id="m-severity" onchange="applyMisconfigFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="m-rule" onchange="applyMisconfigFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All rule categories</option>${misconfigOptions}</select>
+        <input id="m-search" type="text" placeholder="Search title, rule, artifact, app..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
+        <select id="m-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="m-rule" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All rule categories</option>${misconfigOptions}</select>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
         <table class="w-full text-left">
@@ -432,21 +495,21 @@ export async function buildHtml(p) {
     <section id="section-compliance" class="hidden space-y-8">
       <p id="compliance-disclaimer" class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800"></p>
       <div id="compliance-frameworks-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
-      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No findings mapped to a compliance framework.</div>
+      <div id="compliance-empty" class="hidden text-sm text-neutral-500 italic">No issues mapped to a compliance framework.</div>
     </section>
 
     <section id="section-diffs" class="hidden space-y-6"></section>
 
     <section id="section-stats" class="hidden space-y-8">
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Finding Counts</h3><div class="space-y-2 text-sm">
-          ${[['Total findings', total, 'text-neutral-400'], ['Critical', c.critical || 0, 'severity-critical'], ['High', c.high || 0, 'severity-high'], ['Medium', c.medium || 0, 'severity-medium'], ['Low', c.low || 0, 'severity-low'], ['Info', c.info || 0, 'severity-info']].map(([label, value, cls], i) => `<div class="flex justify-between ${i < 5 ? 'border-b border-neutral-800 pb-2' : ''}><span class="${i === 0 ? 'text-neutral-500' : cls}">${esc(label)}</span><span class="mono ${i === 0 ? 'text-neutral-200' : cls}">${Number(value)}</span></div>`).join('')}
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issue Counts</h3><div class="space-y-2 text-sm">
+          ${[['Total issues', total, 'text-neutral-400'], ['Vulnerabilities', vulns.length, 'text-neutral-300'], ['Secrets', secrets.length, 'text-neutral-300'], ['Misconfigurations', misconfigs.length, 'text-neutral-300'], ['Critical', c.critical || 0, 'severity-critical'], ['High', c.high || 0, 'severity-high'], ['Medium', c.medium || 0, 'severity-medium'], ['Low', c.low || 0, 'severity-low'], ['Info', c.info || 0, 'severity-info']].map(([label, value, cls], i, rows) => `<div class="flex justify-between ${i < rows.length - 1 ? 'border-b border-neutral-800 pb-2' : ''}"><span class="${i === 0 ? 'text-neutral-500' : cls}">${esc(label)}</span><span class="mono ${i === 0 ? 'text-neutral-200' : cls}">${Number(value)}</span></div>`).join('')}
         </div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by Origin</h3><div class="h-48"><canvas id="originStatsChart"></canvas></div><div class="space-y-2 text-sm"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">App / package</span><span class="mono">${Number(p.stats?.by_origin?.app || 0)}</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Unattributed (renamed classes)</span><span class="mono">${Number(p.stats?.by_origin?.unknown || 0)}</span></div><div class="flex justify-between"><span class="text-neutral-500">Third-party library</span><span class="mono">${Number(p.stats?.by_origin?.library || 0)}</span></div></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by Origin</h3><div class="h-48"><canvas id="originStatsChart"></canvas></div><div class="space-y-2 text-sm"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">App / package</span><span class="mono">${Number(p.stats?.by_origin?.app || 0)}</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Unattributed (renamed classes)</span><span class="mono">${Number(p.stats?.by_origin?.unknown || 0)}</span></div><div class="flex justify-between"><span class="text-neutral-500">Third-party library</span><span class="mono">${Number(p.stats?.by_origin?.library || 0)}</span></div></div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Confidence Distribution</h3><div class="h-48"><canvas id="confidenceChart"></canvas></div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by MASVS Area</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Area</th><th class="px-4 py-3 text-right">Findings</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByMasvs.map(([k, v]) => `<tr><td class="px-4 py-3 mono">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No MASVS data.</td></tr>'}</tbody></table></div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by App</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">App</th><th class="px-4 py-3 text-right">Findings</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByApp.map(([k, v]) => `<tr><td class="px-4 py-3 break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No findings.</td></tr>'}</tbody></table></div></div>
-        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Frequent Rules</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Rule</th><th class="px-4 py-3 text-right">Findings</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByRule.map(([k, v]) => `<tr><td class="px-4 py-3 mono break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No rule data.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by MASVS Area</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Area</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByMasvs.map(([k, v]) => `<tr><td class="px-4 py-3 mono">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No MASVS data.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by App</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">App</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByApp.map(([k, v]) => `<tr><td class="px-4 py-3 break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No findings.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Frequent Rules</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Rule</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByRule.map(([k, v]) => `<tr><td class="px-4 py-3 mono break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No rule data.</td></tr>'}</tbody></table></div></div>
       </div>
     </section>
 
@@ -477,6 +540,8 @@ export async function buildHtml(p) {
 
   <script>
 const reportData = ${safeJson};
+// Same order as the server-side list the table rows index into: vulnerabilities, secrets, misconfigurations.
+const allFindings = [].concat(reportData.vulnerabilities || [], reportData.secrets || [], reportData.misconfigurations || []);
 const chartInstances = [];
 function escH(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 function switchTab(id) {
@@ -489,19 +554,20 @@ function switchTab(id) {
 function closeModal() { document.getElementById('modal-overlay').style.display = 'none'; document.body.style.overflow = 'auto'; }
 function openModal(html) { document.getElementById('modal-body').innerHTML = html; document.getElementById('modal-overlay').style.display = 'flex'; document.body.style.overflow = 'hidden'; }
 function modalMetaRow(label, value) { return '<div class="flex justify-between border-b border-neutral-800 pb-2 gap-4"><span class="text-neutral-500 text-xs">' + escH(label) + '</span><span class="mono text-xs text-right text-neutral-200 break-all">' + escH(value == null || value === '' ? '—' : value) + '</span></div>'; }
+const CATEGORY_LABEL = { vulnerability: 'Vulnerability', secret: 'Secret', misconfiguration: 'Misconfiguration' };
 function openFindingModal(index) {
-  const f = reportData.findings[index]; if (!f) return;
+  const f = allFindings[index]; if (!f) return;
   const c = {critical:'#ef4444',high:'#f87171',medium:'#fb923c',low:'#60a5fa',info:'#a3a3a3'}[f.severity] || '#a3a3a3';
   const evidence = Array.isArray(f.evidence) && f.evidence.length ? '<div class="glass p-5 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Evidence</h3><ul class="list-disc pl-5 text-sm text-neutral-300 space-y-2">' + f.evidence.map(e => '<li><code class="mono text-xs break-all">' + escH(e) + '</code></li>').join('') + '</ul></div>' : '';
   const compliance = f.compliance && f.compliance.frameworks ? f.compliance.frameworks.map(fw => '<div class="text-xs text-neutral-300"><span class="font-semibold">' + escH(fw.name) + '</span>: ' + (fw.controls || []).map(x => escH(x.id)).join(', ') + '</div>').join('') : '';
-  openModal('<div class="space-y-5"><div><div class="flex flex-wrap items-center gap-3 mb-2"><span class="px-2 py-1 rounded border text-xs uppercase font-bold" style="color:' + c + ';border-color:' + c + '">' + escH(f.severity || 'info') + '</span><span class="mono text-xs text-neutral-500">' + escH(f.rule || '') + '</span></div><h2 class="text-xl font-bold pr-8">' + escH(f.title || 'Untitled finding') + '</h2><p class="text-sm text-neutral-400 mt-2">' + escH(f.description || '') + '</p></div><div class="glass p-5 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Finding Details</h3>' + modalMetaRow('Artifact', (f.artifact || '') + (f.line ? ':' + f.line : '')) + modalMetaRow('Application', f.app || '—') + modalMetaRow('Origin', f.origin || 'app') + modalMetaRow('Confidence', f.confidence || 'unknown') + modalMetaRow('MASVS', f.masvs || 'Unmapped') + modalMetaRow('CWE', f.cwe || '—') + '</div>' + evidence + '<div class="glass p-5 rounded-xl space-y-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Remediation</h3><p class="text-sm text-neutral-300">' + escH(f.remediation || 'Review this finding manually.') + '</p></div>' + (compliance ? '<div class="glass p-5 rounded-xl space-y-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Compliance Frameworks</h3>' + compliance + '</div>' : '') + '</div>');
+  openModal('<div class="space-y-5"><div><div class="flex flex-wrap items-center gap-3 mb-2"><span class="px-2 py-1 rounded border text-xs uppercase font-bold" style="color:' + c + ';border-color:' + c + '">' + escH(f.severity || 'info') + '</span><span class="mono text-xs text-neutral-500">' + escH(f.rule || '') + '</span></div><h2 class="text-xl font-bold pr-8">' + escH(f.title || 'Untitled finding') + '</h2><p class="text-sm text-neutral-400 mt-2">' + escH(f.description || '') + '</p></div><div class="glass p-5 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">' + escH(CATEGORY_LABEL[f.category] || 'Issue') + ' Details</h3>' + modalMetaRow('Artifact', (f.artifact || '') + (f.line ? ':' + f.line : '')) + modalMetaRow('Application', f.app || '—') + modalMetaRow('Origin', f.origin || 'app') + modalMetaRow('Confidence', f.confidence || 'unknown') + modalMetaRow('MASVS', f.masvs || 'Unmapped') + modalMetaRow('CWE', f.cwe || '—') + '</div>' + evidence + '<div class="glass p-5 rounded-xl space-y-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Remediation</h3><p class="text-sm text-neutral-300">' + escH(f.remediation || 'Review this finding manually.') + '</p></div>' + (compliance ? '<div class="glass p-5 rounded-xl space-y-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Compliance Frameworks</h3>' + compliance + '</div>' : '') + '</div>');
 }
 function mobileComplianceMatches(frameworkName, controlId) {
-  return (reportData.findings || []).filter(f => (f.compliance?.frameworks || []).some(fw =>
+  return allFindings.filter(f => (f.compliance?.frameworks || []).some(fw =>
     fw.name === frameworkName && (fw.controls || []).some(control => control.id === controlId)));
 }
 function mobileComplianceFrameworkMatches(frameworkName) {
-  return (reportData.findings || []).filter(f => (f.compliance?.frameworks || []).some(fw => fw.name === frameworkName));
+  return allFindings.filter(f => (f.compliance?.frameworks || []).some(fw => fw.name === frameworkName));
 }
 function renderCompliance() {
   const cs = reportData.compliance_summary;
@@ -521,9 +587,9 @@ function renderCompliance() {
       const count = mobileComplianceMatches(fw.name, control.id).length;
       return '<div class="flex items-start justify-between gap-2 text-xs border-b border-neutral-800 pb-1.5 last:border-0 cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1 transition-colors" onclick="openComplianceModal(' + fwIdx + ',' + controlIdx + ')">' +
         '<div class="flex flex-col min-w-0"><span class="mono text-red-400">' + escH(control.id) + '</span><span class="text-neutral-500">' + escH(control.title || control.id) + '</span></div>' +
-        '<div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0"><span class="mono text-neutral-200">' + count + ' finding' + (count === 1 ? '' : 's') + '</span></div></div>';
+        '<div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0"><span class="mono text-neutral-200">' + count + ' issue' + (count === 1 ? '' : 's') + '</span></div></div>';
     }).join('');
-    return '<div class="glass p-6 rounded-xl space-y-4"><div class="flex items-start justify-between gap-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3><div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0"><span class="mono text-red-400 font-semibold text-xs">' + frameworkCount + ' finding' + (frameworkCount === 1 ? '' : 's') + '</span></div></div>' +
+    return '<div class="glass p-6 rounded-xl space-y-4"><div class="flex items-start justify-between gap-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-300">' + escH(fw.name) + '</h3><div class="flex flex-col items-end gap-0.5 whitespace-nowrap shrink-0"><span class="mono text-red-400 font-semibold text-xs">' + frameworkCount + ' issue' + (frameworkCount === 1 ? '' : 's') + '</span></div></div>' +
       '<div class="space-y-1.5 max-h-64 overflow-y-auto pr-1">' + (controls || '<p class="text-xs text-neutral-500 italic">No mapped controls.</p>') + '</div></div>';
   }).join('');
 }
@@ -534,20 +600,20 @@ function openComplianceModal(fwIdx, controlIdx) {
   if (!fw || !control) return;
   const matches = mobileComplianceMatches(fw.name, control.id);
   const rows = matches.map(f => {
-    const index = reportData.findings.indexOf(f);
+    const index = allFindings.indexOf(f);
     const severity = String(f.severity || 'unknown').toLowerCase();
     return '<div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="openFindingModal(' + index + ')">' +
-      '<div class="flex items-center gap-3 min-w-0"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + escH(severity) + '">' + escH(severity) + '</span><span class="text-xs text-white">' + escH(f.title || f.rule || 'Mobile finding') + '</span></div>' +
+      '<div class="flex items-center gap-3 min-w-0"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + escH(severity) + '">' + escH(severity) + '</span><span class="text-xs text-white">' + escH(f.title || f.rule || 'Mobile issue') + '</span></div>' +
       '<div class="flex items-center gap-3 shrink-0"><span class="mono text-[10px] text-neutral-500">' + escH(f.artifact || '') + '</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg></div></div>';
   }).join('');
-  const body = rows || '<p class="text-sm text-neutral-500 italic py-2">No findings mapped to this control.</p>';
-  openModal('<div class="space-y-4"><div><div class="flex items-center gap-3 mb-1 flex-wrap"><span class="mono text-red-400 text-sm">' + escH(control.id) + '</span><h2 class="text-lg font-semibold text-white">' + escH(control.title || control.id) + '</h2></div><p class="text-xs text-neutral-500">' + escH(fw.name) + (fw.version ? ' · ' + escH(fw.version) : '') + ' — ' + matches.length + ' finding' + (matches.length === 1 ? '' : 's') + '</p></div><div class="glass rounded-xl p-3 space-y-1">' + body + '</div></div>');
+  const body = rows || '<p class="text-sm text-neutral-500 italic py-2">No issues mapped to this control.</p>';
+  openModal('<div class="space-y-4"><div><div class="flex items-center gap-3 mb-1 flex-wrap"><span class="mono text-red-400 text-sm">' + escH(control.id) + '</span><h2 class="text-lg font-semibold text-white">' + escH(control.title || control.id) + '</h2></div><p class="text-xs text-neutral-500">' + escH(fw.name) + (fw.version ? ' · ' + escH(fw.version) : '') + ' — ' + matches.length + ' issue' + (matches.length === 1 ? '' : 's') + '</p></div><div class="glass rounded-xl p-3 space-y-1">' + body + '</div></div>');
 }
 const DIFF_GROUPS = [
-  { key: 'findings', title: 'Findings', cards: [
-    { list: 'new', label: 'New findings', count: 'new_findings', color: 'text-red-400' },
-    { list: 'unchanged', label: 'Still existing findings', count: 'unchanged_findings', color: 'text-yellow-400' },
-    { list: 'removed', label: 'Fixed findings', count: 'fixed_findings', color: 'text-green-400' }
+  { key: 'vulnerabilities', title: 'Vulnerabilities', cards: [
+    { list: 'new', label: 'New vulnerabilities', count: 'new_vulnerabilities', color: 'text-red-400' },
+    { list: 'unchanged', label: 'Still existing vulnerabilities', count: 'unchanged_vulnerabilities', color: 'text-yellow-400' },
+    { list: 'removed', label: 'Fixed vulnerabilities', count: 'fixed_vulnerabilities', color: 'text-green-400' }
   ]},
   { key: 'secrets', title: 'Secrets', cards: [
     { list: 'new', label: 'New secrets', count: 'new_secrets', color: 'text-red-400' },
@@ -579,7 +645,7 @@ function renderDiffs() {
   html += renderDiffGroup(DIFF_GROUPS[1]);
   const compliance = d.compliance && d.compliance.frameworks || [];
   if (compliance.length) {
-    html += '<h3 class="text-lg font-bold pt-4">Compliance</h3><p class="text-xs text-neutral-500">Findings mapped to each framework, compared with the previous report.</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+    html += '<h3 class="text-lg font-bold pt-4">Compliance</h3><p class="text-xs text-neutral-500">Issues mapped to each framework, compared with the previous report.</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
     compliance.forEach((fw, fwIdx) => {
       html += '<div class="glass rounded-xl p-5 space-y-3"><div><p class="font-semibold text-sm">' + escH(fw.name) + '</p>' + (fw.version ? '<p class="text-[10px] text-neutral-500 mono">' + escH(fw.version) + '</p>' : '') + '</div><div class="grid grid-cols-3 gap-2">';
       [['new', 'New', 'text-red-400'], ['unchanged', 'Existing', 'text-yellow-400'], ['removed', 'Resolved', 'text-green-400']].forEach(status => {
@@ -596,9 +662,9 @@ function openMobileDiffModal(group, list) {
   const d = reportData.diffs;
   const items = d && d[group] && d[group][list] || [];
   const labels = { new: 'New', unchanged: 'Still existing', removed: group === 'secrets' ? 'Removed' : 'Fixed' };
-  const groupLabels = { findings: 'findings', secrets: 'secrets', misconfigs: 'misconfigurations' };
-  const rows = items.map(item => '<tr><td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + escH(String(item.severity || 'unknown').toLowerCase()) + '">' + escH(item.severity || 'unknown') + '</td><td class="py-2 pr-4 font-medium">' + escH(item.title || item.rule || 'Untitled finding') + '</td><td class="py-2 pr-4 text-neutral-400">' + escH(item.app || '—') + '</td><td class="py-2 pr-4 mono text-neutral-400">' + escH(item.artifact || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.rule || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.masvs || '—') + '</td></tr>').join('');
-  const body = rows ? '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' + ['Severity', 'Finding', 'App', 'Artifact', 'Rule', 'MASVS'].map(label => '<th class="pb-2 pr-4 font-bold">' + label + '</th>').join('') + '</tr></thead><tbody class="divide-y divide-neutral-800">' + rows + '</tbody></table></div>' : '<p class="text-sm text-neutral-500 italic">None.</p>';
+  const groupLabels = { vulnerabilities: 'vulnerabilities', secrets: 'secrets', misconfigs: 'misconfigurations' };
+  const rows = items.map(item => '<tr><td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + escH(String(item.severity || 'unknown').toLowerCase()) + '">' + escH(item.severity || 'unknown') + '</td><td class="py-2 pr-4 font-medium">' + escH(item.title || item.rule || 'Untitled issue') + '</td><td class="py-2 pr-4 text-neutral-400">' + escH(item.app || '—') + '</td><td class="py-2 pr-4 mono text-neutral-400">' + escH(item.artifact || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.rule || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.masvs || '—') + '</td></tr>').join('');
+  const body = rows ? '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' + ['Severity', 'Issue', 'App', 'Artifact', 'Rule', 'MASVS'].map(label => '<th class="pb-2 pr-4 font-bold">' + label + '</th>').join('') + '</tr></thead><tbody class="divide-y divide-neutral-800">' + rows + '</tbody></table></div>' : '<p class="text-sm text-neutral-500 italic">None.</p>';
   openModal('<h3 class="text-lg font-bold mb-1">' + labels[list] + ' ' + groupLabels[group] + '</h3><p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
 }
 function openMobileComplianceDiffModal(fwIdx, list) {
@@ -607,7 +673,7 @@ function openMobileComplianceDiffModal(fwIdx, list) {
   if (!fw) return;
   const labels = { new: 'New', unchanged: 'Still existing', removed: 'Resolved' };
   const items = fw[list] || [];
-  const rows = items.map(item => '<tr><td class="py-2 pr-4 text-neutral-400">' + escH(item.kind === 'secret' ? 'Secret' : item.kind === 'misconfig' ? 'Misconfiguration' : 'Finding') + '</td><td class="py-2 pr-4 mono">' + escH(item.id || '') + '</td><td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + escH(String(item.severity || 'unknown').toLowerCase()) + '">' + escH(item.severity || 'unknown') + '</td><td class="py-2 pr-4 font-medium">' + escH(item.title || '') + '</td><td class="py-2 pr-4 mono text-neutral-400">' + escH(item.where || '') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.controls || '') + '</td></tr>').join('');
+  const rows = items.map(item => '<tr><td class="py-2 pr-4 text-neutral-400">' + escH(item.kind === 'secret' ? 'Secret' : item.kind === 'misconfig' ? 'Misconfiguration' : 'Vulnerability') + '</td><td class="py-2 pr-4 mono">' + escH(item.id || '') + '</td><td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + escH(String(item.severity || 'unknown').toLowerCase()) + '">' + escH(item.severity || 'unknown') + '</td><td class="py-2 pr-4 font-medium">' + escH(item.title || '') + '</td><td class="py-2 pr-4 mono text-neutral-400">' + escH(item.where || '') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.controls || '') + '</td></tr>').join('');
   const body = rows ? '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' + ['Type', 'ID', 'Severity', 'Title', 'Component / File', 'Controls'].map(label => '<th class="pb-2 pr-4 font-bold">' + label + '</th>').join('') + '</tr></thead><tbody class="divide-y divide-neutral-800">' + rows + '</tbody></table></div>' : '<p class="text-sm text-neutral-500 italic">None.</p>';
   openModal('<h3 class="text-lg font-bold mb-1">' + escH(fw.name) + ' — ' + labels[list] + '</h3><p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
 }
@@ -658,8 +724,23 @@ function applyDependencyFilters() {
   document.getElementById('dependencies-filter-count').textContent = shown + ' of ' + rows.length + ' dependencies shown';
   document.getElementById('dependencies-empty').classList.toggle('hidden', shown > 0);
 }
-function applyFindingFilters() { const q=(document.getElementById('f-search').value||'').toLowerCase(); const sev=document.getElementById('f-severity').value; const origin=document.getElementById('f-origin').value; const masvs=document.getElementById('f-masvs').value; let shown=0; document.querySelectorAll('#findings-table-body tr[data-finding-row]').forEach(row=>{const ok=(!q||row.textContent.toLowerCase().includes(q))&&(sev==='all'||row.dataset.severity===sev)&&(origin==='all'||row.dataset.origin===origin)&&(masvs==='all'||row.dataset.masvs===masvs); row.classList.toggle('hidden',!ok); if(ok) shown++;}); document.getElementById('findings-filter-count').textContent=shown+' of '+document.querySelectorAll('#findings-table-body tr[data-finding-row]').length+' findings shown'; document.getElementById('findings-empty').classList.toggle('hidden',shown>0); }
-function applyMisconfigFilters() { const q=(document.getElementById('m-search').value||'').toLowerCase(); const sev=document.getElementById('m-severity').value; const rule=document.getElementById('m-rule').value; let shown=0; const rows=document.querySelectorAll('#misconfigs-table-body tr[data-finding-row]'); rows.forEach(row=>{const ok=(!q||row.textContent.toLowerCase().includes(q))&&(sev==='all'||row.dataset.severity===sev)&&(rule==='all'||row.dataset.rule===rule);row.classList.toggle('hidden',!ok);if(ok)shown++;});document.getElementById('misconfigs-filter-count').textContent=shown+' of '+rows.length+' configuration findings shown';document.getElementById('misconfigs-empty').classList.toggle('hidden',shown>0); }
+// One filter routine for the three issue tables (prefix = DOM id prefix of its search / severity / extra selects).
+function applyIssueFilters(key, prefix, noun, extras) {
+  const q = (document.getElementById(prefix + '-search').value || '').toLowerCase();
+  const sev = document.getElementById(prefix + '-severity').value;
+  const filters = extras.map(([id, attr]) => [document.getElementById(prefix + '-' + id).value, attr]);
+  const rows = document.querySelectorAll('#' + key + '-table-body tr[data-finding-row]');
+  let shown = 0;
+  rows.forEach(row => {
+    const ok = (!q || row.textContent.toLowerCase().includes(q)) && (sev === 'all' || row.dataset.severity === sev) && filters.every(([value, attr]) => value === 'all' || row.dataset[attr] === value);
+    row.classList.toggle('hidden', !ok); if (ok) shown++;
+  });
+  document.getElementById(key + '-filter-count').textContent = shown + ' of ' + rows.length + ' ' + noun + ' shown';
+  document.getElementById(key + '-empty').classList.toggle('hidden', shown > 0 || rows.length === 0);
+}
+function applyVulnerabilityFilters() { applyIssueFilters('vulnerabilities', 'v', 'vulnerabilities', [['origin', 'origin'], ['masvs', 'masvs']]); }
+function applySecretFilters() { applyIssueFilters('secrets', 's', 'secrets', [['rule', 'rule']]); }
+function applyMisconfigFilters() { applyIssueFilters('misconfigs', 'm', 'misconfigurations', [['rule', 'rule']]); }
 function makeChart(id, type, labels, data, colors) {
   const el = document.getElementById(id); if (!el || !window.Chart || !labels.length) return;
   const chart = new Chart(el, { type, data: { labels, datasets: [{ data, backgroundColor: colors, borderColor: '#171717', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { labels: { color: '#a3a3a3', boxWidth: 10 } } }, scales: type === 'bar' ? { x: { ticks: { color: '#a3a3a3' }, grid: { color: '#262626' } }, y: { beginAtZero: true, ticks: { precision: 0, color: '#a3a3a3' }, grid: { color: '#262626' } } } : {} } }); chartInstances.push(chart);
@@ -674,16 +755,14 @@ makeChart('originStatsChart','doughnut',['App / package','Unattributed (renamed)
 const confidenceKeys=['high','medium','low']; makeChart('confidenceChart','bar',confidenceKeys.map(s=>s.toUpperCase()),confidenceKeys.map(s=>Number(reportData.stats?.by_confidence?.[s]||0)),['#34d399','#fb923c','#f87171']);
 renderCompliance();
 renderDiffs();
-document.getElementById('findings-table-body').addEventListener('click',e=>{const row=e.target.closest('[data-finding-index]');if(row)openFindingModal(Number(row.dataset.findingIndex));});
-document.getElementById('misconfigs-table-body').addEventListener('click',e=>{const row=e.target.closest('[data-finding-index]');if(row)openFindingModal(Number(row.dataset.findingIndex));});
+['vulnerabilities','secrets','misconfigs'].forEach(key=>document.getElementById(key+'-table-body').addEventListener('click',e=>{const row=e.target.closest('[data-finding-index]');if(row)openFindingModal(Number(row.dataset.findingIndex));}));
 document.getElementById('apps-table-body').addEventListener('click',e=>{const row=e.target.closest('[data-app-index]');if(row)appDetails(Number(row.dataset.appIndex));});
 document.getElementById('dependencies-table-body').addEventListener('click',e=>{const row=e.target.closest('[data-dependency-index]');if(row)openDependencyModal(Number(row.dataset.dependencyIndex));});
 document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target.id==='modal-overlay')closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
-['f-search','f-severity','f-origin','f-masvs'].forEach(id=>document.getElementById(id).addEventListener(id==='f-search'?'input':'change',applyFindingFilters));
-['m-search','m-severity','m-rule'].forEach(id=>document.getElementById(id).addEventListener(id==='m-search'?'input':'change',applyMisconfigFilters));
+[[['v-search','v-severity','v-origin','v-masvs'],applyVulnerabilityFilters],[['s-search','s-severity','s-rule'],applySecretFilters],[['m-search','m-severity','m-rule'],applyMisconfigFilters]].forEach(([ids,fn])=>ids.forEach(id=>document.getElementById(id).addEventListener(id.endsWith('-search')?'input':'change',fn)));
 ['dep-search','dep-status'].forEach(id=>document.getElementById(id).addEventListener(id==='dep-search'?'input':'change',applyDependencyFilters));
-applyFindingFilters(); applyMisconfigFilters(); applyDependencyFilters();
+applyVulnerabilityFilters(); applySecretFilters(); applyMisconfigFilters(); applyDependencyFilters();
   </script>
 </body>
 </html>`;

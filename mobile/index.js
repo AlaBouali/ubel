@@ -16,7 +16,7 @@ import { extractMobileDependencies, scanMobileDependencies } from './lib/depende
 export { extractMobileDependencies, scanMobileDependencies };
 import { Findings } from './lib/findings.js';
 import { SEVERITY_RANK, SEVERITIES } from './lib/rules.js';
-import { buildPayload, buildHtml, complianceForMobileFinding, isMisconfigurationFinding, isSecretFinding } from './lib/report.js';
+import { buildPayload, buildHtml, complianceForMobileFinding, isMisconfigurationFinding, isSecretFinding, isVulnerabilityFinding, flattenFindings } from './lib/report.js';
 import { loadPreviousReport } from '../cloud/lib/previous_report.js';
 import { buildZip } from '../sca/zip_writer.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
@@ -159,8 +159,20 @@ export function scanPackage(file, opts = {}) {
   return { findings, apps, dependencies, notes, target: { file: path.basename(file), kind, size_bytes: st.size, sha256: sha256File(file) } };
 }
 
-function diffReports(prev, current) {
-  if (!prev || !Array.isArray(prev.report?.findings)) return null;
+/**
+ * Every issue of an earlier report as one flat list. Reports written before the vulnerabilities / secrets / misconfigurations
+ * split carry a single `findings` array (which already held all three kinds); newer ones carry the three disjoint lists.
+ * Returns null when the report has neither.
+ */
+function previousIssues(report) {
+  if (Array.isArray(report?.findings)) return report.findings;
+  if (['vulnerabilities', 'secrets', 'misconfigurations'].some(k => Array.isArray(report?.[k]))) return flattenFindings(report);
+  return null;
+}
+
+export function diffReports(prev, current) {
+  const previousList = prev && previousIssues(prev.report);
+  if (!previousList) return null;
   const ids = r => (r.apps || []).map(a => a.package || a.bundle_id).sort().join(',');
   if (ids(prev.report) !== ids(current)) return null;
 
@@ -171,8 +183,8 @@ function diffReports(prev, current) {
       ? f.compliance
       : complianceForMobileFinding(f),
   });
-  const previousFindings = prev.report.findings.map(normalize);
-  const currentFindings = (current.findings || []).map(normalize);
+  const previousFindings = previousList.map(normalize);
+  const currentFindings = flattenFindings(current).map(normalize);
   const brief = f => ({
     fingerprint: keyOf(f), rule: f.rule, severity: f.severity, title: f.title,
     artifact: f.artifact, line: f.line, app: f.app,
@@ -187,9 +199,9 @@ function diffReports(prev, current) {
       removed: before.filter(f => !afterMap.has(keyOf(f))).map(brief),
     };
   };
-  // Findings mirrors the main Findings tab (all findings); Secrets and
-  // Misconfigs are focused subsets, matching the separate SCA diff categories.
-  const findings = compare(previousFindings, currentFindings);
+  // Three disjoint groups, matching the report's Vulnerabilities / Secrets / Misconfigurations tabs: an issue is in exactly one.
+  // Classification is by rule id (not a stored field) so reports from before the split diff correctly too.
+  const vulnerabilities = compare(previousFindings.filter(isVulnerabilityFinding), currentFindings.filter(isVulnerabilityFinding));
   const secrets = compare(previousFindings.filter(isSecretFinding), currentFindings.filter(isSecretFinding));
   const misconfigs = compare(previousFindings.filter(isMisconfigurationFinding), currentFindings.filter(isMisconfigurationFinding));
 
@@ -204,7 +216,7 @@ function diffReports(prev, current) {
         const key = keyOf(finding);
         const controls = [...new Set((fw.controls || []).map(c => c.id).filter(Boolean))].sort();
         const item = {
-          kind: isSecretFinding(finding) ? 'secret' : isMisconfigurationFinding(finding) ? 'misconfig' : 'finding',
+          kind: isSecretFinding(finding) ? 'secret' : isMisconfigurationFinding(finding) ? 'misconfig' : 'vulnerability',
           id: finding.rule || key, severity: finding.severity, title: finding.title,
           where: (finding.artifact || '') + (finding.line ? ':' + finding.line : ''),
           controls: controls.join(', '),
@@ -236,12 +248,10 @@ function diffReports(prev, current) {
   });
 
   const counts = {
-    new_findings: findings.new.length, unchanged_findings: findings.unchanged.length, fixed_findings: findings.removed.length,
+    new_vulnerabilities: vulnerabilities.new.length, unchanged_vulnerabilities: vulnerabilities.unchanged.length, fixed_vulnerabilities: vulnerabilities.removed.length,
     new_secrets: secrets.new.length, unchanged_secrets: secrets.unchanged.length, removed_secrets: secrets.removed.length,
     new_misconfigs: misconfigs.new.length, unchanged_misconfigs: misconfigs.unchanged.length, fixed_misconfigs: misconfigs.removed.length,
   };
-  const previousKeys = new Set(previousFindings.map(keyOf));
-  const currentKeys = new Set(currentFindings.map(keyOf));
   return {
     enabled: true,
     previous: {
@@ -252,12 +262,8 @@ function diffReports(prev, current) {
     previous_file: prev.file || null,
     previous_report_id: prev.report.report_id || null,
     previous_generated_at: prev.report.generated_at || null,
-    findings, secrets, misconfigs, counts,
+    vulnerabilities, secrets, misconfigs, counts,
     compliance: { frameworks: complianceFrameworks, includes_secrets: true },
-    // Preserve the original flat fields for consumers of older mobile diffs.
-    new: currentFindings.filter(f => !previousKeys.has(keyOf(f))).map(brief),
-    fixed: previousFindings.filter(f => !currentKeys.has(keyOf(f))).map(brief),
-    unchanged: currentFindings.filter(f => previousKeys.has(keyOf(f))).length,
   };
 }
 
@@ -315,19 +321,22 @@ export async function main() {
   if (!args.quiet) {
     const c = payload.summary.counts;
     console.log(`\n=== Mobile security scan: ${payload.apps.map(a => a.package || a.bundle_id).join(', ')} ===`);
-    console.log(`Findings: ${payload.summary.total}  (critical ${c.critical}, high ${c.high}, medium ${c.medium}, low ${c.low}, info ${c.info})`);
+    const bc = payload.summary.by_category;
+    console.log(`Issues: ${payload.summary.total}  (critical ${c.critical}, high ${c.high}, medium ${c.medium}, low ${c.low}, info ${c.info})`);
+    console.log(`  Vulnerabilities: ${bc.vulnerabilities}  ·  Secrets: ${bc.secrets}  ·  Misconfigurations: ${bc.misconfigurations}`);
     const ds = payload.dependency_summary || {};
     console.log(`Dependencies: ${ds.total || 0} detected, ${ds.queryable || 0} queried, ${ds.vulnerable_dependencies || 0} with known vulnerabilities (${ds.vulnerabilities || 0} advisory matches)`);
-    for (const f of payload.findings.filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${f.title} — ${f.artifact}`);
+    const issues = flattenFindings(payload);
+    for (const f of issues.filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${f.title} — ${f.artifact}`);
     for (const n of payload.analysis_notes) console.log(`  note: ${n}`);
   }
   const f = args.failOnParsed;
   if (f.mode === 'none') process.exitCode = 0;
   else {
     const limit = SEVERITY_RANK[f.severity];
-    const staticHits = payload.findings.filter(x => (SEVERITY_RANK[x.severity] ?? 4) <= limit).length;
+    const staticHits = flattenFindings(payload).filter(x => (SEVERITY_RANK[x.severity] ?? 4) <= limit).length;
     const dependencyHits = (payload.dependencies || []).reduce((n, dep) => n + (dep.vulnerabilities || []).filter(v => severityRank(v.severity) <= limit).length, 0);
-    const hits = staticHits + dependencyHits;
+    const hits = staticHits + dependencyHits;  // vulnerabilities + secrets + misconfigurations + dependency advisories
     process.exitCode = f.mode === 'threshold' ? (hits > f.count ? 2 : 0) : (hits > 0 ? 2 : 0);
   }
 }
