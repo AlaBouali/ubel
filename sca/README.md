@@ -1863,7 +1863,7 @@ An **asset id is a random UUID v4 without hyphens** — 32 hex characters (case-
 - **`asset_name` is for people.** It is the repository name from `git remote get-url origin` when the folder is a git checkout (only the last path segment is used, so credentials in a remote URL are never stored), otherwise the folder's name (an editor's extensions folder is named `<editor>_extensions`). Edit it freely — UBEL never overwrites a name that is already there, and adds one to a file that has an id but no name.
 - **Files the history.** Zips go under `$HOME/.ubel/history/<asset_id>/`, so each asset's zips stay together instead of mixing in one flat folder.
 - **Written into every report.** The JSON report carries `asset_id`, `asset_name`, `asset_type` and the scanning machine's [`machine_id`](#machine-id-ubel_machinejson) — and a per-report [`report_id`](#report-id-report_id) — (SCA: in `scan_info`; SAST/malware: in `meta`; cloud and EASM: top level), and the HTML report shows them as *Asset*, *Asset ID* and *Asset type* next to the other scan details. The id is therefore in the zip's path *and* in the report inside it. Unlike the id and name, the type is **not stored in `ubel_asset.json`** — it is worked out from the scan that ran (see [Asset types](#asset-types-asset_type)).
-- **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
+- **`asset_type` says what kind of thing was scanned** — one of `codebase`, `cloud`, `easm`, `mobile`, `machine`, `agent`, `editor` or `docker`. It is defined once, in [Asset types](#asset-types-asset_type) below.
 - **Also in the SBOM and SARIF.** The CycloneDX SBOM (`*.cdx.json`) has `asset_id`, `asset_name` and `asset_type` among its `metadata.properties`. In SARIF (`*.sarif.json`) they are in the `properties` of every run — the main run, plus the secrets and license runs when present; `ubel-sast` / `ubel-mal` write them to their one run.
 - **Every CLI creates it if it doesn't exist, when it starts** — before any network call, install or LLM request, and for every mode, including ones that never write a report (`init`, `threshold`, `block-unknown`, `install-hook`, …) and `asset-id` itself. A new id is announced with one line on **stderr** (`[+] New asset id created: …`), so JSON on stdout stays clean; nothing is printed when it already existed. `--help` and `version` create nothing, and neither does a run with `--asset-id` (see below). `ubel-<cli> init` does the same explicitly and prints the id on stdout.
 - **Every scanner writes one**, in the `.ubel/` it reports into: SCA health and firewall scans, `ubel-license`, `ubel-secrets`, `ubel-sast`, `ubel-mal`, `ubel-cloud`, and the EASM scanners (`ubel-url`, `ubel-domain`, `ubel-host`, `ubel-easm`) — the non-code scans included. `ubel-docker` keeps its id in the `.ubel/` of the directory you run it from (the extracted image is thrown away); an image's own `ubel_asset.json`, if it has one, is never copied over it. For cloud and EASM the id identifies the folder you ran from, not the account or target scanned — the report's own `accounts` / `targets` say that.
@@ -1890,13 +1890,14 @@ Every report also says **which machine produced it**. `$HOME/.ubel/ubel_machine.
 
 #### Asset types: `asset_type`
 
-Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing the scan looked at. It is always exactly one of these seven values — never the scan mode, never `null`:
+Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing the scan looked at. It is always exactly one of these eight values — never the scan mode, never `null`:
 
 | `asset_type` | What was scanned | Scan modes (history `<mode>`) | Scans that produce it |
 |---|---|---|---|
 | `codebase` | A source repository or project folder: dependencies, source code, malicious code | **`sca`, `firewall`, `sast`, `malware`** — and, because they scan the same folder with the same engine, `licenses` and `secrets` | SCA `health` and firewall `check` / `install` for `ubel-npm` / `-pnpm` / `-bun` / `-yarn` / `-pip` / `-pipx` / `-uv` / `-conda` / `-cargo` / `-composer`; `ubel-sast`; `ubel-mal`; `ubel-license`; `ubel-secrets`; `ubel-cicd`; and the VS Code extension's *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* |
 | `cloud` | A cloud account's configuration (AWS / GCP / Azure) | **`cloud`** | `ubel-cloud` |
 | `easm` | Externally exposed infrastructure: URLs, domains, IPs and hosts | **`easm`** — the EASM module's other modes `url`, `domain` and `host` too | `ubel-easm`, `ubel-url`, `ubel-domain`, `ubel-host` |
+| `mobile` | A mobile app package (Android `.apk` / iOS `.ipa`) | **`mobile`** | `ubel-mobile` |
 | `machine` | A host machine: its OS packages and installed developer tools and runtimes | `os` (and `sca` health scans with scope `developer_platform`) | `ubel-apt`, `ubel-dnf`, `ubel-yum`, `ubel-platform`, and the VS Code extension's *Scan Host Platform* |
 | `agent` | An AI-agent workspace or sandbox (OS, runtimes, tools and dependencies) | `sca` with scope `agent` | `ubel-agent` |
 | `editor` | An editor's installed extensions | `sca` with scope `editor_extension` | the VS Code extension's *Scan VS Code Extensions* |
@@ -1905,7 +1906,7 @@ Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing t
 How it is decided (`assetTypeFor()` in `sca/report_naming.js`, the only place the mapping lives):
 
 1. A scan's **`scan_scope`** wins when it names one of the special kinds: `agent` → `agent`; `editor_extension` → `editor`; `container-image` → `docker`; `developer_platform`, `cli_tool` or `linux_machine` → `machine`.
-2. Otherwise the scan's **history mode** decides: `os` → `machine`; `cloud` → `cloud`; `easm`, `host`, `domain` and `url` → `easm`.
+2. Otherwise the scan's **history mode** decides: `os` → `machine`; `cloud` → `cloud`; `mobile` → `mobile`; `easm`, `host`, `domain` and `url` → `easm`.
 3. Everything else — the `sca`, `firewall`, `sast` and `malware` scans (plus `licenses` and `secrets`, and the `repository` and `cicd` scopes) — is `codebase`.
 
 Three things to keep straight:

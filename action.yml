@@ -2,7 +2,7 @@ name: 'UBEL Security Scan and dependencies firewall'
 description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -151,10 +151,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
             exit 1
             ;;
         esac

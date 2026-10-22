@@ -55,6 +55,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-mal` | SAST | Malicious-code scan for intentional backdoors, C2 implants, exfiltration, persistence |
 | `ubel-chunk` | SAST | Utility with no LLM cost to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
+| `ubel-mobile` | Mobile | Static scan of an Android `.apk` / iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, with no third-party libraries or external binaries — see [mobile/README.md](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
 | `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD/wpvulnerability.net vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
 | `ubel-domain` | EASM | Same as `ubel-url`, but discovers its own target list first — enumerates a domain's subdomains via Certificate Transparency logs (crt.sh), then runs the same fingerprinting/vulnerability/misconfiguration scan against all of them — **authorized use only, against infrastructure you own** |
 | `ubel-host` | EASM | Takes one or more IPs/domains, resolves them to their distinct IPs (handled exactly like `ubel-easm` handles crt.sh hostnames), connect-scans every port in a range (default 1-30000) on each, probes whatever accepts a connection for HTTP(S), then runs the same fingerprinting/vulnerability/misconfiguration scan `ubel-url` does against whatever answered — **authorized use only, against infrastructure you own** |
@@ -399,6 +400,15 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 
 ---
 
+## Mobile — Android / iOS App Scanning
+
+`ubel-mobile <app.apk | app.ipa | app.xapk | app.apks>` statically analyses a mobile app package — nothing is executed, nothing is sent anywhere — for **hardcoded secrets** (UBEL's shared secrets rules over DEX strings and constants, string resources, plists, bundled files and native-library strings), **insecure storage and data handling** (backups, world-readable files, weak or constant crypto keys/IVs, bundled keystores/databases, Keychain/data-protection attributes) and **misconfigurations** (debuggable builds, cleartext traffic, ATS exceptions, exported components, WebView settings, TLS-validation bypasses, weak signing, missing binary hardening). Findings are mapped to OWASP MASVS and written as JSON and HTML (`report.mobile.json` / `report.mobile.html`, plus `latest.mobile.*` under `.ubel/reports/`), with a Diffs section against the asset's previous scan. The whole module is pure Node built-ins: ZIP, Android binary XML, `resources.arsc`, DEX, plist (XML and binary), Mach-O, ELF and PKCS#7/X.509 are all read directly, so no `aapt`, `apktool`, `jadx`, `otool` or `codesign` is needed. There is no decompiler: a finding comes from manifests/plists, resources, constant tables, API references and call arguments, and binary metadata. See [Mobile § Limits](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md#limits).
+
+```bash
+ubel-mobile app-release.apk
+ubel-mobile Bank.ipa --fail-on high --min-severity medium
+```
+
 ## EASM — External Attack Surface Fingerprinting
 
 > **⚠ Authorized use only.** `ubel-url` sends live requests (unauthenticated,
@@ -635,7 +645,7 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
     args: check curl
 ```
 
-`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `bundle`, `go`, `dotnet`, `dart`, `flutter`, `swift`, `apt`, `dnf`, `yum`, `resbom`, `sbom` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
+`command` must be one of: `sast`, `mal`, `chunk`, `cicd`, `agent`, `platform`, `secrets`, `license`, `cloud`, `mobile`, `url`, `domain`, `host`, `easm`, `npm`, `pnpm`, `bun`, `yarn`, `composer`, `docker`, `pip`, `pipx`, `uv`, `conda`, `poetry`, `cargo`, `bundle`, `go`, `dotnet`, `dart`, `flutter`, `swift`, `apt`, `dnf`, `yum`, `resbom`, `sbom` — anything else fails the step before `npx` ever runs. `domain`, `host`, and `easm` are in the allow-list too, but they actively probe whatever target you pass them: only point them at assets your organization owns, and think twice before running `easm` unattended (it expands a domain into every subdomain IP, which can include shared CDN/hosting addresses you don't own — see the comments in `action.yml`).
 
 The lockfile-required commands (`yarn`, `bundle`, `go`, `dotnet`, `dart`, `flutter`, `swift`) fail the step with exit `1` when the lockfile is missing or `args` contains a package name — `args` is just the mode (`check` / `health`; `install` is not available on these engines). `check` only reads files and needs no toolchain on the runner; do the actual install in a separate step after it passes.
 

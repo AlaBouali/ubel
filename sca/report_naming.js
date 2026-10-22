@@ -667,7 +667,7 @@ export function parseReportId(id) {
 }
 
 /** The only values `asset_type` can take. */
-export const ASSET_TYPES = Object.freeze(["codebase", "cloud", "easm", "machine", "agent", "editor", "docker"]);
+export const ASSET_TYPES = Object.freeze(["codebase", "cloud", "easm", "machine", "agent", "editor", "docker", "mobile"]);
 
 // scan_scope values that are about a machine rather than a repository.
 const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine"]);
@@ -681,6 +681,7 @@ const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine
  *   scan_scope developer_platform / cli_tool /
  *              linux_machine, or mode "os"              → machine
  *   mode cloud                                          → cloud
+ *   mode mobile (ubel-mobile)                           → mobile
  *   mode easm (and the EASM modes host / domain / url)  → easm
  *   everything else: modes sca, firewall, sast, malware
  *   (and licenses, secrets, scope cicd)                 → codebase
@@ -690,7 +691,7 @@ const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine
  *
  * @param {string} mode         history mode (see historyZipPath)
  * @param {string} [scanScope]  scan_scope of an SCA run, when there is one
- * @returns {"codebase"|"cloud"|"easm"|"machine"|"agent"|"editor"|"docker"}
+ * @returns {"codebase"|"cloud"|"easm"|"machine"|"agent"|"editor"|"docker"|"mobile"}
  */
 export function assetTypeFor(mode, scanScope) {
   if (scanScope === "agent") return "agent";
@@ -700,6 +701,7 @@ export function assetTypeFor(mode, scanScope) {
   switch (sanitizeReportTag(mode)) {
     case "os":                                      return "machine";
     case "cloud":                                   return "cloud";
+    case "mobile":                                  return "mobile";
     case "easm": case "host": case "domain": case "url": return "easm";
     default:                                        return "codebase";
   }
