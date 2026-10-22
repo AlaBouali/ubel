@@ -11,6 +11,7 @@ import { asciiStrings } from './strings.js';
 import { certsFromPkcs7, describeCert, parseApkSigningBlock, WEAK_SIG } from './der.js';
 import { scanBundledFiles } from './files.js';
 import { Aggregator, mask } from './findings.js';
+import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, constantSecretArg } from './signals.js';
 
 const MB = 1024 * 1024;
 
@@ -32,6 +33,52 @@ const LIB_PREFIXES = ['Landroid/', 'Landroidx/', 'Lcom/android/', 'Ljava/', 'Lja
   'Lorg/slf4j/', 'Lorg/json/', 'Lorg/chromium/', 'Lcom/tencent/', 'Lcom/baidu/', 'Lcom/alipay/', 'Lcom/umeng/', 'Lcom/huawei/', 'Lcom/xiaomi/', 'Lio/realm/',
   'Lcom/reactnative/', 'Lcom/swmansion/', 'Lorg/xmlpull/', 'Lorg/w3c/', 'Lorg/xml/', 'Lbolts/', 'Lcom/braze/', 'Lcom/segment/', 'Lcom/stripe/', 'Lcom/paypal/'];
 const isLibraryClass = t => LIB_PREFIXES.some(p => t.startsWith(p));
+
+/**
+ * R8/ProGuard renames third-party library classes just like app classes (Material becomes `Lc/c/a/a/…`),
+ * so a package-prefix list alone cannot tell them apart. A class is "obfuscated-looking" when its leading
+ * package segment is a single character, or a two-character one followed by another short segment
+ * (`Lio/flutter/…` is a real package; `Lio/a/b;` is not). Default-package classes with a 1–2 character
+ * name count too.
+ */
+export function looksObfuscated(type) {
+  const segs = String(type).replace(/^L|;$/g, '').split('/');
+  if (segs.length === 1) return segs[0].length <= 2;
+  if (segs[0].length === 1) return true;
+  return segs[0].length === 2 && segs[1].length <= 2;
+}
+
+/**
+ * Package directories ("com/foo/app") that belong to the app itself: the manifest package plus the package
+ * of every component the manifest names. Components contributed by library manifests (androidx, Firebase …)
+ * are skipped so they cannot turn a library package into "app" code.
+ */
+export function appNamespaces(pkg, application) {
+  const dirs = new Set();
+  const add = fqn => {
+    const t = `L${String(fqn).replace(/\./g, '/')};`;
+    if (isLibraryClass(t)) return;
+    const dir = String(fqn).split('.').slice(0, -1).join('/');
+    if (dir.includes('/')) dirs.add(dir);
+  };
+  if (pkg && pkg !== 'unknown') { const d = pkg.replace(/\./g, '/'); if (d.includes('/') && !isLibraryClass(`L${d}/`)) dirs.add(d); }
+  const qualify = n => (String(n).startsWith('.') ? pkg + n : String(n).includes('.') ? String(n) : `${pkg}.${n}`);
+  for (const c of [application, ...(application.children || []).filter(x => ['activity', 'activity-alias', 'service', 'receiver', 'provider'].includes(x.tag))]) {
+    if (c && c.attrs && typeof c.attrs.name === 'string' && c.attrs.name) add(qualify(c.attrs.name));
+  }
+  return [...dirs].map(d => `L${d}/`);
+}
+
+/**
+ * 'library' (known prefix) | 'app' (under an app namespace, or an ordinary non-obfuscated package) |
+ * 'unknown' (renamed class outside the app namespace: most likely renamed library code, but not provable).
+ * 'unknown' is never downgraded in severity, so a renamed class cannot hide a finding.
+ */
+export function classOrigin(type, namespaces = []) {
+  if (isLibraryClass(type)) return 'library';
+  if (namespaces.some(n => type.startsWith(n))) return 'app';
+  return looksObfuscated(type) ? 'unknown' : 'app';
+}
 
 const DEBUG_LIBS = [['Lcom/facebook/stetho/', 'Stetho'], ['Lcom/squareup/leakcanary/', 'LeakCanary'], ['Lleakcanary/', 'LeakCanary'],
   ['Lcom/readystatesoftware/chuck/', 'Chuck'], ['Lcom/chuckerteam/chucker/', 'Chucker'], ['Lcom/facebook/flipper/', 'Flipper'], ['Lcom/amitshekhar/', 'Android-Debug-Database']];
@@ -98,14 +145,45 @@ for (const cls of CONTEXT_CLASSES) {
 for (const m of ['getExternalStorageDirectory', 'getExternalStoragePublicDirectory']) {
   on(`Landroid/os/Environment;->${m}`, () => [{ rule: 'android.dex.external_storage', evidence: `Environment.${m}()`, description: 'Data written here is readable by other apps (and users); review what is stored.', confidence: 'medium' }]);
 }
-for (const c of ['DexClassLoader', 'PathClassLoader', 'InMemoryDexClassLoader']) {
+for (const c of ['DexClassLoader', 'InMemoryDexClassLoader']) {
   on(`Ldalvik/system/${c};-><init>`, () => [{ rule: 'android.dex.dynamic_code_loading', evidence: `new ${c}(…)`, description: 'Code is loaded at runtime; if the source is writable or remote it can be replaced.', confidence: 'medium' }]);
 }
+// PathClassLoader is how Android (and every multidex / split / plugin framework) loads the app's own installed code,
+// so the constructor alone is not a signal. Report it only when the constant path is outside app-private storage.
+on('Ldalvik/system/PathClassLoader;-><init>', ([, path]) => {
+  const v = str(path);
+  if (v === null || !/^(\/sdcard\/|\/storage\/|\/mnt\/|\/data\/local\/tmp|https?:)/i.test(v)) return;
+  return [{ rule: 'android.dex.dynamic_code_loading', evidence: `new PathClassLoader("${esc(v).slice(0, 80)}", …)`, description: 'Code is loaded at runtime from a location other apps or the network can write to; it can be replaced.', confidence: 'medium' }];
+});
 on('Ljava/lang/Runtime;->exec', () => [{ rule: 'android.dex.runtime_exec', evidence: 'Runtime.exec(…)', description: 'Shell commands are executed.', confidence: 'medium' }]);
 for (const m of ['getDeviceId', 'getImei', 'getMeid', 'getSubscriberId', 'getSimSerialNumber', 'getLine1Number']) {
   on(`Landroid/telephony/TelephonyManager;->${m}`, () => [{ rule: 'android.dex.device_identifiers', evidence: `TelephonyManager.${m}()`, description: 'Persistent hardware/subscriber identifiers are read.' }]);
 }
-const WATCH = new Set(CALLS.keys());
+// JWT / HMAC signing secrets passed as constants (existing SecretKeySpec rule covers hand-rolled HMAC).
+for (const [key, from, short] of [
+  ['Lio/jsonwebtoken/JwtBuilder;->signWith', 1, 'JwtBuilder.signWith'],
+  ['Lio/jsonwebtoken/JwtParser;->setSigningKey', 1, 'JwtParser.setSigningKey'],
+  ['Lio/jsonwebtoken/JwtParserBuilder;->setSigningKey', 1, 'JwtParserBuilder.setSigningKey'],
+  ['Lio/jsonwebtoken/security/Keys;->hmacShaKeyFor', 0, 'Keys.hmacShaKeyFor'],
+  ['Lcom/auth0/jwt/algorithms/Algorithm;->HMAC256', 0, 'Algorithm.HMAC256'],
+  ['Lcom/auth0/jwt/algorithms/Algorithm;->HMAC384', 0, 'Algorithm.HMAC384'],
+  ['Lcom/auth0/jwt/algorithms/Algorithm;->HMAC512', 0, 'Algorithm.HMAC512'],
+  ['Lcom/nimbusds/jose/crypto/MACSigner;-><init>', 1, 'MACSigner'],
+  ['Lcom/nimbusds/jose/crypto/MACVerifier;-><init>', 1, 'MACVerifier'],
+]) {
+  on(key, args => {
+    const a = constantSecretArg(args, from);
+    return a ? [{ rule: 'android.dex.hardcoded_jwt_secret', evidence: `${short}("${mask(a.v)}")`, description: 'The signing secret is a string literal in the code, so anyone with the app can forge tokens.' }] : undefined;
+  });
+}
+const WATCH = new Set([...CALLS.keys(), ...SIGNAL_KEYS.keys()]);
+
+/** Runs every single-call rule registered for a callee key (exported so rules can be tested without a DEX fixture). */
+export function applyCallRules(key, args, current = {}) {
+  const out = [];
+  for (const fn of CALLS.get(key) || []) { const hits = fn(args, current); if (hits) out.push(...hits); }
+  return out;
+}
 
 // ── entry point ────────────────────────────────────────────────────────────────────────────────────
 /**
@@ -137,6 +215,7 @@ export function analyzeApk(zip, ctx) {
     permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], libraries: [],
     signing: null, frameworks: [], _detected_dependencies: [],
   };
+  const namespaces = appNamespaces(pkg, application);
   const urls = new Map();          // url -> artifact
   const addUrl = (u, a) => { if (!urls.has(u)) urls.set(u, a); };
   let pinning = false;
@@ -169,7 +248,7 @@ export function analyzeApk(zip, ctx) {
       const dex = new Dex(zip.read(e, 160 * MB), e.name);
       app.dex_files.push(e.name);
       collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
-      if (analyzeDex(dex, { findings, base, at, scanner, addUrl })) pinning = true;
+      if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces })) pinning = true;
     } catch (err) { notes.push(`${at(e.name)}: not analysed (${err.message}).`); }
   }
   if (!app.dex_files.length) notes.push(`${at('classes.dex')}: no DEX code found.`);
@@ -332,7 +411,7 @@ function hybridChecks({ xmlRoots, base, findings, at }) {
 }
 
 // ── DEX ────────────────────────────────────────────────────────────────────────────────────────────
-function analyzeDex(dex, { findings, base, at, scanner, addUrl }) {
+function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] }) {
   const agg = new Aggregator(findings, base);
   const users = new Map();                       // string idx -> first class that loads it
   let current = null;
@@ -340,10 +419,29 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl }) {
   const debugLibs = new Set();
   const customTm = new Set();
   let pinned = false;
+  const signals = new MethodSignals();
+  const strInfo = new Map();                     // string idx -> { label, jwt, schema } (memoised: const-string runs in every method)
+  const info = idx => {
+    let v = strInfo.get(idx);
+    if (!v) {
+      const str = dex.string(idx), c0 = str.charCodeAt(0);
+      v = { label: sensitiveLabel(str), jwt: isJwtLiteral(str) ? str : null, schema: (c0 === 99 || c0 === 67) ? schemaSensitive(str) : null };
+      strInfo.set(idx, v);
+    }
+    return v;
+  };
+  // Encryption libraries make the plaintext-storage heuristics weaker evidence: the same API may be backed by them.
+  let encryptedPrefs = false, sqlCipher = false;
+  for (const def of dex.classes()) {
+    if (def.type.startsWith('Landroidx/security/crypto/')) encryptedPrefs = true;
+    else if (def.type.startsWith('Lnet/sqlcipher/') || def.type.startsWith('Lnet/zetetic/')) sqlCipher = true;
+  }
+  const storageNote = rule => (rule === 'android.dex.plaintext_prefs' && encryptedPrefs ? ' This app also ships androidx.security.crypto, so the preferences may be an EncryptedSharedPreferences instance.'
+    : rule === 'android.dex.plaintext_database' && sqlCipher ? ' This app also ships SQLCipher, so the database may be encrypted.' : '');
 
   for (const def of dex.classes()) {
     const type = def.type;
-    const origin = isLibraryClass(type) ? 'library' : 'app';
+    const origin = classOrigin(type, namespaces);
     for (const [p, label] of DEBUG_LIBS) if (type.startsWith(p)) debugLibs.add(label);
     let data;
     try { data = dex.classData(def); } catch { continue; }
@@ -351,7 +449,11 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl }) {
     if (def.staticValuesOff) {
       try {
         for (const c of dex.staticConstants(def, data)) {
-          if (c.kind === 'string' && c.value.length >= 6) { constLines.push(`${c.field} = "${esc(c.value)}"`); constWhere.push(pretty(type)); }
+          if (c.kind === 'string' && c.value.length >= 6) {
+            constLines.push(`${c.field} = "${esc(c.value)}"`); constWhere.push(pretty(type));
+            if (credentialConstant(c.field, c.value)) agg.hit('android.dex.hardcoded_credential', { origin, evidence: `${pretty(type)}.${maskedConstant(c.field, c.value)}`, description: 'A constant whose name says password, secret or token holds what looks like a real value.', confidence: 'medium' });
+            if (isJwtLiteral(c.value)) agg.hit('android.dex.hardcoded_jwt', { origin, evidence: `${pretty(type)}.${c.field} = JWT "${mask(c.value)}"`, description: 'A complete JSON Web Token is embedded as a constant; it may carry a valid identity or session.' });
+          }
           if (c.kind === 'bool' && c.value === true && c.field === 'DEBUG' && type.endsWith('/BuildConfig;')) {
             agg.hit('android.dex.build_debug', { origin, evidence: `${pretty(type)}.DEBUG = true`, description: 'A compiled BuildConfig says this is a debug build.' });
           }
@@ -375,19 +477,30 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl }) {
         if (kind === 'return-true' || kind === 'return-void') agg.hit('android.dex.allow_all_hostnames', { origin, evidence: pretty(type), description: 'verify() always succeeds, so any certificate is accepted for any host name.' });
       }
       current = { cls: type, method: name, origin };
+      signals.reset();
       try {
         dex.walk(m.codeOff, {
-          onString: idx => { if (!users.has(idx)) users.set(idx, type); },
+          onString: idx => {
+            if (!users.has(idx)) users.set(idx, type);
+            const v = info(idx);
+            if (v.label) signals.label(v.label);
+            if (v.jwt) agg.hit('android.dex.hardcoded_jwt', { origin, evidence: `JWT "${mask(v.jwt)}" in ${pretty(type)}#${name}`, description: 'A complete JSON Web Token is embedded in the code; it may carry a valid identity or session.' });
+            if (v.schema) agg.hit('android.dex.plaintext_database', { origin, evidence: `CREATE TABLE with a "${v.schema}" column in ${pretty(type)}`, description: `A table definition has a sensitive-looking column ("${v.schema}"); SQLite files are unencrypted unless SQLCipher or similar is used.${storageNote('android.dex.plaintext_database')}`, confidence: sqlCipher ? 'low' : 'medium' });
+          },
           onInvoke: (k, args) => {
-            const fns = CALLS.get(k);
-            if (!fns) return;
-            for (const fn of fns) {
-              const hits = fn(args, current);
-              if (hits) for (const h of hits) agg.hit(h.rule, { origin: current.origin, evidence: `${h.evidence} in ${pretty(current.cls)}#${current.method}`, description: h.description, confidence: h.confidence });
-            }
+            signals.call(k, args);
+            for (const h of applyCallRules(k, args, current)) agg.hit(h.rule, { origin: current.origin, evidence: `${h.evidence} in ${pretty(current.cls)}#${current.method}`, description: h.description, confidence: h.confidence });
           },
         }, WATCH);
       } catch { /* malformed code item: skip this method */ }
+      // Heuristic verdicts for this method. Known library code is not the app's own logging/storage choice, so it is
+      // skipped; renamed (unknown-origin) code is reported at low confidence because it may well be a library.
+      if (origin !== 'library') {
+        for (const h of signals.evaluate()) {
+          const weak = origin === 'unknown' || (h.rule === 'android.dex.plaintext_prefs' && encryptedPrefs) || (h.rule === 'android.dex.plaintext_database' && sqlCipher);
+          agg.hit(h.rule, { origin, evidence: `${h.evidence} in ${pretty(type)}#${name}`, description: `${h.description}${storageNote(h.rule)}`, confidence: weak ? 'low' : h.confidence });
+        }
+      }
     }
   }
   for (const f of dex.allFieldRefs()) {

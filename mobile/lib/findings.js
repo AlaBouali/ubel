@@ -20,7 +20,8 @@ export class Findings {
    * @param {string[]} [f.evidence]  short, already-masked items (classes, paths, URLs …)
    * @param {string} [f.severity]    overrides the catalog severity
    * @param {string} [f.title]       overrides the catalog title (secrets)
-   * @param {string} [f.origin]      'app' | 'library' — library code is reported one level lower
+   * @param {string} [f.origin]      'app' | 'library' | 'unknown' — only 'library' is reported one level lower; 'unknown' (renamed classes
+   *                                  outside the app namespace) keeps the full severity so obfuscation cannot hide a finding
    * @param {string} [f.confidence]  'high' | 'medium' | 'low'
    * @param {string} [f.app]         package / bundle id the finding belongs to
    */
@@ -68,27 +69,37 @@ export class Findings {
   }
 }
 
-/** Collects hits per rule, splitting app code from third-party library code, then emits one finding per rule. */
+/** Collects hits per rule, splitting app code from unattributable (renamed) code and third-party library code, then emits one finding per rule. */
 export class Aggregator {
   constructor(findings, base) { this.findings = findings; this.base = base; this.groups = new Map(); }
   hit(rule, { origin = 'app', evidence, description, severity, confidence }) {
     let g = this.groups.get(rule);
-    if (!g) this.groups.set(rule, g = { app: new Set(), lib: new Set(), description, severity, confidence });
-    (origin === 'library' ? g.lib : g.app).add(evidence);
+    if (!g) this.groups.set(rule, g = { app: new Set(), unk: new Set(), lib: new Set(), conf: {}, description, severity, confidence });
+    const bucket = origin === 'library' ? 'lib' : origin === 'unknown' ? 'unk' : 'app';
+    g[bucket].add(evidence);
+    (g.desc ||= {})[bucket] ||= description;      // the description must match the bucket that is finally emitted
+    // Keep the strongest confidence seen for each bucket, so one weak hit cannot mask a strong one.
+    const rank = { high: 3, medium: 2, low: 1 };
+    if (confidence && (rank[confidence] || 0) > (rank[g.conf[bucket]] || 0)) g.conf[bucket] = confidence;
     if (description && !g.description) g.description = description;
     if (severity) g.severity = severity;
   }
   flush(artifact) {
     for (const [rule, g] of this.groups) {
-      const isApp = g.app.size > 0;
-      const items = [...(isApp ? g.app : g.lib)];
-      const extra = isApp && g.lib.size ? ` ${g.lib.size} further occurrence(s) are in third-party library code.` : '';
-      const where = isApp ? '' : ' All occurrences are inside third-party library code (severity lowered one level).';
+      // The most specific attribution wins: app code, else code we cannot attribute, else known library code.
+      const origin = g.app.size ? 'app' : g.unk.size ? 'unknown' : 'library';
+      const items = [...(origin === 'app' ? g.app : origin === 'unknown' ? g.unk : g.lib)];
+      const others = [];
+      if (origin === 'app' && g.unk.size) others.push(`${g.unk.size} further occurrence(s) are in renamed (obfuscated) classes that could not be attributed to the app or a library`);
+      if (origin !== 'library' && g.lib.size) others.push(`${g.lib.size} further occurrence(s) are in third-party library code`);
+      const extra = others.length ? ` ${others.join('; ')}.` : '';
+      const where = origin === 'unknown' ? ' All occurrences are in renamed (obfuscated) classes outside the app package; they are most likely third-party library code but this could not be confirmed, so the severity is not lowered.'
+        : origin === 'library' ? ' All occurrences are inside third-party library code (severity lowered one level).' : '';
       this.findings.add(rule, {
         ...this.base, artifact,
-        description: `${g.description || ''}${extra}${where}`.trim(),
+        description: `${(g.desc && g.desc[origin === 'library' ? 'lib' : origin === 'unknown' ? 'unk' : 'app']) || g.description || ''}${extra}${where}`.trim(),
         evidence: items.slice(0, 25), evidence_total: items.length,
-        severity: g.severity, origin: isApp ? 'app' : 'library', confidence: g.confidence,
+        severity: g.severity, origin, confidence: g.conf[origin === 'library' ? 'lib' : origin === 'unknown' ? 'unk' : 'app'] || g.confidence,
       });
     }
     this.groups.clear();

@@ -54,13 +54,13 @@ export function complianceForMobileFinding(finding) {
 
 function buildMobileStats(findings, apps) {
   const byRule = {};
-  const byOrigin = { app: 0, library: 0 };
+  const byOrigin = { app: 0, unknown: 0, library: 0 };
   const byConfidence = { high: 0, medium: 0, low: 0 };
   const byApp = {};
   for (const finding of findings) {
     const rule = String(finding.rule || 'unknown');
     byRule[rule] = (byRule[rule] || 0) + 1;
-    const origin = finding.origin === 'library' ? 'library' : 'app';
+    const origin = finding.origin === 'library' ? 'library' : finding.origin === 'unknown' ? 'unknown' : 'app';
     byOrigin[origin]++;
     const confidence = ['high', 'medium', 'low'].includes(finding.confidence) ? finding.confidence : 'low';
     byConfidence[confidence]++;
@@ -192,7 +192,7 @@ export async function buildHtml(p) {
 
   const findingRows = (list, { clickable = true } = {}) => (list || []).map(f => {
     const index = findings.indexOf(f);
-    const origin = f.origin === 'library' ? 'library' : 'app';
+    const origin = f.origin === 'library' ? 'library' : f.origin === 'unknown' ? 'unknown' : 'app';
     const app = f.app || (p.apps?.length === 1 ? appIdentity(p.apps[0]) : '—');
     return `<tr class="border-b border-neutral-800 ${clickable ? 'hover:bg-neutral-900 cursor-pointer' : ''}"
       ${clickable ? `data-finding-index="${index}"` : ''}
@@ -387,7 +387,7 @@ export async function buildHtml(p) {
       </div>
       <div class="glass rounded-xl overflow-x-auto">
         <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Dependency</th><th class="px-4 py-3">Version</th><th class="px-4 py-3">Ecosystem</th><th class="px-4 py-3">Package URL / Identity</th><th class="px-4 py-3">OSV lookup</th><th class="px-4 py-3 text-right">Advisories</th><th class="px-4 py-3">Evidence source</th></tr></thead>
+          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Dependency</th><th class="px-4 py-3">Version</th><th class="px-4 py-3">Ecosystem</th><th class="px-4 py-3">Package URL / Identity</th><th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Advisories</th><th class="px-4 py-3">Evidence source</th></tr></thead>
           <tbody id="dependencies-table-body" class="divide-y divide-neutral-800">${dependencyRows || '<tr><td colspan="7" class="px-4 py-3 text-sm text-neutral-500">No dependency metadata was extracted from this package.</td></tr>'}</tbody>
         </table>
       </div>
@@ -400,7 +400,7 @@ export async function buildHtml(p) {
       <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
         <input id="f-search" type="text" placeholder="Search title, rule, artifact, evidence..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500" oninput="applyFindingFilters()">
         <select id="f-severity" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="f-origin" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All origins</option><option value="app">App / package</option><option value="library">Third-party library</option></select>
+        <select id="f-origin" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All origins</option><option value="app">App / package</option><option value="unknown">Unattributed (renamed classes)</option><option value="library">Third-party library</option></select>
         <select id="f-masvs" onchange="applyFindingFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All MASVS areas</option>${masvsOptions}</select>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
@@ -442,7 +442,7 @@ export async function buildHtml(p) {
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Finding Counts</h3><div class="space-y-2 text-sm">
           ${[['Total findings', total, 'text-neutral-400'], ['Critical', c.critical || 0, 'severity-critical'], ['High', c.high || 0, 'severity-high'], ['Medium', c.medium || 0, 'severity-medium'], ['Low', c.low || 0, 'severity-low'], ['Info', c.info || 0, 'severity-info']].map(([label, value, cls], i) => `<div class="flex justify-between ${i < 5 ? 'border-b border-neutral-800 pb-2' : ''}><span class="${i === 0 ? 'text-neutral-500' : cls}">${esc(label)}</span><span class="mono ${i === 0 ? 'text-neutral-200' : cls}">${Number(value)}</span></div>`).join('')}
         </div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by Origin</h3><div class="h-48"><canvas id="originStatsChart"></canvas></div><div class="space-y-2 text-sm"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">App / package</span><span class="mono">${Number(p.stats?.by_origin?.app || 0)}</span></div><div class="flex justify-between"><span class="text-neutral-500">Third-party library</span><span class="mono">${Number(p.stats?.by_origin?.library || 0)}</span></div></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by Origin</h3><div class="h-48"><canvas id="originStatsChart"></canvas></div><div class="space-y-2 text-sm"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">App / package</span><span class="mono">${Number(p.stats?.by_origin?.app || 0)}</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Unattributed (renamed classes)</span><span class="mono">${Number(p.stats?.by_origin?.unknown || 0)}</span></div><div class="flex justify-between"><span class="text-neutral-500">Third-party library</span><span class="mono">${Number(p.stats?.by_origin?.library || 0)}</span></div></div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Confidence Distribution</h3><div class="h-48"><canvas id="confidenceChart"></canvas></div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by MASVS Area</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Area</th><th class="px-4 py-3 text-right">Findings</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByMasvs.map(([k, v]) => `<tr><td class="px-4 py-3 mono">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No MASVS data.</td></tr>'}</tbody></table></div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Findings by App</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">App</th><th class="px-4 py-3 text-right">Findings</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByApp.map(([k, v]) => `<tr><td class="px-4 py-3 break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No findings.</td></tr>'}</tbody></table></div></div>
@@ -669,8 +669,8 @@ const severityPalette = ['#ef4444','#f87171','#fb923c','#60a5fa','#a3a3a3'];
 makeChart('severityChart','doughnut',severityKeys.map(s=>s.toUpperCase()),severityKeys.map(s=>Number(reportData.summary?.counts?.[s]||0)),severityPalette);
 const masvsEntries=Object.entries(reportData.summary?.by_masvs||{}).sort((a,b)=>b[1]-a[1]).slice(0,8);
 makeChart('masvsChart','bar',masvsEntries.map(x=>x[0]),masvsEntries.map(x=>x[1]),masvsEntries.map((_,i)=>['#ef4444','#fb923c','#60a5fa','#a78bfa','#34d399','#f472b6','#facc15','#94a3b8'][i%8]));
-makeChart('originChart','doughnut',['App / package','Third-party library'],[Number(reportData.stats?.by_origin?.app||0),Number(reportData.stats?.by_origin?.library||0)],['#ef4444','#60a5fa']);
-makeChart('originStatsChart','doughnut',['App / package','Third-party library'],[Number(reportData.stats?.by_origin?.app||0),Number(reportData.stats?.by_origin?.library||0)],['#ef4444','#60a5fa']);
+makeChart('originChart','doughnut',['App / package','Unattributed (renamed)','Third-party library'],[Number(reportData.stats?.by_origin?.app||0),Number(reportData.stats?.by_origin?.unknown||0),Number(reportData.stats?.by_origin?.library||0)],['#ef4444','#a3a3a3','#60a5fa']);
+makeChart('originStatsChart','doughnut',['App / package','Unattributed (renamed)','Third-party library'],[Number(reportData.stats?.by_origin?.app||0),Number(reportData.stats?.by_origin?.unknown||0),Number(reportData.stats?.by_origin?.library||0)],['#ef4444','#a3a3a3','#60a5fa']);
 const confidenceKeys=['high','medium','low']; makeChart('confidenceChart','bar',confidenceKeys.map(s=>s.toUpperCase()),confidenceKeys.map(s=>Number(reportData.stats?.by_confidence?.[s]||0)),['#34d399','#fb923c','#f87171']);
 renderCompliance();
 renderDiffs();

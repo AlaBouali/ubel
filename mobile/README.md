@@ -34,7 +34,7 @@ JSON and HTML only. The HTML report includes a **Dependencies** tab with extract
 - `.ubel/reports/latest.mobile.json` and `.ubel/reports/latest.mobile.html` — overwritten on every run;
 - `$HOME/.ubel/history/<asset_id>/<timestamp>.mobile.zip` — `report.mobile.json` + `report.mobile.html`, kept for the asset's history.
 
-The report carries the standard UBEL identity fields (`asset_id`, `asset_name`, `asset_type: "mobile"`, `machine_id`, `report_id`), the scanned file's SHA-256, one summary object per app (package/bundle id, versions, SDK levels, permissions, signing certificates, embedded libraries and frameworks), a plain-language **executive summary** (risk rating, what it means, most important findings, next steps), the findings, analysis notes and — when an earlier mobile report exists for the same app — a **Diffs** section (new / fixed / unchanged). Findings carry a rule id, severity, OWASP MASVS control, CWE, evidence, remediation, `confidence` and `origin` (`app` or `library`: issues found only inside third-party library code are reported one severity level lower).
+The report carries the standard UBEL identity fields (`asset_id`, `asset_name`, `asset_type: "mobile"`, `machine_id`, `report_id`), the scanned file's SHA-256, one summary object per app (package/bundle id, versions, SDK levels, permissions, signing certificates, embedded libraries and frameworks), a plain-language **executive summary** (risk rating, what it means, most important findings, next steps), the findings, analysis notes and — when an earlier mobile report exists for the same app — a **Diffs** section (new / fixed / unchanged). Findings carry a rule id, severity, OWASP MASVS control, CWE, evidence, remediation, `confidence` and `origin` (`app`, `unknown` or `library`: issues found only inside known third-party library code are reported one severity level lower; `unknown` marks renamed/obfuscated classes outside the app's own package, which are most likely library code but cannot be proven to be, so they keep their full severity).
 
 Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)`). All app-controlled text is HTML-escaped in the HTML report.
 
@@ -47,7 +47,7 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 | `AndroidManifest.xml` (binary XML) | debuggable / testOnly / allowBackup / cleartext flags, min/target SDK, sharedUserId, exported activities, services, receivers and content providers without a permission, weak custom permissions, risky permissions, deep links without `autoVerify`, `meta-data` values (scanned for secrets) |
 | `res/xml/*` | network security config (cleartext, user CAs, expired pin-sets, pinning), Cordova `config.xml` open origins, all values scanned for secrets |
 | `resources.arsc` | every string resource (e.g. `google_api_key`) scanned with its resource name |
-| `classes*.dex` | all strings, `static final` constants, `BuildConfig.DEBUG`, class hierarchy and a constant-tracking bytecode walk: weak/ECB ciphers, constant keys and IVs, weak hashes/TLS protocols, empty `checkServerTrusted`, allow-all `HostnameVerifier`, `SslErrorHandler.proceed`, WebView file access / mixed content / debugging / JavaScript interfaces, world-accessible storage, external storage, dynamic code loading, `Runtime.exec`, device identifiers, debug libraries, `http://` endpoints, Firebase URLs, pinning markers |
+| `classes*.dex` | all strings, `static final` constants, `BuildConfig.DEBUG`, class hierarchy and a constant-tracking bytecode walk: weak/ECB ciphers, constant keys and IVs, weak hashes/TLS protocols, empty `checkServerTrusted`, allow-all `HostnameVerifier`, `SslErrorHandler.proceed`, WebView file access / mixed content / debugging / JavaScript interfaces, world-accessible storage, external storage, sensitive-looking data in `Log.*` calls, plaintext `SharedPreferences` / SQLite storage, hardcoded credentials in constants, JWT literals and JWT/HMAC signing secrets, dynamic code loading, `Runtime.exec`, device identifiers, debug libraries, `http://` endpoints, Firebase URLs, pinning markers |
 | signing | v1 (JAR/PKCS#7) and v2/v3/v3.1 (APK Signing Block) certificates: debug certificate, weak algorithm, short key, expiry, v1-only / Janus exposure |
 | `lib/**/*.so` | ELF hardening (executable stack, RELRO, text relocations, RPATH, canary) and strings (secrets) |
 | everything else | keystores/private keys, `.env`/credential/VCS files, backups, bundled databases, embedded `.apk`/`.dex`/`.jar`, Flutter debug kernels, source maps; text files, React Native / Hermes bundles, Xamarin/Unity DLLs (UTF-16) scanned for secrets |
@@ -66,10 +66,13 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 
 - **Static only.** Nothing in the app runs. The only network requests made by the dependency lookup are OSV.dev requests for extracted, versioned package URLs. Backend behavior, Firebase database rules, and the validity of a found key are *not* tested.
 - **No decompiler.** Findings come from configuration, constant tables, API references and call arguments, and binary metadata — not data-flow analysis. The DEX walker tracks constants straight-line within a method, so it sees `Cipher.getInstance("DES/ECB/…")` and constant keys, but not values assembled at runtime. Findings marked `confidence: low|medium` are leads to verify.
-- **Obfuscation.** R8/ProGuard renames app classes but not framework calls or string constants, so most checks still work; packers, DexGuard-style string encryption, Hermes bytecode and code downloaded at runtime are only partly visible.
+- **Obfuscation.** R8/ProGuard renames app classes but not framework calls or string constants, so most checks still work. It also renames *library* classes (Material becomes `c.c.a.a.…`), so package prefixes alone cannot separate app from library code: a class is `app` when it sits under the manifest package or a manifest component's package, `library` when it matches a known library prefix, and `unknown` when it is renamed and outside the app's package; packers, DexGuard-style string encryption, Hermes bytecode and code downloaded at runtime are only partly visible.
 - **App Store IPAs are FairPlay-encrypted** (`cryptid=1`): `Info.plist`, provisioning, entitlements, bundled files and imported symbols are analysed, but strings inside the binary are not. Scan a development-signed or decrypted build for full coverage. The report says so.
 - **App Bundles (`.aab`)** use a protobuf manifest and are not supported; scan the APKs built from the bundle (or the `.apks`/`.xapk`).
 - **Limits protect the scanner:** per-file and total inflated-size caps, a ratio check, a bounded string budget for the secrets scan. When a budget is hit the report says what was skipped.
+- **Sensitive-data rules are heuristics.** There is no data-flow analysis, so `logging_sensitive`, `plaintext_prefs` and `plaintext_database` work from what is visible in one method: *direct* evidence (a constant tag, message, preference key or `ContentValues` key that names something sensitive; confidence `medium`) or *nearby* evidence (the same method also loads a sensitive-looking label such as `"accesstoken"`, because the logged/stored text is built at runtime; confidence `low`). Prose such as SDK error messages and class-name log tags are ignored, known library code is skipped, and renamed (`unknown`-origin) code is always reported at `low` confidence. If `androidx.security.crypto` or SQLCipher is packaged the storage rules drop to `low`, since the same APIs may be encrypted. Treat them as pointers for manual review.
+- **Hardcoded-credential rules are name-plus-value checks.** `hardcoded_credential` needs a constant whose *name* says password/secret/token/key **and** a value that looks like a secret (not a placeholder, key name, identifier or URL); an all-lowercase word such as `"letmein"` is deliberately not reported. Secrets with a known vendor format, long key/value pairs and `Bearer`/`Basic` headers are still caught by the shared secrets engine. JWT signing-secret detection recognises jjwt, java-jwt and Nimbus calls with constant arguments; hand-rolled `SecretKeySpec` is covered by `android.dex.hardcoded_key`. Root/emulator-detection bypasses are runtime behaviour and out of scope for a static scan.
+- **Dependency lookup covers only exact identities.** A component is sent to OSV.dev only when a versioned package URL could be extracted (e.g. from `META-INF/*.version` files). Anything else (for example "Firebase Android SDK" or "Google Play Services" detected by namespace only) is reported as `not_queryable`, never as clean; failed lookups are `lookup_error` / `lookup_incomplete`.
 - It scans the package you give it, not the app's backend.
 
 ## Programmatic use
@@ -105,7 +108,7 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.manifest.weak_permission` | medium | MASVS-PLATFORM-1 | Custom permission has a weak protectionLevel |
 | `android.manifest.risky_permissions` | medium | MASVS-PRIVACY-1 | High-impact permissions requested |
 | `android.manifest.permissions` | info | MASVS-PRIVACY-1 | Dangerous permissions requested |
-| `android.manifest.deeplinks` | info | MASVS-PLATFORM-1 | Deep links / custom URL schemes |
+| `android.manifest.deeplinks` | info (low when an http(s) link has no `autoVerify`) | MASVS-PLATFORM-1 | Deep links / custom URL schemes |
 | `android.nsc.cleartext` | medium | MASVS-NETWORK-1 | Network security config permits cleartext traffic |
 | `android.nsc.user_ca` | medium | MASVS-NETWORK-1 | Network security config trusts user-installed CAs |
 | `android.nsc.pin_expired` | low | MASVS-NETWORK-2 | Certificate pin-set has expired |
@@ -134,8 +137,14 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.dex.webview_mixed_content` | medium | MASVS-NETWORK-1 | WebView allows mixed (HTTP in HTTPS) content |
 | `android.dex.webview_debugging` | medium | MASVS-PLATFORM-2 | WebView remote debugging enabled |
 | `android.dex.world_accessible_storage` | high | MASVS-STORAGE-2 | World-readable / world-writable files or preferences |
+| `android.dex.logging_sensitive` | medium | MASVS-STORAGE-2 | Sensitive-looking data may be written to the system log (`Log.*`) |
+| `android.dex.plaintext_prefs` | medium | MASVS-STORAGE-1 | Sensitive-looking values stored in plaintext `SharedPreferences` |
+| `android.dex.plaintext_database` | medium | MASVS-STORAGE-1 | Sensitive-looking data stored in an unencrypted SQLite database |
+| `android.dex.hardcoded_credential` | high | MASVS-CRYPTO-2 | Constant named like a password / secret / token holds a real-looking value |
+| `android.dex.hardcoded_jwt_secret` | high | MASVS-CRYPTO-2 | JWT / HMAC signing secret hardcoded (jjwt, java-jwt, Nimbus) |
+| `android.dex.hardcoded_jwt` | high | MASVS-AUTH-1 | Complete JWT embedded in code |
 | `android.dex.external_storage` | medium | MASVS-STORAGE-2 | Writes to shared external storage |
-| `android.dex.dynamic_code_loading` | medium | MASVS-CODE-4 | Loads code at runtime (DexClassLoader & co.) |
+| `android.dex.dynamic_code_loading` | medium | MASVS-CODE-4 | Loads code at runtime (`DexClassLoader`, `InMemoryDexClassLoader`; `PathClassLoader` only for constant paths on external storage or URLs) |
 | `android.dex.runtime_exec` | low | MASVS-CODE-4 | Executes shell commands (Runtime.exec) |
 | `android.dex.device_identifiers` | low | MASVS-PRIVACY-1 | Reads hardware identifiers (IMEI, subscriber id, …) |
 | `android.dex.build_debug` | medium | MASVS-CODE | BuildConfig.DEBUG is true in this build |
@@ -195,3 +204,7 @@ Hardcoded secrets are reported as `secret.<rule id>` (for example `secret.github
 ## Tests
 
 `node --test tests/mobile.test.js` — builds Android binary XML, `resources.arsc`, DEX, binary plists, Mach-O and ELF fixtures in memory (`tests/helpers/mobile_fixtures.js`) plus real PKCS#7 signatures, and checks parsers, whole-package scans and the CLI (outputs, exit codes, HTML escaping, diffs). The fixtures follow the file-format specifications; they are not real apps, so run the scanner against your own builds as well.
+
+Accuracy-fix regression tests (dependency status, origin attribution, class-loader rule): `node --test tests/mobile-fixes.test.js`.
+
+Sensitive-data rules (logging, plaintext storage, hardcoded credentials / JWT): `node --test tests/mobile-signals.test.js`; set `DVBA_APK=/path/to/dvba.apk` to also run the end-to-end check against a real APK.

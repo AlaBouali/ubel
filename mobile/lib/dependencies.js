@@ -407,17 +407,26 @@ export async function scanMobileDependencies(components, { log = () => {} } = {}
     }
   }
 
+  settleLookupStatuses(dependencies);
+  return { dependencies, summary: summarise(dependencies), lookup_error: null };
+}
+
+/**
+ * Final status for every dependency after the OSV round-trip. Only components that were actually sent to
+ * OSV (status still 'pending') may become 'vulnerable' or 'clean'. Components that were never queried
+ * ('not_queryable': no PURL / no exact version) and components whose lookup failed ('lookup_error',
+ * 'lookup_incomplete') keep their status — reporting them as "Safe" would claim a check that never happened.
+ */
+export function settleLookupStatuses(dependencies) {
+  const rank = { critical: 0, high: 1, medium: 2, moderate: 2, low: 3, info: 4, unknown: 5 };
   for (const dep of dependencies) {
-    dep.vulnerabilities.sort((a, b) => {
-      const rank = { critical: 0, high: 1, medium: 2, moderate: 2, low: 3, info: 4, unknown: 5 };
-      return (rank[a.severity] ?? 5) - (rank[b.severity] ?? 5) || String(a.id).localeCompare(String(b.id));
-    });
+    dep.vulnerabilities.sort((a, b) => (rank[a.severity] ?? 5) - (rank[b.severity] ?? 5) || String(a.id).localeCompare(String(b.id)));
     dep.vulnerability_count = dep.vulnerabilities.length;
-    if (dep.lookup_status === 'lookup_incomplete' || dep.lookup_status === 'lookup_error') continue;
+    if (dep.lookup_status !== 'pending') continue;
     dep.lookup_status = dep.vulnerability_count ? 'vulnerable' : 'clean';
     dep.lookup_reason = dep.vulnerability_count ? null : 'OSV.dev returned Safe for this exact PURL and version at scan time.';
   }
-  return { dependencies, summary: summarise(dependencies), lookup_error: null };
+  return dependencies;
 }
 
 function summarise(dependencies) {
