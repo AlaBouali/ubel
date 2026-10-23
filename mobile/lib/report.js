@@ -21,7 +21,7 @@ const MASVS_FRAMEWORK = {
   version: null,
 };
 
-const MISCONFIG_RULE = /^(?:android\.(?:manifest|nsc|cordova|signing|native)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|android\.dex\.(?:build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
+const MISCONFIG_RULE = /^(?:android\.(?:manifest|nsc|cordova|signing|native)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
 
 export function isMisconfigurationFinding(finding) {
   return MISCONFIG_RULE.test(String(finding?.rule || ''));
@@ -132,6 +132,14 @@ export function buildPayload({ meta, target, apps, findings, dependencies = [], 
   payload.compliance_summary = summarizeCompliance(sorted.map(f => f.compliance));
   payload.compliance_summary.disclaimer = `${payload.compliance_summary.disclaimer} Mobile findings are mapped to their catalogued MASVS control and, where a CWE mapping exists, to general security-framework references. This is guidance, not a certified assessment.`;
   payload.executive_summary = executiveSummary(payload);
+  // Coverage: places the scan could not look. A clean list over incomplete coverage must not read as "all clear".
+  const gaps = Array.isArray(notes?.gaps) ? [...notes.gaps] : [];
+  payload.analysis = { complete: gaps.length === 0, gaps };
+  if (gaps.length) {
+    const es = payload.executive_summary;
+    if (es.rating === 'No issues found') { es.rating = 'No issues found (analysis incomplete)'; es.headline = 'Nothing was found in the parts of the package that could be analysed, but some parts could not be.'; }
+    es.paragraphs.push(`Coverage is incomplete: ${gaps.length} part(s) of the package could not be examined (${gaps.slice(0, 3).join('; ')}${gaps.length > 3 ? '; …' : ''}). Findings there, if any, are not in this report. See the analysis notes.`);
+  }
   return payload;
 }
 
@@ -686,12 +694,12 @@ function appDetails(index) {
     add('Name', a.name); add('Bundle ID', a.bundle_id); add('Version', a.version); add('Build', a.build); add('Minimum iOS', a.min_os); add('Architectures', (a.architectures || []).join(', '));
     add('Binary', a.binary ? ('PIE ' + (a.binary.pie ? 'yes' : 'no') + ', encrypted ' + (a.binary.encrypted ? 'yes' : 'no') + ', signed ' + (a.binary.signed ? 'yes' : 'no') + (a.binary.swift ? ', Swift' : '')) : '—');
     add('Provisioning', a.provisioning ? [a.provisioning.type, a.provisioning.name, a.provisioning.team, 'expires ' + (a.provisioning.expires || '?')].filter(Boolean).join(' — ') : '—');
-    add('URL schemes', (a.url_schemes || []).join(', ')); add('Frameworks', (a.frameworks || []).map(f => f.name + (f.version ? ' ' + f.version : '')).join(', ')); add('Extensions', (a.extensions || []).map(e => e.name).join(', '));
+    add('URL schemes', (a.url_schemes || []).join(', ')); add('Frameworks', (a.frameworks || []).map(f => f.name + (f.version ? ' ' + f.version : '')).join(', ')); add('Extensions', (a.extensions || []).map(e => e.name).join(', ')); add('Cross-platform', (a.cross_platform || []).map(f => f.name + ' (' + [f.engine, f.backend, f.mode, f.flavour, f.dart_version && ('Dart ' + f.dart_version), f.unity_version].filter(Boolean).join(', ') + ')').join('; '));
   } else {
     add('Package', a.package); add('Version', (a.version_name || '?') + ' (' + (a.version_code || '?') + ')'); add('SDK', 'min ' + (a.min_sdk ?? '?') + ' / target ' + (a.target_sdk ?? '?'));
     add('Components', Object.entries(a.components || {}).map(([k,v]) => v + ' ' + k).join(', ')); add('Permissions', (a.permissions || []).length);
     add('Signing', a.signing ? (a.signing.schemes || []).join(', ') + ' — ' + (a.signing.certificates || []).map(cert => cert.subject + ' [' + cert.key + ', ' + cert.signature_algorithm + ']').join('; ') : '—');
-    add('Frameworks', (a.frameworks || []).join(', ')); add('DEX files', (a.dex_files || []).join(', ')); add('Native libraries', (a.native_libs || []).length); add('Embedded libraries', (a.libraries || []).map(l => l.name + ' ' + (l.version || '')).join(', '));
+    add('Frameworks', (a.frameworks || []).join(', ')); add('Cross-platform', (a.cross_platform || []).map(f => f.name + ' (' + [f.engine, f.backend, f.mode, f.flavour, f.dart_version && ('Dart ' + f.dart_version), f.unity_version].filter(Boolean).join(', ') + ')').join('; ')); add('Modules', (a.modules || []).map(m => m.name + ' (' + m.type + ')').join(', ')); add('DEX files', (a.dex_files || []).join(', ')); add('Native libraries', (a.native_libs || []).length); add('Embedded libraries', (a.libraries || []).map(l => l.name + ' ' + (l.version || '')).join(', '));
   }
   openModal('<div class="space-y-5"><div><p class="text-xs text-neutral-500 uppercase tracking-widest mb-1">App Inventory</p><h2 class="text-xl font-bold pr-8">' + escH(a.name || a.package || a.bundle_id || 'Application') + '</h2></div><div class="glass p-5 rounded-xl space-y-3">' + rows.join('') + '</div></div>');
 }

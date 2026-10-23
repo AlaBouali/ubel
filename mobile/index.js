@@ -9,10 +9,12 @@ import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { ZipArchive } from './lib/zip.js';
-import { analyzeApk } from './lib/android.js';
+import { analyzeApk, bundleSigning } from './lib/android.js';
+import { isAab, aabModules, ModuleView, bundletoolVersion } from './lib/aab.js';
+import { Notes, gap } from './lib/coverage.js';
 import { analyzeIpa, findAppDir } from './lib/ios.js';
 import { SecretScanner } from './lib/secrets.js';
-import { extractMobileDependencies, scanMobileDependencies } from './lib/dependencies.js';
+import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies } from './lib/dependencies.js';
 export { extractMobileDependencies, scanMobileDependencies };
 import { Findings } from './lib/findings.js';
 import { SEVERITY_RANK, SEVERITIES } from './lib/rules.js';
@@ -29,10 +31,10 @@ const HELP = `
 ubel-mobile — static security scan of a mobile app package (no third-party libraries, no external tools)
 
 Usage:
-  ubel-mobile <app.apk | app.ipa | app.xapk | app.apks> [--working-dir <path>]
+  ubel-mobile <app.apk | app.aab | app.ipa | app.xapk | app.apks> [--working-dir <path>]
               [--min-severity critical|high|medium|low|info]
               [--fail-on critical|high|medium|low|info|none|<count>:<severity>]
-              [--max-entry-mb <n>] [--verbose] [--quiet]
+              [--allow-partial] [--max-entry-mb <n>] [--verbose] [--quiet]
 
 Looks for:
   • hardcoded secrets (API keys, tokens, private keys …) in code, resources, plists, bundled files and native libraries
@@ -48,17 +50,22 @@ $HOME/.ubel/history/<asset_id>/<timestamp>.mobile.zip and always-overwritten cop
 
 Options:
   --working-dir <path>   Directory whose .ubel/ folder receives the reports (default: cwd)
-  --min-severity <s>     Drop findings below this severity from the report (default: info)
-  --fail-on <s>          Exit 2 when findings at/above <s> exist; "none" disables; "5:high" tolerates 5 (default: critical)
+  --min-severity <s>     Drop findings below this severity from the report (default: info). Display only: the --fail-on gate always
+                         looks at every finding, so a filtered report can never hide a failing build
+  --fail-on <s>          Exit 2 when findings or dependency advisories at/above <s> exist; "none" disables the gate (always exit 0);
+                         "5:high" tolerates five (default: critical)
+  --allow-partial        Accept an incomplete analysis (something in the package could not be examined) instead of exiting 3
   --max-entry-mb <n>     Largest single file inside the package that is inflated and scanned (default: 256)
   --verbose / --quiet    More / less console output
-Exit codes: 0 ok · 1 scan failed (unreadable or unsupported package) · 2 --fail-on gate tripped or bad arguments
+Exit codes: 0 gate passed and the analysis was complete · 1 scan failed (file missing, unreadable or unsupported package, report not written)
+            · 2 --fail-on gate tripped, or bad arguments · 3 gate passed but the analysis was incomplete (a clean result over partial coverage is
+            not a pass); --allow-partial accepts it, --fail-on none always exits 0
 `;
 
 const VALID_SEVERITIES = new Set(SEVERITIES);
 
 export function parseArgs(argv) {
-  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, maxEntryMb: 256, file: null };
+  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, allowPartial: false, maxEntryMb: 256, file: null };
   const bad = msg => { console.error(`${msg}\n`); console.log(HELP); process.exit(2); };
   const value = (flag, i) => { const v = argv[i + 1]; if (v === undefined || v.startsWith('--')) bad(`${flag} requires a value`); return v; };
   for (let i = 0; i < argv.length; i++) {
@@ -70,11 +77,12 @@ export function parseArgs(argv) {
     else if (a === '--max-entry-mb') args.maxEntryMb = Number(value(a, i++));
     else if (a === '--verbose') args.verbose = true;
     else if (a === '--quiet') args.quiet = true;
+    else if (a === '--allow-partial') args.allowPartial = true;
     else if (a.startsWith('--')) bad(`Unknown argument: ${a}`);
     else if (args.file === null) args.file = a;
     else bad(`Unexpected extra argument: ${a}`);
   }
-  if (!args.file) bad('A package to scan is required (.apk, .ipa, .xapk, .apks)');
+  if (!args.file) bad('A package to scan is required (.apk, .aab, .ipa, .xapk, .apks)');
   if (!VALID_SEVERITIES.has(args.minSeverity)) bad(`--min-severity must be one of: ${SEVERITIES.join(', ')}`);
   if (!Number.isFinite(args.maxEntryMb) || args.maxEntryMb < 1 || args.maxEntryMb > 1024) bad('--max-entry-mb must be a number between 1 and 1024');
   args.failOnParsed = parseFailOn(args.failOn);
@@ -87,13 +95,34 @@ function severityRank(value) {
   return SEVERITY_RANK[severity === 'moderate' ? 'medium' : severity] ?? 4;
 }
 
-function parseFailOn(v) {
+export function parseFailOn(v) {
   if (v === 'none') return { mode: 'none' };
-  if (v.includes(':')) {
-    const [c, s] = v.split(':'); const count = Number(c);
-    return Number.isInteger(count) && count >= 0 && VALID_SEVERITIES.has(s) ? { mode: 'threshold', count, severity: s } : null;
-  }
+  const m = /^(\d+):([a-z]+)$/.exec(v);
+  if (m) return VALID_SEVERITIES.has(m[2]) ? { mode: 'threshold', count: Number(m[1]), severity: m[2] } : null;
   return VALID_SEVERITIES.has(v) ? { mode: 'severity', severity: v } : null;
+}
+
+/**
+ * The CI gate. Pure, so the exit-code contract can be tested without a package.
+ *   2  the gate tripped: findings + dependency advisories at or above the severity exceed what --fail-on tolerates
+ *   3  the gate did not trip but the analysis was incomplete (`gaps`) and --allow-partial was not given
+ *   0  otherwise; --fail-on none always yields 0.
+ * `findings` must be the UNFILTERED list: --min-severity shapes the report, never the gate. Advisories whose severity OSV did not give
+ * are counted as `unrated` and only trip a --fail-on info gate (the long-standing behaviour), but they are always reported.
+ */
+export function evaluateGate({ failOn, findings = [], dependencies = [], gaps = [], allowPartial = false }) {
+  const incomplete = gaps.length > 0;
+  const out = { fail_on: failOn.mode === 'none' ? 'none' : failOn.mode === 'threshold' ? `${failOn.count}:${failOn.severity}` : failOn.severity,
+    hits: 0, tolerated: failOn.mode === 'threshold' ? failOn.count : 0, unrated_advisories: 0, tripped: false, incomplete, gaps: gaps.length, allow_partial: !!allowPartial, exit_code: 0 };
+  for (const dep of dependencies) for (const v of dep.vulnerabilities || []) if (!(String(v.severity || '').toLowerCase() in SEVERITY_RANK) && String(v.severity || '').toLowerCase() !== 'moderate') out.unrated_advisories++;
+  if (failOn.mode === 'none') return out;
+  const limit = SEVERITY_RANK[failOn.severity];
+  const staticHits = findings.filter(x => (SEVERITY_RANK[x.severity] ?? 4) <= limit).length;
+  const dependencyHits = dependencies.reduce((n, dep) => n + (dep.vulnerabilities || []).filter(v => severityRank(v.severity) <= limit).length, 0);
+  out.hits = staticHits + dependencyHits;
+  out.tripped = out.hits > out.tolerated;
+  out.exit_code = out.tripped ? 2 : (incomplete && !allowPartial ? 3 : 0);
+  return out;
 }
 
 function sha256File(file) {
@@ -108,6 +137,51 @@ function sha256File(file) {
 }
 
 /**
+ * An App Bundle is a set of modules. Each is analysed as an APK (ModuleView presents it that way); the base module becomes the app, and the
+ * other modules (dynamic features, asset packs) are folded into its summary so the report still describes one app. Their findings keep a
+ * `<module>!` artifact prefix. Signing is read once, from the bundle's own META-INF (jar signature with the upload key).
+ */
+function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log }) {
+  const modules = aabModules(zip);
+  if (!modules.length) throw new Error('App Bundle has no module with a manifest/AndroidManifest.xml');
+  const baseName = modules.includes('base') ? 'base' : modules[0];
+  let base = null;
+  for (const m of modules) {
+    const isBase = m === baseName;
+    const view = new ModuleView(zip, m);
+    log(`Bundle module: ${m}`);
+    let app;
+    try {
+      app = analyzeApk(view, { findings, notes, newScanner, prefix: `${m}!`, module: m, featureModule: !isBase, limits });
+    } catch (err) {
+      if (isBase) throw new Error(`base module ${m}: ${err.message}`);
+      gap(notes, `${m}: module not analysed (${err.message}).`);
+      continue;
+    }
+    dependencies.push(...extractMobileDependencies(view, { platform: 'android', prefix: `${m}!`, appSummary: app }));
+    delete app._detected_dependencies;
+    if (isBase) { base = app; base.modules = [{ name: m, type: 'base', dex_files: [...app.dex_files], native_libs: app.native_libs.length }]; apps.push(app); }
+    else {
+      const hasCode = app.dex_files.length > 0 || Object.values(app.components).some(c => c > 0);
+      base.modules.push({ name: m, type: hasCode ? 'feature' : 'asset-pack', dex_files: [...app.dex_files], native_libs: app.native_libs.length });
+      for (const k of Object.keys(base.components)) base.components[k] += app.components[k];
+      base.permissions = [...new Set([...base.permissions, ...app.permissions])];
+      base.dex_files.push(...app.dex_files.map(f => `${m}!${f}`));
+      base.native_libs = [...new Set([...base.native_libs, ...app.native_libs])];
+      base.libraries = [...base.libraries, ...app.libraries.filter(l => !base.libraries.some(b => b.name === l.name && b.version === l.version))];
+      base.frameworks = [...new Set([...base.frameworks, ...app.frameworks])];
+    }
+  }
+  if (!base) throw new Error('no analysable module in the App Bundle');
+  const version = bundletoolVersion(zip);
+  if (version) base.bundletool_version = version;
+  const deps = extractBundleDependencies(zip);
+  dependencies.push(...deps.records);
+  if (deps.unreadable) gap(notes, 'BUNDLE-METADATA dependency list is present but unreadable; dependencies were not enumerated from it.');
+  bundleSigning(zip, { findings, base: { app: base.package }, at: n => n, app: base });
+}
+
+/**
  * Scans one package and returns { findings, apps, dependencies, notes, target }. Never writes files.
  * @param {string} file
  * @param {{maxEntryMb?:number, log?:(m:string)=>void}} [opts]
@@ -119,15 +193,18 @@ export function scanPackage(file, opts = {}) {
   const limits = {};
   const zipOpts = { maxEntryBytes: (opts.maxEntryMb || 256) * 1024 * 1024 };
   const findings = new Findings();
-  const notes = [];
+  const notes = new Notes();
   const apps = [];
   const dependencies = [];
   const newScanner = base => new SecretScanner(findings, base);
   let kind;
   const zip = new ZipArchive(file, zipOpts);
   try {
-    if (zip.duplicateNames.length) notes.push(`The archive contains ${zip.duplicateNames.length} duplicate entry name(s) (e.g. ${zip.duplicateNames[0]}); only the first of each was analysed. Duplicate names are a known package-tampering trick.`);
-    if (zip.has('AndroidManifest.xml')) {
+    if (zip.duplicateNames.length) gap(notes, `The archive contains ${zip.duplicateNames.length} duplicate entry name(s) (e.g. ${zip.duplicateNames[0]}); only the first of each was analysed. Duplicate names are a known package-tampering trick.`);
+    if (isAab(zip)) {
+      kind = 'aab'; log('Android App Bundle detected');
+      scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log });
+    } else if (zip.has('AndroidManifest.xml')) {
       kind = 'apk'; log('Android package detected');
       const app = analyzeApk(zip, { findings, notes, newScanner, limits });
       apps.push(app);
@@ -140,7 +217,7 @@ export function scanPackage(file, opts = {}) {
       dependencies.push(...extractMobileDependencies(zip, { platform: 'ios', appSummary: app }));
     } else {
       const nested = zip.find(/\.apk$/i).filter(e => !/\//.test(e.name) || /^(splits|config)\//i.test(e.name) || true).slice(0, 20);
-      if (!nested.length) throw new Error('not an Android (.apk) or iOS (.ipa) package: no AndroidManifest.xml, no Payload/*.app and no nested .apk found');
+      if (!nested.length) throw new Error('not an Android (.apk, .aab) or iOS (.ipa) package: no AndroidManifest.xml, no bundle module, no Payload/*.app and no nested .apk found');
       kind = 'apk-bundle';
       for (const e of nested) {
         log(`Nested APK: ${e.name}`);
@@ -151,7 +228,7 @@ export function scanPackage(file, opts = {}) {
           apps.push(app);
           dependencies.push(...extractMobileDependencies(inner, { platform: 'android', prefix: `${e.name}!`, appSummary: app }));
           delete app._detected_dependencies;
-        } catch (err) { notes.push(`${e.name}: not analysed (${err.message}).`); }
+        } catch (err) { gap(notes, `${e.name}: not analysed (${err.message}).`); }
       }
       if (!apps.length) throw new Error('no analysable APK inside the bundle');
     }
@@ -268,12 +345,16 @@ export function diffReports(prev, current) {
 }
 
 /** Writes report.mobile.json / .html: latest copies under .ubel/reports and a timestamped bundle in the history. */
-async function writeReports(meta, scan, notes, args) {
+async function resolveDependencies(scan, notes, args) {
   const dependencyScan = await scanMobileDependencies(scan.dependencies || [], { log: args.quiet ? () => {} : m => console.log(m) });
   scan.dependencies = dependencyScan.dependencies;
   scan.dependencySummary = dependencyScan.summary;
-  if (dependencyScan.lookup_error) notes.push(`Mobile dependency OSV lookup was incomplete: ${dependencyScan.lookup_error}`);
-  if (dependencyScan.summary.lookup_errors) notes.push(`${dependencyScan.summary.lookup_errors} mobile dependency record(s) could not be fully checked against OSV.dev; see the Dependencies tab.`);
+  // A failed advisory lookup is a coverage gap, not a clean result (same fail-closed rule as the rest of UBEL).
+  if (dependencyScan.lookup_error) gap(notes, `Mobile dependency OSV lookup was incomplete: ${dependencyScan.lookup_error}`);
+  if (dependencyScan.summary.lookup_errors) gap(notes, `${dependencyScan.summary.lookup_errors} mobile dependency record(s) could not be fully checked against OSV.dev; see the Dependencies tab.`);
+}
+
+async function writeReports(meta, scan, notes, args) {
   const ts = reportTimestamp(new Date());
   const workingDir = args.workingDir ? path.resolve(args.workingDir) : process.cwd();
   const latestDir = path.join(workingDir, '.ubel', 'reports');
@@ -283,7 +364,7 @@ async function writeReports(meta, scan, notes, args) {
   const jsonName = reportFileName('report', TAG, 'json'), htmlName = reportFileName('report', TAG, 'html');
 
   const base = {
-    generated_at: new Date().toISOString(), tool_version: TOOL_VERSION, min_severity: args.minSeverity, hidden_by_filter: meta.hidden,
+    generated_at: new Date().toISOString(), tool_version: TOOL_VERSION, min_severity: args.minSeverity, hidden_by_filter: meta.hidden, gate: meta.gate,
     report_id: generateReportId(TAG, asset.asset_id), asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, machine_id: asset.machine_id,
   };
   let payload = buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs: null });
@@ -313,10 +394,14 @@ export async function main() {
   try { scan = scanPackage(file, { maxEntryMb: args.maxEntryMb, log }); }
   catch (e) { console.error(`[ubel-mobile] ${e.message}`); process.exitCode = 1; return; }
 
+  // The gate is evaluated on EVERY finding; --min-severity only decides what the report shows.
+  const everything = scan.findings.list.slice();
   const rank = SEVERITY_RANK[args.minSeverity];
-  const before = scan.findings.list.length;
-  scan.findings.list = scan.findings.list.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
-  const payload = await writeReports({ hidden: before - scan.findings.list.length }, scan, scan.notes, args);
+  scan.findings.list = everything.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
+  const hidden = everything.length - scan.findings.list.length;
+  await resolveDependencies(scan, scan.notes, args);
+  const gate = evaluateGate({ failOn: args.failOnParsed, findings: everything, dependencies: scan.dependencies, gaps: scan.notes.gaps || [], allowPartial: args.allowPartial });
+  const payload = await writeReports({ hidden, gate }, scan, scan.notes, args);
 
   if (!args.quiet) {
     const c = payload.summary.counts;
@@ -330,15 +415,12 @@ export async function main() {
     for (const f of issues.filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${f.title} — ${f.artifact}`);
     for (const n of payload.analysis_notes) console.log(`  note: ${n}`);
   }
-  const f = args.failOnParsed;
-  if (f.mode === 'none') process.exitCode = 0;
-  else {
-    const limit = SEVERITY_RANK[f.severity];
-    const staticHits = flattenFindings(payload).filter(x => (SEVERITY_RANK[x.severity] ?? 4) <= limit).length;
-    const dependencyHits = (payload.dependencies || []).reduce((n, dep) => n + (dep.vulnerabilities || []).filter(v => severityRank(v.severity) <= limit).length, 0);
-    const hits = staticHits + dependencyHits;  // vulnerabilities + secrets + misconfigurations + dependency advisories
-    process.exitCode = f.mode === 'threshold' ? (hits > f.count ? 2 : 0) : (hits > 0 ? 2 : 0);
-  }
+  // One line on stderr whatever --quiet says: a CI log must say why the job went red (or amber).
+  if (gate.exit_code === 2) console.error(`[ubel-mobile] gate FAILED: ${gate.hits} issue(s) at or above ${args.failOnParsed.severity}${gate.tolerated ? ` (${gate.tolerated} tolerated)` : ''} (--fail-on ${gate.fail_on})${hidden ? `; ${hidden} lower-severity finding(s) are hidden from the report by --min-severity` : ''}.`);
+  else if (gate.exit_code === 3) console.error(`[ubel-mobile] gate INCOMPLETE: nothing tripped --fail-on ${gate.fail_on}, but ${gate.gaps} part(s) of the package could not be analysed, so a clean result is not proof of a clean app (exit 3; --allow-partial accepts this). See analysis_notes in the report.`);
+  else if (gate.incomplete && gate.exit_code === 0 && args.failOnParsed.mode !== 'none') console.error(`[ubel-mobile] note: analysis incomplete in ${gate.gaps} place(s); accepted via --allow-partial.`);
+  if (gate.unrated_advisories) console.error(`[ubel-mobile] note: ${gate.unrated_advisories} dependency advisor${gate.unrated_advisories === 1 ? 'y has' : 'ies have'} no severity from OSV and only count against --fail-on info.`);
+  process.exitCode = gate.exit_code;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

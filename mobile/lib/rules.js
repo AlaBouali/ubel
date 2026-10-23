@@ -88,6 +88,15 @@ export const RULES = {
   'bundle.embedded_code':              R('medium', 'Executable code bundled as data (apk/dex/jar)', 'MASVS-CODE-4', 494, 'Review why code is shipped as an asset and how it is loaded.'),
   'bundle.debug_build':                R('high',   'Debug (JIT/kernel) build artifacts shipped', 'MASVS-RESILIENCE', 489, 'Build in release/AOT mode.'),
   'bundle.source_maps':                R('low',    'Source maps / debug symbols shipped', 'MASVS-RESILIENCE', 540, 'Do not package source maps or dSYM/PDB files.'),
+  // ── Cross-platform frameworks (React Native, Flutter, Unity, Xamarin / .NET) ──────────────────────────
+  'rn.dev_bundle':                     R('high',   'React Native bundle built in development mode (__DEV__ = true)', 'MASVS-RESILIENCE', 489, 'Build the release bundle with --dev false (the release Gradle / Xcode build phases do this).'),
+  'rn.plain_bundle':                   R('info',   'React Native app logic ships as readable JavaScript', 'MASVS-RESILIENCE', 540, 'Compile the bundle to Hermes bytecode and keep secrets out of it; neither is protection against a determined reader.'),
+  'rn.async_storage_secrets':          R('medium', 'Credential-looking keys used with unencrypted AsyncStorage', 'MASVS-STORAGE-1', 312, 'Keep tokens and credentials in the Keychain / Keystore (react-native-keychain, expo-secure-store), not AsyncStorage.'),
+  'unity.development_build':           R('high',   'Unity Development Build (player-connection-debug)', 'MASVS-RESILIENCE', 489, 'Ship release builds: untick "Development Build" and "Script Debugging" in the Unity build settings.'),
+  'unity.certificate_handler':         R('info',   'Custom Unity CertificateHandler (pinning or validation bypass)', 'MASVS-NETWORK-2', 295, 'Review ValidateCertificate: it must verify the chain or a pinned key, never return true unconditionally.'),
+  'dotnet.tls_validation_disabled':    R('high',   'Managed code disables or overrides TLS certificate validation', 'MASVS-NETWORK-1', 295, 'Remove DangerousAcceptAnyServerCertificateValidator; if a validation callback is needed, verify the chain or a pinned key inside it.'),
+  'dotnet.debug_build':                R('medium', 'Managed assemblies built in the Debug configuration', 'MASVS-RESILIENCE', 489, 'Build and ship the Release configuration.'),
+  'dotnet.build_path_leak':            R('info',   'Build machine paths embedded in managed assemblies', 'MASVS-CODE', 200, 'Build with deterministic paths (PathMap) or strip the PDB path from release assemblies.'),
   // ── iOS ────────────────────────────────────────────────────────────────────
   'ios.plist.ats_arbitrary':           R('high',   'App Transport Security disabled (NSAllowsArbitraryLoads)', 'MASVS-NETWORK-1', 319, 'Remove NSAllowsArbitraryLoads; add narrowly scoped exceptions only where unavoidable.'),
   'ios.plist.ats_web':                 R('medium', 'ATS disabled for web content (NSAllowsArbitraryLoadsInWebContent)', 'MASVS-NETWORK-1', 319, 'Remove NSAllowsArbitraryLoadsInWebContent.'),

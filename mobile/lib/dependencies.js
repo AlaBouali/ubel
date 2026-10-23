@@ -3,6 +3,7 @@
 // implementation as UBEL SCA; no separate HTTP client or third-party package.
 
 import { submitToOsv, getVulnById } from '../../sca/engine.js';
+import { readBundleDependencies, DEPENDENCIES_PB } from './aab.js';
 
 const MAX_METADATA_BYTES = 8 * 1024 * 1024;
 const MAX_DEPENDENCIES = 5000;
@@ -295,6 +296,20 @@ function parseCocoaPodsLock(zip, platform, prefix, out) {
       if (out.length >= MAX_DEPENDENCIES) return;
     }
   }
+}
+
+/**
+ * Exact Maven coordinates from an App Bundle's BUNDLE-METADATA dependency list (written by the Android Gradle plugin from the resolved
+ * dependency graph, so it is the build's own record, not a guess from class names). `unreadable` is true when the list exists but is damaged.
+ * @returns {{records: object[], unreadable: boolean}}
+ */
+export function extractBundleDependencies(zip, { platform = 'android' } = {}) {
+  const libs = readBundleDependencies(zip);
+  if (libs === null) return { records: [], unreadable: true };
+  const records = libs.map(l => (l.kind === 'maven'
+    ? depRecord({ name: `${l.group}:${l.artifact}`, version: l.version, ecosystem: 'Maven', purl: mavenPurl(l.group, l.artifact, l.version), coordinate: `${l.group}:${l.artifact}`, platform, source: DEPENDENCIES_PB, source_type: 'App Bundle dependency list', confidence: 'high' })
+    : depRecord({ name: l.artifact, version: l.version, ecosystem: 'Unity package', platform, source: DEPENDENCIES_PB, source_type: 'App Bundle dependency list', confidence: 'medium', reason: 'Unity packages are not looked up in OSV.' })));
+  return { records, unreadable: false };
 }
 
 /** Extracts candidate third-party components from an APK/IPA ZIP. No network is used here. */

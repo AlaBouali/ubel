@@ -3,7 +3,10 @@
 // manifest, network security config, signing, DEX (strings, constants, API calls, TLS bypasses),
 // native libraries, string resources and bundled files. Pure Node: no aapt, apktool, jadx or smali.
 
-import { isAxml, parseAxml, findAll, axmlToLines } from './axml.js';
+import { findAll, axmlToLines } from './axml.js';
+import { parseBinaryXml, isBinaryXml, parseResourceTableStrings } from './aab.js';
+import { gap } from './coverage.js';
+import { analyzeFrameworks } from './frameworks.js';
 import { parseArscStrings } from './arsc.js';
 import { Dex, isDex } from './dex.js';
 import { isElf, parseElf } from './elf.js';
@@ -198,9 +201,11 @@ export function analyzeApk(zip, ctx) {
   const manifestEntry = zip.entry('AndroidManifest.xml');
   if (!manifestEntry) throw new Error('AndroidManifest.xml not found — not an APK');
   const raw = zip.read(manifestEntry, 32 * MB);
-  if (!isAxml(raw)) throw new Error('AndroidManifest.xml is not binary XML (App Bundles / protobuf manifests are not supported — scan the APKs built from the bundle)');
-  const manifest = parseAxml(raw);
-  if (!manifest || manifest.tag !== 'manifest') throw new Error('AndroidManifest.xml has no <manifest> element');
+  // Binary XML (APK) or aapt2 protobuf XML (App Bundle modules); both decode to the same element tree.
+  const manifest = parseBinaryXml(raw);
+  if (!manifest) throw new Error('AndroidManifest.xml is neither Android binary XML nor an aapt2 protobuf manifest (is this an unpacked project?)');
+  if (manifest.tag !== 'manifest') throw new Error('AndroidManifest.xml has no <manifest> element');
+  const featureModule = !!ctx.featureModule;   // a non-base bundle module: app-level manifest defaults do not apply to it, they come from the base module
 
   const pkg = String(manifest.attrs.package || 'unknown');
   const base = { app: pkg };
@@ -214,32 +219,33 @@ export function analyzeApk(zip, ctx) {
     min_sdk: minSdk, target_sdk: targetSdk, debuggable: application.attrs.debuggable === true,
     permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], libraries: [],
     signing: null, frameworks: [], _detected_dependencies: [],
+    ...(ctx.module ? { module: ctx.module } : {}),
   };
   const namespaces = appNamespaces(pkg, application);
   const urls = new Map();          // url -> artifact
   const addUrl = (u, a) => { if (!urls.has(u)) urls.set(u, a); };
   let pinning = false;
 
-  manifestChecks({ manifest, application, app, base, findings, at, targetSdk, minSdk, scanner });
+  manifestChecks({ manifest, application, app, base, findings, at, targetSdk, minSdk, scanner, featureModule });
   const xmlRoots = resourceXml(zip, at, scanner, notes);
   networkSecurityChecks({ xmlRoots, base, findings, at, flags: { setPinned: () => { pinning = true; } } });
   hybridChecks({ xmlRoots, base, findings, at });
 
   // string resources
-  const arsc = zip.entry('resources.arsc');
+  const arsc = zip.entry('resources.arsc') || zip.entry('resources.pb');       // resources.pb: the App Bundle (protobuf) form of the same table
   if (arsc) {
     try {
       const buf = zip.read(arsc, 128 * MB);
       const seen = new Set(); const lines = [];
-      for (const s of parseArscStrings(buf)) {
+      for (const s of (arsc.name === 'resources.pb' ? parseResourceTableStrings(buf) : parseArscStrings(buf))) {
         const k = `${s.name}\0${s.value}`;
         if (seen.has(k) || !s.value) continue;
         seen.add(k);
         if (s.value.length >= 8 || /key|secret|token|pass|pwd|auth|_id$/i.test(s.name)) lines.push(`${s.name} = "${esc(s.value)}"`);
-        if (/^https?:\/\//i.test(s.value)) addUrl(s.value, at('resources.arsc'));
+        if (/^https?:\/\//i.test(s.value)) addUrl(s.value, at(arsc.name));
       }
       scanner.add(at('res/values/strings.xml'), lines);
-    } catch (e) { notes.push(`${at('resources.arsc')}: not analysed (${e.message}).`); }
+    } catch (e) { gap(notes, `${at(arsc.name)}: string resources not analysed (${e.message}).`); }
   }
 
   // code
@@ -249,13 +255,17 @@ export function analyzeApk(zip, ctx) {
       app.dex_files.push(e.name);
       collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
       if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces })) pinning = true;
-    } catch (err) { notes.push(`${at(e.name)}: not analysed (${err.message}).`); }
+    } catch (err) { gap(notes, `${at(e.name)}: code not analysed (${err.message}).`); }
   }
-  if (!app.dex_files.length) notes.push(`${at('classes.dex')}: no DEX code found.`);
+  if (!app.dex_files.length && !featureModule) notes.push(`${at('classes.dex')}: no DEX code found.`);
 
   nativeLibraries(zip, { findings, base, at, scanner, notes, app });
-  signing(zip, { findings, base, at, app, minSdk });
+  if (!ctx.module) signing(zip, { findings, base, at, app, minSdk });      // bundle modules carry no signature of their own
   libraries(zip, app);
+
+  // cross-platform frameworks: React Native / Hermes, Flutter, Unity, Xamarin / .NET (runs before URL aggregation: it feeds addUrl)
+  const fw = analyzeFrameworks(zip, { platform: 'android', findings, base, scanner, notes, at, addUrl });
+  app.cross_platform = fw.list;
 
   // cleartext endpoints / firebase / pinning (collected from DEX + resources)
   const http = [], firebase = [];
@@ -266,38 +276,38 @@ export function analyzeApk(zip, ctx) {
   }
   if (http.length) findings.add('android.dex.cleartext_urls', { ...base, artifact: at('classes.dex'), description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted.`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
   if (firebase.length) findings.add('android.dex.firebase_urls', { ...base, artifact: at('resources.arsc'), description: 'The app talks to Firebase Realtime Database. Misconfigured rules are a very common source of data leaks; ubel-mobile does not contact the network, so the rules were not tested.', evidence: [...new Set(firebase)].slice(0, 10) });
-  if (!pinning) findings.add('android.network.no_pinning', { ...base, artifact: at('AndroidManifest.xml'), description: 'No pin-set, OkHttp CertificatePinner, TrustKit or hardcoded pin hash was found.', evidence: [], confidence: 'low', key: 'nopin' });
+  if (!pinning && !featureModule) findings.add('android.network.no_pinning', { ...base, artifact: at('AndroidManifest.xml'), description: 'No pin-set, OkHttp CertificatePinner, TrustKit or hardcoded pin hash was found.', evidence: [], confidence: 'low', key: 'nopin' });
 
   // everything else shipped in the package
-  const handled = /^(classes\d*\.dex|AndroidManifest\.xml|resources\.arsc|META-INF\/|lib\/|res\/(?!raw\/)|r\/|kotlin\/|okhttp3\/|DebugProbesKt\.bin)/;
-  const rest = zip.entries.filter(e => !e.isDir && !handled.test(e.name));
+  const handled = /^(classes\d*\.dex|AndroidManifest\.xml|resources\.(arsc|pb)|META-INF\/|lib\/|res\/(?!raw\/)|r\/|kotlin\/|okhttp3\/|DebugProbesKt\.bin)/;
+  const rest = zip.entries.filter(e => !e.isDir && !handled.test(e.name) && !fw.handled.has(e.name));
   scanBundledFiles(zip, rest, { findings, scanner, base, notes, relName: at, limits: ctx.limits });
   detectFrameworks(zip, app);
   scanner.run();
-  if (scanner.truncated) notes.push(`${pkg}: secret scanning stopped at its line budget; some strings were not scanned.`);
+  if (scanner.truncated) gap(notes, `${pkg}: secret scanning stopped at its line budget; some strings were not scanned.`);
   return app;
 }
 
 // ── manifest ───────────────────────────────────────────────────────────────────────────────────────
-function manifestChecks({ manifest, application, app, base, findings, at, targetSdk, minSdk, scanner }) {
+function manifestChecks({ manifest, application, app, base, findings, at, targetSdk, minSdk, scanner, featureModule = false }) {
   const art = at('AndroidManifest.xml');
   const A = application.attrs;
   if (A.debuggable === true) findings.add('android.manifest.debuggable', { ...base, artifact: art, description: 'android:debuggable="true" lets anyone attach a debugger, read the app’s private files with run-as and bypass many protections.', evidence: ['android:debuggable="true"'] });
   if (A.testOnly === true) findings.add('android.manifest.test_only', { ...base, artifact: art, description: 'android:testOnly="true" marks a development build.', evidence: ['android:testOnly="true"'] });
-  if (A.allowBackup !== false) {
+  if (!featureModule && A.allowBackup !== false) {
     const hasCfg = A.fullBackupContent !== undefined || A.dataExtractionRules !== undefined;
     findings.add('android.manifest.backup', { ...base, artifact: art, severity: hasCfg ? 'low' : 'medium',
       description: `allowBackup is ${A.allowBackup === true ? 'true' : 'not set (defaults to true)'}; app data can be copied off the device with adb backup / cloud backup.${hasCfg ? ' A backup-rules file is configured: check it excludes tokens, databases and preferences that hold secrets.' : ''}`,
       evidence: [`android:allowBackup=${A.allowBackup === true ? '"true"' : '(default)'}`] });
   }
   if (A.usesCleartextTraffic === true) findings.add('android.manifest.cleartext', { ...base, artifact: art, description: 'usesCleartextTraffic="true" allows plain HTTP for the whole app.', evidence: ['android:usesCleartextTraffic="true"'] });
-  else if (A.usesCleartextTraffic === undefined && A.networkSecurityConfig === undefined && targetSdk !== null && targetSdk < 28) {
+  else if (!featureModule && A.usesCleartextTraffic === undefined && A.networkSecurityConfig === undefined && targetSdk !== null && targetSdk < 28) {
     findings.add('android.manifest.cleartext_default', { ...base, artifact: art, description: `targetSdkVersion ${targetSdk} permits cleartext traffic by default and no network security config overrides it.`, evidence: [`targetSdkVersion=${targetSdk}`] });
   }
   if (A.requestLegacyExternalStorage === true) findings.add('android.manifest.legacy_storage', { ...base, artifact: art, description: 'requestLegacyExternalStorage="true" keeps broad access to shared storage.', evidence: ['android:requestLegacyExternalStorage="true"'] });
   if (manifest.attrs.sharedUserId) findings.add('android.manifest.shared_user_id', { ...base, artifact: art, description: `sharedUserId="${manifest.attrs.sharedUserId}" runs this app in the same sandbox as every app signed with the same key and sharing the id.`, evidence: [String(manifest.attrs.sharedUserId)] });
-  if (minSdk !== null && minSdk < 24) findings.add('android.manifest.min_sdk', { ...base, artifact: art, severity: minSdk < 21 ? 'medium' : 'low', description: `minSdkVersion is ${minSdk}; devices running such releases miss years of security fixes and sandbox hardening.`, evidence: [`minSdkVersion=${minSdk}`] });
-  if (targetSdk !== null && targetSdk < 33) findings.add('android.manifest.target_sdk', { ...base, artifact: art, severity: targetSdk < 29 ? 'medium' : 'low', description: `targetSdkVersion is ${targetSdk}; newer API levels enforce stricter defaults (exported components, scoped storage, cleartext, background limits) that this app opts out of.`, evidence: [`targetSdkVersion=${targetSdk}`] });
+  if (!featureModule && minSdk !== null && minSdk < 24) findings.add('android.manifest.min_sdk', { ...base, artifact: art, severity: minSdk < 21 ? 'medium' : 'low', description: `minSdkVersion is ${minSdk}; devices running such releases miss years of security fixes and sandbox hardening.`, evidence: [`minSdkVersion=${minSdk}`] });
+  if (!featureModule && targetSdk !== null && targetSdk < 33) findings.add('android.manifest.target_sdk', { ...base, artifact: art, severity: targetSdk < 29 ? 'medium' : 'low', description: `targetSdkVersion is ${targetSdk}; newer API levels enforce stricter defaults (exported components, scoped storage, cleartext, background limits) that this app opts out of.`, evidence: [`targetSdkVersion=${targetSdk}`] });
 
   // permissions
   const perms = manifest.children.filter(c => c.tag === 'uses-permission' || c.tag === 'uses-permission-sdk-23').map(c => String(c.attrs.name || ''));
@@ -364,14 +374,14 @@ function resourceXml(zip, at, scanner, notes) {
   const roots = [];
   for (const e of zip.find(/^(res\/xml[^/]*\/[^/]+|r\/[^/]+)\.xml$/i).slice(0, 400)) {
     const buf = zip.tryRead(e, 4 * MB);
-    if (!buf || !isAxml(buf)) continue;
+    if (!buf || !isBinaryXml(buf)) continue;
     try {
-      const root = parseAxml(buf);
+      const root = parseBinaryXml(buf);
       if (!root) continue;
       roots.push({ name: e.name, root });
       const lines = axmlToLines(root);
       if (lines.length < 5000) scanner.add(at(e.name), lines);
-    } catch { notes.push(`${at(e.name)}: unreadable binary XML.`); }
+    } catch { gap(notes, `${at(e.name)}: unreadable binary XML.`); }
   }
   return roots;
 }
@@ -527,7 +537,7 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
 
 // ── native libraries ───────────────────────────────────────────────────────────────────────────────
 const ABI_ORDER = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86', 'armeabi'];
-const SKIP_STRINGS = /^(libflutter|libc\+\+_shared|libhermes|libjsc|libmonosgen|libreactnativejni|libfbjni|libjscexecutor|libunity|libil2cpp|libmain|libbitmaps|libimagepipeline|libgifimage|libwebp|libyoga|libglog|libfolly|libv8)/;
+const SKIP_STRINGS = /^(libapp\.so|libassembly-store|libxamarin-app|libmonodroid|libflutter|libc\+\+_shared|libhermes|libjsc|libmonosgen|libreactnativejni|libfbjni|libjscexecutor|libunity|libil2cpp|libmain|libbitmaps|libimagepipeline|libgifimage|libwebp|libyoga|libglog|libfolly|libv8)/;
 
 function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
   const byName = new Map();
@@ -541,9 +551,10 @@ function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
   const props = { exec_stack: [], no_relro: [], partial_relro: [], textrel: [], no_canary: [], rpath: [] };
   let n = 0;
   for (const [name, { e, abi }] of byName) {
-    if (++n > 150) { notes.push('More than 150 native libraries: the rest were not analysed.'); break; }
+    if (++n > 150) { gap(notes, 'More than 150 native libraries: the rest were not analysed.'); break; }
     const buf = zip.tryRead(e, 128 * MB);
-    if (!buf || !isElf(buf)) continue;
+    if (!buf) { gap(notes, `${at(`lib/${abi}/${name}`)}: native library could not be read (encrypted, corrupt or over the size limit).`); continue; }
+    if (!isElf(buf)) continue;
     const label = `${abi}/${name}`;
     try {
       const elf = parseElf(buf);
@@ -552,7 +563,7 @@ function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
       if (elf.textrel) props.textrel.push(label);
       if (elf.rpath) props.rpath.push(`${label} (${elf.rpath})`);
       if (!elf.canary && elf.imports.some(s => /^(strcpy|strcat|sprintf|gets|memcpy)$/.test(s))) props.no_canary.push(label);
-    } catch { /* unreadable ELF */ }
+    } catch { gap(notes, `${at(`lib/${abi}/${name}`)}: ELF header not readable; hardening flags not checked.`); }
     if (!SKIP_STRINGS.test(name)) scanner.add(at(`lib/${abi}/${name}`), asciiStrings(buf, { min: 8, max: 400, limit: 40000 }));
   }
   const emit = (rule, list, text) => list.length && findings.add(rule, { ...base, artifact: at(`lib/…/${list[0].split('/').pop().split(' ')[0]}`), description: `${text} (${list.length} librar${list.length === 1 ? 'y' : 'ies'}).`, evidence: list.slice(0, 30), evidence_total: list.length, key: rule });
@@ -565,7 +576,9 @@ function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
 }
 
 // ── signing ────────────────────────────────────────────────────────────────────────────────────────
-function signing(zip, { findings, base, at, app, minSdk }) {
+export function bundleSigning(zip, ctx) { return signing(zip, { ...ctx, minSdk: null, bundle: true }); }
+
+function signing(zip, { findings, base, at, app, minSdk, bundle = false }) {
   const certs = new Map();
   const schemes = new Set();
   const v1 = zip.find(/^META-INF\/[^/]+\.(RSA|DSA|EC)$/i);
@@ -582,7 +595,7 @@ function signing(zip, { findings, base, at, app, minSdk }) {
   } catch { /* no signing block */ }
   app.signing = { schemes: [...schemes], certificates: [...certs.values()].map(c => ({ subject: c.subject, issuer: c.issuer, valid_to: c.valid_to, key: `${c.key_type}${c.key_bits ? ` ${c.key_bits}` : ''}`, signature_algorithm: c.signature_algorithm, sha256: c.sha256 })) };
   const art = at('META-INF/');
-  if (!schemes.size) { findings.add('android.signing.unsigned', { ...base, artifact: at('AndroidManifest.xml'), description: 'No v1, v2 or v3 signature was found; Android will refuse to install an unsigned package.', evidence: [] , key: 'unsigned' }); return; }
+  if (!schemes.size) { if (!bundle) findings.add('android.signing.unsigned', { ...base, artifact: at('AndroidManifest.xml'), description: 'No v1, v2 or v3 signature was found; Android will refuse to install an unsigned package.', evidence: [] , key: 'unsigned' }); return; }
   for (const c of certs.values()) {
     if (/CN=Android Debug\b/i.test(c.subject)) findings.add('android.signing.debug_cert', { ...base, artifact: art, key: c.sha256, description: 'The certificate is the well-known Android debug certificate; its private key is public knowledge (or generated on every developer machine), so anyone can sign an update that Android treats as coming from this developer.', evidence: [c.subject, `sha256 ${c.sha256}`] });
     if (WEAK_SIG.test(c.signature_algorithm)) findings.add('android.signing.weak_algorithm', { ...base, artifact: art, key: c.sha256, description: `The certificate is signed with ${c.signature_algorithm}.`, evidence: [c.subject, c.signature_algorithm] });
@@ -590,6 +603,7 @@ function signing(zip, { findings, base, at, app, minSdk }) {
     if (c.expired) findings.add('android.signing.expired', { ...base, artifact: art, key: c.sha256, description: `The certificate expired on ${c.valid_to}.`, evidence: [c.subject, c.valid_to] });
   }
   const modern = ['v2', 'v3', 'v3.1'].some(s => schemes.has(s));
+  if (bundle) return;                                  // an .aab is jar-signed with the upload key; the APK scheme rules below do not apply
   if (schemes.has('v1') && !modern) findings.add('android.signing.v1_only', { ...base, artifact: art, description: 'Only the JAR (v1) signature is present; it does not cover the whole file and is vulnerable to Janus-style tampering on Android 5.0–8.0.', evidence: ['v1'], key: 'v1only' });
   else if (schemes.has('v1') && minSdk !== null && minSdk < 24) findings.add('android.signing.janus', { ...base, artifact: art, description: `minSdkVersion ${minSdk} keeps Android 5.0–8.0 devices in scope, where the v1 signature is what gets checked and can be bypassed (Janus).`, evidence: [`minSdkVersion=${minSdk}`], key: 'janus' });
 }
@@ -659,9 +673,9 @@ function libraries(zip, app) {
 
 function detectFrameworks(zip, app) {
   const has = re => zip.entries.some(e => re.test(e.name));
-  if (has(/^assets\/index\.android\.bundle$/)) app.frameworks.push('React Native');
-  if (has(/^lib\/[^/]+\/libflutter\.so$/)) app.frameworks.push('Flutter');
+  for (const f of app.cross_platform || []) {
+    const detail = [f.engine, f.backend, f.mode, f.flavour, f.dart_version && `Dart ${f.dart_version}`, f.unity_version].filter(Boolean).join(', ');
+    app.frameworks.push(detail ? `${f.name} (${detail})` : f.name);
+  }
   if (has(/^assets\/www\//) || has(/^assets\/public\//)) app.frameworks.push('Cordova / Capacitor / Ionic');
-  if (has(/^assemblies\/|^assets\/bin\/Data\/Managed\//)) app.frameworks.push('Xamarin / .NET / Unity (Mono)');
-  if (has(/^lib\/[^/]+\/libunity\.so$/)) app.frameworks.push('Unity');
 }

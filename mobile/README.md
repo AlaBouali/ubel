@@ -1,6 +1,6 @@
 # UBEL Mobile — Android / iOS App Scanning
 
-`ubel-mobile` statically analyses an Android **`.apk`** or an iOS **`.ipa`** (and split bundles: `.xapk`, `.apks`, `.apkm`) for
+`ubel-mobile` statically analyses an Android **`.apk`** or **`.aab`** (App Bundle) or an iOS **`.ipa`** (and split bundles: `.xapk`, `.apks`, `.apkm`) for
 
 - **hardcoded secrets** — API keys, tokens, private keys, connection strings … found in code, string resources, plists, bundled files and native libraries;
 - **insecure storage and data handling** — backups enabled, world-readable files, weak or constant crypto keys/IVs, bundled keystores and databases, Keychain / data-protection attributes;
@@ -10,6 +10,7 @@ Nothing in the app is executed or uploaded. **No third-party libraries and no ex
 
 ```bash
 ubel-mobile app-release.apk
+ubel-mobile app-release.aab
 ubel-mobile Bank.ipa --fail-on high --min-severity medium
 ubel-mobile app.xapk --working-dir ./reports-dir
 ```
@@ -18,14 +19,26 @@ ubel-mobile app.xapk --working-dir ./reports-dir
 
 | Option | Default | Meaning |
 |---|---|---|
-| `<package>` | — | `.apk`, `.ipa`, `.xapk`, `.apks` or `.apkm` (detected from the content, not the extension) |
+| `<package>` | — | `.apk`, `.aab`, `.ipa`, `.xapk`, `.apks` or `.apkm` (detected from the content, not the extension) |
 | `--working-dir <path>` | cwd | Directory whose `.ubel/` folder receives the reports |
-| `--min-severity <s>` | `info` | Drop issues below `critical` / `high` / `medium` / `low` / `info` from the report |
-| `--fail-on <s>` | `critical` | Exit `2` when issues (vulnerabilities, secrets, misconfigurations) or dependency advisories at or above the severity exist; `none` disables; `5:high` tolerates five |
+| `--min-severity <s>` | `info` | Drop issues below `critical` / `high` / `medium` / `low` / `info` from the **report**. Display only: the `--fail-on` gate always sees every finding |
+| `--fail-on <s>` | `critical` | Exit `2` when issues (vulnerabilities, secrets, misconfigurations) or dependency advisories at or above the severity exist; `none` disables the gate (always exit `0`); `5:high` tolerates five. Anything else is a usage error |
+| `--allow-partial` | off | Accept an incomplete analysis (exit `0` instead of `3`) |
 | `--max-entry-mb <n>` | `256` | Largest single file inside the package that is inflated and scanned |
 | `--verbose` / `--quiet` | | More / less console output |
 
-Exit codes: `0` ok · `1` the package could not be read or is not an APK/IPA · `2` the `--fail-on` gate tripped, or bad arguments. Like every UBEL CLI it also accepts `asset-id`, `set-asset-id <id>`, `version` and `--asset-id <id>`.
+### Exit codes (for CI)
+
+| Code | Meaning |
+|---|---|
+| `0` | the gate passed **and** the analysis was complete (or `--fail-on none`, or `--allow-partial` accepted the gaps) |
+| `1` | the scan failed: file missing, unreadable or not a supported package, or the report could not be written |
+| `2` | the `--fail-on` gate tripped, **or** bad arguments (a one-line reason is printed to stderr either way) |
+| `3` | nothing tripped the gate, but part of the package **could not be analysed** (a DEX that failed to parse, an unreadable or oversized file, an exhausted scan budget, a FairPlay-encrypted binary, an LZMA-compressed Unity bundle, an unrecognised assembly store, a failed OSV lookup …). A clean result over partial coverage is not a pass; `--allow-partial` accepts it |
+
+How the gate decides, so a green build means something: it counts **every** finding and dependency advisory, whatever `--min-severity` hides from the report (that option only shapes what you read; the stderr line says how many were hidden). Gaps are listed in the report (`analysis.gaps`, and in the HTML notes), the machine-readable verdict is in `gate` in the JSON (`tripped`, `hits`, `incomplete`, `exit_code`), and the executive summary says "No issues found (analysis incomplete)" instead of "No issues found". Advisories OSV gives no severity for are reported (`unrated_advisories`) and count only against `--fail-on info`. Bad arguments share exit `2` with a tripped gate, as in the other UBEL CLIs; the stderr message tells them apart.
+
+Like every UBEL CLI it also accepts `asset-id`, `set-asset-id <id>`, `version` and `--asset-id <id>`.
 
 ## Output
 
@@ -54,6 +67,17 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 | `lib/**/*.so` | ELF hardening (executable stack, RELRO, text relocations, RPATH, canary) and strings (secrets) |
 | everything else | keystores/private keys, `.env`/credential/VCS files, backups, bundled databases, embedded `.apk`/`.dex`/`.jar`, Flutter debug kernels, source maps; text files, React Native / Hermes bundles, Xamarin/Unity DLLs (UTF-16) scanned for secrets |
 
+**Android App Bundles (`.aab`)** — every module (base, dynamic features, asset packs) is analysed with the same checks as an APK, through the bundle's protobuf manifest, `res/xml` files and `resources.pb`. The bundle is reported as one app (`modules` lists the parts); feature modules do not repeat app-level defaults such as backup or SDK levels. `BUNDLE-METADATA/…/dependencies.pb` supplies the build's exact Maven coordinates, which go to the OSV lookup. Signing is read from the bundle's own jar signature (debug certificate, weak algorithm, expiry); APK-only signature-scheme findings do not apply to a bundle.
+
+**Cross-platform frameworks (Android and iOS)** — their code does not live in DEX or Mach-O, so each gets a reader of its own format instead of a printable-string pass:
+
+| Framework | What is read |
+|---|---|
+| React Native | `index.android.bundle` / `main.jsbundle` / `*.hbc`. **Hermes bytecode**: the string table is read through its own index (every literal and identifier as a separate, complete string; layout validated against real `hermesc` output, falls back to printable runs with a note if the layout is unknown). **Plain JS**: string literals and `key: "value"` pairs are extracted from minified code. Flags a development bundle (`__DEV__ = true`), readable source, and credential-looking keys used with unencrypted `AsyncStorage`. (Before this, `index.android.bundle` was not scanned at all.) |
+| Flutter | `libapp.so` / `App.framework` Dart AOT snapshot (ASCII and UTF-16 strings, `package:` names → Dart package list), the Dart/engine version from `libflutter.so`, debug JIT snapshots (`kernel_blob.bin`, `isolate_snapshot_data`) flagged. The report notes that Dart HTTP traffic ignores the Android network-security config and system proxy |
+| Unity | **IL2CPP** `global-metadata.dat`: the exact C# string literals and the identifier table (a `CertificateHandler` / `ValidateCertificate` pair is flagged for review). **Mono** `Managed/*.dll` through the .NET reader. `boot.config` (`player-connection-debug=1` = Development Build), serialized scene/asset files (inspector-entered keys end up there), and **UnityFS** bundles (stored and LZ4/LZ4HC; LZMA-compressed bundles are reported as not inspected) |
+| Xamarin / .NET MAUI | Managed assemblies, plain or **XALZ/LZ4-compressed** (the Xamarin.Android release default; LZ4 only removes repeats, so a raw string scan still sees some unique text but in fragments, and cannot read the identifier heap or PDB path the checks below depend on) or packed in an **assembly store** (`assemblies.blob`, `libassembly-store.so`). The `#US` heap gives the exact C# literals; the identifier heap flags `DangerousAcceptAnyServerCertificateValidator` (and, at low confidence, custom validation callbacks); the PDB path flags Debug builds and leaked build-machine paths. SDK assemblies (`System.*`, `Mono.*`, `Xamarin.AndroidX.*`, …) are skipped |
+
 **iOS (`.ipa`)**
 
 | Area | What is read |
@@ -70,7 +94,8 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 - **No decompiler.** Findings come from configuration, constant tables, API references and call arguments, and binary metadata — not data-flow analysis. The DEX walker tracks constants straight-line within a method, so it sees `Cipher.getInstance("DES/ECB/…")` and constant keys, but not values assembled at runtime. Findings marked `confidence: low|medium` are leads to verify.
 - **Obfuscation.** R8/ProGuard renames app classes but not framework calls or string constants, so most checks still work. It also renames *library* classes (Material becomes `c.c.a.a.…`), so package prefixes alone cannot separate app from library code: a class is `app` when it sits under the manifest package or a manifest component's package, `library` when it matches a known library prefix, and `unknown` when it is renamed and outside the app's package; packers, DexGuard-style string encryption, Hermes bytecode and code downloaded at runtime are only partly visible.
 - **App Store IPAs are FairPlay-encrypted** (`cryptid=1`): `Info.plist`, provisioning, entitlements, bundled files and imported symbols are analysed, but strings inside the binary are not. Scan a development-signed or decrypted build for full coverage. The report says so.
-- **App Bundles (`.aab`)** use a protobuf manifest and are not supported; scan the APKs built from the bundle (or the `.apks`/`.xapk`).
+- **Framework code is read as data, not decompiled.** Hermes bytecode, Dart snapshots, IL2CPP binaries and .NET IL are not decompiled, so logic (a certificate callback that returns `true`, a token written to storage) cannot be proven from them. What is found is what the containers expose: string literals, identifiers, configuration, build flags. Dart-side TLS handling in particular is invisible; Dart package *versions* are not shipped, so Flutter dependencies are listed by name only and are not looked up in OSV. Unreadable layouts are reported as coverage gaps (exit `3`), not skipped silently.
+- **Bundle caveats.** Unity LZMA-compressed UnityFS bundles and encrypted/custom-packed `global-metadata.dat` are not read (reported). The `.aab` assembly-store and Hermes layouts are version-dependent: they are validated before use and a mismatch is reported rather than guessed. Bundle modules are analysed from the `.aab`; an `.aab` that is not jar-signed simply has no signature findings.
 - **Limits protect the scanner:** per-file and total inflated-size caps, a ratio check, a bounded string budget for the secrets scan. When a budget is hit the report says what was skipped.
 - **Sensitive-data rules are heuristics.** There is no data-flow analysis, so `logging_sensitive`, `plaintext_prefs` and `plaintext_database` work from what is visible in one method: *direct* evidence (a constant tag, message, preference key or `ContentValues` key that names something sensitive; confidence `medium`) or *nearby* evidence (the same method also loads a sensitive-looking label such as `"accesstoken"`, because the logged/stored text is built at runtime; confidence `low`). Prose such as SDK error messages and class-name log tags are ignored, known library code is skipped, and renamed (`unknown`-origin) code is always reported at `low` confidence. If `androidx.security.crypto` or SQLCipher is packaged the storage rules drop to `low`, since the same APIs may be encrypted. Treat them as pointers for manual review.
 - **Hardcoded-credential rules are name-plus-value checks.** `hardcoded_credential` needs a constant whose *name* says password/secret/token/key **and** a value that looks like a secret (not a placeholder, key name, identifier or URL); an all-lowercase word such as `"letmein"` is deliberately not reported. Secrets with a known vendor format, long key/value pairs and `Bearer`/`Basic` headers are still caught by the shared secrets engine. JWT signing-secret detection recognises jjwt, java-jwt and Nimbus calls with constant arguments; hand-rolled `SecretKeySpec` is covered by `android.dex.hardcoded_key`. Root/emulator-detection bypasses are runtime behaviour and out of scope for a static scan.
@@ -204,6 +229,8 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 Hardcoded secrets are reported as `secret.<rule id>` (for example `secret.github-pat`) with the severity of the shared secrets rule. Severity is lowered one level when every occurrence is inside third-party library code.
 
 ## Tests
+
+`node --test tests/mobile-frameworks.test.js` — `.aab` support (proto XML, modules, dependency list), Hermes / IL2CPP / UnityFS / XALZ / assembly-store readers, per-framework scans (RN, Flutter, Unity, Xamarin), and the exit-code contract (gate maths plus the real CLI: pass, missing file, gate, bad arguments, incomplete, `--allow-partial`, `--min-severity` not hiding gate failures). The parsers were also checked against real files: a bundletool sample `.aab`, `hermesc` output (bytecode v94), a real managed DLL and a real LZ4 compressor.
 
 `node --test tests/mobile.test.js` — builds Android binary XML, `resources.arsc`, DEX, binary plists, Mach-O and ELF fixtures in memory (`tests/helpers/mobile_fixtures.js`) plus real PKCS#7 signatures, and checks parsers, whole-package scans and the CLI (outputs, exit codes, HTML escaping, diffs). The fixtures follow the file-format specifications; they are not real apps, so run the scanner against your own builds as well.
 

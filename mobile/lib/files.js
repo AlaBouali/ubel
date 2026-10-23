@@ -4,6 +4,8 @@
 // extraction of scannable text (JSON/XML/plist/JS/… and printable strings of opaque binaries).
 
 import { isLikelyBinary, asciiStrings, utf16Strings } from './strings.js';
+import { gap } from './coverage.js';
+import { isHermes, parseHermes } from './hermes.js';
 import { parsePlist, plistToLines } from './plist.js';
 import { isAxml, parseAxml, axmlToLines } from './axml.js';
 
@@ -17,12 +19,12 @@ const SENSITIVE = [
 const BACKUP = /(\.(bak|old|orig|swp|swo|tmp)|~)$/i;
 const DATABASE = /\.(db|sqlite3?|db3|realm|mdb)$/i;
 const EMBEDDED_CODE = /\.(apk|dex|jar|aar|odex|vdex)$/i;
-const DEBUG_SYMBOLS = /(\.js\.map|\.css\.map|\.pdb|\.dSYM(\/|$))/i;
-const FLUTTER_DEBUG = /(^|\/)flutter_assets\/kernel_blob\.bin$/;
+const DEBUG_SYMBOLS = /(\.js\.map|\.css\.map|\.(bundle|jsbundle|hbc)\.map|\.pdb|\.mdb|\.dSYM(\/|$))/i;
+const FLUTTER_DEBUG = /(^|\/)flutter_assets\/(kernel_blob\.bin|isolate_snapshot_data|vm_snapshot_data)$/;
 
 const BINARY_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|heic|heif|tiff?|mp[34]|m4[av]|mov|avi|webm|ogg|oga|wav|aac|flac|mid|ttf|otf|woff2?|eot|pdf|car|nib|storyboardc|momd?|omo|ktx|astc|pvr|dds|atlas|riv|lottie|tgs|zip|gz|tgz|bz2|xz|7z|rar|lz4|zst|obj|fbx|glb|bin|pak|dat|data|bundle\/.*\.nib)$/i;
 const STRINGS_EXT = /\.(so|dll|dylib|a|hbc|exe|pyc|wasm|db|sqlite3?|realm|mdb|dex|jar|class|o)$/i;
-const TEXT_EXT = /\.(json|xml|plist|strings|properties|txt|js|mjs|cjs|jsx|ts|tsx|html?|css|ya?ml|ini|cfg|conf|config|env|sh|md|csv|tsv|map|pem|key|crt|cer|pub|toml|gradle|kts?|java|swift|m|mm|h|py|rb|php|sql|graphql|gql|xcconfig|entitlements|jsbundle|rtf|log|dart|lua|gs|plist\.json|mobileconfig)$/i;
+const TEXT_EXT = /\.(json|xml|plist|strings|properties|txt|js|mjs|cjs|jsx|ts|tsx|html?|css|ya?ml|ini|cfg|conf|config|env|sh|md|csv|tsv|map|pem|key|crt|cer|pub|toml|gradle|kts?|java|swift|m|mm|h|py|rb|php|sql|graphql|gql|xcconfig|entitlements|jsbundle|bundle|rtf|log|dart|lua|gs|plist\.json|mobileconfig)$/i;
 
 /**
  * @param {string} p path inside the package
@@ -83,9 +85,9 @@ export function scanBundledFiles(zip, entries, ctx) {
       evidence: paths.slice(0, 30), evidence_total: paths.length,
     });
   }
-  if (skippedLarge) notes.push(`${skippedLarge} bundled file(s) larger than the scan limit were not scanned for secrets.`);
-  if (unreadable) notes.push(`${unreadable} bundled file(s) could not be read (encrypted, corrupt or unsupported compression).`);
-  if (files >= limits.maxFiles || total >= limits.maxTotalBytes) notes.push('Bundled-file scan stopped at its file/size budget; later files were not scanned.');
+  if (skippedLarge) gap(notes, `${skippedLarge} bundled file(s) larger than the scan limit were not scanned for secrets.`);
+  if (unreadable) gap(notes, `${unreadable} bundled file(s) could not be read (encrypted, corrupt or unsupported compression).`);
+  if (files >= limits.maxFiles || total >= limits.maxTotalBytes) gap(notes, 'Bundled-file scan stopped at its file/size budget; later files were not scanned.');
 }
 
 /** Turns one file's bytes into lines for the secrets engine. */
@@ -94,8 +96,9 @@ export function collectText(shown, name, data, scanner) {
     try { scanner.add(shown, plistToLines(parsePlist(data))); return; } catch { /* not a plist: fall through to plain text */ }
   }
   if (isAxml(data)) { const root = parseAxml(data); if (root) scanner.add(shown, axmlToLines(root)); return; }
-  if (data.length >= 8 && data.readBigUInt64LE(0) === 0x1f1903c103bc1fc6n) {          // Hermes bytecode: JS source is gone, string table is plain
-    scanner.add(shown, asciiStrings(data, { min: 8 }));
+  if (isHermes(data)) {                                                                  // Hermes bytecode: JS source is gone, the string table is plain
+    const h = parseHermes(data);
+    scanner.add(shown, h.strings ? h.strings.filter(s => s.length >= 6).map(s => s.replace(/\r?\n|\r/g, ' ')) : asciiStrings(data, { min: 8 }));
     return;
   }
   if (STRINGS_EXT.test(name) || isLikelyBinary(data)) {

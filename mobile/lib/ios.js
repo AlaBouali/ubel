@@ -9,6 +9,8 @@ import { isMachO, parseMachO, sectionBuffers } from './macho.js';
 import { asciiStrings, utf16Strings } from './strings.js';
 import { scanBundledFiles } from './files.js';
 import { Aggregator } from './findings.js';
+import { gap } from './coverage.js';
+import { analyzeFrameworks } from './frameworks.js';
 
 const MB = 1024 * 1024;
 const URL_HTTP = /^http:\/\/[^\s"'<>\\]{4,300}$/i;
@@ -70,7 +72,7 @@ export function analyzeIpa(zip, ctx) {
     try {
       const p = extractEmbeddedPlist(zip.read(prov, 4 * MB));
       if (p) profileEnt = provisioningChecks(p, { findings, base, art: prov.name, app });
-    } catch { notes.push(`${prov.name}: could not be parsed.`); }
+    } catch { gap(notes, `${prov.name}: provisioning profile could not be parsed.`); }
   }
 
   // Mach-O: main executable, embedded frameworks, app extensions
@@ -97,14 +99,14 @@ export function analyzeIpa(zip, ctx) {
   let mainEnt = null;
   for (const t of targets.slice(0, 200)) {
     const entry = zip.entry(t.name);
-    if (!entry) { if (t.main) notes.push(`${t.name}: main executable missing from the package.`); continue; }
+    if (!entry) { if (t.main) gap(notes, `${t.name}: main executable missing from the package.`); continue; }
     state.machoPaths.add(t.name);
     const buf = zip.tryRead(entry, 1024 * MB);
-    if (!buf || !isMachO(buf)) { if (t.main) notes.push(`${t.name}: not a readable Mach-O executable.`); continue; }
+    if (!buf || !isMachO(buf)) { if (t.main) gap(notes, `${t.name}: not a readable Mach-O executable.`); else if (!buf) gap(notes, `${t.name}: could not be read (encrypted, corrupt or over the size limit).`); continue; }
     try {
       const r = analyzeMachO(buf, t, { agg, findings, base, scanner, state, notes, app });
       if (t.main) mainEnt = r.entitlements;
-    } catch (e) { notes.push(`${t.name}: Mach-O not analysed (${e.message}).`); }
+    } catch (e) { gap(notes, `${t.name}: Mach-O not analysed (${e.message}).`); }
   }
   agg.flush(app.executable ? `${dir}${app.executable}` : dir);
 
@@ -116,6 +118,10 @@ export function analyzeIpa(zip, ctx) {
     if (ent['aps-environment'] === 'development') findings.add('ios.profile.push_dev', { ...base, artifact: `${dir}${app.executable || ''}`, description: 'The push-notification entitlement points at the APNs sandbox.', evidence: ['aps-environment = development'], key: 'aps' });
   }
 
+  // cross-platform frameworks (React Native / Hermes, Flutter, Unity, Xamarin / .NET)
+  const fw = analyzeFrameworks(zip, { platform: 'ios', findings, base, scanner, notes, at: n => n, addUrl: u => state.urls.add(u) });
+  app.cross_platform = fw.list;
+
   // cleartext URLs / pinning
   const http = [...state.urls].filter(u => URL_HTTP.test(u) && !NAMESPACE_URL.test(u));
   if (http.length) findings.add('ios.code.cleartext_urls', { ...base, artifact: `${dir}${app.executable || ''}`, description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted unless ATS blocks it.`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
@@ -124,10 +130,10 @@ export function analyzeIpa(zip, ctx) {
 
   // everything else in the bundle
   const skip = e => state.machoPaths.has(e.name) || /^Payload\/[^/]+\.app\/(_CodeSignature\/|SC_Info\/|embedded\.mobileprovision$)/.test(e.name) ||
-    /\/_CodeSignature\//.test(e.name) || e.name === infoEntry.name || /^(Symbols|SwiftSupport|BCSymbolMaps)\//.test(e.name) || /\.(car|nib|storyboardc|momd?)(\/|$)/i.test(e.name);
+    /\/_CodeSignature\//.test(e.name) || e.name === infoEntry.name || /^(Symbols|SwiftSupport|BCSymbolMaps)\//.test(e.name) || /\.(car|nib|storyboardc|momd?)(\/|$)/i.test(e.name) || fw.handled.has(e.name);
   scanBundledFiles(zip, zip.entries.filter(e => !e.isDir && !skip(e)), { findings, scanner, base, notes, limits: ctx.limits });
   scanner.run();
-  if (scanner.truncated) notes.push(`${bundleId}: secret scanning stopped at its line budget; some strings were not scanned.`);
+  if (scanner.truncated) gap(notes, `${bundleId}: secret scanning stopped at its line budget; some strings were not scanned.`);
   return app;
 }
 
@@ -193,7 +199,7 @@ function analyzeMachO(buf, t, { agg, findings, base, scanner, state, notes, app 
     if (!preferred.signed) findings.add('ios.macho.unsigned', { ...base, artifact: art, description: 'The main executable has no LC_CODE_SIGNATURE.', evidence: [], key: 'unsigned' });
     if (preferred.encrypted) {
       findings.add('ios.macho.encrypted', { ...base, artifact: art, description: `LC_ENCRYPTION_INFO cryptid=${preferred.cryptid}: the code pages are FairPlay-encrypted (normal for an App Store download). Imported symbols and the Info.plist were still analysed; strings inside the binary could not be.`, evidence: [`cryptid = ${preferred.cryptid}`], key: 'cryptid' });
-      notes.push(`${art}: FairPlay-encrypted — string-based checks and the secrets scan of the main binary were skipped. Scan a decrypted or development-signed build for full coverage.`);
+      gap(notes, `${art}: FairPlay-encrypted — string-based checks and the secrets scan of the main binary were skipped. Scan a decrypted or development-signed build for full coverage.`);
     }
   }
   const imports = preferred.imports;
