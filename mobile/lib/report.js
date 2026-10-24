@@ -247,6 +247,105 @@ export function nativeBinaryCount(apps) {
   return (apps || []).reduce((n, a) => n + Number(a?.native_hardening?.binaries?.length || 0), 0);
 }
 
+// ── Behavior tab ───────────────────────────────────────────────────────────────────────────────────
+// What the code DOES (file access, network, IPC, processes, reflection, native code, sensitive device APIs), taken from the call inventory in
+// `app.behavior` (behavior.js). Nearly every app does all of this, so the tab is context for the findings, not a list of findings: each
+// category links to the findings that bear on it. Server-rendered and escaped (API names and intent actions come from the package).
+const BEHAVIOR_INFO = {
+  file_io: { about: 'Reads, writes and deletes files. Check that anything sensitive stays in app-private storage and is not written to shared storage or made world-accessible.',
+    rules: /^(android\.dex\.(external_storage|world_accessible_storage|plaintext_prefs|plaintext_database)|android\.manifest\.(backup|legacy_storage)|bundle\.(database|sensitive_file))/ },
+  network: { about: 'Opens connections: URL / HttpURLConnection, sockets, OkHttp calls and WebView loads. Check transport security, certificate validation and which endpoints are contacted.',
+    rules: /^(android\.dex\.(cleartext_urls|trust_all_certs|allow_all_hostnames|custom_trust_manager|weak_tls_protocol|webview_|firebase_urls)|android\.manifest\.cleartext|android\.nsc\.|android\.network\.|android\.online\.)/ },
+  ipc: { about: 'Talks to other components and apps: activities, services, broadcasts and intents. Implicit intents (an action string, no target class) can be intercepted; exported components are reachable by other apps.',
+    rules: /^android\.manifest\.(exported_|deeplinks|weak_permission|shared_user_id)/ },
+  process: { about: 'Starts processes (Runtime.exec, ProcessBuilder). Shell execution is rare in normal apps; check that no input reaches the command line.',
+    rules: /^android\.dex\.runtime_exec$/ },
+  reflection: { about: 'Looks up classes and methods by name at run time (Class.forName, Method.invoke, ClassLoader.loadClass). Common in frameworks; also how code is hidden from static analysis or loaded dynamically.',
+    rules: /^(android\.dex\.dynamic_code_loading|bundle\.embedded_code)$/ },
+  native_code: { about: 'Loads native libraries (System.loadLibrary / load). Native code is outside the Java sandbox of checks: see the Native Binaries tab for its hardening.',
+    rules: /^android\.native\./ },
+  device_access: { about: 'Uses sensitive device APIs: location, camera, microphone, SMS, clipboard, installed-package list. Each should match a declared permission and a feature the user can see.',
+    rules: /^(android\.manifest\.(risky_permissions|permissions)|android\.dex\.device_identifiers)$/ },
+};
+const BEHAVIOR_ORIGIN = { app: 'App code', unknown: 'Renamed classes', library: 'Third-party libraries' };
+const BEHAVIOR_ORIGIN_BADGE = { app: 'text-red-300 border-red-500/40 bg-red-500/10', unknown: 'text-orange-300 border-orange-500/40 bg-orange-500/10', library: 'text-neutral-300 border-neutral-600 bg-neutral-800/50' };
+const SEVERITY_BADGE = {
+  critical: 'text-red-300 border-red-500/60 bg-red-500/20', high: 'text-red-400 border-red-500/50 bg-red-500/10', medium: 'text-orange-300 border-orange-500/50 bg-orange-500/10',
+  low: 'text-yellow-300 border-yellow-500/40 bg-yellow-500/10', info: 'text-blue-300 border-blue-500/40 bg-blue-500/10',
+};
+const BEHAVIOR_ORIGINS = ['app', 'unknown', 'library'];
+
+/** Number of distinct behavior API references across the apps of a payload (the count shown on the tab). */
+export function behaviorApiCount(apps) {
+  return (apps || []).reduce((n, a) => n + Object.values(a?.behavior?.categories || {}).reduce((m, byOrigin) => {
+    const names = new Set(); for (const o of BEHAVIOR_ORIGINS) Object.keys(byOrigin?.[o]?.apis || {}).forEach(k => names.add(k)); return m + names.size;
+  }, 0), 0);
+}
+
+export function behaviorHtml(apps, findings = []) {
+  const withBehavior = (apps || []).map((a, i) => ({ a, i })).filter(({ a }) => a?.behavior && Object.keys(a.behavior.categories || {}).length);
+  if (!withBehavior.length) return '';
+  const callsOf = (byOrigin, o) => Number(byOrigin?.[o]?.calls || 0);
+  const originChip = o => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${BEHAVIOR_ORIGIN_BADGE[o]}">${esc(BEHAVIOR_ORIGIN[o])}</span>`;
+  const related = (a, cat) => {
+    const re = BEHAVIOR_INFO[cat]?.rules;
+    return re ? findings.filter(f => re.test(String(f.rule || '')) && (!f.app || !a.package || f.app === a.package)) : [];
+  };
+  const findingList = list => list.length
+    ? `<ul class="divide-y divide-neutral-800">${list.map(f => `<li class="py-2 flex flex-wrap items-center gap-2 text-sm"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold uppercase ${SEVERITY_BADGE[f.severity] || SEVERITY_BADGE.info}">${esc(f.severity)}</span><span>${esc(f.title)}</span><span class="mono text-xs text-neutral-500 break-all">${esc(f.rule)} · ${esc(f.artifact)}</span></li>`).join('')}</ul>`
+    : '<p class="text-xs text-neutral-500">No finding in this report bears on this behavior.</p>';
+
+  return withBehavior.map(({ a, i }) => {
+    const b = a.behavior;
+    const cats = Object.keys(BEHAVIOR_LABELS).filter(c => b.categories[c]);
+    const totalCalls = c => BEHAVIOR_ORIGINS.reduce((n, o) => n + callsOf(b.categories[c], o), 0);
+    const pill = (id, label, count) => `<button type="button" data-bh-app="${i}" data-bh-pill="${esc(id)}" onclick="switchBehavior(${i}, '${esc(id)}')" class="bh-pill px-3 py-1.5 rounded-full border border-neutral-700 text-xs font-medium text-neutral-300 hover:text-white whitespace-nowrap${id === 'overview' ? ' bh-pill-active' : ''}">${esc(label)}${count == null ? '' : ` <span class="mono text-neutral-500">${Number(count)}</span>`}</button>`;
+    const pills = [pill('overview', 'Overview', null), ...cats.map(c => pill(c, BEHAVIOR_LABELS[c], totalCalls(c)))].join('');
+
+    const matrix = cats.map(c => `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" onclick="switchBehavior(${i}, '${esc(c)}')">
+        <td class="px-4 py-3 font-semibold">${esc(BEHAVIOR_LABELS[c])}</td>
+        ${BEHAVIOR_ORIGINS.map(o => `<td class="px-4 py-3 mono text-sm ${callsOf(b.categories[c], o) ? '' : 'text-neutral-600'}">${callsOf(b.categories[c], o)}</td>`).join('')}
+        <td class="px-4 py-3 mono text-sm font-semibold">${totalCalls(c)}</td>
+        <td class="px-4 py-3 mono text-sm ${related(a, c).length ? 'text-orange-300' : 'text-neutral-600'}">${related(a, c).length}</td></tr>`).join('');
+    const it = b.intent_actions_total || {}, ex = b.explicit_intents || {};
+    const overview = `<div data-bh-app="${i}" data-bh-panel="overview" class="space-y-4">
+        <p class="text-xs text-neutral-400">API references counted in the app's DEX code, split by who owns the class. <b>Renamed classes</b> are obfuscated classes outside the app's own package: most likely library code, but not provable. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact APIs.</p>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">Behavior</th><th class="px-4 py-3">App code</th><th class="px-4 py-3">Renamed classes</th><th class="px-4 py-3">Libraries</th><th class="px-4 py-3">Total calls</th><th class="px-4 py-3">Related findings</th></tr></thead>
+          <tbody class="divide-y divide-neutral-800">${matrix}</tbody></table></div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">${[['Explicit intents (app)', ex.app || 0], ['Implicit intent actions (app)', it.app || 0], ['Implicit actions (renamed / library)', `${it.unknown || 0} / ${it.library || 0}`], ['Explicit intents (all)', (ex.app || 0) + (ex.unknown || 0) + (ex.library || 0)]]
+          .map(([l, v]) => `<div class="glass p-4 rounded-xl"><div class="text-xl font-bold mono">${esc(v)}</div><div class="text-[11px] uppercase tracking-widest text-neutral-500">${esc(l)}</div></div>`).join('')}</div>
+      </div>`;
+
+    const panels = cats.map(c => {
+      const byOrigin = b.categories[c];
+      const rows = BEHAVIOR_ORIGINS.filter(o => byOrigin[o]).flatMap(o => Object.entries(byOrigin[o].apis || {}).map(([api, n]) => ({ o, api, n }))).sort((x, y) => y.n - x.n || x.api.localeCompare(y.api));
+      const shown = rows.map(r => `<tr class="hover:bg-neutral-800/30 transition-colors"><td class="px-4 py-2 mono text-xs break-all">${esc(r.api)}</td><td class="px-4 py-2">${originChip(r.o)}</td><td class="px-4 py-2 mono text-sm">${Number(r.n)}</td></tr>`).join('');
+      const truncated = BEHAVIOR_ORIGINS.some(o => byOrigin[o] && Number(byOrigin[o].calls) > Object.values(byOrigin[o].apis || {}).reduce((x, y) => x + y, 0));
+      let extra = '';
+      if (c === 'ipc') {
+        const acts = BEHAVIOR_ORIGINS.filter(o => (b.intent_actions?.[o] || []).length).map(o => `<div><div class="mb-1">${originChip(o)} <span class="mono text-xs text-neutral-500">${(b.intent_actions[o] || []).length}${(it[o] || 0) > (b.intent_actions[o] || []).length ? ` of ${Number(it[o])}` : ''} action(s)</span></div><div class="flex flex-wrap gap-1">${(b.intent_actions[o] || []).map(x => `<span class="px-2 py-0.5 rounded bg-neutral-800 mono text-[11px] break-all">${esc(x)}</span>`).join('')}</div></div>`).join('');
+        extra = `<div class="space-y-3"><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400">Implicit intent actions</h4><p class="text-xs text-neutral-500">An intent built from an action string (no target class) is resolved by the system and can be answered by any app that registers for it: never put secrets in one, and prefer explicit intents for internal calls.</p>${acts || '<p class="text-xs text-neutral-500">No constant action strings were found.</p>'}</div>`;
+      }
+      return `<div data-bh-app="${i}" data-bh-panel="${esc(c)}" class="space-y-4 hidden">
+        <div><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">${esc(BEHAVIOR_LABELS[c])}</h3><p class="text-xs text-neutral-400 mt-1">${esc(BEHAVIOR_INFO[c]?.about || '')}</p></div>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">API</th><th class="px-4 py-3">Owner</th><th class="px-4 py-3">Calls</th></tr></thead>
+          <tbody class="divide-y divide-neutral-800">${shown}</tbody></table></div>
+        ${truncated ? '<p class="text-xs text-neutral-500">Only the most frequent APIs of each owner are listed; the call totals include the rest.</p>' : ''}
+        ${extra}
+        <div class="space-y-2"><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400">Related findings</h4>${findingList(related(a, c))}</div>
+      </div>`;
+    }).join('');
+
+    return `<div class="glass p-6 rounded-xl space-y-4 behavior-block">
+      <div class="flex flex-wrap items-baseline justify-between gap-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Behavior checks</h3><span class="mono text-xs text-neutral-500">${esc(a.package || a.name || 'Android app')}</span></div>
+      <div class="flex flex-wrap gap-2">${pills}</div>
+      ${overview}${panels}
+    </div>`;
+  }).join('');
+}
+
 export async function buildHtml(p) {
   const [tailwind, chartjs, googleFonts] = await Promise.all([
     getTailwindScript(), getChartJSScript(), getGoogleFontsScript(),
@@ -264,6 +363,8 @@ export async function buildHtml(p) {
   const dependencies = p.dependencies || [];
   const nativeCount = nativeBinaryCount(p.apps);
   const nativeHtml = nativeHardeningHtml(p.apps);
+  const behaviorCount = behaviorApiCount(p.apps);
+  const behaviorPanels = behaviorHtml(p.apps, flattenFindings(p));
   const dependencySummary = p.dependency_summary || {};
   const dependencyStatusLabel = { vulnerable: 'Vulnerable', clean: 'Safe', not_queryable: 'Not queried', lookup_error: 'Lookup failed', lookup_incomplete: 'Lookup incomplete', pending: 'Pending' };
   const severityColors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3' };
@@ -373,6 +474,8 @@ export async function buildHtml(p) {
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
     .tab-active { border-bottom: 2px solid var(--accent); color: white; }
+    .bh-pill-active { background: var(--accent); border-color: var(--accent); color: white; }
+    .bh-pill-active .mono { color: rgba(255,255,255,.75); }
     .modal-overlay { display: none; position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.85); z-index:50; backdrop-filter: blur(4px); }
     .modal-content { max-height: 90vh; overflow-y: auto; }
     details > summary { list-style: none; }
@@ -440,6 +543,7 @@ export async function buildHtml(p) {
       <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">App Inventory(${(p.apps || []).length})</button>
       <button onclick="switchTab('native')" id="tab-native" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Native Binaries(${nativeCount})</button>
+      <button onclick="switchTab('behavior')" id="tab-behavior" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Behavior(${behaviorCount})</button>
       <button onclick="switchTab('dependencies')" id="tab-dependencies" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Dependencies(${dependencies.length})</button>
       <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Vulnerabilities(${vulns.length})</button>
       <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Secrets(${secrets.length})</button>
@@ -496,6 +600,11 @@ export async function buildHtml(p) {
     <section id="section-native" class="hidden space-y-6">
       <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Native Binaries Analysis</h2><p class="text-xs text-neutral-500 mono">${nativeCount} binar${nativeCount === 1 ? 'y' : 'ies'}</p></div>
       ${nativeHtml || '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No native libraries or executables were found in this package, so there is nothing to analyse.</div>'}
+    </section>
+
+    <section id="section-behavior" class="hidden space-y-6">
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorCount} API reference${behaviorCount === 1 ? '' : 's'}</p></div>
+      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'Behavior inventory is built from Android DEX code; it is not collected for iOS packages.' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
     </section>
 
     <section id="section-dependencies" class="hidden space-y-6">
@@ -626,6 +735,10 @@ function switchTab(id) {
   document.querySelectorAll('main section').forEach(section => section.classList.add('hidden'));
   const section = document.getElementById('section-' + id); if (section) section.classList.remove('hidden');
   chartInstances.forEach(chart => { try { chart.resize(); } catch (_) {} });
+}
+function switchBehavior(app, id) {
+  document.querySelectorAll('[data-bh-panel][data-bh-app="' + app + '"]').forEach(el => el.classList.toggle('hidden', el.dataset.bhPanel !== id));
+  document.querySelectorAll('[data-bh-pill][data-bh-app="' + app + '"]').forEach(el => el.classList.toggle('bh-pill-active', el.dataset.bhPill === id));
 }
 function closeModal() { document.getElementById('modal-overlay').style.display = 'none'; document.body.style.overflow = 'auto'; }
 function openModal(html) { document.getElementById('modal-body').innerHTML = html; document.getElementById('modal-overlay').style.display = 'flex'; document.body.style.overflow = 'hidden'; }
