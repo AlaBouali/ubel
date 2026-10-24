@@ -10,7 +10,7 @@ import { analyzeFrameworks } from './frameworks.js';
 import { parseArscStrings } from './arsc.js';
 import { Dex, isDex } from './dex.js';
 import { isElf, parseElf } from './elf.js';
-import { hardeningRecord, evaluateRecords, groupFailures, summarizeHardening } from './elf_hardening.js';
+import { hardeningRecord, evaluateRecords, groupFailures, summarizeHardening, isVendorNative } from './elf_hardening.js';
 import { asciiStrings } from './strings.js';
 import { certsFromPkcs7, describeCert, parseApkSigningBlock, WEAK_SIG } from './der.js';
 import { scanBundledFiles } from './files.js';
@@ -18,7 +18,7 @@ import { Aggregator, mask } from './findings.js';
 import { ResilienceCollector, MIN_INDICATORS, RESILIENCE_CALLS, RUNTIME_EXEC, classifyResilienceString } from './resilience.js';
 import { BehaviorCollector, BEHAVIOR } from './behavior.js';
 import { captureFirebaseResource, collectVerifyHosts, onlineData, FIREBASE_DB_URL } from './online.js';
-import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, constantSecretArg } from './signals.js';
+import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, classifyJwt, constantSecretArg } from './signals.js';
 
 const MB = 1024 * 1024;
 
@@ -145,7 +145,7 @@ on('Ljavax/crypto/spec/IvParameterSpec;-><init>', a => {
   if (a[1] && a[1].k === 'bytes') return [{ rule: 'android.dex.static_iv', evidence: `new IvParameterSpec("${mask(a[1].v)}")`, description: 'The IV comes from a string literal, so it repeats on every encryption.' }];
 });
 on('Ljavax/crypto/spec/GCMParameterSpec;-><init>', a => {
-  if (a[2] && a[2].k === 'bytes') return [{ rule: 'android.dex.static_iv', evidence: `new GCMParameterSpec(…, "${mask(a[2].v)}")`, description: 'A constant GCM nonce breaks GCM completely when reused with a key.' }];
+  if (a[2] && a[2].k === 'bytes') return [{ rule: 'android.dex.static_gcm_nonce', evidence: `new GCMParameterSpec(…, "${mask(a[2].v)}")`, description: 'A constant GCM nonce breaks GCM completely when reused with a key.' }];
 });
 on('Ljava/security/SecureRandom;->setSeed', () => [{ rule: 'android.dex.insecure_random', evidence: 'SecureRandom.setSeed(…)', description: 'Seeding can make output predictable.', confidence: 'medium' }]);
 for (const m of ['setAllowFileAccessFromFileURLs', 'setAllowUniversalAccessFromFileURLs']) {
@@ -296,7 +296,12 @@ export function analyzeApk(zip, ctx) {
     else if (URL_HTTP.test(u) && !NAMESPACE_URL.test(u)) http.push(u);
     if (PIN.test(u)) pinning = true;
   }
-  if (http.length) findings.add('android.dex.cleartext_urls', { ...base, artifact: at('classes.dex'), description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted.`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
+  // Severity follows what the platform enforces: from targetSdk 28 cleartext is blocked unless the manifest or the network security config allows it.
+  const cleartextAllowed = application.attrs.usesCleartextTraffic === true ||
+    (application.attrs.usesCleartextTraffic === undefined && application.attrs.networkSecurityConfig === undefined && targetSdk !== null && targetSdk < 28) ||
+    findings.list.some(f => f.app === pkg && f.rule === 'android.nsc.cleartext');
+  if (http.length) findings.add('android.dex.cleartext_urls', { ...base, artifact: at('classes.dex'), severity: cleartextAllowed ? 'medium' : 'low',
+    description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted.${cleartextAllowed ? ' The app permits cleartext traffic, so nothing stops these requests.' : ' The platform blocks cleartext traffic for this app by default, so these requests fail unless a library or the code opts out; many such strings are documentation or SDK URLs.'}`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
   for (const u of firebase) onlineData(app).dbUrls.add(u);
   if (firebase.length) findings.add('android.dex.firebase_urls', { ...base, artifact: at('resources.arsc'), description: 'The app talks to Firebase Realtime Database. Misconfigured rules are a very common source of data leaks; ubel-mobile does not contact the network unless --online is given, so the rules were not tested.', evidence: [...new Set(firebase)].slice(0, 10) });
   if (!pinning && !featureModule) findings.add('android.network.no_pinning', { ...base, artifact: at('AndroidManifest.xml'), description: 'No pin-set, OkHttp CertificatePinner, TrustKit or hardcoded pin hash was found.', evidence: [], confidence: 'low', key: 'nopin' });
@@ -319,8 +324,11 @@ function manifestChecks({ manifest, application, app, base, findings, at, target
   if (A.testOnly === true) findings.add('android.manifest.test_only', { ...base, artifact: art, description: 'android:testOnly="true" marks a development build.', evidence: ['android:testOnly="true"'] });
   if (!featureModule && A.allowBackup !== false) {
     const hasCfg = A.fullBackupContent !== undefined || A.dataExtractionRules !== undefined;
-    findings.add('android.manifest.backup', { ...base, artifact: art, severity: hasCfg ? 'low' : 'medium',
-      description: `allowBackup is ${A.allowBackup === true ? 'true' : 'not set (defaults to true)'}; app data can be copied off the device with adb backup / cloud backup.${hasCfg ? ' A backup-rules file is configured: check it excludes tokens, databases and preferences that hold secrets.' : ''}`,
+    // adb backup excludes app data by default for apps targeting Android 12 (API 31)+; what remains is the encrypted cloud / device-transfer backup.
+    const adbOpen = targetSdk === null || targetSdk < 31;
+    const severity = !hasCfg && adbOpen ? 'medium' : hasCfg && !adbOpen ? 'info' : 'low';
+    findings.add('android.manifest.backup', { ...base, artifact: art, severity,
+      description: `allowBackup is ${A.allowBackup === true ? 'true' : 'not set (defaults to true)'}; app data can be copied off the device with ${adbOpen ? 'adb backup / ' : ''}cloud backup.${adbOpen ? '' : ' The app targets Android 12+, where adb backup excludes app data by default.'}${hasCfg ? ' A backup-rules file is configured: check it excludes tokens, databases and preferences that hold secrets.' : ''}`,
       evidence: [`android:allowBackup=${A.allowBackup === true ? '"true"' : '(default)'}`] });
   }
   if (A.usesCleartextTraffic === true) findings.add('android.manifest.cleartext', { ...base, artifact: art, description: 'usesCleartextTraffic="true" allows plain HTTP for the whole app.', evidence: ['android:usesCleartextTraffic="true"'] });
@@ -468,6 +476,13 @@ export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespace
     }
     return v;
   };
+  // A JWT literal is only a leaked credential if its claims say so: public client keys (role "anon") and expired tokens go to a lower rule.
+  const jwtHit = (origin, token, evidence, description) => {
+    const j = classifyJwt(token);
+    if (j.state === 'live') return agg.hit('android.dex.hardcoded_jwt', { origin, evidence, description });
+    const why = j.state === 'public' ? `its role claim is "${j.role}", a public client role` : `it expired on ${new Date(j.exp * 1000).toISOString().slice(0, 10)}`;
+    agg.hit('android.dex.hardcoded_jwt_public', { origin, evidence, description: `${description} It is probably not a live credential: ${why}.`, confidence: 'medium' });
+  };
   // Encryption libraries make the plaintext-storage heuristics weaker evidence: the same API may be backed by them.
   let encryptedPrefs = false, sqlCipher = false;
   for (const def of dex.classes()) {
@@ -491,7 +506,7 @@ export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespace
           if (c.kind === 'string' && c.value.length >= 6) {
             constLines.push(`${c.field} = "${esc(c.value)}"`); constWhere.push(pretty(type));
             if (credentialConstant(c.field, c.value)) agg.hit('android.dex.hardcoded_credential', { origin, evidence: `${pretty(type)}.${maskedConstant(c.field, c.value)}`, description: 'A constant whose name says password, secret or token holds what looks like a real value.', confidence: 'medium' });
-            if (isJwtLiteral(c.value)) agg.hit('android.dex.hardcoded_jwt', { origin, evidence: `${pretty(type)}.${c.field} = JWT "${mask(c.value)}"`, description: 'A complete JSON Web Token is embedded as a constant; it may carry a valid identity or session.' });
+            if (isJwtLiteral(c.value)) jwtHit(origin, c.value, `${pretty(type)}.${c.field} = JWT "${mask(c.value)}"`, 'A complete JSON Web Token is embedded as a constant; it may carry a valid identity or session.');
           }
           if (c.kind === 'bool' && c.value === true && c.field === 'DEBUG' && type.endsWith('/BuildConfig;')) {
             agg.hit('android.dex.build_debug', { origin, evidence: `${pretty(type)}.DEBUG = true`, description: 'A compiled BuildConfig says this is a debug build.' });
@@ -524,7 +539,7 @@ export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespace
             const v = info(idx);
             if (v.res) resil.string(v.res);
             if (v.label) signals.label(v.label);
-            if (v.jwt) agg.hit('android.dex.hardcoded_jwt', { origin, evidence: `JWT "${mask(v.jwt)}" in ${pretty(type)}#${name}`, description: 'A complete JSON Web Token is embedded in the code; it may carry a valid identity or session.' });
+            if (v.jwt) jwtHit(origin, v.jwt, `JWT "${mask(v.jwt)}" in ${pretty(type)}#${name}`, 'A complete JSON Web Token is embedded in the code; it may carry a valid identity or session.');
             if (v.schema) agg.hit('android.dex.plaintext_database', { origin, evidence: `CREATE TABLE with a "${v.schema}" column in ${pretty(type)}`, description: `A table definition has a sensitive-looking column ("${v.schema}"); SQLite files are unencrypted unless SQLCipher or similar is used.${storageNote('android.dex.plaintext_database')}`, confidence: sqlCipher ? 'low' : 'medium' });
           },
           onField: fi => { if (origin !== 'library') resil.field(dex.fieldKey(fi)); },
@@ -642,11 +657,18 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }
   records.sort((a, b) => a.library.localeCompare(b.library) || order(a.abi) - order(b.abi) || a.abi.localeCompare(b.abi));
   const evaluated = evaluateRecords(records);
   for (const g of groupFailures(evaluated)) {
-    const nb = g.entries.length;
+    // Same attribution rule as DEX code: one finding per rule; it is about the app's own libraries when any are affected, and only when every
+    // affected library is a framework / SDK binary is it reported one level lower.
+    const own = g.records.map((r, i) => (isVendorNative(r.library) ? -1 : i)).filter(i => i >= 0);
+    const vendorOnly = own.length === 0;
+    const idx = vendorOnly ? g.records.map((_, i) => i) : own;
+    const entries = idx.map(i => g.entries[i]), libs = idx.map(i => g.libraries[i]);
+    const abis = [...new Set(idx.map(i => g.records[i].abi))].sort();
+    const nb = entries.length, vendorExtra = g.records.length - nb;
     findings.add(g.rule, {
-      ...base, artifact: at(`lib/…/${g.libraries[0]}`), key: g.rule,
-      description: `${g.text} (${nb} binar${nb === 1 ? 'y' : 'ies'} in ${g.abis.length} ABI${g.abis.length === 1 ? '' : 's'}: ${g.abis.join(', ')}).`,
-      evidence: g.entries.slice(0, 30), evidence_total: nb,
+      ...base, artifact: at(`lib/…/${libs[0]}`), key: g.rule, origin: vendorOnly ? 'library' : 'app',
+      description: `${g.text} (${nb} binar${nb === 1 ? 'y' : 'ies'} in ${abis.length} ABI${abis.length === 1 ? '' : 's'}: ${abis.join(', ')}).${vendorExtra > 0 ? ` ${vendorExtra} further binar${vendorExtra === 1 ? 'y is' : 'ies are'} framework or third-party SDK libraries that the app build does not control.` : ''}${vendorOnly ? ' All affected binaries are framework or third-party SDK libraries (severity lowered one level).' : ''}`,
+      evidence: entries.slice(0, 30), evidence_total: nb,
       ...(g.confidence ? { confidence: g.confidence } : {}),
     });
   }
@@ -673,16 +695,17 @@ function signing(zip, { findings, base, at, app, minSdk, bundle = false }) {
   } catch { /* no signing block */ }
   app.signing = { schemes: [...schemes], certificates: [...certs.values()].map(c => ({ subject: c.subject, issuer: c.issuer, valid_to: c.valid_to, key: `${c.key_type}${c.key_bits ? ` ${c.key_bits}` : ''}`, signature_algorithm: c.signature_algorithm, sha256: c.sha256 })) };
   const art = at('META-INF/');
-  if (!schemes.size) { if (!bundle) findings.add('android.signing.unsigned', { ...base, artifact: at('AndroidManifest.xml'), description: 'No v1, v2 or v3 signature was found; Android will refuse to install an unsigned package.', evidence: [] , key: 'unsigned' }); return; }
+  if (!schemes.size) { if (!bundle) findings.add('android.signing.unsigned', { ...base, artifact: at('AndroidManifest.xml'), description: 'No v1, v2 or v3 signature was found; Android will refuse to install an unsigned package. Expected for a CI artifact that is signed in a later step; a problem only if this is the file that is distributed.', evidence: [] , key: 'unsigned' }); return; }
   for (const c of certs.values()) {
     if (/CN=Android Debug\b/i.test(c.subject)) findings.add('android.signing.debug_cert', { ...base, artifact: art, key: c.sha256, description: 'The certificate is the well-known Android debug certificate; its private key is public knowledge (or generated on every developer machine), so anyone can sign an update that Android treats as coming from this developer.', evidence: [c.subject, `sha256 ${c.sha256}`] });
-    if (WEAK_SIG.test(c.signature_algorithm)) findings.add('android.signing.weak_algorithm', { ...base, artifact: art, key: c.sha256, description: `The certificate is signed with ${c.signature_algorithm}.`, evidence: [c.subject, c.signature_algorithm] });
+    if (WEAK_SIG.test(c.signature_algorithm)) findings.add('android.signing.weak_algorithm', { ...base, artifact: art, key: c.sha256, description: `The certificate itself is signed with ${c.signature_algorithm}. Android pins an app to the signing key, not to the certificate's own signature, so this is hygiene rather than an exploitable weakness; the digest algorithm of the APK signature is what protects the package.`, evidence: [c.subject, c.signature_algorithm] });
     if ((c.key_type === 'rsa' || c.key_type === 'dsa') && typeof c.key_bits === 'number' && c.key_bits < 2048) findings.add('android.signing.weak_key', { ...base, artifact: art, key: c.sha256, description: `The signing key is ${c.key_type.toUpperCase()}-${c.key_bits}.`, evidence: [c.subject, `${c.key_type}-${c.key_bits}`] });
-    if (c.expired) findings.add('android.signing.expired', { ...base, artifact: art, key: c.sha256, description: `The certificate expired on ${c.valid_to}.`, evidence: [c.subject, c.valid_to] });
+    if (c.expired) findings.add('android.signing.expired', { ...base, artifact: art, key: c.sha256, description: `The certificate expired on ${c.valid_to}. Android does not enforce certificate validity dates when installing or updating an app, so this does not stop the app working; Google Play and some enterprise stores do require a long validity.`, evidence: [c.subject, c.valid_to] });
   }
   const modern = ['v2', 'v3', 'v3.1'].some(s => schemes.has(s));
   if (bundle) return;                                  // an .aab is jar-signed with the upload key; the APK scheme rules below do not apply
-  if (schemes.has('v1') && !modern) findings.add('android.signing.v1_only', { ...base, artifact: art, description: 'Only the JAR (v1) signature is present; it does not cover the whole file and is vulnerable to Janus-style tampering on Android 5.0–8.0.', evidence: ['v1'], key: 'v1only' });
+  if (schemes.has('v1') && !modern) findings.add('android.signing.v1_only', { ...base, artifact: art, severity: minSdk !== null && minSdk >= 27 ? 'low' : undefined,
+    description: `Only the JAR (v1) signature is present; it does not cover the whole file and is vulnerable to Janus-style tampering on Android 5.0–8.0.${minSdk !== null && minSdk >= 27 ? ` minSdkVersion is ${minSdk}, so the affected releases are not supported and only the missing v2+ integrity protection remains.` : ''}`, evidence: ['v1'], key: 'v1only' });
   else if (schemes.has('v1') && minSdk !== null && minSdk < 24) findings.add('android.signing.janus', { ...base, artifact: art, description: `minSdkVersion ${minSdk} keeps Android 5.0–8.0 devices in scope, where the v1 signature is what gets checked and can be bypassed (Janus).`, evidence: [`minSdkVersion=${minSdk}`], key: 'janus' });
 }
 

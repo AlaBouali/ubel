@@ -132,6 +132,24 @@ export function maskedConstant(name, value) { return `${name} = "${mask(value)}"
 export const JWT_LITERAL = /^eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$/;
 export const isJwtLiteral = s => typeof s === 'string' && s.length < 4096 && s.charCodeAt(0) === 101 && JWT_LITERAL.test(s);
 
+/**
+ * Reads the claims of a JWT literal (no signature check) and says whether it is worth a high-severity "leaked token" finding.
+ *   'public'  — the role claim is a public client role (Supabase "anon", "anonymous", "public"): such keys are shipped in apps on purpose
+ *   'expired' — the exp claim is in the past: the token cannot be replayed
+ *   'live'    — anything else, including unreadable claims, "service_role" and tokens without exp: treated as a real credential
+ * @returns {{state:'public'|'expired'|'live', role:string|null, exp:number|null}}
+ */
+export function classifyJwt(token, now = Date.now()) {
+  let claims = null;
+  try { claims = JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8')); } catch { /* unreadable: stays live */ }
+  if (!claims || typeof claims !== 'object') return { state: 'live', role: null, exp: null };
+  const role = typeof claims.role === 'string' ? claims.role : null;
+  const exp = typeof claims.exp === 'number' ? claims.exp : null;
+  if (role && /^(anon|anonymous|public)$/i.test(role)) return { state: 'public', role, exp };
+  if (exp !== null && exp * 1000 < now) return { state: 'expired', role, exp };
+  return { state: 'live', role, exp };
+}
+
 /** Constant string/bytes passed as a signing secret. @param {any[]} args  @param {number} from first argument to consider */
 export function constantSecretArg(args, from = 0) {
   for (const a of (args || []).slice(from)) {

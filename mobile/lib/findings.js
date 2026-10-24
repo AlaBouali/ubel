@@ -22,13 +22,25 @@ export class Findings {
    * @param {string} [f.title]       overrides the catalog title (secrets)
    * @param {string} [f.origin]      'app' | 'library' | 'unknown' — only 'library' is reported one level lower; 'unknown' (renamed classes
    *                                  outside the app namespace) keeps the full severity so obfuscation cannot hide a finding
-   * @param {string} [f.confidence]  'high' | 'medium' | 'low'
+   * @param {string} [f.confidence]  'high' | 'medium' | 'low' — 'low' lowers the severity one level (floor: low), except for origin 'unknown'
+   * @param {boolean} [f.confidenceCap] set to false to keep the severity of a low-confidence finding
    * @param {string} [f.app]         package / bundle id the finding belongs to
    */
   add(rule, f) {
     const meta = ruleMeta(rule);
     let severity = f.severity || meta.severity;
+    let description = f.description;
     if (f.origin === 'library') severity = lowerSeverity(severity);
+    // Severity must not outrun the evidence: a low-confidence heuristic (a name match, an import that libraries also reference, a
+    // string that merely exists in the binary) is reported one level lower, never below 'low'. Renamed ('unknown') code is exempt so
+    // obfuscation cannot be used to push a finding down the list.
+    if (f.confidence === 'low' && f.origin !== 'unknown' && f.confidenceCap !== false && SEVERITY_RANK[severity] < SEVERITY_RANK.low) {
+      const lowered = lowerSeverity(severity);
+      if (lowered !== severity) {
+        severity = lowered;
+        description = `${description || ''} Severity is one level lower than the rule's default because this is a low-confidence heuristic.`.trim();
+      }
+    }
     const evidence = (f.evidence || []).slice(0, 40);
     const fingerprint = crypto.createHash('sha256')
       .update([rule, f.app || '', f.artifact || '', f.key ?? evidence.join('|')].join('\0'))
@@ -39,7 +51,7 @@ export class Findings {
       rule,
       severity,
       title: f.title || meta.title,
-      description: f.description,
+      description,
       remediation: f.remediation || meta.remediation,
       masvs: meta.masvs,
       cwe: meta.cwe ? `CWE-${meta.cwe}` : null,

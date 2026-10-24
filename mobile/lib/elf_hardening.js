@@ -15,6 +15,15 @@
 //            finding needs a reason to expect one: it imports unbounded copy functions, or another ABI of the same library has one.
 //   FORTIFY  imports of the checked libc variants (__memcpy_chk …) next to the plain ones. An indicator, not proof (see elf.js).
 
+/**
+ * Native libraries that come from a framework, runtime or well-known third-party SDK rather than from the app's own build (Flutter, React
+ * Native, Hermes, Unity, Mono, libc++, image / media codecs, bundled OpenSSL / SQLCipher …). The app developer cannot fix their build flags,
+ * so a hardening gap found only in these is reported one level lower, exactly like DEX findings inside third-party library code.
+ * The app's own library (libapp.so, libmain.so of a plain NDK app …) is deliberately not listed.
+ */
+export const VENDOR_NATIVE = /^(libflutter|libc\+\+_shared|libhermes|libjsc|libjscexecutor|libreactnativejni|libreact_|libfabricjni|libfbjni|libfolly|libglog|libyoga|libv8|libunity|libil2cpp|libmono|libxamarin|libassembly-store|libSystem\.|libimagepipeline|libgifimage|libwebp|libbitmaps|libsqlcipher|libsqlite|libcrypto|libssl|libopencv|libavcodec|libavformat|libavutil|libswscale|libswresample|libffmpeg|libjpeg|libpng|libtool-checker|libnative-imagetranscoder|libnative-filters|libmapbox|libmbgl|libcrashlytics|libsentry|libbugsnag|libtensorflow|libtflite|libonnx|libmlkit|libdatastore)/i;
+export const isVendorNative = name => VENDOR_NATIVE.test(String(name));
+
 /** Unbounded or easily-misused copy functions: a library that imports one and has no canary is the case worth flagging. */
 export const UNSAFE_COPY = new Set(['strcpy', 'strncpy', 'stpcpy', 'strcat', 'strncat', 'sprintf', 'vsprintf', 'gets', 'memcpy', 'memmove']);
 
@@ -101,7 +110,7 @@ export function evaluateRecords(records) {
 
 /**
  * Groups the failures by check for finding emission.
- * @returns {Array<{check:string, rule:string, text:string, confidence:string|undefined, entries:string[], libraries:string[], abis:string[]}>} only checks that failed, in CHECKS order
+ * @returns {Array<{check:string, rule:string, text:string, confidence:string|undefined, entries:string[], libraries:string[], records:object[], abis:string[]}>} only checks that failed, in CHECKS order
  */
 export function groupFailures(evaluated) {
   const out = [];
@@ -112,6 +121,7 @@ export function groupFailures(evaluated) {
       check, rule, text: TEXT[check], confidence: CONFIDENCE[check],
       entries: hits.map(e => `${e.record.abi}/${e.record.library}${typeof e.fails[check] === 'string' ? ` (${e.fails[check]})` : ''}`),
       libraries: hits.map(e => e.record.library),
+      records: hits.map(e => e.record),
       abis: [...new Set(hits.map(e => e.record.abi))].sort(),
     });
   }

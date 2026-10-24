@@ -32,10 +32,19 @@ const base = p => p.slice(p.lastIndexOf('/') + 1);
 export function jsLiterals(text, { max = 400000 } = {}) {
   const out = [], seen = new Set();
   const add = s => { if (!seen.has(s) && out.length < max) { seen.add(s); out.push(s); } };
-  const pair = /([A-Za-z_$][\w$]{1,40})\s*[:=]\s*(?:"((?:[^"\\\n]|\\.){6,2000})"|'((?:[^'\\\n]|\\.){6,2000})')/g;
-  for (let m; (m = pair.exec(text)) && out.length < max;) add(`${m[1]} = "${esc(m[2] ?? m[3])}"`);
-  const lit = /"((?:[^"\\\n]|\\.){8,2000})"|'((?:[^'\\\n]|\\.){8,2000})'/g;
-  for (let m; (m = lit.exec(text)) && out.length < max;) add(m[1] ?? m[2]);
+  // One tokenizer for every string literal, short ones included: skipping literals under 8 characters used to shift the quote pairing, so
+  // everything after the first short literal on a (minified, single-line) bundle was read between the wrong quotes.
+  const pair = /([A-Za-z_$][\w$]{0,40})["']?\s*[:=]\s*$/;
+  const lit = /"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'/g;
+  for (let m; (m = lit.exec(text)) && out.length < max;) {
+    const v = m[1] ?? m[2];
+    if (v.length > 2000) continue;
+    if (v.length >= 6) {
+      const k = pair.exec(text.slice(Math.max(0, m.index - 60), m.index));
+      if (k) add(`${k[1]} = "${esc(v)}"`);
+    }
+    if (v.length >= 8) add(v);
+  }
   return out;
 }
 
@@ -254,7 +263,7 @@ export function analyzeFrameworks(zip, ctx) {
     const hits = TLS_BYPASS_STRONG.filter(n => d.identifiers.has(n));
     const weak = TLS_BYPASS_WEAK.filter(n => d.identifiers.has(n));
     if (hits.length) add('dotnet.tls_validation_disabled', { artifact: path, evidence: hits, confidence: 'medium', description: `${name} references HttpClientHandler.DangerousAcceptAnyServerCertificateValidator, the stock "accept every certificate" validator.`, key: `${path}:strong` });
-    else if (weak.length) add('dotnet.tls_validation_disabled', { artifact: path, evidence: weak, severity: 'medium', confidence: 'low', description: `${name} sets a custom server-certificate validation callback. That is how pinning is implemented in .NET and also how checks are disabled (callback returning true); the compiled code was not decompiled, so review the callback.`, key: `${path}:weak` });
+    else if (weak.length) add('dotnet.tls_validation_disabled', { artifact: path, evidence: weak, confidence: 'low', description: `${name} sets a custom server-certificate validation callback. That is how pinning is implemented in .NET and also how checks are disabled (callback returning true); the compiled code was not decompiled, so review the callback.`, key: `${path}:weak` });
     if (d.pdbPath) {
       if (acc && /[\\/]Debug[\\/]/i.test(d.pdbPath)) acc.debugPaths.push(`${d.pdbPath} ← ${path}`);
       if (acc && /^([A-Za-z]:\\|\/(home|Users)\/)/.test(d.pdbPath)) acc.leakPaths.push(`${d.pdbPath} ← ${path}`);

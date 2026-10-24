@@ -18,14 +18,16 @@ const NAMESPACE_URL = /(w3\.org|apache\.org|xmlpull\.org|schemas\.|sun\.com|xml\
 const SECRET_KEY_NAME = /^(password|passwd|pwd|pin|secret|api_?key|access_?token|auth_?token|refresh_?token|session_?(id|token)|client_?secret|private_?key)$/i;
 const PIN_STRINGS = ['TrustKit', 'AFSecurityPolicy', 'pinnedCertificates', 'PinnedCertificatesTrustEvaluator', 'ServerTrustManager', 'PublicKeyPinning', 'SSLPinning'];
 const AUTH_CHALLENGE = ['URLSession:didReceiveChallenge:completionHandler:', 'connection:willSendRequestForAuthenticationChallenge:', 'URLSession:task:didReceiveChallenge:completionHandler:'];
-const TLS_OFF_STRINGS = ['allowsAnyHTTPSCertificateForHost:', 'setAllowsAnyHTTPSCertificate:forHost:', 'setAllowInvalidCertificates:', 'DisabledTrustEvaluator'];
+// Not listed on purpose: 'setAllowInvalidCertificates:' (the property setter AFNetworking's AFSecurityPolicy defines, so it is in the method-name table of
+// every app that links AFNetworking whatever value is set) and 'DisabledTrustEvaluator' (a type Alamofire defines for everyone).
+const TLS_OFF_STRINGS = ['allowsAnyHTTPSCertificateForHost:', 'setAllowsAnyHTTPSCertificate:forHost:'];
 
 const SYMBOL_RULES = [
   ['ios.code.weak_hash', ['_CC_MD5', '_CC_MD5_Init', '_CC_MD2', '_CC_MD4', '_CC_SHA1', '_CC_SHA1_Init', '_MD5_Init', '_SHA1_Init'], 'MD5/SHA-1 primitives are imported.'],
   ['ios.code.weak_cipher', ['_DES_ecb_encrypt', '_DES_cbc_encrypt', '_DES_ncbc_encrypt', '_DES_ede3_cbc_encrypt', '_RC4', '_RC4_set_key', '_BF_set_key', '_BF_cbc_encrypt', '_EVP_des_cbc', '_EVP_des_ecb', '_EVP_des_ede3_cbc', '_EVP_rc4', '_EVP_rc2_cbc'], 'Broken ciphers are linked in.'],
   ['ios.code.ecb', ['_EVP_aes_128_ecb', '_EVP_aes_192_ecb', '_EVP_aes_256_ecb', '_AES_ecb_encrypt'], 'AES-ECB primitives are linked in.'],
   ['ios.code.insecure_random', ['_rand', '_srand', '_random', '_srandom', '_drand48'], 'rand()/random() are not cryptographically secure.'],
-  ['ios.code.keychain_always', ['_kSecAttrAccessibleAlways', '_kSecAttrAccessibleAlwaysThisDeviceOnly'], 'Keychain items using this attribute can be read while the device is locked or freshly booted.'],
+  ['ios.code.keychain_always', ['_kSecAttrAccessibleAlways', '_kSecAttrAccessibleAlwaysThisDeviceOnly'], 'Keychain items using this attribute can be read while the device is locked or freshly booted. Keychain wrapper libraries reference every accessibility constant, so the import alone does not prove the app selects it.'],
   ['ios.code.file_protection_none', ['_NSFileProtectionNone'], 'Files written with NSFileProtectionNone are never encrypted with the device passcode key.'],
   ['ios.code.uiwebview', ['_OBJC_CLASS_$_UIWebView'], 'UIWebView is deprecated and has weaker isolation than WKWebView.'],
   ['ios.code.tls_validation_disabled', ['_kCFStreamSSLValidatesCertificateChain'], 'kCFStreamSSLValidatesCertificateChain is referenced; setting it to false turns certificate validation off.'],
@@ -124,7 +126,10 @@ export function analyzeIpa(zip, ctx) {
 
   // cleartext URLs / pinning
   const http = [...state.urls].filter(u => URL_HTTP.test(u) && !NAMESPACE_URL.test(u));
-  if (http.length) findings.add('ios.code.cleartext_urls', { ...base, artifact: `${dir}${app.executable || ''}`, description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted unless ATS blocks it.`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
+  // ATS blocks cleartext unless the Info.plist opts out for everything or for named domains.
+  const atsOpen = findings.list.some(f => f.app === bundleId && (f.rule === 'ios.plist.ats_arbitrary' || f.rule === 'ios.plist.ats_exceptions'));
+  if (http.length) findings.add('ios.code.cleartext_urls', { ...base, artifact: `${dir}${app.executable || ''}`, severity: atsOpen ? 'medium' : 'low',
+    description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted${atsOpen ? ', and the Info.plist relaxes App Transport Security, so nothing blocks it.' : ' unless ATS blocks it (it is active for this app, so these requests fail unless an exception is added at run time); many such strings are documentation or SDK URLs.'}`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
   const certFiles = zip.entries.some(e => /\.(cer|crt|der)$/i.test(e.name) && e.name.startsWith(dir));
   if (!state.pinned && !certFiles) findings.add('ios.code.no_pinning', { ...base, artifact: `${dir}${app.executable || ''}`, description: 'No pinning library, pinned-certificate file or SecTrust evaluation with a pinned key was found.', evidence: [], confidence: 'low', key: 'nopin' });
 

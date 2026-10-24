@@ -161,39 +161,40 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | Rule | Default severity | MASVS | What |
 |---|---|---|---|
 | `android.manifest.debuggable` | high | MASVS-RESILIENCE | App is debuggable (android:debuggable="true") |
-| `android.manifest.test_only` | medium | MASVS-CODE | App is marked testOnly |
-| `android.manifest.backup` | medium | MASVS-STORAGE-2 | App data can be extracted by backup (android:allowBackup) |
+| `android.manifest.test_only` | low | MASVS-CODE | App is marked testOnly |
+| `android.manifest.backup` | low (medium without backup rules while `targetSdk` < 31; info with rules on `targetSdk` ≥ 31) | MASVS-STORAGE-2 | App data can be extracted by backup (android:allowBackup) |
 | `android.manifest.cleartext` | medium | MASVS-NETWORK-1 | Cleartext (HTTP) traffic permitted app-wide |
 | `android.manifest.cleartext_default` | low | MASVS-NETWORK-1 | Cleartext traffic permitted by default (targetSdk < 28) |
-| `android.manifest.min_sdk` | low | MASVS-CODE-1 | Supports old Android versions (minSdkVersion) |
-| `android.manifest.target_sdk` | low | MASVS-CODE-1 | Targets an old Android API level (targetSdkVersion) |
+| `android.manifest.min_sdk` | low (medium when < 21) | MASVS-CODE-1 | Supports old Android versions (minSdkVersion) |
+| `android.manifest.target_sdk` | low (medium when < 29) | MASVS-CODE-1 | Targets an old Android API level (targetSdkVersion) |
 | `android.manifest.shared_user_id` | medium | MASVS-PLATFORM-1 | sharedUserId shares the app sandbox with other apps |
 | `android.manifest.legacy_storage` | low | MASVS-STORAGE-2 | Opts out of scoped storage (requestLegacyExternalStorage) |
 | `android.manifest.exported_provider` | high | MASVS-PLATFORM-1 | Content provider reachable by other apps without a permission |
 | `android.manifest.exported_service` | medium | MASVS-PLATFORM-1 | Service reachable by other apps without a permission |
-| `android.manifest.exported_receiver` | medium | MASVS-PLATFORM-1 | Broadcast receiver reachable by other apps without a permission |
+| `android.manifest.exported_receiver` | medium (low when it only listens to system broadcasts) | MASVS-PLATFORM-1 | Broadcast receiver reachable by other apps without a permission |
 | `android.manifest.exported_activity` | low | MASVS-PLATFORM-1 | Exported activities (other than the launcher) |
 | `android.manifest.weak_permission` | medium | MASVS-PLATFORM-1 | Custom permission has a weak protectionLevel |
-| `android.manifest.risky_permissions` | medium | MASVS-PRIVACY-1 | High-impact permissions requested |
+| `android.manifest.risky_permissions` | low | MASVS-PRIVACY-1 | High-impact permissions requested |
 | `android.manifest.permissions` | info | MASVS-PRIVACY-1 | Dangerous permissions requested |
 | `android.manifest.deeplinks` | info (low when an http(s) link has no `autoVerify`) | MASVS-PLATFORM-1 | Deep links / custom URL schemes |
-| `android.nsc.cleartext` | medium | MASVS-NETWORK-1 | Network security config permits cleartext traffic |
+| `android.nsc.cleartext` | medium (low when only named domains are exempt) | MASVS-NETWORK-1 | Network security config permits cleartext traffic |
 | `android.nsc.user_ca` | medium | MASVS-NETWORK-1 | Network security config trusts user-installed CAs |
 | `android.nsc.pin_expired` | low | MASVS-NETWORK-2 | Certificate pin-set has expired |
 | `android.network.no_pinning` | info | MASVS-NETWORK-2 | No certificate pinning detected |
 | `android.cordova.access_origin` | medium | MASVS-PLATFORM-2 | Cordova/WebView config allows any origin |
-| `android.signing.unsigned` | high | MASVS-RESILIENCE | Package carries no signature |
+| `android.signing.unsigned` | medium | MASVS-RESILIENCE | Package carries no signature |
 | `android.signing.debug_cert` | high | MASVS-RESILIENCE | Signed with a debug certificate |
-| `android.signing.weak_algorithm` | medium | MASVS-RESILIENCE | Signing certificate uses a weak signature algorithm |
+| `android.signing.weak_algorithm` | low | MASVS-RESILIENCE | Signing certificate uses a weak signature algorithm |
 | `android.signing.weak_key` | medium | MASVS-RESILIENCE | Signing key is too short |
-| `android.signing.expired` | medium | MASVS-RESILIENCE | Signing certificate has expired |
-| `android.signing.v1_only` | medium | MASVS-RESILIENCE | Only the legacy v1 (JAR) signature is present |
+| `android.signing.expired` | low | MASVS-RESILIENCE | Signing certificate has expired |
+| `android.signing.v1_only` | medium (low when `minSdk` ≥ 27) | MASVS-RESILIENCE | Only the legacy v1 (JAR) signature is present |
 | `android.signing.janus` | low | MASVS-RESILIENCE | v1 signature on an app that supports Android 5.0–8.0 (Janus, CVE-2017-13156) |
 | `android.dex.weak_cipher` | high | MASVS-CRYPTO-1 | Broken or weak cipher in use |
 | `android.dex.ecb_mode` | medium | MASVS-CRYPTO-1 | ECB mode (or default AES mode) in use |
 | `android.dex.weak_hash` | low | MASVS-CRYPTO-1 | MD5 / SHA-1 in use |
 | `android.dex.hardcoded_key` | high | MASVS-CRYPTO-2 | Cryptographic key built from a constant in code |
 | `android.dex.static_iv` | medium | MASVS-CRYPTO-1 | Constant IV / nonce in code |
+| `android.dex.static_gcm_nonce` | high | MASVS-CRYPTO-1 | Constant GCM nonce in code (nonce reuse with one key breaks GCM) |
 | `android.dex.insecure_random` | low | MASVS-CRYPTO-1 | SecureRandom is seeded explicitly |
 | `android.dex.weak_tls_protocol` | medium | MASVS-NETWORK-1 | Outdated SSL/TLS protocol requested |
 | `android.dex.trust_all_certs` | high | MASVS-NETWORK-1 | TrustManager accepts every certificate |
@@ -203,7 +204,7 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.dex.webview_js_interface` | medium | MASVS-PLATFORM-2 | WebView exposes a Java object to JavaScript |
 | `android.dex.webview_file_access` | high | MASVS-PLATFORM-2 | WebView allows file:// content to read other files / origins |
 | `android.dex.webview_mixed_content` | medium | MASVS-NETWORK-1 | WebView allows mixed (HTTP in HTTPS) content |
-| `android.dex.webview_debugging` | medium | MASVS-PLATFORM-2 | WebView remote debugging enabled |
+| `android.dex.webview_debugging` | low | MASVS-PLATFORM-2 | WebView remote debugging enabled |
 | `android.dex.world_accessible_storage` | high | MASVS-STORAGE-2 | World-readable / world-writable files or preferences |
 | `android.dex.logging_sensitive` | medium | MASVS-STORAGE-2 | Sensitive-looking data may be written to the system log (`Log.*`) |
 | `android.dex.plaintext_prefs` | medium | MASVS-STORAGE-1 | Sensitive-looking values stored in plaintext `SharedPreferences` |
@@ -211,13 +212,14 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.dex.hardcoded_credential` | high | MASVS-CRYPTO-2 | Constant named like a password / secret / token holds a real-looking value |
 | `android.dex.hardcoded_jwt_secret` | high | MASVS-CRYPTO-2 | JWT / HMAC signing secret hardcoded (jjwt, java-jwt, Nimbus) |
 | `android.dex.hardcoded_jwt` | high | MASVS-AUTH-1 | Complete JWT embedded in code |
+| `android.dex.hardcoded_jwt_public` | low | MASVS-AUTH-1 | JWT literal that is expired or has a public client role (e.g. `role: "anon"`) |
 | `android.dex.external_storage` | medium | MASVS-STORAGE-2 | Writes to shared external storage |
 | `android.dex.dynamic_code_loading` | medium | MASVS-CODE-4 | Loads code at runtime (`DexClassLoader`, `InMemoryDexClassLoader`; `PathClassLoader` only for constant paths on external storage or URLs) |
 | `android.dex.runtime_exec` | low | MASVS-CODE-4 | Executes shell commands (Runtime.exec) |
 | `android.dex.device_identifiers` | low | MASVS-PRIVACY-1 | Reads hardware identifiers (IMEI, subscriber id, …) |
 | `android.dex.build_debug` | medium | MASVS-CODE | BuildConfig.DEBUG is true in this build |
 | `android.dex.debug_libraries` | low | MASVS-CODE | Debug / inspection libraries present |
-| `android.dex.cleartext_urls` | medium | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
+| `android.dex.cleartext_urls` | low (medium when the app permits cleartext traffic) | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
 | `android.dex.firebase_urls` | info | MASVS-STORAGE-1 | Firebase Realtime Database URLs |
 | `android.dex.anti_analysis` | info | MASVS-RESILIENCE | Anti-debug / anti-emulator / root-detection logic present (cluster of ≥3 distinct indicators in one class) |
 | `android.online.assetlinks_missing` | low | MASVS-PLATFORM-1 | App Link host serves no usable `assetlinks.json` (`--online`) |
@@ -234,25 +236,26 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.native.no_canary` | low (medium confidence) | MASVS-CODE-4 | Native library has no stack canary |
 | `android.native.no_fortify` | low (low confidence) | MASVS-CODE-4 | Native library shows no FORTIFY_SOURCE indicators |
 | `android.native.rpath` | low | MASVS-CODE-4 | Native library sets RPATH/RUNPATH |
-| `bundle.private_key` | high | MASVS-CRYPTO-2 | Keystore / private key file bundled in the app |
+| `bundle.private_key` | high when a private or secret key is inside; info for a certificates-only truststore; medium (low confidence) when the content cannot be read | MASVS-CRYPTO-2 | Keystore / private key file bundled in the app |
 | `bundle.sensitive_file` | medium | MASVS-STORAGE-1 | Sensitive-looking file bundled in the app |
+| `bundle.os_metadata` | info | MASVS-STORAGE-1 | `.DS_Store`, `Thumbs.db`, `__MACOSX` bundled in the app |
 | `bundle.backup_file` | low | MASVS-STORAGE-1 | Backup / temporary files bundled in the app |
 | `bundle.database` | low | MASVS-STORAGE-1 | Pre-populated database bundled in the app |
 | `bundle.embedded_code` | medium | MASVS-CODE-4 | Executable code bundled as data (apk/dex/jar) |
 | `bundle.debug_build` | high | MASVS-RESILIENCE | Debug (JIT/kernel) build artifacts shipped |
 | `bundle.source_maps` | low | MASVS-RESILIENCE | Source maps / debug symbols shipped |
-| `ios.plist.ats_arbitrary` | high | MASVS-NETWORK-1 | App Transport Security disabled (NSAllowsArbitraryLoads) |
+| `ios.plist.ats_arbitrary` | medium | MASVS-NETWORK-1 | App Transport Security disabled (NSAllowsArbitraryLoads) |
 | `ios.plist.ats_web` | medium | MASVS-NETWORK-1 | ATS disabled for web content (NSAllowsArbitraryLoadsInWebContent) |
-| `ios.plist.ats_exceptions` | medium | MASVS-NETWORK-1 | ATS exception domains allow insecure HTTP |
+| `ios.plist.ats_exceptions` | low | MASVS-NETWORK-1 | ATS exception domains allow insecure HTTP |
 | `ios.plist.ats_tls` | medium | MASVS-NETWORK-1 | ATS exception allows an outdated TLS version |
 | `ios.plist.file_sharing` | low | MASVS-STORAGE-2 | File sharing enabled (UIFileSharingEnabled) |
 | `ios.plist.url_schemes` | info | MASVS-PLATFORM-1 | Custom URL schemes registered |
-| `ios.plist.min_os` | low | MASVS-CODE-1 | Supports old iOS versions (MinimumOSVersion) |
-| `ios.plist.simulator` | medium | MASVS-CODE | Built for the iOS Simulator |
+| `ios.plist.min_os` | low (medium when < 12) | MASVS-CODE-1 | Supports old iOS versions (MinimumOSVersion) |
+| `ios.plist.simulator` | low | MASVS-CODE | Built for the iOS Simulator |
 | `ios.profile.get_task_allow` | high | MASVS-RESILIENCE | Debugging entitlement set (get-task-allow = true) |
-| `ios.profile.all_devices` | medium | MASVS-CODE | Enterprise (in-house) distribution profile |
+| `ios.profile.all_devices` | low | MASVS-CODE | Enterprise (in-house) distribution profile |
 | `ios.profile.dev_devices` | low | MASVS-CODE | Development/ad-hoc profile bound to specific devices |
-| `ios.profile.expired` | medium | MASVS-CODE | Provisioning profile has expired |
+| `ios.profile.expired` | low | MASVS-CODE | Provisioning profile has expired |
 | `ios.profile.push_dev` | low | MASVS-CODE | Push environment is "development" |
 | `ios.macho.no_pie` | high | MASVS-CODE-4 | Executable is not position independent (no PIE) |
 | `ios.macho.stack_exec` | high | MASVS-CODE-4 | Executable allows an executable stack |
@@ -264,7 +267,7 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `ios.code.weak_cipher` | high | MASVS-CRYPTO-1 | Broken or weak cipher primitives imported (DES/RC4/RC2/Blowfish) |
 | `ios.code.ecb` | medium | MASVS-CRYPTO-1 | ECB-mode primitives imported |
 | `ios.code.insecure_random` | low | MASVS-CRYPTO-1 | rand()/random() used |
-| `ios.code.keychain_always` | high | MASVS-STORAGE-1 | Keychain items readable while the device is locked (kSecAttrAccessibleAlways) |
+| `ios.code.keychain_always` | medium | MASVS-STORAGE-1 | Keychain items readable while the device is locked (kSecAttrAccessibleAlways) |
 | `ios.code.file_protection_none` | medium | MASVS-STORAGE-1 | Files written without data protection (NSFileProtectionNone) |
 | `ios.code.uiwebview` | medium | MASVS-PLATFORM-2 | Deprecated UIWebView in use |
 | `ios.code.wkwebview_file_access` | medium | MASVS-PLATFORM-2 | WKWebView file-URL access preferences referenced |
@@ -274,11 +277,23 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `ios.code.nslog` | info | MASVS-STORAGE-2 | NSLog used (logs readable on the device/console) |
 | `ios.code.userdefaults_secrets` | low | MASVS-STORAGE-1 | Secret-looking keys alongside NSUserDefaults |
 | `ios.code.no_pinning` | info | MASVS-NETWORK-2 | No certificate pinning detected |
-| `ios.code.cleartext_urls` | medium | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
+| `ios.code.cleartext_urls` | low (medium when ATS is relaxed in the Info.plist) | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
 
 Hardcoded secrets are reported as `secret.<rule id>` (for example `secret.github-pat`) with the severity of the shared secrets rule. Severity is lowered one level when every occurrence is inside third-party library code.
 
+Mobile-specific calibration of the shared secrets rules: `secret.google-api-key` is **medium with low confidence** (a Google client key is shipped in every Firebase / Maps app by design; it only matters if it is unrestricted or its project enables Gemini or another billable API, which a static scan cannot see), and the generic rules (`generic-fallback`, `generic-key-value-credential`) have low confidence.
+
+### How severity is assigned
+
+- The catalog severity is a default. A few rules override it from what the scan can see (`minSdk`/`targetSdk`, backup rules, system-only receivers, cleartext permitted or blocked by the platform, a JWT's claims, what a keystore actually contains); the table above lists the range.
+- **Confidence lowers severity.** A finding with `confidence: low` is reported one level lower than its catalog severity (never below `low`; `info` stays `info`). Findings in renamed (`unknown`) classes are exempt, so obfuscation cannot push a finding down.
+- **Origin lowers severity.** Findings only in third-party library code are reported one level lower. For native libraries, "third-party" means framework / SDK binaries (Flutter, React Native, Hermes, Unity, Mono, libc++, bundled OpenSSL / SQLCipher / codecs …); a hardening gap in the app's own `.so` keeps the full severity.
+- A JWT literal with a public client role (`anon`) or an expired `exp` is reported as `android.dex.hardcoded_jwt_public` (low); any other JWT, including `service_role`, stays `android.dex.hardcoded_jwt` (high).
+- The overall rating counts findings after this adjustment: three or more high findings, or any critical one, gives "High risk".
+
 ## Tests
+
+`node --test tests/mobile-severity.test.js` — severity calibration (keystore content, JWT claims, confidence and origin lowering, secrets, native vendor libraries, JS literal extraction).
 
 `node --test tests/mobile-frameworks.test.js` — `.aab` support (proto XML, modules, dependency list), Hermes / IL2CPP / UnityFS / XALZ / assembly-store readers, per-framework scans (RN, Flutter, Unity, Xamarin), and the exit-code contract (gate maths plus the real CLI: pass, missing file, gate, bad arguments, incomplete, `--allow-partial`, `--min-severity` not hiding gate failures). The parsers were also checked against real files: a bundletool sample `.aab`, `hermesc` output (bytecode v94), a real managed DLL and a real LZ4 compressor.
 
