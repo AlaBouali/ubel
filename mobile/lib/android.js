@@ -10,6 +10,7 @@ import { analyzeFrameworks } from './frameworks.js';
 import { parseArscStrings } from './arsc.js';
 import { Dex, isDex } from './dex.js';
 import { isElf, parseElf } from './elf.js';
+import { hardeningRecord, evaluateRecords, groupFailures, summarizeHardening } from './elf_hardening.js';
 import { asciiStrings } from './strings.js';
 import { certsFromPkcs7, describeCert, parseApkSigningBlock, WEAK_SIG } from './der.js';
 import { scanBundledFiles } from './files.js';
@@ -217,7 +218,7 @@ export function analyzeApk(zip, ctx) {
   const app = {
     platform: 'android', package: pkg, version_name: manifest.attrs.versionName ?? null, version_code: manifest.attrs.versionCode ?? null,
     min_sdk: minSdk, target_sdk: targetSdk, debuggable: application.attrs.debuggable === true,
-    permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], libraries: [],
+    permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], native_hardening: null, libraries: [],
     signing: null, frameworks: [], _detected_dependencies: [],
     ...(ctx.module ? { module: ctx.module } : {}),
   };
@@ -539,40 +540,75 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
 const ABI_ORDER = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86', 'armeabi'];
 const SKIP_STRINGS = /^(libapp\.so|libassembly-store|libxamarin-app|libmonodroid|libflutter|libc\+\+_shared|libhermes|libjsc|libmonosgen|libreactnativejni|libfbjni|libjscexecutor|libunity|libil2cpp|libmain|libbitmaps|libimagepipeline|libgifimage|libwebp|libyoga|libglog|libfolly|libv8)/;
 
-function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
-  const byName = new Map();
+const MAX_NATIVE_LIBS = 150;                 // distinct library names analysed (unchanged)
+const MAX_NATIVE_BINARIES = 600;             // ABI copies analysed in total
+const EXTRA_ABI_BUDGET = 512 * MB;           // bytes read for ABI copies other than the preferred one (those are only hardening-checked)
+
+/**
+ * Native libraries: hardening of EVERY ABI copy (lib/<abi>/<name>.so), and secret-scanning strings of the preferred copy.
+ * An APK carries a separately built copy per ABI, so each is checked on its own; a library that is hardened for arm64-v8a can still
+ * be missing its canary or PIE in x86. Findings name the exact `abi/library`; `app.native_hardening` holds the per-ABI table.
+ * Exported so the policy can be exercised against a small archive without a full APK.
+ */
+export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
+  const byName = new Map();                  // library name -> its ABI copies, preferred ABI first
   for (const e of zip.find(/^lib\/[^/]+\/[^/]+\.so$/)) {
     const [, abi, name] = e.name.match(/^lib\/([^/]+)\/([^/]+)$/);
-    const cur = byName.get(name);
     const rank = ABI_ORDER.indexOf(abi) < 0 ? 99 : ABI_ORDER.indexOf(abi);
-    if (!cur || rank < cur.rank) byName.set(name, { e, abi, rank });
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push({ e, abi, rank });
   }
+  for (const copies of byName.values()) copies.sort((a, b) => a.rank - b.rank || a.abi.localeCompare(b.abi));
   app.native_libs = [...byName.keys()].sort().slice(0, 300);
-  const props = { exec_stack: [], no_relro: [], partial_relro: [], textrel: [], no_canary: [], rpath: [] };
-  let n = 0;
-  for (const [name, { e, abi }] of byName) {
-    if (++n > 150) { gap(notes, 'More than 150 native libraries: the rest were not analysed.'); break; }
+
+  const records = [];
+  const analyse = ({ e, abi }, name, { strings }) => {
+    const where = at(`lib/${abi}/${name}`);
     const buf = zip.tryRead(e, 128 * MB);
-    if (!buf) { gap(notes, `${at(`lib/${abi}/${name}`)}: native library could not be read (encrypted, corrupt or over the size limit).`); continue; }
-    if (!isElf(buf)) continue;
-    const label = `${abi}/${name}`;
+    if (!buf) { gap(notes, `${where}: native library could not be read (encrypted, corrupt or over the size limit).`); return 0; }
+    if (!isElf(buf)) { notes.push(`${where}: not an ELF file; hardening flags not checked.`); return buf.length; }
     try {
       const elf = parseElf(buf);
-      if (elf.execStack) props.exec_stack.push(label);
-      if (elf.relro === 'none') props.no_relro.push(label); else if (elf.relro === 'partial') props.partial_relro.push(label);
-      if (elf.textrel) props.textrel.push(label);
-      if (elf.rpath) props.rpath.push(`${label} (${elf.rpath})`);
-      if (!elf.canary && elf.imports.some(s => /^(strcpy|strcat|sprintf|gets|memcpy)$/.test(s))) props.no_canary.push(label);
-    } catch { gap(notes, `${at(`lib/${abi}/${name}`)}: ELF header not readable; hardening flags not checked.`); }
-    if (!SKIP_STRINGS.test(name)) scanner.add(at(`lib/${abi}/${name}`), asciiStrings(buf, { min: 8, max: 400, limit: 40000 }));
+      records.push(hardeningRecord(elf, { abi, library: name, path: where, size: buf.length }));
+      if (!elf.symbolsReadable) notes.push(`${where}: dynamic symbol table not readable; stack canary and FORTIFY indicators were not assessed.`);
+    } catch (err) { gap(notes, `${where}: ELF not readable (${err.message}); hardening flags not checked.`); }
+    if (strings && !SKIP_STRINGS.test(name)) scanner.add(where, asciiStrings(buf, { min: 8, max: 400, limit: 40000 }));
+    return buf.length;
+  };
+
+  // pass 1 — the preferred ABI of every library: hardening + strings, exactly the coverage the scan always had
+  let n = 0;
+  const analysed = [];
+  for (const [name, copies] of byName) {
+    if (++n > MAX_NATIVE_LIBS) { gap(notes, `More than ${MAX_NATIVE_LIBS} native libraries: the rest were not analysed.`); break; }
+    analysed.push([name, copies]);
+    analyse(copies[0], name, { strings: true });
   }
-  const emit = (rule, list, text) => list.length && findings.add(rule, { ...base, artifact: at(`lib/…/${list[0].split('/').pop().split(' ')[0]}`), description: `${text} (${list.length} librar${list.length === 1 ? 'y' : 'ies'}).`, evidence: list.slice(0, 30), evidence_total: list.length, key: rule });
-  emit('android.native.exec_stack', props.exec_stack, 'The stack of these libraries is marked executable.');
-  emit('android.native.textrel', props.textrel, 'Text relocations force writable code pages.');
-  emit('android.native.no_relro', props.no_relro, 'The GOT is writable at runtime.');
-  emit('android.native.partial_relro', props.partial_relro, 'Lazy binding leaves the GOT writable.');
-  emit('android.native.no_canary', props.no_canary, 'The library imports unsafe C functions but has no stack canary.');
-  emit('android.native.rpath', props.rpath, 'A search path is baked into the library.');
+  // pass 2 — the other ABI copies: hardening only, within a read budget so a large multi-ABI package cannot exhaust the archive's inflate limit
+  let budget = EXTRA_ABI_BUDGET, total = analysed.length;
+  const skipped = [];
+  for (const [name, copies] of analysed) {
+    for (const copy of copies.slice(1)) {
+      if (total >= MAX_NATIVE_BINARIES || copy.e.usize > budget) { skipped.push(`${copy.abi}/${name}`); continue; }
+      total++;
+      budget -= analyse(copy, name, { strings: false });
+    }
+  }
+  if (skipped.length) gap(notes, `Hardening of ${skipped.length} further ABI cop${skipped.length === 1 ? 'y' : 'ies'} was not assessed (read budget reached): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}.`);
+
+  const order = abi => (ABI_ORDER.indexOf(abi) < 0 ? 99 : ABI_ORDER.indexOf(abi));
+  records.sort((a, b) => a.library.localeCompare(b.library) || order(a.abi) - order(b.abi) || a.abi.localeCompare(b.abi));
+  const evaluated = evaluateRecords(records);
+  for (const g of groupFailures(evaluated)) {
+    const nb = g.entries.length;
+    findings.add(g.rule, {
+      ...base, artifact: at(`lib/…/${g.libraries[0]}`), key: g.rule,
+      description: `${g.text} (${nb} binar${nb === 1 ? 'y' : 'ies'} in ${g.abis.length} ABI${g.abis.length === 1 ? '' : 's'}: ${g.abis.join(', ')}).`,
+      evidence: g.entries.slice(0, 30), evidence_total: nb,
+      ...(g.confidence ? { confidence: g.confidence } : {}),
+    });
+  }
+  app.native_hardening = records.length ? summarizeHardening(records, evaluated) : null;
 }
 
 // ── signing ────────────────────────────────────────────────────────────────────────────────────────

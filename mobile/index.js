@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { ZipArchive } from './lib/zip.js';
 import { analyzeApk, bundleSigning } from './lib/android.js';
+import { mergeHardening } from './lib/elf_hardening.js';
 import { isAab, aabModules, ModuleView, bundletoolVersion } from './lib/aab.js';
 import { Notes, gap } from './lib/coverage.js';
 import { analyzeIpa, findAppDir } from './lib/ios.js';
@@ -168,6 +169,7 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
       base.permissions = [...new Set([...base.permissions, ...app.permissions])];
       base.dex_files.push(...app.dex_files.map(f => `${m}!${f}`));
       base.native_libs = [...new Set([...base.native_libs, ...app.native_libs])];
+      base.native_hardening = mergeHardening(base.native_hardening, app.native_hardening);
       base.libraries = [...base.libraries, ...app.libraries.filter(l => !base.libraries.some(b => b.name === l.name && b.version === l.version))];
       base.frameworks = [...new Set([...base.frameworks, ...app.frameworks])];
     }

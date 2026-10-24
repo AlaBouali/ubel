@@ -74,11 +74,16 @@ export const RULES = {
   'android.dex.cleartext_urls':        R('medium', 'Hardcoded http:// endpoints', 'MASVS-NETWORK-1', 319, 'Switch these endpoints to HTTPS.'),
   'android.dex.firebase_urls':         R('info',   'Firebase Realtime Database URLs', 'MASVS-STORAGE-1', 284, 'Confirm the database rules deny unauthenticated reads and writes (ubel-mobile does not contact the network).'),
   // ── Android native libraries ──────────────────────────────────────────────
+  // Each is checked on every ABI copy of every library (lib/<abi>/*.so), and the evidence names the exact abi/library pair.
+  'android.native.no_pie':             R('high',   'Native binary is not position independent (no PIE)', 'MASVS-CODE-4', 693, 'Build libraries with -fPIC -shared and executables with -fPIE -pie, in every ABI you ship.'),
   'android.native.exec_stack':         R('high',   'Native library requests an executable stack', 'MASVS-CODE-4', 119, 'Link with -z noexecstack.'),
+  'android.native.no_gnu_stack':       R('low',    'Native library has no PT_GNU_STACK header (NX not asserted)', 'MASVS-CODE-4', 693, 'Link with -z noexecstack so the toolchain emits a non-executable PT_GNU_STACK header.'),
+  'android.native.wx_segment':         R('medium', 'Native library has a writable and executable segment', 'MASVS-CODE-4', 693, 'Keep code and data in separate segments (no RWX); drop -z execstack and linker scripts that merge them.'),
   'android.native.no_relro':           R('medium', 'Native library has no RELRO', 'MASVS-CODE-4', 693, 'Link with -z relro -z now.'),
   'android.native.partial_relro':      R('low',    'Native library has only partial RELRO', 'MASVS-CODE-4', 693, 'Link with -z now for full RELRO.'),
   'android.native.textrel':            R('medium', 'Native library has text relocations', 'MASVS-CODE-4', 693, 'Build position-independent code (-fPIC) without text relocations.'),
-  'android.native.no_canary':          R('low',    'Native library has no stack canary', 'MASVS-CODE-4', 693, 'Build with -fstack-protector-strong.'),
+  'android.native.no_canary':          R('low',    'Native library has no stack canary', 'MASVS-CODE-4', 693, 'Build every ABI with -fstack-protector-strong (the NDK clang default; check that CMake/ndk-build flags do not override it with -fno-stack-protector).'),
+  'android.native.no_fortify':         R('low',    'Native library shows no FORTIFY_SOURCE indicators', 'MASVS-CODE-4', 693, 'Build with -D_FORTIFY_SOURCE=2 (or 3) and optimisation enabled (-O1 or higher) so libc copies are bounds-checked.'),
   'android.native.rpath':              R('low',    'Native library sets RPATH/RUNPATH', 'MASVS-CODE-4', 426, 'Remove RPATH/RUNPATH from Android libraries.'),
   // ── Files shipped inside the package (both platforms) ─────────────────────
   'bundle.private_key':                R('high',   'Keystore / private key file bundled in the app', 'MASVS-CRYPTO-2', 321, 'Remove it; anything in the package can be extracted by anyone.'),

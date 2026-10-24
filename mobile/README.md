@@ -64,7 +64,7 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 | `resources.arsc` | every string resource (e.g. `google_api_key`) scanned with its resource name |
 | `classes*.dex` | all strings, `static final` constants, `BuildConfig.DEBUG`, class hierarchy and a constant-tracking bytecode walk: weak/ECB ciphers, constant keys and IVs, weak hashes/TLS protocols, empty `checkServerTrusted`, allow-all `HostnameVerifier`, `SslErrorHandler.proceed`, WebView file access / mixed content / debugging / JavaScript interfaces, world-accessible storage, external storage, sensitive-looking data in `Log.*` calls, plaintext `SharedPreferences` / SQLite storage, hardcoded credentials in constants, JWT literals and JWT/HMAC signing secrets, dynamic code loading, `Runtime.exec`, device identifiers, debug libraries, `http://` endpoints, Firebase URLs, pinning markers |
 | signing | v1 (JAR/PKCS#7) and v2/v3/v3.1 (APK Signing Block) certificates: debug certificate, weak algorithm, short key, expiry, v1-only / Janus exposure |
-| `lib/**/*.so` | ELF hardening (executable stack, RELRO, text relocations, RPATH, canary) and strings (secrets) |
+| `lib/**/*.so` | **per-ABI ELF hardening** — every `lib/<abi>/<name>.so` copy is checked on its own for PIE, NX (executable stack, missing `PT_GNU_STACK`, writable+executable segments), RELRO, stack canary, FORTIFY_SOURCE indicators, text relocations and RPATH/RUNPATH (see [Native library hardening](#native-library-hardening)); printable strings of the preferred-ABI copy are scanned for secrets |
 | everything else | keystores/private keys, `.env`/credential/VCS files, backups, bundled databases, embedded `.apk`/`.dex`/`.jar`, Flutter debug kernels, source maps; text files, React Native / Hermes bundles, Xamarin/Unity DLLs (UTF-16) scanned for secrets |
 
 **Android App Bundles (`.aab`)** — every module (base, dynamic features, asset packs) is analysed with the same checks as an APK, through the bundle's protobuf manifest, `res/xml` files and `resources.pb`. The bundle is reported as one app (`modules` lists the parts); feature modules do not repeat app-level defaults such as backup or SDK levels. `BUNDLE-METADATA/…/dependencies.pb` supplies the build's exact Maven coordinates, which go to the OSV lookup. Signing is read from the bundle's own jar signature (debug certificate, weak algorithm, expiry); APK-only signature-scheme findings do not apply to a bundle.
@@ -87,6 +87,28 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 | code signature | entitlements embedded in the Mach-O (`get-task-allow`, `aps-environment`, …) |
 | main binary, frameworks, extensions (Mach-O) | PIE, executable stack, code signature, FairPlay encryption, stack canary, ARC; imported symbols (`CC_MD5`, `kSecAttrAccessibleAlways`, `NSFileProtectionNone`, `UIWebView`, `rand`, unsafe C functions, `NSLog`, …); strings (secrets, `http://` endpoints, TLS-bypass selectors, auth-challenge handling without trust evaluation, pinning libraries, secret-looking `NSUserDefaults` keys) |
 | everything else | the same bundled-file checks and secret scan as on Android (plists and `.strings` files included) |
+
+### Native library hardening
+
+An APK ships a separately built copy of each native library per ABI (`lib/arm64-v8a`, `lib/armeabi-v7a`, `lib/x86`, `lib/x86_64`, …), so the same library can be hardened in one ABI and not in another. ubel-mobile checks **every copy**, and each finding names the exact `abi/library` pair (for example `x86/libtool-checker.so`). The report's **App Inventory** tab shows the full per-ABI table, and the JSON carries it as `apps[].native_hardening` (`total`, `libraries`, `abis`, `failing` counts, and one record per binary with the checks it fails).
+
+| Check | How it is decided | Rule(s) |
+|---|---|---|
+| **PIE** | `ET_DYN` is position independent; `ET_EXEC` is not. A library with text relocations (`DT_TEXTREL`, or `DF_TEXTREL` in `DT_FLAGS`) loads but is not truly position independent code, so that is reported separately. A `ET_DYN` with `PT_INTERP` / `DF_1_PIE` is an executable shipped as `lib*.so` and is labelled `exe` | `no_pie`, `textrel` |
+| **NX** | `PT_GNU_STACK` present and not executable. An executable `PT_GNU_STACK`, a *missing* `PT_GNU_STACK` header (NX not asserted) and any `PT_LOAD` that is both writable and executable are reported separately | `exec_stack`, `no_gnu_stack`, `wx_segment` |
+| **RELRO** | `PT_GNU_RELRO` gives partial RELRO; full RELRO also needs immediate binding (`DT_BIND_NOW`, `DF_BIND_NOW` or `DF_1_NOW`) | `no_relro`, `partial_relro` |
+| **Stack canary** | an import of `__stack_chk_fail` / `__stack_chk_guard`. A library with no stack buffers legitimately has none, so the finding needs a reason to expect one: the library imports unbounded copy functions (`strcpy`, `strncpy`, `stpcpy`, `strcat`, `strncat`, `sprintf`, `vsprintf`, `gets`, `memcpy`, `memmove`), **or another ABI copy of the same library has a canary** (the same source built without the protector for one ABI) | `no_canary` |
+| **FORTIFY** | imports of the checked libc variants (`__memcpy_chk`, `__strcpy_chk`, `__sprintf_chk`, `__open_2`, …) next to the plain ones: `yes` (only checked), `partial` (both, which is normal for a fortified build), `no` (fortifiable functions imported, no checked variant), `n/a`. Only `no` raises a finding | `no_fortify` |
+| **RPATH / RUNPATH** | `DT_RPATH` / `DT_RUNPATH` present | `rpath` |
+
+How the ELF is read:
+
+- Symbols and strings are located **the way the dynamic loader finds them**, through `DT_SYMTAB` / `DT_STRTAB` and the `DT_HASH` / `DT_GNU_HASH` table, with the section headers only as a fallback. A library whose section table was stripped or zeroed (typical of packed or obfuscated builds) is therefore still assessed instead of looking "clean" or "unhardened".
+- When no symbol table can be found at all (for example a statically linked binary), the canary and FORTIFY columns show `unknown`, the library is noted in the analysis notes, and **no finding is raised from missing evidence**.
+- The preferred ABI of each library (arm64-v8a first) is checked and string-scanned first. The other ABI copies are hardening-checked afterwards under a 512 MB read budget (and at most 600 binaries in total); anything skipped is reported as a coverage gap, never silently dropped.
+- Little-endian ELF only (every Android ABI is). A big-endian ELF is a coverage gap; a `.so` that is not an ELF at all is noted.
+
+Canary and FORTIFY are **indicators, not proof**. The canary check is inferred from imports; Rust, Go and other non-C toolchains typically do not use the stack protector at all, so a missing canary there is a toolchain property rather than a build flag. A fortified build still imports plain `memcpy` wherever the compiler could not prove the destination size, and a statically linked libc would hide both. Severities reflect that: `no_fortify` is low severity and low confidence, `no_canary` is low severity and medium confidence, while PIE, NX and RELRO are read straight from the ELF headers.
 
 ## Limits
 
@@ -178,11 +200,15 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.dex.debug_libraries` | low | MASVS-CODE | Debug / inspection libraries present |
 | `android.dex.cleartext_urls` | medium | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
 | `android.dex.firebase_urls` | info | MASVS-STORAGE-1 | Firebase Realtime Database URLs |
+| `android.native.no_pie` | high | MASVS-CODE-4 | Native binary is not position independent (no PIE) |
 | `android.native.exec_stack` | high | MASVS-CODE-4 | Native library requests an executable stack |
+| `android.native.no_gnu_stack` | low | MASVS-CODE-4 | Native library has no `PT_GNU_STACK` header (NX not asserted) |
+| `android.native.wx_segment` | medium | MASVS-CODE-4 | Native library has a writable and executable segment |
 | `android.native.no_relro` | medium | MASVS-CODE-4 | Native library has no RELRO |
 | `android.native.partial_relro` | low | MASVS-CODE-4 | Native library has only partial RELRO |
 | `android.native.textrel` | medium | MASVS-CODE-4 | Native library has text relocations |
-| `android.native.no_canary` | low | MASVS-CODE-4 | Native library has no stack canary |
+| `android.native.no_canary` | low (medium confidence) | MASVS-CODE-4 | Native library has no stack canary |
+| `android.native.no_fortify` | low (low confidence) | MASVS-CODE-4 | Native library shows no FORTIFY_SOURCE indicators |
 | `android.native.rpath` | low | MASVS-CODE-4 | Native library sets RPATH/RUNPATH |
 | `bundle.private_key` | high | MASVS-CRYPTO-2 | Keystore / private key file bundled in the app |
 | `bundle.sensitive_file` | medium | MASVS-STORAGE-1 | Sensitive-looking file bundled in the app |
@@ -233,6 +259,8 @@ Hardcoded secrets are reported as `secret.<rule id>` (for example `secret.github
 `node --test tests/mobile-frameworks.test.js` — `.aab` support (proto XML, modules, dependency list), Hermes / IL2CPP / UnityFS / XALZ / assembly-store readers, per-framework scans (RN, Flutter, Unity, Xamarin), and the exit-code contract (gate maths plus the real CLI: pass, missing file, gate, bad arguments, incomplete, `--allow-partial`, `--min-severity` not hiding gate failures). The parsers were also checked against real files: a bundletool sample `.aab`, `hermesc` output (bytecode v94), a real managed DLL and a real LZ4 compressor.
 
 `node --test tests/mobile.test.js` — builds Android binary XML, `resources.arsc`, DEX, binary plists, Mach-O and ELF fixtures in memory (`tests/helpers/mobile_fixtures.js`) plus real PKCS#7 signatures, and checks parsers, whole-package scans and the CLI (outputs, exit codes, HTML escaping, diffs). The fixtures follow the file-format specifications; they are not real apps, so run the scanner against your own builds as well.
+
+Native ELF hardening (per-ABI PIE / NX / RELRO / canary / FORTIFY, symbol lookup without section headers, report table): `node --test tests/mobile-elf-hardening.test.js`. Besides in-memory ELF fixtures it compiles real binaries with `gcc` and compares the reader with `readelf`; that part is skipped when neither is installed.
 
 Accuracy-fix regression tests (dependency status, origin attribution, class-loader rule): `node --test tests/mobile-fixes.test.js`.
 

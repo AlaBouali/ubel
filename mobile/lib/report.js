@@ -187,6 +187,60 @@ export function executiveSummary(p) {
 // ── HTML ───────────────────────────────────────────────────────────────────────────────────────────
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+const HARDENING_BADGE = {
+  ok: 'text-green-400 border-green-500/50 bg-green-500/10', bad: 'text-red-400 border-red-500/50 bg-red-500/10',
+  warn: 'text-orange-300 border-orange-500/50 bg-orange-500/10', na: 'text-neutral-400 border-neutral-700 bg-neutral-800/50',
+};
+const HARDENING_LABEL = {
+  no_pie: 'No PIE', exec_stack: 'Executable stack', no_gnu_stack: 'No GNU_STACK', wx_segment: 'W+X segment', textrel: 'Text relocations',
+  no_relro: 'No RELRO', partial_relro: 'Partial RELRO', no_canary: 'No stack canary', no_fortify: 'No FORTIFY', rpath: 'RPATH / RUNPATH',
+};
+
+/**
+ * Per-ABI native hardening table (PIE, NX, RELRO, stack canary, FORTIFY, RPATH) for every Android app that has one. Server-rendered
+ * and escaped: library names and RPATH values come from the package. Returns '' when no app has native libraries.
+ */
+export function nativeHardeningHtml(apps) {
+  const cell = (text, level, title = '') => `<td class="px-3 py-2"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${HARDENING_BADGE[level]}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span></td>`;
+  return (apps || []).filter(a => a?.native_hardening?.binaries?.length).map(a => {
+    const h = a.native_hardening;
+    const chips = Object.entries(h.failing || {}).filter(([, n]) => n > 0)
+      .map(([k, n]) => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.bad}">${esc(HARDENING_LABEL[k] || k)} × ${Number(n)}</span>`).join(' ');
+    const rows = h.binaries.map(b => {
+      const failed = new Set(b.failed || []);
+      const pie = !b.pie ? cell('no', 'bad', 'ET_EXEC: not position independent') : b.textrel ? cell('text relocations', 'warn', 'Position independent image, but relocations patch code pages') : cell('yes', 'ok');
+      const nxTitle = b.nx === 'disabled' ? 'PT_GNU_STACK requests an executable stack' : b.nx === 'missing' ? 'No PT_GNU_STACK header' : b.wx_segments ? `${b.wx_segments} writable and executable segment(s)` : '';
+      const nx = cell((b.nx === 'enabled' ? 'yes' : b.nx === 'disabled' ? 'no' : 'not asserted') + (b.wx_segments ? ' · W+X' : ''),
+        b.nx === 'disabled' || b.wx_segments ? 'bad' : b.nx === 'missing' ? 'warn' : 'ok', nxTitle);
+      const relro = cell(b.relro, b.relro === 'full' ? 'ok' : b.relro === 'partial' ? 'warn' : 'bad');
+      const canary = b.canary === null ? cell('unknown', 'na', 'The dynamic symbol table could not be read')
+        : b.canary ? cell('yes', 'ok')
+          : failed.has('no_canary') ? cell('no', 'bad', 'No __stack_chk_fail import although a canary is expected here')
+            : cell('none', 'na', 'No canary, but no unbounded copy calls are imported and no other ABI of this library has one');
+      const fortify = b.fortify === 'yes' || b.fortify === 'partial' ? cell(b.fortify, 'ok', `${b.fortified_functions} checked function(s) imported`)
+        : b.fortify === 'no' ? cell('no', 'warn', `Imports ${(b.unfortified_functions || []).join(', ')} without checked variants`)
+          : cell(b.fortify === 'unknown' ? 'unknown' : 'n/a', 'na');
+      return `<tr class="border-b border-neutral-800">
+        <td class="px-3 py-2 font-semibold break-all">${esc(b.library)}</td>
+        <td class="px-3 py-2 mono text-xs whitespace-nowrap">${esc(b.abi)}</td>
+        <td class="px-3 py-2 mono text-xs whitespace-nowrap">${esc(b.arch)}${b.kind === 'executable' ? ' · exe' : ''}</td>
+        ${pie}${nx}${relro}${canary}${fortify}
+        <td class="px-3 py-2 mono text-xs break-all">${b.rpath ? esc(b.rpath) : '—'}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="glass p-6 rounded-xl space-y-4 native-hardening">
+      <div class="flex flex-wrap items-baseline justify-between gap-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Native library hardening</h3><span class="mono text-xs text-neutral-500">${esc(a.package || a.name || 'Android app')}</span></div>
+      <p class="text-xs text-neutral-400">${Number(h.total)} binar${h.total === 1 ? 'y' : 'ies'} · ${Number(h.libraries)} librar${h.libraries === 1 ? 'y' : 'ies'} · ABIs: ${esc((h.abis || []).join(', '))}${h.unknown_symbols ? ` · ${Number(h.unknown_symbols)} without a readable symbol table` : ''}</p>
+      <div class="flex flex-wrap gap-2">${chips || `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.ok}">No hardening gaps found</span>`}</div>
+      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+        <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-3 py-2">Library</th><th class="px-3 py-2">ABI</th><th class="px-3 py-2">Arch</th><th class="px-3 py-2">PIE</th><th class="px-3 py-2">NX</th><th class="px-3 py-2">RELRO</th><th class="px-3 py-2">Canary</th><th class="px-3 py-2">FORTIFY</th><th class="px-3 py-2">RPATH</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <p class="text-xs text-neutral-500">Every ABI copy is checked on its own. PIE, NX and RELRO are read from the ELF headers. Canary and FORTIFY are inferred from imported symbols (<span class="mono">__stack_chk_fail</span>, <span class="mono">__*_chk</span>): a library with no stack buffers legitimately has no canary, and a fortified build still imports plain <span class="mono">memcpy</span> where the compiler could not prove the buffer size, so treat those two as indicators.</p>
+    </div>`;
+  }).join('');
+}
+
 export async function buildHtml(p) {
   const [tailwind, chartjs, googleFonts] = await Promise.all([
     getTailwindScript(), getChartJSScript(), getGoogleFontsScript(),
@@ -427,6 +481,7 @@ export async function buildHtml(p) {
           <tbody id="apps-table-body" class="divide-y divide-neutral-800">${appRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No app metadata was extracted.</td></tr>'}</tbody>
         </table>
       </div>
+      ${nativeHardeningHtml(p.apps)}
       <p class="text-xs text-neutral-500">Select an app row to inspect extracted package metadata. This is static package analysis; the app is not executed.</p>
     </section>
 
@@ -699,7 +754,7 @@ function appDetails(index) {
     add('Package', a.package); add('Version', (a.version_name || '?') + ' (' + (a.version_code || '?') + ')'); add('SDK', 'min ' + (a.min_sdk ?? '?') + ' / target ' + (a.target_sdk ?? '?'));
     add('Components', Object.entries(a.components || {}).map(([k,v]) => v + ' ' + k).join(', ')); add('Permissions', (a.permissions || []).length);
     add('Signing', a.signing ? (a.signing.schemes || []).join(', ') + ' — ' + (a.signing.certificates || []).map(cert => cert.subject + ' [' + cert.key + ', ' + cert.signature_algorithm + ']').join('; ') : '—');
-    add('Frameworks', (a.frameworks || []).join(', ')); add('Cross-platform', (a.cross_platform || []).map(f => f.name + ' (' + [f.engine, f.backend, f.mode, f.flavour, f.dart_version && ('Dart ' + f.dart_version), f.unity_version].filter(Boolean).join(', ') + ')').join('; ')); add('Modules', (a.modules || []).map(m => m.name + ' (' + m.type + ')').join(', ')); add('DEX files', (a.dex_files || []).join(', ')); add('Native libraries', (a.native_libs || []).length); add('Embedded libraries', (a.libraries || []).map(l => l.name + ' ' + (l.version || '')).join(', '));
+    add('Frameworks', (a.frameworks || []).join(', ')); add('Cross-platform', (a.cross_platform || []).map(f => f.name + ' (' + [f.engine, f.backend, f.mode, f.flavour, f.dart_version && ('Dart ' + f.dart_version), f.unity_version].filter(Boolean).join(', ') + ')').join('; ')); add('Modules', (a.modules || []).map(m => m.name + ' (' + m.type + ')').join(', ')); add('DEX files', (a.dex_files || []).join(', ')); add('Native libraries', (a.native_libs || []).length); add('Native hardening', a.native_hardening ? (a.native_hardening.total + ' binaries / ' + a.native_hardening.libraries + ' libraries (' + (a.native_hardening.abis || []).join(', ') + ') — failing: ' + (Object.entries(a.native_hardening.failing || {}).filter(function (kv) { return kv[1] > 0; }).map(function (kv) { return kv[0] + ' x' + kv[1]; }).join(', ') || 'none')) : ''); add('Embedded libraries', (a.libraries || []).map(l => l.name + ' ' + (l.version || '')).join(', '));
   }
   openModal('<div class="space-y-5"><div><p class="text-xs text-neutral-500 uppercase tracking-widest mb-1">App Inventory</p><h2 class="text-xl font-bold pr-8">' + escH(a.name || a.package || a.bundle_id || 'Application') + '</h2></div><div class="glass p-5 rounded-xl space-y-3">' + rows.join('') + '</div></div>');
 }
