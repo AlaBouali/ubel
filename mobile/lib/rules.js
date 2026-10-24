@@ -72,7 +72,13 @@ export const RULES = {
   'android.dex.build_debug':           R('medium', 'BuildConfig.DEBUG is true in this build', 'MASVS-CODE', 489, 'Ship release variants only.'),
   'android.dex.debug_libraries':       R('low',    'Debug / inspection libraries present', 'MASVS-CODE', 489, 'Use debugImplementation for Stetho, LeakCanary, Chucker, Flipper, …'),
   'android.dex.cleartext_urls':        R('medium', 'Hardcoded http:// endpoints', 'MASVS-NETWORK-1', 319, 'Switch these endpoints to HTTPS.'),
+  'android.dex.anti_analysis':         R('info',   'Anti-debug / anti-emulator / root-detection logic present', 'MASVS-RESILIENCE', null, 'Informational. Runtime self-protection only slows an attacker down; do not rely on it to protect secrets or to enforce server-side decisions.'),
   'android.dex.firebase_urls':         R('info',   'Firebase Realtime Database URLs', 'MASVS-STORAGE-1', 284, 'Confirm the database rules deny unauthenticated reads and writes (ubel-mobile does not contact the network).'),
+  // ── Online checks (only with --online): these contact hosts named by the app ─────────────────────────
+  'android.online.assetlinks_missing':  R('low',    'App Link host serves no usable assetlinks.json', 'MASVS-PLATFORM-1', 939, 'Serve /.well-known/assetlinks.json over HTTPS with HTTP 200 (no redirect) and list this package and its signing certificate.'),
+  'android.online.assetlinks_mismatch':R('medium', 'assetlinks.json does not authorise this app / signing certificate', 'MASVS-PLATFORM-1', 939, 'List the package name and the SHA-256 fingerprint of the signing certificate (for Play-signed apps, the Play app-signing key) in assetlinks.json.'),
+  'android.online.firebase_db_open':   R('high',   'Firebase Realtime Database readable without authentication', 'MASVS-STORAGE-1', 284, 'Set the database rules to deny unauthenticated access (".read": "auth != null" at minimum, per-path rules for real isolation).'),
+  'android.online.remote_config_exposed': R('info', 'Firebase Remote Config readable with the app\'s embedded API key', 'MASVS-STORAGE-1', 200, 'Remote Config is public to every installation: keep secrets and unreleased features out of it, and restrict the API key to the app.'),
   // ── Android native libraries ──────────────────────────────────────────────
   // Each is checked on every ABI copy of every library (lib/<abi>/*.so), and the evidence names the exact abi/library pair.
   'android.native.no_pie':             R('high',   'Native binary is not position independent (no PIE)', 'MASVS-CODE-4', 693, 'Build libraries with -fPIC -shared and executables with -fPIE -pie, in every ABI you ship.'),

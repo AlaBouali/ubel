@@ -15,6 +15,9 @@ import { asciiStrings } from './strings.js';
 import { certsFromPkcs7, describeCert, parseApkSigningBlock, WEAK_SIG } from './der.js';
 import { scanBundledFiles } from './files.js';
 import { Aggregator, mask } from './findings.js';
+import { ResilienceCollector, MIN_INDICATORS, RESILIENCE_CALLS, RUNTIME_EXEC, classifyResilienceString } from './resilience.js';
+import { BehaviorCollector, BEHAVIOR } from './behavior.js';
+import { captureFirebaseResource, collectVerifyHosts, onlineData, FIREBASE_DB_URL } from './online.js';
 import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, constantSecretArg } from './signals.js';
 
 const MB = 1024 * 1024;
@@ -93,12 +96,26 @@ const CONTEXT_CLASSES = ['Landroid/content/Context;', 'Landroid/content/ContextW
 
 const NAMESPACE_URL = /(w3\.org|apache\.org|xmlpull\.org|schemas\.|sun\.com|xml\.org|ietf\.org|iana\.org|purl\.org|ns\.adobe\.com|sax\.|jboss\.org|sourceforge\.net|oracle\.com|java\.com|opengis\.net|iso\.org|relaxng\.org|xmlsoap\.org|openxmlformats\.org|json-schema\.org|mozilla\.org|gnu\.org|eclipse\.org|jcp\.org|android\.com\/apk|googleapis\.com\/auth|google\.com\/schemas|example\.(com|org)|localhost|127\.0\.0\.1|0\.0\.0\.0|10\.0\.2\.2)/i;
 const URL_HTTP = /^http:\/\/[^\s"'<>\\]{4,300}$/i;
-const URL_FIREBASE = /^https:\/\/[a-z0-9-]+\.(firebaseio\.com|firebasedatabase\.app)\b/i;
+const URL_FIREBASE = FIREBASE_DB_URL;       // shared with the --online probe; covers regional <db>.<region>.firebasedatabase.app instances
 const PIN = /sha(256|1)\/[A-Za-z0-9+/]{27,44}={0,2}/;
 const TYPE_DESC = /^\[*L[\w/$-]+;$|^[VZBSCIJFDL]{1,12}$/;
 
 const pretty = t => t.replace(/^L|;$/g, '').replace(/\//g, '.');
 const esc = s => String(s).replace(/\r?\n|\r/g, ' ').replace(/"/g, '\\"');
+
+/**
+ * A string-pool entry that is base64 (standard or URL-safe) and decodes to ≥90 % printable ASCII is returned decoded so it can go through
+ * the secrets engine (wrapped API keys, URLs, JSON config). Binary results — ciphertext, or a second obfuscation layer such as XOR — are
+ * not text and are deliberately not recovered here.
+ */
+export function decodeBase64Text(s) {
+  if (s.length < 24 || s.length > 2000 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(s)) return null;
+  const b = Buffer.from(s, 'base64');
+  if (b.length < 16) return null;
+  let printable = 0;
+  for (const c of b) if ((c >= 0x20 && c < 0x7f) || c === 9 || c === 10 || c === 13) printable++;
+  return printable / b.length >= 0.9 ? b.toString('latin1').replace(/\r?\n|\r/g, ' ') : null;
+}
 
 // ── DEX API call rules ─────────────────────────────────────────────────────────────────────────────
 const CALLS = new Map();
@@ -180,7 +197,8 @@ for (const [key, from, short] of [
     return a ? [{ rule: 'android.dex.hardcoded_jwt_secret', evidence: `${short}("${mask(a.v)}")`, description: 'The signing secret is a string literal in the code, so anyone with the app can forge tokens.' }] : undefined;
   });
 }
-const WATCH = new Set([...CALLS.keys(), ...SIGNAL_KEYS.keys()]);
+// Resilience and behavior indicators are not findings by themselves (see resilience.js / behavior.js), so they have no CALLS rule; they only need to be watched.
+const WATCH = new Set([...CALLS.keys(), ...SIGNAL_KEYS.keys(), ...RESILIENCE_CALLS.keys(), ...BEHAVIOR.keys(), RUNTIME_EXEC]);
 
 /** Runs every single-call rule registered for a callee key (exported so rules can be tested without a DEX fixture). */
 export function applyCallRules(key, args, current = {}) {
@@ -244,21 +262,24 @@ export function analyzeApk(zip, ctx) {
         seen.add(k);
         if (s.value.length >= 8 || /key|secret|token|pass|pwd|auth|_id$/i.test(s.name)) lines.push(`${s.name} = "${esc(s.value)}"`);
         if (/^https?:\/\//i.test(s.value)) addUrl(s.value, at(arsc.name));
+        captureFirebaseResource(app, s.name, s.value);
       }
       scanner.add(at('res/values/strings.xml'), lines);
     } catch (e) { gap(notes, `${at(arsc.name)}: string resources not analysed (${e.message}).`); }
   }
 
   // code
+  const behavior = new BehaviorCollector();
   for (const e of zip.find(/^classes\d*\.dex$/).slice(0, 30)) {
     try {
       const dex = new Dex(zip.read(e, 160 * MB), e.name);
       app.dex_files.push(e.name);
       collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
-      if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces })) pinning = true;
+      if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces, behavior })) pinning = true;
     } catch (err) { gap(notes, `${at(e.name)}: code not analysed (${err.message}).`); }
   }
   if (!app.dex_files.length && !featureModule) notes.push(`${at('classes.dex')}: no DEX code found.`);
+  if (app.dex_files.length) app.behavior = behavior.summary();
 
   nativeLibraries(zip, { findings, base, at, scanner, notes, app });
   if (!ctx.module) signing(zip, { findings, base, at, app, minSdk });      // bundle modules carry no signature of their own
@@ -276,7 +297,8 @@ export function analyzeApk(zip, ctx) {
     if (PIN.test(u)) pinning = true;
   }
   if (http.length) findings.add('android.dex.cleartext_urls', { ...base, artifact: at('classes.dex'), description: `${http.length} http:// endpoint(s) are hardcoded; traffic to them is unencrypted.`, evidence: http.slice(0, 25), evidence_total: http.length, confidence: 'medium' });
-  if (firebase.length) findings.add('android.dex.firebase_urls', { ...base, artifact: at('resources.arsc'), description: 'The app talks to Firebase Realtime Database. Misconfigured rules are a very common source of data leaks; ubel-mobile does not contact the network, so the rules were not tested.', evidence: [...new Set(firebase)].slice(0, 10) });
+  for (const u of firebase) onlineData(app).dbUrls.add(u);
+  if (firebase.length) findings.add('android.dex.firebase_urls', { ...base, artifact: at('resources.arsc'), description: 'The app talks to Firebase Realtime Database. Misconfigured rules are a very common source of data leaks; ubel-mobile does not contact the network unless --online is given, so the rules were not tested.', evidence: [...new Set(firebase)].slice(0, 10) });
   if (!pinning && !featureModule) findings.add('android.network.no_pinning', { ...base, artifact: at('AndroidManifest.xml'), description: 'No pin-set, OkHttp CertificatePinner, TrustKit or hardcoded pin hash was found.', evidence: [], confidence: 'low', key: 'nopin' });
 
   // everything else shipped in the package
@@ -337,6 +359,10 @@ function manifestChecks({ manifest, application, app, base, findings, at, target
       const launcher = actions.includes('android.intent.action.MAIN') && cats.includes('android.intent.category.LAUNCHER');
       for (const f of filters) {
         if (!f.children.some(x => x.tag === 'category' && x.attrs.name === 'android.intent.category.BROWSABLE')) continue;
+        if (f.attrs.autoVerify === true) {        // remembered for the opt-in --online assetlinks.json check
+          const datas = f.children.filter(x => x.tag === 'data');
+          if (datas.some(d => /^https?$/i.test(String(d.attrs.scheme || '')))) collectVerifyHosts(app, datas.filter(d => d.attrs.host).map(d => d.attrs.host));
+        }
         for (const d of f.children.filter(x => x.tag === 'data' && x.attrs.scheme)) {
           const entry = `${d.attrs.scheme}://${d.attrs.host || ''}${d.attrs.pathPrefix || d.attrs.path || ''} → ${name}`;
           deepLinks.push(entry);
@@ -422,8 +448,9 @@ function hybridChecks({ xmlRoots, base, findings, at }) {
 }
 
 // ── DEX ────────────────────────────────────────────────────────────────────────────────────────────
-function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] }) {
+export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [], behavior = null }) {
   const agg = new Aggregator(findings, base);
+  const resil = new ResilienceCollector();
   const users = new Map();                       // string idx -> first class that loads it
   let current = null;
   const constLines = [], constWhere = [];
@@ -436,7 +463,7 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
     let v = strInfo.get(idx);
     if (!v) {
       const str = dex.string(idx), c0 = str.charCodeAt(0);
-      v = { label: sensitiveLabel(str), jwt: isJwtLiteral(str) ? str : null, schema: (c0 === 99 || c0 === 67) ? schemaSensitive(str) : null };
+      v = { res: classifyResilienceString(str), label: sensitiveLabel(str), jwt: isJwtLiteral(str) ? str : null, schema: (c0 === 99 || c0 === 67) ? schemaSensitive(str) : null };
       strInfo.set(idx, v);
     }
     return v;
@@ -453,6 +480,7 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
   for (const def of dex.classes()) {
     const type = def.type;
     const origin = classOrigin(type, namespaces);
+    resil.begin(type);
     for (const [p, label] of DEBUG_LIBS) if (type.startsWith(p)) debugLibs.add(label);
     let data;
     try { data = dex.classData(def); } catch { continue; }
@@ -494,12 +522,16 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
           onString: idx => {
             if (!users.has(idx)) users.set(idx, type);
             const v = info(idx);
+            if (v.res) resil.string(v.res);
             if (v.label) signals.label(v.label);
             if (v.jwt) agg.hit('android.dex.hardcoded_jwt', { origin, evidence: `JWT "${mask(v.jwt)}" in ${pretty(type)}#${name}`, description: 'A complete JSON Web Token is embedded in the code; it may carry a valid identity or session.' });
             if (v.schema) agg.hit('android.dex.plaintext_database', { origin, evidence: `CREATE TABLE with a "${v.schema}" column in ${pretty(type)}`, description: `A table definition has a sensitive-looking column ("${v.schema}"); SQLite files are unencrypted unless SQLCipher or similar is used.${storageNote('android.dex.plaintext_database')}`, confidence: sqlCipher ? 'low' : 'medium' });
           },
-          onInvoke: (k, args) => {
+          onField: fi => { if (origin !== 'library') resil.field(dex.fieldKey(fi)); },
+          onInvoke: (k, args, mi) => {
             signals.call(k, args);
+            resil.call(k, args);
+            if (behavior) behavior.call(k, args, origin, () => dex.methodProto(mi));
             for (const h of applyCallRules(k, args, current)) agg.hit(h.rule, { origin: current.origin, evidence: `${h.evidence} in ${pretty(current.cls)}#${current.method}`, description: h.description, confidence: h.confidence });
           },
         }, WATCH);
@@ -519,20 +551,30 @@ function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [] 
   }
   if (customTm.size) findings.add('android.dex.custom_trust_manager', { ...base, artifact: at(dex.name), description: `${customTm.size} custom TrustManager implementation(s) with a non-empty checkServerTrusted. Review them for complete chain and host-name validation.`, evidence: [...customTm].slice(0, 20), confidence: 'low' });
   if (debugLibs.size) findings.add('android.dex.debug_libraries', { ...base, artifact: at(dex.name), description: 'Development-time inspection libraries are packaged in this build.', evidence: [...debugLibs] });
+  // Anti-debug / anti-emulator / root-detection: only a cluster of distinct indicators in one class counts (resilience.js); library code is skipped.
+  for (const r of resil.results()) {
+    const o = classOrigin(r.cls, namespaces);
+    if (o === 'library') continue;
+    agg.hit('android.dex.anti_analysis', { origin: o, evidence: `${pretty(r.cls)}: ${r.text}`, confidence: o === 'unknown' ? 'low' : 'medium',
+      description: `A class combines several environment checks (${MIN_INDICATORS}+ distinct indicators: debugger, emulator, root or hooking-framework detection). The app tries to resist analysis; this is an inventory item, not a weakness, and such checks can be bypassed.` });
+  }
   agg.flush(at(dex.name));
 
   // strings → secrets, URLs, pins
-  const idxs = [], lines = [];
+  const idxs = [], lines = [], b64Idx = [], b64Lines = [];
   for (let i = 0; i < dex.nStr; i++) {
     const s = dex.string(i);
     if (s.length < 8 || s.length > 2000) continue;
     if (s.startsWith('http')) { if (URL_HTTP.test(s) || URL_FIREBASE.test(s)) addUrl(s, at(dex.name)); }
     if (!pinned && PIN.test(s)) pinned = true;
+    const dec = b64Lines.length < 20000 ? decodeBase64Text(s) : null;       // base64-wrapped keys, URLs, JSON: scan what is inside
+    if (dec) { b64Idx.push(i); b64Lines.push(dec); if (URL_HTTP.test(dec.trim()) || URL_FIREBASE.test(dec.trim())) addUrl(dec.trim(), at(dex.name)); }
     if (TYPE_DESC.test(s)) continue;
     idxs.push(i); lines.push(s);
   }
   scanner.add(at(dex.name), lines, i => (users.has(idxs[i]) ? `string used by ${pretty(users.get(idxs[i]))}` : null));
   scanner.add(at(dex.name), constLines, i => `constant in ${constWhere[i]}`);
+  scanner.add(at(dex.name), b64Lines, i => `base64-decoded string${users.has(b64Idx[i]) ? ` used by ${pretty(users.get(b64Idx[i]))}` : ''}`);
   return pinned;
 }
 

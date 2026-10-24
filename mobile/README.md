@@ -23,6 +23,7 @@ ubel-mobile app.xapk --working-dir ./reports-dir
 | `--working-dir <path>` | cwd | Directory whose `.ubel/` folder receives the reports |
 | `--min-severity <s>` | `info` | Drop issues below `critical` / `high` / `medium` / `low` / `info` from the **report**. Display only: the `--fail-on` gate always sees every finding |
 | `--fail-on <s>` | `critical` | Exit `2` when issues (vulnerabilities, secrets, misconfigurations) or dependency advisories at or above the severity exist; `none` disables the gate (always exit `0`); `5:high` tolerates five. Anything else is a usage error |
+| `--online` | off | Also run the checks that need the network: `assetlinks.json` of every `android:autoVerify` host against the signing certificate, one unauthenticated shallow read of a Firebase Realtime Database, one Remote Config fetch with the app's own API key (see [Online checks](#online-checks---online)) |
 | `--allow-partial` | off | Accept an incomplete analysis (exit `0` instead of `3`) |
 | `--max-entry-mb <n>` | `256` | Largest single file inside the package that is inflated and scanned |
 | `--verbose` / `--quiet` | | More / less console output |
@@ -88,6 +89,24 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 | main binary, frameworks, extensions (Mach-O) | PIE, executable stack, code signature, FairPlay encryption, stack canary, ARC; imported symbols (`CC_MD5`, `kSecAttrAccessibleAlways`, `NSFileProtectionNone`, `UIWebView`, `rand`, unsafe C functions, `NSLog`, …); strings (secrets, `http://` endpoints, TLS-bypass selectors, auth-challenge handling without trust evaluation, pinning libraries, secret-looking `NSUserDefaults` keys) |
 | everything else | the same bundled-file checks and secret scan as on Android (plists and `.strings` files included) |
 
+**Anti-analysis inventory.** A class that combines at least three *distinct* environment-check indicators — debugger (`Debug.isDebuggerConnected`, `TracerPid`), emulator (`goldfish`, `ranchu`, `/dev/qemu_pipe`, `Build.*` properties), root (`su`, Magisk, `test-keys`) or hooking framework (Frida, Xposed) — is reported as `android.dex.anti_analysis` (info, MASVS-RESILIENCE). One indicator never counts: all `Build.*` reads together are a single indicator, so an analytics SDK reading `Build.MODEL` cannot reach the threshold. One check is one indicator: `exec("su")` and the `"su"` literal it runs, or `Build.TAGS` and the `"test-keys"` it is compared with, count once. Known library code is skipped; renamed classes outside the app package are reported at low confidence.
+
+**Behavior inventory (`app.behavior`).** What the code does, as counts per API reference split by class origin (`app` / `unknown` / `library`): file access, network, inter-app communication, process execution, reflection, native code loading and sensitive device APIs (location, camera, microphone, SMS, clipboard, installed packages). It is a summary on the app record, **not** findings: nearly every app does all of this. Action-based (implicit) intents are read from the `Intent(String …)` constructor, whose first parameter type is checked in the DEX proto table; the constant actions are listed in `intent_actions`, explicit `Intent(Context, Class)` constructions are counted in `explicit_intents`. Actions built at runtime are not visible.
+
+**Base64 decode pass.** String-pool entries of 24+ characters that are valid base64 and decode to at least 90 % printable ASCII are decoded and passed through the secrets engine (wrapped API keys, URLs, JSON config). Decoded `http://` URLs join the cleartext-endpoint check. A blob that decodes to binary — ciphertext, or a second obfuscation layer such as a repeating-key XOR — is deliberately not recovered: that needs the key and the decode routine from the app's own code, which differs per app.
+
+### Online checks (`--online`)
+
+Off by default; without it nothing leaves the machine except the OSV.dev dependency lookup. With it, `ubel-mobile` contacts hosts **named by the app**. The checks are read-only, never follow redirects, never send credentials, refuse IP addresses and private/internal host *names* (the name is checked, not what DNS answers for it), and a request that fails is a coverage gap (exit `3` unless `--allow-partial`), not a pass. Only use it on apps you are allowed to test.
+
+| Check | Request | Rule |
+|---|---|---|
+| App Links | `GET https://<host>/.well-known/assetlinks.json` per `android:autoVerify` host (`*.` stripped), compared with the package name and the signing certificate's SHA-256 (skipped for `.aab`: Play re-signs with its own key) | `android.online.assetlinks_missing`, `android.online.assetlinks_mismatch` |
+| Firebase Realtime Database | one `GET <db>/.json?shallow=true` for each database URL found in the app (`<db>.firebaseio.com`, and regional `<db>.<region>.firebasedatabase.app` instances such as `europe-west1`): HTTP 200 means the root is world-readable. No data is read and nothing is written | `android.online.firebase_db_open` |
+| Firebase Remote Config | one fetch with `google_api_key` / `google_app_id` from the app's resources, exactly what the Firebase SDK sends. Parameter values are scanned for secrets; a restricted key (HTTP 400/403) is reported as `restricted` in `app.online_checks`, never bypassed | `android.online.remote_config_exposed` |
+
+Results are also summarised in `app.online_checks`; the API key is masked there.
+
 ### Native library hardening
 
 An APK ships a separately built copy of each native library per ABI (`lib/arm64-v8a`, `lib/armeabi-v7a`, `lib/x86`, `lib/x86_64`, …), so the same library can be hardened in one ABI and not in another. ubel-mobile checks **every copy**, and each finding names the exact `abi/library` pair (for example `x86/libtool-checker.so`). The report's **Native Binaries** tab shows the full per-ABI table, and the JSON carries it as `apps[].native_hardening` (`total`, `libraries`, `abis`, `failing` counts, and one record per binary with the checks it fails).
@@ -112,7 +131,7 @@ Canary and FORTIFY are **indicators, not proof**. The canary check is inferred f
 
 ## Limits
 
-- **Static only.** Nothing in the app runs. The only network requests made by the dependency lookup are OSV.dev requests for extracted, versioned package URLs. Backend behavior, Firebase database rules, and the validity of a found key are *not* tested.
+- **Static only.** Nothing in the app runs. By default the only network requests are the OSV.dev lookups for extracted, versioned package URLs; backend behavior, Firebase database rules, and the validity of a found key are *not* tested. `--online` adds the three read-only checks listed above and nothing else: it does not test keys against other services or write anything.
 - **No decompiler.** Findings come from configuration, constant tables, API references and call arguments, and binary metadata — not data-flow analysis. The DEX walker tracks constants straight-line within a method, so it sees `Cipher.getInstance("DES/ECB/…")` and constant keys, but not values assembled at runtime. Findings marked `confidence: low|medium` are leads to verify.
 - **Obfuscation.** R8/ProGuard renames app classes but not framework calls or string constants, so most checks still work. It also renames *library* classes (Material becomes `c.c.a.a.…`), so package prefixes alone cannot separate app from library code: a class is `app` when it sits under the manifest package or a manifest component's package, `library` when it matches a known library prefix, and `unknown` when it is renamed and outside the app's package; packers, DexGuard-style string encryption, Hermes bytecode and code downloaded at runtime are only partly visible.
 - **App Store IPAs are FairPlay-encrypted** (`cryptid=1`): `Info.plist`, provisioning, entitlements, bundled files and imported symbols are analysed, but strings inside the binary are not. Scan a development-signed or decrypted build for full coverage. The report says so.
@@ -120,7 +139,7 @@ Canary and FORTIFY are **indicators, not proof**. The canary check is inferred f
 - **Bundle caveats.** Unity LZMA-compressed UnityFS bundles and encrypted/custom-packed `global-metadata.dat` are not read (reported). The `.aab` assembly-store and Hermes layouts are version-dependent: they are validated before use and a mismatch is reported rather than guessed. Bundle modules are analysed from the `.aab`; an `.aab` that is not jar-signed simply has no signature findings.
 - **Limits protect the scanner:** per-file and total inflated-size caps, a ratio check, a bounded string budget for the secrets scan. When a budget is hit the report says what was skipped.
 - **Sensitive-data rules are heuristics.** There is no data-flow analysis, so `logging_sensitive`, `plaintext_prefs` and `plaintext_database` work from what is visible in one method: *direct* evidence (a constant tag, message, preference key or `ContentValues` key that names something sensitive; confidence `medium`) or *nearby* evidence (the same method also loads a sensitive-looking label such as `"accesstoken"`, because the logged/stored text is built at runtime; confidence `low`). Prose such as SDK error messages and class-name log tags are ignored, known library code is skipped, and renamed (`unknown`-origin) code is always reported at `low` confidence. If `androidx.security.crypto` or SQLCipher is packaged the storage rules drop to `low`, since the same APIs may be encrypted. Treat them as pointers for manual review.
-- **Hardcoded-credential rules are name-plus-value checks.** `hardcoded_credential` needs a constant whose *name* says password/secret/token/key **and** a value that looks like a secret (not a placeholder, key name, identifier or URL); an all-lowercase word such as `"letmein"` is deliberately not reported. Secrets with a known vendor format, long key/value pairs and `Bearer`/`Basic` headers are still caught by the shared secrets engine. JWT signing-secret detection recognises jjwt, java-jwt and Nimbus calls with constant arguments; hand-rolled `SecretKeySpec` is covered by `android.dex.hardcoded_key`. Root/emulator-detection bypasses are runtime behaviour and out of scope for a static scan.
+- **Hardcoded-credential rules are name-plus-value checks.** `hardcoded_credential` needs a constant whose *name* says password/secret/token/key **and** a value that looks like a secret (not a placeholder, key name, identifier or URL); an all-lowercase word such as `"letmein"` is deliberately not reported. Secrets with a known vendor format, long key/value pairs and `Bearer`/`Basic` headers are still caught by the shared secrets engine. JWT signing-secret detection recognises jjwt, java-jwt and Nimbus calls with constant arguments; hand-rolled `SecretKeySpec` is covered by `android.dex.hardcoded_key`. Bypassing root/emulator detection is runtime behaviour and out of scope for a static scan; the *presence* of such checks is reported by `android.dex.anti_analysis`.
 - **Dependency lookup covers only exact identities.** A component is sent to OSV.dev only when a versioned package URL could be extracted (e.g. from `META-INF/*.version` files). Anything else (for example "Firebase Android SDK" or "Google Play Services" detected by namespace only) is reported as `not_queryable`, never as clean; failed lookups are `lookup_error` / `lookup_incomplete`.
 - It scans the package you give it, not the app's backend.
 
@@ -200,6 +219,11 @@ checked.summary;           // counts for queryable, vulnerable, clean, not-query
 | `android.dex.debug_libraries` | low | MASVS-CODE | Debug / inspection libraries present |
 | `android.dex.cleartext_urls` | medium | MASVS-NETWORK-1 | Hardcoded http:// endpoints |
 | `android.dex.firebase_urls` | info | MASVS-STORAGE-1 | Firebase Realtime Database URLs |
+| `android.dex.anti_analysis` | info | MASVS-RESILIENCE | Anti-debug / anti-emulator / root-detection logic present (cluster of ≥3 distinct indicators in one class) |
+| `android.online.assetlinks_missing` | low | MASVS-PLATFORM-1 | App Link host serves no usable `assetlinks.json` (`--online`) |
+| `android.online.assetlinks_mismatch` | medium | MASVS-PLATFORM-1 | `assetlinks.json` does not authorise this package / signing certificate (`--online`) |
+| `android.online.firebase_db_open` | high | MASVS-STORAGE-1 | Firebase Realtime Database readable without authentication (`--online`) |
+| `android.online.remote_config_exposed` | info | MASVS-STORAGE-1 | Firebase Remote Config readable with the embedded API key (`--online`) |
 | `android.native.no_pie` | high | MASVS-CODE-4 | Native binary is not position independent (no PIE) |
 | `android.native.exec_stack` | high | MASVS-CODE-4 | Native library requests an executable stack |
 | `android.native.no_gnu_stack` | low | MASVS-CODE-4 | Native library has no `PT_GNU_STACK` header (NX not asserted) |
@@ -261,6 +285,8 @@ Hardcoded secrets are reported as `secret.<rule id>` (for example `secret.github
 `node --test tests/mobile.test.js` — builds Android binary XML, `resources.arsc`, DEX, binary plists, Mach-O and ELF fixtures in memory (`tests/helpers/mobile_fixtures.js`) plus real PKCS#7 signatures, and checks parsers, whole-package scans and the CLI (outputs, exit codes, HTML escaping, diffs). The fixtures follow the file-format specifications; they are not real apps, so run the scanner against your own builds as well.
 
 Native ELF hardening (per-ABI PIE / NX / RELRO / canary / FORTIFY, symbol lookup without section headers, report table): `node --test tests/mobile-elf-hardening.test.js`. Besides in-memory ELF fixtures it compiles real binaries with `gcc` and compares the reader with `readelf`; that part is skipped when neither is installed.
+
+Anti-analysis clusters, behavior inventory, base64 decode pass and the `--online` checks (assembled DEX in memory, mock `fetch`): `node --test tests/mobile-detections.test.js`.
 
 Accuracy-fix regression tests (dependency status, origin attribution, class-loader rule): `node --test tests/mobile-fixes.test.js`.
 

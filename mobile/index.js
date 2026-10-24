@@ -15,6 +15,9 @@ import { isAab, aabModules, ModuleView, bundletoolVersion } from './lib/aab.js';
 import { Notes, gap } from './lib/coverage.js';
 import { analyzeIpa, findAppDir } from './lib/ios.js';
 import { SecretScanner } from './lib/secrets.js';
+import { mergeBehavior } from './lib/behavior.js';
+import { runOnlineChecks, onlineData } from './lib/online.js';
+export { runOnlineChecks };
 import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies } from './lib/dependencies.js';
 export { extractMobileDependencies, scanMobileDependencies };
 import { Findings } from './lib/findings.js';
@@ -35,7 +38,7 @@ Usage:
   ubel-mobile <app.apk | app.aab | app.ipa | app.xapk | app.apks> [--working-dir <path>]
               [--min-severity critical|high|medium|low|info]
               [--fail-on critical|high|medium|low|info|none|<count>:<severity>]
-              [--allow-partial] [--max-entry-mb <n>] [--verbose] [--quiet]
+              [--online] [--allow-partial] [--max-entry-mb <n>] [--verbose] [--quiet]
 
 Looks for:
   • hardcoded secrets (API keys, tokens, private keys …) in code, resources, plists, bundled files and native libraries
@@ -43,7 +46,7 @@ Looks for:
   • misconfigurations (debuggable builds, cleartext traffic, ATS exceptions, exported components, WebView settings,
     TLS validation bypasses, weak signing, missing binary hardening)
 
-Nothing is executed. The app package is never uploaded; when exact dependency identities and versions can be extracted, UBEL sends only their package URLs/versions to OSV.dev through the shared SCA engine.
+Nothing is executed. The app package is never uploaded; with --online, the hosts the app names are contacted (see below); when exact dependency identities and versions can be extracted, UBEL sends only their package URLs/versions to OSV.dev through the shared SCA engine.
 
 Every run writes report.mobile.json + report.mobile.html into a timestamped zip under
 $HOME/.ubel/history/<asset_id>/<timestamp>.mobile.zip and always-overwritten copies to
@@ -55,6 +58,10 @@ Options:
                          looks at every finding, so a filtered report can never hide a failing build
   --fail-on <s>          Exit 2 when findings or dependency advisories at/above <s> exist; "none" disables the gate (always exit 0);
                          "5:high" tolerates five (default: critical)
+  --online               Also run the checks that need the network (default: off). Contacts hosts named by the app, read-only, no redirects,
+                         public DNS names only: assetlinks.json of every android:autoVerify host compared with the signing certificate;
+                         one unauthenticated shallow read of a Firebase Realtime Database; one Remote Config fetch with the app's own API key.
+                         A request that fails is a coverage gap (exit 3 unless --allow-partial)
   --allow-partial        Accept an incomplete analysis (something in the package could not be examined) instead of exiting 3
   --max-entry-mb <n>     Largest single file inside the package that is inflated and scanned (default: 256)
   --verbose / --quiet    More / less console output
@@ -66,7 +73,7 @@ Exit codes: 0 gate passed and the analysis was complete · 1 scan failed (file m
 const VALID_SEVERITIES = new Set(SEVERITIES);
 
 export function parseArgs(argv) {
-  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, allowPartial: false, maxEntryMb: 256, file: null };
+  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, allowPartial: false, online: false, maxEntryMb: 256, file: null };
   const bad = msg => { console.error(`${msg}\n`); console.log(HELP); process.exit(2); };
   const value = (flag, i) => { const v = argv[i + 1]; if (v === undefined || v.startsWith('--')) bad(`${flag} requires a value`); return v; };
   for (let i = 0; i < argv.length; i++) {
@@ -79,6 +86,7 @@ export function parseArgs(argv) {
     else if (a === '--verbose') args.verbose = true;
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--allow-partial') args.allowPartial = true;
+    else if (a === '--online') args.online = true;
     else if (a.startsWith('--')) bad(`Unknown argument: ${a}`);
     else if (args.file === null) args.file = a;
     else bad(`Unexpected extra argument: ${a}`);
@@ -172,6 +180,9 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
       base.native_hardening = mergeHardening(base.native_hardening, app.native_hardening);
       base.libraries = [...base.libraries, ...app.libraries.filter(l => !base.libraries.some(b => b.name === l.name && b.version === l.version))];
       base.frameworks = [...new Set([...base.frameworks, ...app.frameworks])];
+      base.behavior = mergeBehavior(base.behavior, app.behavior);
+      const bo = onlineData(base), fo = onlineData(app);
+      fo.verifyHosts.forEach(h => bo.verifyHosts.add(h)); fo.dbUrls.forEach(u => bo.dbUrls.add(u));
     }
   }
   if (!base) throw new Error('no analysable module in the App Bundle');
@@ -396,6 +407,10 @@ export async function main() {
   try { scan = scanPackage(file, { maxEntryMb: args.maxEntryMb, log }); }
   catch (e) { console.error(`[ubel-mobile] ${e.message}`); process.exitCode = 1; return; }
 
+  if (args.online) {
+    if (!args.quiet) console.log('[ubel-mobile] --online: contacting hosts named by the app (assetlinks.json, Firebase). Read-only; no credentials are sent.');
+    await runOnlineChecks(scan.apps, { findings: scan.findings, notes: scan.notes, newScanner: b => new SecretScanner(scan.findings, b), log });
+  }
   // The gate is evaluated on EVERY finding; --min-severity only decides what the report shows.
   const everything = scan.findings.list.slice();
   const rank = SEVERITY_RANK[args.minSeverity];

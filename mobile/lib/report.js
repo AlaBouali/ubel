@@ -2,6 +2,7 @@
 // report.js — turns findings into the report payload (JSON), the plain-language executive summary
 // and a self-contained HTML report (no external assets, everything escaped).
 
+import { BEHAVIOR_LABELS } from './behavior.js';
 import { SEVERITIES, SEVERITY_RANK } from './rules.js';
 import { getTailwindScript } from '../../sca/tailwindcss.js';
 import { getChartJSScript } from '../../sca/chartjs.js';
@@ -21,7 +22,7 @@ const MASVS_FRAMEWORK = {
   version: null,
 };
 
-const MISCONFIG_RULE = /^(?:android\.(?:manifest|nsc|cordova|signing|native)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
+const MISCONFIG_RULE = /^(?:android\.(?:manifest|nsc|cordova|signing|native|online)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:anti_analysis|build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
 
 export function isMisconfigurationFinding(finding) {
   return MISCONFIG_RULE.test(String(finding?.rule || ''));
@@ -767,6 +768,21 @@ function appDetails(index) {
     add('Components', Object.entries(a.components || {}).map(([k,v]) => v + ' ' + k).join(', ')); add('Permissions', (a.permissions || []).length);
     add('Signing', a.signing ? (a.signing.schemes || []).join(', ') + ' — ' + (a.signing.certificates || []).map(cert => cert.subject + ' [' + cert.key + ', ' + cert.signature_algorithm + ']').join('; ') : '—');
     add('Frameworks', (a.frameworks || []).join(', ')); add('Cross-platform', (a.cross_platform || []).map(f => f.name + ' (' + [f.engine, f.backend, f.mode, f.flavour, f.dart_version && ('Dart ' + f.dart_version), f.unity_version].filter(Boolean).join(', ') + ')').join('; ')); add('Modules', (a.modules || []).map(m => m.name + ' (' + m.type + ')').join(', ')); add('DEX files', (a.dex_files || []).join(', ')); add('Native libraries', (a.native_libs || []).length); add('Native hardening', a.native_hardening ? (a.native_hardening.total + ' binaries / ' + a.native_hardening.libraries + ' libraries (' + (a.native_hardening.abis || []).join(', ') + ') — failing: ' + (Object.entries(a.native_hardening.failing || {}).filter(function (kv) { return kv[1] > 0; }).map(function (kv) { return kv[0] + ' x' + kv[1]; }).join(', ') || 'none')) : ''); add('Embedded libraries', (a.libraries || []).map(l => l.name + ' ' + (l.version || '')).join(', '));
+    if (a.behavior) {
+      const labels = ${JSON.stringify(BEHAVIOR_LABELS)};
+      for (const [cat, byOrigin] of Object.entries(a.behavior.categories || {})) {
+        add('Behavior · ' + (labels[cat] || cat), ['app', 'unknown', 'library'].filter(o => byOrigin[o]).map(o => o + ': ' + byOrigin[o].calls + ' (' + Object.entries(byOrigin[o].apis).slice(0, 4).map(kv => kv[0] + ' ×' + kv[1]).join(', ') + ')').join(' · '));
+      }
+      const ia = a.behavior.intent_actions || {}, it = a.behavior.intent_actions_total || {};
+      add('Intent actions (app code)', (ia.app || []).slice(0, 12).join(', ') + ((it.app || 0) > 12 ? ' … (' + it.app + ' total)' : ''));
+      add('Intent actions (unattributed / library)', (it.unknown || 0) + ' / ' + (it.library || 0));
+    }
+    if (a.online_checks) {
+      const o = a.online_checks;
+      add('Online · App Links', (o.assetlinks || []).map(x => x.host + ': ' + x.state).join('; '));
+      add('Online · Firebase database', (o.firebase_database || []).map(x => x.url + ': ' + x.state).join('; '));
+      add('Online · Remote Config', o.remote_config ? o.remote_config.state + (o.remote_config.entries ? ' (' + o.remote_config.entries + ' parameters)' : '') : '');
+    }
   }
   openModal('<div class="space-y-5"><div><p class="text-xs text-neutral-500 uppercase tracking-widest mb-1">App Inventory</p><h2 class="text-xl font-bold pr-8">' + escH(a.name || a.package || a.bundle_id || 'Application') + '</h2></div><div class="glass p-5 rounded-xl space-y-3">' + rows.join('') + '</div></div>');
 }

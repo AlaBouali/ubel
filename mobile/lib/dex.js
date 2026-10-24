@@ -57,11 +57,11 @@ export class Dex {
     this.version = buf.toString('latin1', 4, 7);
     const u = o => buf.readUInt32LE(o);
     this.nStr = u(0x38); this.oStr = u(0x3c); this.nType = u(0x40); this.oType = u(0x44);
-    this.nField = u(0x50); this.oField = u(0x54); this.nMeth = u(0x58); this.oMeth = u(0x5c);
+    this.nProto = u(0x48); this.oProto = u(0x4c); this.nField = u(0x50); this.oField = u(0x54); this.nMeth = u(0x58); this.oMeth = u(0x5c);
     this.nClass = u(0x60); this.oClass = u(0x64);
     const within = (o, n, sz) => o + n * sz <= buf.length;
     if (!within(this.oStr, this.nStr, 4) || !within(this.oType, this.nType, 4) || !within(this.oField, this.nField, 8) ||
-        !within(this.oMeth, this.nMeth, 8) || !within(this.oClass, this.nClass, 32)) throw new Error('corrupt DEX tables');
+        !within(this.oMeth, this.nMeth, 8) || !within(this.oProto, this.nProto, 12) || !within(this.oClass, this.nClass, 32)) throw new Error('corrupt DEX tables');
     this._str = new Array(this.nStr);
     this._mkey = new Array(this.nMeth);
   }
@@ -93,6 +93,28 @@ export class Dex {
     if (k !== undefined) return k;
     const o = this.oMeth + i * 8;
     return (this._mkey[i] = `${this.typeName(this.buf.readUInt16LE(o))}->${this.string(this.buf.readUInt32LE(o + 4))}`);
+  }
+
+  /** "Lcom/foo/Bar;->baz" for field id i (the `sget-*` / `iget-*` operand). */
+  fieldKey(i) {
+    if (i >= this.nField) return '';
+    const o = this.oField + i * 8;
+    return `${this.typeName(this.buf.readUInt16LE(o))}->${this.string(this.buf.readUInt32LE(o + 4))}`;
+  }
+
+  /** { ret, params:[type …] } of method id i, from the proto table (methodKey drops the signature). */
+  methodProto(i) {
+    if (i >= this.nMeth) return null;
+    const pi = this.buf.readUInt16LE(this.oMeth + i * 8 + 2);
+    if (pi >= this.nProto) return null;
+    const po = this.oProto + pi * 12, buf = this.buf;
+    const params = [];
+    const off = buf.readUInt32LE(po + 8);
+    if (off && off + 4 <= buf.length) {
+      const n = buf.readUInt32LE(off);
+      for (let k = 0; k < n && k < 32 && off + 4 + k * 2 + 2 <= buf.length; k++) params.push(this.typeName(buf.readUInt16LE(off + 4 + k * 2)));
+    }
+    return { ret: this.typeName(buf.readUInt32LE(po + 4)), params };
   }
 
   *allStrings() { for (let i = 0; i < this.nStr; i++) yield this.string(i); }
@@ -228,7 +250,7 @@ export class Dex {
   /**
    * Linear walk of one method body. hooks.onInvoke(key, args) gets the callee ("Lcls;->name") and the
    * argument registers' known constants ({k:'str'|'int'|'bytes', v}) or undefined when unknown;
-   * hooks.onString(idx) sees every const-string. `watch` limits onInvoke to the keys in the Set.
+   * hooks.onString(idx) sees every const-string; hooks.onField(fieldIdx) sees every static field read (sget-*). onInvoke also gets the method index as a third argument. `watch` limits onInvoke to the keys in the Set.
    * Constant tracking is deliberately simple (straight-line, destination-killing): good precision for the
    * usual "load literal, call API" shape, silent when unsure.
    */
@@ -265,6 +287,9 @@ export class Dex {
           regs.set(u0 >> 8, { k: 'str', v: this.string(idx) });
           if (hooks.onString) hooks.onString(idx);
         }
+      } else if (op >= 0x60 && op <= 0x66) {                   // sget-*: report the field, then it is an ordinary register kill
+        if (hooks.onField) hooks.onField(U(i + 1));
+        const r = u0 >> 8; regs.delete(r); regs.delete(r + 1);
       } else if (op === 0x0c && pb) {
         regs.set(u0 >> 8, pb);
       } else if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
@@ -282,7 +307,7 @@ export class Dex {
             for (let a = 0; a < count && a < 8; a++) args.push(regs.get(first + a));
           }
           if ((isString || isB64) && args[0] && args[0].k === 'str') pendingBytes = { k: 'bytes', v: args[0].v };
-          if (watch && watch.has(key) && hooks.onInvoke) hooks.onInvoke(key, args);
+          if (watch && watch.has(key) && hooks.onInvoke) hooks.onInvoke(key, args, mIdx);
         }
       } else {
         const d = DEST[op];
