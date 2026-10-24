@@ -201,7 +201,7 @@ const HARDENING_LABEL = {
  * and escaped: library names and RPATH values come from the package. Returns '' when no app has native libraries.
  */
 export function nativeHardeningHtml(apps) {
-  const cell = (text, level, title = '') => `<td class="px-3 py-2"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${HARDENING_BADGE[level]}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span></td>`;
+  const cell = (text, level, title = '') => `<td class="px-3 py-3"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${HARDENING_BADGE[level]}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span></td>`;
   return (apps || []).filter(a => a?.native_hardening?.binaries?.length).map(a => {
     const h = a.native_hardening;
     const chips = Object.entries(h.failing || {}).filter(([, n]) => n > 0)
@@ -220,12 +220,12 @@ export function nativeHardeningHtml(apps) {
       const fortify = b.fortify === 'yes' || b.fortify === 'partial' ? cell(b.fortify, 'ok', `${b.fortified_functions} checked function(s) imported`)
         : b.fortify === 'no' ? cell('no', 'warn', `Imports ${(b.unfortified_functions || []).join(', ')} without checked variants`)
           : cell(b.fortify === 'unknown' ? 'unknown' : 'n/a', 'na');
-      return `<tr class="border-b border-neutral-800">
-        <td class="px-3 py-2 font-semibold break-all">${esc(b.library)}</td>
-        <td class="px-3 py-2 mono text-xs whitespace-nowrap">${esc(b.abi)}</td>
-        <td class="px-3 py-2 mono text-xs whitespace-nowrap">${esc(b.arch)}${b.kind === 'executable' ? ' · exe' : ''}</td>
+      return `<tr class="hover:bg-neutral-800/30 transition-colors">
+        <td class="px-3 py-3 font-semibold break-all">${esc(b.library)}</td>
+        <td class="px-3 py-3 mono text-xs whitespace-nowrap">${esc(b.abi)}</td>
+        <td class="px-3 py-3 mono text-xs whitespace-nowrap">${esc(b.arch)}${b.kind === 'executable' ? ' · exe' : ''}</td>
         ${pie}${nx}${relro}${canary}${fortify}
-        <td class="px-3 py-2 mono text-xs break-all">${b.rpath ? esc(b.rpath) : '—'}</td>
+        <td class="px-3 py-3 mono text-xs break-all">${b.rpath ? esc(b.rpath) : '—'}</td>
       </tr>`;
     }).join('');
     return `<div class="glass p-6 rounded-xl space-y-4 native-hardening">
@@ -233,12 +233,17 @@ export function nativeHardeningHtml(apps) {
       <p class="text-xs text-neutral-400">${Number(h.total)} binar${h.total === 1 ? 'y' : 'ies'} · ${Number(h.libraries)} librar${h.libraries === 1 ? 'y' : 'ies'} · ABIs: ${esc((h.abis || []).join(', '))}${h.unknown_symbols ? ` · ${Number(h.unknown_symbols)} without a readable symbol table` : ''}</p>
       <div class="flex flex-wrap gap-2">${chips || `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.ok}">No hardening gaps found</span>`}</div>
       <div class="overflow-x-auto"><table class="w-full text-left text-sm">
-        <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-3 py-2">Library</th><th class="px-3 py-2">ABI</th><th class="px-3 py-2">Arch</th><th class="px-3 py-2">PIE</th><th class="px-3 py-2">NX</th><th class="px-3 py-2">RELRO</th><th class="px-3 py-2">Canary</th><th class="px-3 py-2">FORTIFY</th><th class="px-3 py-2">RPATH</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-3 py-3">Library</th><th class="px-3 py-3">ABI</th><th class="px-3 py-3">Arch</th><th class="px-3 py-3">PIE</th><th class="px-3 py-3">NX</th><th class="px-3 py-3">RELRO</th><th class="px-3 py-3">Canary</th><th class="px-3 py-3">FORTIFY</th><th class="px-3 py-3">RPATH</th></tr></thead>
+        <tbody class="divide-y divide-neutral-800">${rows}</tbody>
       </table></div>
       <p class="text-xs text-neutral-500">Every ABI copy is checked on its own. PIE, NX and RELRO are read from the ELF headers. Canary and FORTIFY are inferred from imported symbols (<span class="mono">__stack_chk_fail</span>, <span class="mono">__*_chk</span>): a library with no stack buffers legitimately has no canary, and a fortified build still imports plain <span class="mono">memcpy</span> where the compiler could not prove the buffer size, so treat those two as indicators.</p>
     </div>`;
   }).join('');
+}
+
+/** Number of native binaries (every ABI copy) across the Android apps of a payload. */
+export function nativeBinaryCount(apps) {
+  return (apps || []).reduce((n, a) => n + Number(a?.native_hardening?.binaries?.length || 0), 0);
 }
 
 export async function buildHtml(p) {
@@ -256,6 +261,8 @@ export async function buildHtml(p) {
   const misconfigs = p.misconfigurations || [];
   const all = flattenFindings(p);
   const dependencies = p.dependencies || [];
+  const nativeCount = nativeBinaryCount(p.apps);
+  const nativeHtml = nativeHardeningHtml(p.apps);
   const dependencySummary = p.dependency_summary || {};
   const dependencyStatusLabel = { vulnerable: 'Vulnerable', clean: 'Safe', not_queryable: 'Not queried', lookup_error: 'Lookup failed', lookup_incomplete: 'Lookup incomplete', pending: 'Pending' };
   const severityColors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3' };
@@ -269,13 +276,13 @@ export async function buildHtml(p) {
     const componentCount = a.platform === 'ios'
       ? (a.frameworks || []).length + (a.extensions || []).length
       : Object.values(a.components || {}).reduce((sum, n) => sum + Number(n || 0), 0) + (a.native_libs || []).length;
-    return `<tr class="border-b border-neutral-800 hover:bg-neutral-900 cursor-pointer" data-app-index="${i}" title="Open app metadata">
-      <td class="px-4 py-3">${esc(appPlatform(a))}</td>
-      <td class="px-4 py-3 font-semibold">${esc(appIdentity(a))}</td>
-      <td class="px-4 py-3 mono text-xs">${esc(id || '—')}</td>
-      <td class="px-4 py-3 mono text-xs">${esc(appVersion(a))}</td>
-      <td class="px-4 py-3 text-xs">${esc(scope)}</td>
-      <td class="px-4 py-3 text-right mono">${Number(componentCount)}</td>
+    return `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-app-index="${i}" title="Open app metadata">
+      <td class="px-6 py-4">${esc(appPlatform(a))}</td>
+      <td class="px-6 py-4 font-semibold">${esc(appIdentity(a))}</td>
+      <td class="px-6 py-4 mono text-xs">${esc(id || '—')}</td>
+      <td class="px-6 py-4 mono text-xs">${esc(appVersion(a))}</td>
+      <td class="px-6 py-4 text-xs">${esc(scope)}</td>
+      <td class="px-6 py-4 text-right mono">${Number(componentCount)}</td>
     </tr>`;
   }).join('');
 
@@ -283,14 +290,14 @@ export async function buildHtml(p) {
     const status = dep.lookup_status || 'not_queryable';
     const badgeClass = status === 'vulnerable' ? 'text-red-400 border-red-500/50 bg-red-500/10' : status === 'clean' ? 'text-green-400 border-green-500/50 bg-green-500/10' : status === 'lookup_error' || status === 'lookup_incomplete' ? 'text-orange-300 border-orange-500/50 bg-orange-500/10' : 'text-neutral-400 border-neutral-700 bg-neutral-800/50';
     const sources = Array.isArray(dep.sources) ? dep.sources : [];
-    return `<tr class="border-b border-neutral-800 hover:bg-neutral-900 cursor-pointer" data-dependency-index="${i}" data-dependency-row="true" data-status="${esc(status)}" title="Open dependency and OSV advisory details">
-      <td class="px-4 py-3 font-semibold min-w-[12rem]">${esc(dep.name || 'Unknown dependency')}</td>
-      <td class="px-4 py-3 mono text-xs whitespace-nowrap">${esc(dep.version || 'unknown')}</td>
-      <td class="px-4 py-3 text-xs">${esc(dep.ecosystem || 'Unknown')}</td>
-      <td class="px-4 py-3 mono text-xs break-all">${esc(dep.purl || dep.coordinate || 'identity unavailable')}</td>
-      <td class="px-4 py-3"><span class="px-2 py-1 rounded border text-[10px] font-semibold ${badgeClass}">${esc(dependencyStatusLabel[status] || status)}</span></td>
-      <td class="px-4 py-3 text-right mono">${Number(dep.vulnerability_count || 0)}</td>
-      <td class="px-4 py-3 text-xs text-neutral-500 break-all">${esc(sources[0] || '—')}${sources.length > 1 ? ` (+${sources.length - 1} source(s))` : ''}</td>
+    return `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-dependency-index="${i}" data-dependency-row="true" data-status="${esc(status)}" title="Open dependency and OSV advisory details">
+      <td class="px-6 py-4 font-semibold min-w-[12rem]">${esc(dep.name || 'Unknown dependency')}</td>
+      <td class="px-6 py-4 mono text-xs whitespace-nowrap">${esc(dep.version || 'unknown')}</td>
+      <td class="px-6 py-4 text-xs">${esc(dep.ecosystem || 'Unknown')}</td>
+      <td class="px-6 py-4 mono text-xs break-all">${esc(dep.purl || dep.coordinate || 'identity unavailable')}</td>
+      <td class="px-6 py-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ${badgeClass}">${esc(dependencyStatusLabel[status] || status)}</span></td>
+      <td class="px-6 py-4 text-right mono">${Number(dep.vulnerability_count || 0)}</td>
+      <td class="px-6 py-4 text-xs text-neutral-500 break-all">${esc(sources[0] || '—')}${sources.length > 1 ? ` (+${sources.length - 1} source(s))` : ''}</td>
     </tr>`;
   }).join('');
 
@@ -298,16 +305,16 @@ export async function buildHtml(p) {
     const index = all.indexOf(f);
     const origin = f.origin === 'library' ? 'library' : f.origin === 'unknown' ? 'unknown' : 'app';
     const app = f.app || (p.apps?.length === 1 ? appIdentity(p.apps[0]) : '—');
-    return `<tr class="border-b border-neutral-800 ${clickable ? 'hover:bg-neutral-900 cursor-pointer' : ''}"
+    return `<tr class="${clickable ? 'hover:bg-neutral-800/30 transition-colors cursor-pointer' : ''}"
       ${clickable ? `data-finding-index="${index}"` : ''}
       data-finding-row="true" data-severity="${esc(f.severity || 'info')}" data-origin="${esc(origin)}"
       data-masvs="${esc(String(f.masvs || 'Unmapped').replace(/-\d+$/, ''))}" data-rule="${esc(f.rule || '')}">
-      <td class="px-4 py-3 whitespace-nowrap"><span class="px-2 py-1 rounded border text-xs uppercase font-bold severity-${esc(f.severity || 'info')}">${esc(f.severity || 'info')}</span></td>
-      <td class="px-4 py-3 font-semibold min-w-[15rem]">${esc(f.title || f.rule || 'Untitled finding')}</td>
-      <td class="px-4 py-3">${esc(app)}</td>
-      <td class="px-4 py-3 mono text-xs break-all">${esc(f.artifact || '—')}${f.line ? `:${esc(f.line)}` : ''}</td>
-      <td class="px-4 py-3 mono text-xs">${esc(f.masvs || 'Unmapped')}</td>
-      <td class="px-4 py-3 text-xs">${esc(f.confidence || 'unknown')}</td>
+      <td class="px-6 py-4 whitespace-nowrap"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-${esc(f.severity || 'info')}">${esc(f.severity || 'info')}</span></td>
+      <td class="px-6 py-4 font-semibold min-w-[15rem]">${esc(f.title || f.rule || 'Untitled finding')}</td>
+      <td class="px-6 py-4">${esc(app)}</td>
+      <td class="px-6 py-4 mono text-xs break-all">${esc(f.artifact || '—')}${f.line ? `:${esc(f.line)}` : ''}</td>
+      <td class="px-6 py-4 mono text-xs">${esc(f.masvs || 'Unmapped')}</td>
+      <td class="px-6 py-4 text-xs">${esc(f.confidence || 'unknown')}</td>
     </tr>`;
   }).join('');
 
@@ -422,23 +429,24 @@ export async function buildHtml(p) {
           <p class="text-xs text-neutral-500 mono" id="report-id">GENERATED_AT: ${esc(p.generated_at || 'unknown')}</p>
         </div>
       </div>
-      <span class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/50">${esc(p.tool || 'ubel-mobile')}${p.tool_version ? ` v${esc(p.tool_version)}` : ''}</span>
+      <span id="overall-status" class="px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider ${c.critical + c.high > 0 ? 'bg-red-500/20 text-red-400 border border-red-500/50' : c.medium > 0 ? 'bg-orange-500/20 text-orange-400 border border-orange-500/50' : 'bg-green-500/20 text-green-400 border border-green-500/50'}">Status: ${esc(es.rating || 'Unknown')}</span>
     </div>
   </header>
 
   <nav class="border-b border-neutral-800 bg-neutral-900/30">
     <div class="max-w-7xl mx-auto px-4 flex gap-8 overflow-x-auto">
-      <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
-      <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
-      <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">App Inventory(${(p.apps || []).length})</button>
-      <button onclick="switchTab('dependencies')" id="tab-dependencies" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Dependencies(${dependencies.length})</button>
-      <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Vulnerabilities(${vulns.length})</button>
-      <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Secrets(${secrets.length})</button>
-      <button onclick="switchTab('misconfigs')" id="tab-misconfigs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Misconfigurations(${misconfigs.length})</button>
-      <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(${(p.compliance_summary?.frameworks || []).length})</button>
-      <button onclick="switchTab('diffs')" id="tab-diffs" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
-      <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
-      <button onclick="switchTab('scaninfo')" id="tab-scaninfo" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Scan Info</button>
+      <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
+      <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
+      <button onclick="switchTab('inventory')" id="tab-inventory" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">App Inventory(${(p.apps || []).length})</button>
+      <button onclick="switchTab('native')" id="tab-native" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Native Binaries(${nativeCount})</button>
+      <button onclick="switchTab('dependencies')" id="tab-dependencies" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Dependencies(${dependencies.length})</button>
+      <button onclick="switchTab('vulnerabilities')" id="tab-vulnerabilities" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Vulnerabilities(${vulns.length})</button>
+      <button onclick="switchTab('secrets')" id="tab-secrets" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Secrets(${secrets.length})</button>
+      <button onclick="switchTab('misconfigs')" id="tab-misconfigs" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Misconfigurations(${misconfigs.length})</button>
+      <button onclick="switchTab('stats')" id="tab-stats" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
+      <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Compliance(${(p.compliance_summary?.frameworks || []).length})</button>
+      <button onclick="switchTab('diffs')" id="tab-diffs" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Diffs</button>
+      <button onclick="switchTab('scaninfo')" id="tab-scaninfo" class="py-4 text-sm font-medium whitespace-nowrap text-neutral-400 hover:text-white transition-colors">Scan Info</button>
     </div>
   </nav>
 
@@ -474,29 +482,33 @@ export async function buildHtml(p) {
       </div>
     </section>
 
-    <section id="section-inventory" class="hidden space-y-4">
+    <section id="section-inventory" class="hidden space-y-6">
       <div class="glass rounded-xl overflow-x-auto">
-        <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Platform</th><th class="px-4 py-3">Application</th><th class="px-4 py-3">Package / Bundle ID</th><th class="px-4 py-3">Version</th><th class="px-4 py-3">OS / SDK</th><th class="px-4 py-3 text-right">Components</th></tr></thead>
-          <tbody id="apps-table-body" class="divide-y divide-neutral-800">${appRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No app metadata was extracted.</td></tr>'}</tbody>
+        <table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Platform</th><th class="px-6 py-4">Application</th><th class="px-6 py-4">Package / Bundle ID</th><th class="px-6 py-4">Version</th><th class="px-6 py-4">OS / SDK</th><th class="px-6 py-4 text-right">Components</th></tr></thead>
+          <tbody id="apps-table-body" class="divide-y divide-neutral-800">${appRows || '<tr><td colspan="6" class="px-6 py-4 text-sm text-neutral-500">No app metadata was extracted.</td></tr>'}</tbody>
         </table>
       </div>
-      ${nativeHardeningHtml(p.apps)}
       <p class="text-xs text-neutral-500">Select an app row to inspect extracted package metadata. This is static package analysis; the app is not executed.</p>
     </section>
 
-    <section id="section-dependencies" class="hidden space-y-4">
+    <section id="section-native" class="hidden space-y-6">
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Native Binaries Analysis</h2><p class="text-xs text-neutral-500 mono">${nativeCount} binar${nativeCount === 1 ? 'y' : 'ies'}</p></div>
+      ${nativeHtml || '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No native libraries or executables were found in this package, so there is nothing to analyse.</div>'}
+    </section>
+
+    <section id="section-dependencies" class="hidden space-y-6">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         ${[['Detected components', dependencySummary.total || dependencies.length, '#d4d4d4'], ['OSV-queryable', dependencySummary.queryable || 0, '#60a5fa'], ['Components with advisories', dependencySummary.vulnerable_dependencies || 0, '#f87171'], ['Advisory matches', dependencySummary.vulnerabilities || 0, '#fb923c']].map(([label, value, color]) => `<div class="glass p-5 rounded-xl"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">${esc(label)}</p><p class="text-2xl font-bold" style="color:${color}">${Number(value)}</p></div>`).join('')}
       </div>
-      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="dep-search" type="text" placeholder="Search package, version, PURL or source..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500" oninput="applyDependencyFilters()">
-        <select id="dep-status" onchange="applyDependencyFilters()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All lookup states</option><option value="vulnerable">Vulnerable</option><option value="clean">Safe</option><option value="not_queryable">Not queried</option><option value="lookup_error">Lookup failed</option><option value="lookup_incomplete">Lookup incomplete</option></select>
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Dependencies</h2><div class="flex gap-2 w-full md:w-auto flex-wrap">
+        <input id="dep-search" type="text" placeholder="Search package, version, PURL or source..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64" oninput="applyDependencyFilters()">
+        <select id="dep-status" onchange="applyDependencyFilters()" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All lookup states</option><option value="vulnerable">Vulnerable</option><option value="clean">Safe</option><option value="not_queryable">Not queried</option><option value="lookup_error">Lookup failed</option><option value="lookup_incomplete">Lookup incomplete</option></select></div>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
-        <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Dependency</th><th class="px-4 py-3">Version</th><th class="px-4 py-3">Ecosystem</th><th class="px-4 py-3">Package URL / Identity</th><th class="px-4 py-3">Status</th><th class="px-4 py-3 text-right">Advisories</th><th class="px-4 py-3">Evidence source</th></tr></thead>
-          <tbody id="dependencies-table-body" class="divide-y divide-neutral-800">${dependencyRows || '<tr><td colspan="7" class="px-4 py-3 text-sm text-neutral-500">No dependency metadata was extracted from this package.</td></tr>'}</tbody>
+        <table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Dependency</th><th class="px-6 py-4">Version</th><th class="px-6 py-4">Ecosystem</th><th class="px-6 py-4">Package URL / Identity</th><th class="px-6 py-4">Status</th><th class="px-6 py-4 text-right">Advisories</th><th class="px-6 py-4">Evidence source</th></tr></thead>
+          <tbody id="dependencies-table-body" class="divide-y divide-neutral-800">${dependencyRows || '<tr><td colspan="7" class="px-6 py-4 text-sm text-neutral-500">No dependency metadata was extracted from this package.</td></tr>'}</tbody>
         </table>
       </div>
       <p id="dependencies-empty" class="hidden text-sm text-neutral-500 italic">No dependencies match the selected filters.</p>
@@ -504,17 +516,17 @@ export async function buildHtml(p) {
       <p class="text-xs text-neutral-500">Only exact, supported, versioned package URLs are queried. Native .so/.dylib binaries and embedded native frameworks are excluded from the Dependencies tab and are never submitted to OSV; native hardening and secret checks remain separate. If an APK/IPA omits its build lockfiles or package metadata, a package may remain Not queried rather than being reported as clean. Click a row to inspect advisory details and source evidence.</p>
     </section>
 
-    <section id="section-vulnerabilities" class="hidden space-y-4">
-      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="v-search" type="text" placeholder="Search title, rule, artifact, evidence..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
-        <select id="v-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="v-origin" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All origins</option><option value="app">App / package</option><option value="unknown">Unattributed (renamed classes)</option><option value="library">Third-party library</option></select>
-        <select id="v-masvs" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All MASVS areas</option>${masvsOptions}</select>
+    <section id="section-vulnerabilities" class="hidden space-y-6">
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Vulnerability Findings</h2><div class="flex gap-2 w-full md:w-auto flex-wrap">
+        <input id="v-search" type="text" placeholder="Search title, rule, artifact, evidence..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
+        <select id="v-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="v-origin" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All origins</option><option value="app">App / package</option><option value="unknown">Unattributed (renamed classes)</option><option value="library">Third-party library</option></select>
+        <select id="v-masvs" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All MASVS areas</option>${masvsOptions}</select></div>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
-        <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Vulnerability</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">MASVS</th><th class="px-4 py-3">Confidence</th></tr></thead>
-          <tbody id="vulnerabilities-table-body" class="divide-y divide-neutral-800">${vulnRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No vulnerabilities detected.</td></tr>'}</tbody>
+        <table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Severity</th><th class="px-6 py-4">Vulnerability</th><th class="px-6 py-4">App</th><th class="px-6 py-4">Artifact</th><th class="px-6 py-4">MASVS</th><th class="px-6 py-4">Confidence</th></tr></thead>
+          <tbody id="vulnerabilities-table-body" class="divide-y divide-neutral-800">${vulnRows || '<tr><td colspan="6" class="px-6 py-4 text-sm text-neutral-500">No vulnerabilities detected.</td></tr>'}</tbody>
         </table>
       </div>
       <p id="vulnerabilities-empty" class="hidden text-sm text-neutral-500 italic">No vulnerabilities match the selected filters.</p>
@@ -522,16 +534,16 @@ export async function buildHtml(p) {
       <p class="text-xs text-neutral-500">Insecure code, cryptography, storage and data handling. Hardcoded secrets and configuration weaknesses are listed in their own tabs and never repeated here. Known-vulnerable third-party packages are on the Dependencies tab.</p>
     </section>
 
-    <section id="section-secrets" class="hidden space-y-4">
-      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="s-search" type="text" placeholder="Search title, rule, artifact, app..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
-        <select id="s-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="s-rule" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All secret types</option>${secretOptions}</select>
+    <section id="section-secrets" class="hidden space-y-6">
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Hardcoded Secrets</h2><div class="flex gap-2 w-full md:w-auto flex-wrap">
+        <input id="s-search" type="text" placeholder="Search title, rule, artifact, app..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
+        <select id="s-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="s-rule" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All secret types</option>${secretOptions}</select></div>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
-        <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Title</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">Rule</th><th class="px-4 py-3">MASVS</th></tr></thead>
-          <tbody id="secrets-table-body" class="divide-y divide-neutral-800">${secretRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No hardcoded secrets detected.</td></tr>'}</tbody>
+        <table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Severity</th><th class="px-6 py-4">Title</th><th class="px-6 py-4">App</th><th class="px-6 py-4">Artifact</th><th class="px-6 py-4">Rule</th><th class="px-6 py-4">MASVS</th></tr></thead>
+          <tbody id="secrets-table-body" class="divide-y divide-neutral-800">${secretRows || '<tr><td colspan="6" class="px-6 py-4 text-sm text-neutral-500">No hardcoded secrets detected.</td></tr>'}</tbody>
         </table>
       </div>
       <p id="secrets-empty" class="hidden text-sm text-neutral-500 italic">No secrets match the selected filters.</p>
@@ -539,16 +551,16 @@ export async function buildHtml(p) {
       <p class="text-xs text-neutral-500">Secret values are never written to the report; only a masked preview is shown. A match proves the string is in the package, not that the credential is still valid.</p>
     </section>
 
-    <section id="section-misconfigs" class="hidden space-y-4">
-      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="m-search" type="text" placeholder="Search title, rule, artifact, app..." class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500">
-        <select id="m-severity" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
-        <select id="m-rule" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm"><option value="all">All rule categories</option>${misconfigOptions}</select>
+    <section id="section-misconfigs" class="hidden space-y-6">
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Misconfigurations</h2><div class="flex gap-2 w-full md:w-auto flex-wrap">
+        <input id="m-search" type="text" placeholder="Search title, rule, artifact, app..." class="bg-neutral-800 border border-neutral-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 w-full md:w-64">
+        <select id="m-severity" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All severities</option>${SEVERITIES.map(s => `<option value="${s}">${esc(s)}</option>`).join('')}</select>
+        <select id="m-rule" class="bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none"><option value="all">All rule categories</option>${misconfigOptions}</select></div>
       </div>
       <div class="glass rounded-xl overflow-x-auto">
-        <table class="w-full text-left">
-          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Severity</th><th class="px-4 py-3">Title</th><th class="px-4 py-3">App</th><th class="px-4 py-3">Artifact</th><th class="px-4 py-3">Rule</th><th class="px-4 py-3">MASVS</th></tr></thead>
-          <tbody id="misconfigs-table-body" class="divide-y divide-neutral-800">${misconfigRows || '<tr><td colspan="6" class="px-4 py-3 text-sm text-neutral-500">No misconfigurations detected.</td></tr>'}</tbody>
+        <table class="w-full text-left text-sm">
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Severity</th><th class="px-6 py-4">Title</th><th class="px-6 py-4">App</th><th class="px-6 py-4">Artifact</th><th class="px-6 py-4">Rule</th><th class="px-6 py-4">MASVS</th></tr></thead>
+          <tbody id="misconfigs-table-body" class="divide-y divide-neutral-800">${misconfigRows || '<tr><td colspan="6" class="px-6 py-4 text-sm text-neutral-500">No misconfigurations detected.</td></tr>'}</tbody>
         </table>
       </div>
       <p id="misconfigs-empty" class="hidden text-sm text-neutral-500 italic">No misconfigurations match the selected filters.</p>
@@ -570,18 +582,18 @@ export async function buildHtml(p) {
         </div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by Origin</h3><div class="h-48"><canvas id="originStatsChart"></canvas></div><div class="space-y-2 text-sm"><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">App / package</span><span class="mono">${Number(p.stats?.by_origin?.app || 0)}</span></div><div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500">Unattributed (renamed classes)</span><span class="mono">${Number(p.stats?.by_origin?.unknown || 0)}</span></div><div class="flex justify-between"><span class="text-neutral-500">Third-party library</span><span class="mono">${Number(p.stats?.by_origin?.library || 0)}</span></div></div></div>
         <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Confidence Distribution</h3><div class="h-48"><canvas id="confidenceChart"></canvas></div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by MASVS Area</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Area</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByMasvs.map(([k, v]) => `<tr><td class="px-4 py-3 mono">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No MASVS data.</td></tr>'}</tbody></table></div></div>
-        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by App</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">App</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByApp.map(([k, v]) => `<tr><td class="px-4 py-3 break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No findings.</td></tr>'}</tbody></table></div></div>
-        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Frequent Rules</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider"><tr><th class="px-4 py-3">Rule</th><th class="px-4 py-3 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByRule.map(([k, v]) => `<tr><td class="px-4 py-3 mono break-all">${esc(k)}</td><td class="px-4 py-3 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-4 py-3 text-neutral-500">No rule data.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by MASVS Area</h3><div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Area</th><th class="px-6 py-4 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByMasvs.map(([k, v]) => `<tr><td class="px-6 py-4 mono">${esc(k)}</td><td class="px-6 py-4 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-6 py-4 text-neutral-500">No MASVS data.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Issues by App</h3><div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">App</th><th class="px-6 py-4 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByApp.map(([k, v]) => `<tr><td class="px-6 py-4 break-all">${esc(k)}</td><td class="px-6 py-4 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-6 py-4 text-neutral-500">No findings.</td></tr>'}</tbody></table></div></div>
+        <div class="glass p-6 rounded-xl space-y-4 md:col-span-2 lg:col-span-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Most Frequent Rules</h3><div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-6 py-4">Rule</th><th class="px-6 py-4 text-right">Issues</th></tr></thead><tbody class="divide-y divide-neutral-800">${statsByRule.map(([k, v]) => `<tr><td class="px-6 py-4 mono break-all">${esc(k)}</td><td class="px-6 py-4 text-right mono">${Number(v)}</td></tr>`).join('') || '<tr><td colspan="2" class="px-6 py-4 text-neutral-500">No rule data.</td></tr>'}</tbody></table></div></div>
       </div>
     </section>
 
     <section id="section-scaninfo" class="hidden space-y-8">
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div class="glass p-6 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Scan</h3><div class="space-y-3 text-sm">
+        <div class="glass p-6 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Scan</h3><div class="space-y-3 text-sm">
           ${kvRow('Tool', p.tool || 'ubel-mobile')}${kvRow('Version', p.tool_version || 'unknown')}${kvRow('Generated at', p.generated_at || 'unknown')}${kvRow('Report ID', p.report_id || 'unknown')}${kvRow('Minimum severity filter', p.min_severity || 'info')}${kvRow('Hidden by filter', p.hidden_by_filter || 0)}
         </div></div>
-        <div class="glass p-6 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Target Artifact</h3><div class="space-y-3 text-sm">
+        <div class="glass p-6 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400 flex items-center gap-2"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Target Artifact</h3><div class="space-y-3 text-sm">
           ${kvRow('File', targetFile)}${kvRow('Kind', p.target?.kind || 'unknown')}${kvRow('Size', `${(Number(p.target?.size_bytes || 0) / 1048576).toFixed(2)} MB`)}${kvRow('SHA-256', p.target?.sha256 || 'unknown')}${kvRow('Detected apps', (p.apps || []).length)}${kvRow('Asset name', p.asset_name || 'unknown')}${kvRow('Asset ID', p.asset_id || 'unknown')}${kvRow('Machine ID', p.machine_id || 'unknown')}
         </div></div>
       </div>
@@ -706,6 +718,7 @@ function renderDiffs() {
   };
   html += renderDiffGroup(DIFF_GROUPS[0]);
   html += renderDiffGroup(DIFF_GROUPS[1]);
+  html += renderDiffGroup(DIFF_GROUPS[2]);
   const compliance = d.compliance && d.compliance.frameworks || [];
   if (compliance.length) {
     html += '<h3 class="text-lg font-bold pt-4">Compliance</h3><p class="text-xs text-neutral-500">Issues mapped to each framework, compared with the previous report.</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
@@ -718,7 +731,6 @@ function renderDiffs() {
     });
     html += '</div>';
   }
-  html += renderDiffGroup(DIFF_GROUPS[2]);
   section.innerHTML = html;
 }
 function openMobileDiffModal(group, list) {
@@ -830,4 +842,3 @@ applyVulnerabilityFilters(); applySecretFilters(); applyMisconfigFilters(); appl
 </body>
 </html>`;
 }
-

@@ -90,7 +90,7 @@ Secrets are never written to a report: only a masked preview (`ghp_…(40 chars)
 
 ### Native library hardening
 
-An APK ships a separately built copy of each native library per ABI (`lib/arm64-v8a`, `lib/armeabi-v7a`, `lib/x86`, `lib/x86_64`, …), so the same library can be hardened in one ABI and not in another. ubel-mobile checks **every copy**, and each finding names the exact `abi/library` pair (for example `x86/libtool-checker.so`). The report's **App Inventory** tab shows the full per-ABI table, and the JSON carries it as `apps[].native_hardening` (`total`, `libraries`, `abis`, `failing` counts, and one record per binary with the checks it fails).
+An APK ships a separately built copy of each native library per ABI (`lib/arm64-v8a`, `lib/armeabi-v7a`, `lib/x86`, `lib/x86_64`, …), so the same library can be hardened in one ABI and not in another. ubel-mobile checks **every copy**, and each finding names the exact `abi/library` pair (for example `x86/libtool-checker.so`). The report's **Native Binaries** tab shows the full per-ABI table, and the JSON carries it as `apps[].native_hardening` (`total`, `libraries`, `abis`, `failing` counts, and one record per binary with the checks it fails).
 
 | Check | How it is decided | Rule(s) |
 |---|---|---|
