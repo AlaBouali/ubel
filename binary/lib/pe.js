@@ -56,7 +56,7 @@ export function parsePe(buf) {
     loadConfig: false, securityCookie: null, safeSeh: null,
     wxSections: sections.filter(s => (s.chars & SCN_EXEC) && (s.chars & SCN_WRITE)).map(s => s.name),
     sections: sections.map(s => ({ name: s.name, size: s.rawSize, off: s.rawPtr, vsize: s.vsize, chars: s.chars })),
-    needed: [], imports: [], importsReadable: false,
+    needed: [], imports: [], importProviders: new Map(), ordinalImports: 0, importsReadable: false,
   };
 
   // Authenticode: the security directory holds a FILE OFFSET (not an RVA).
@@ -78,22 +78,23 @@ export function parsePe(buf) {
   const imp = dir(1), io = imp.rva ? rvaToOff(imp.rva) : -1;
   if (io >= 0) {
     try {
-      const names = new Set(), dlls = new Set();
+      const names = new Set(), dlls = new Set(), providers = new Map();
+      let ordinals = 0;
       for (let o = io, n = 0; o + 20 <= buf.length && n < 2048; o += 20, n++) {
         const oft = buf.readUInt32LE(o), nameRva = buf.readUInt32LE(o + 12), ft = buf.readUInt32LE(o + 16);
         if (!oft && !nameRva && !ft) break;
-        const d = cstr(rvaToOff(nameRva)); if (d) dlls.add(d.toLowerCase());
+        const d = cstr(rvaToOff(nameRva)), dll = d ? d.toLowerCase() : null; if (dll) dlls.add(dll);
         let t = rvaToOff(oft || ft); if (t < 0) continue;
         const w = is64 ? 8 : 4;
         for (let k = 0; k < MAX_IMPORTS && t + w <= buf.length; k++, t += w) {
           const v = is64 ? buf.readBigUInt64LE(t) : BigInt(buf.readUInt32LE(t));
           if (v === 0n) break;
-          if (v >> BigInt(is64 ? 63 : 31)) continue;                         // import by ordinal
+          if (v >> BigInt(is64 ? 63 : 31)) { ordinals++; continue; }         // import by ordinal: no name to look at
           const nm = cstr(rvaToOff(Number(v & 0x7fffffffn)) + 2);
-          if (nm) names.add(nm);
+          if (nm) { names.add(nm); if (dll && !providers.has(nm)) providers.set(nm, dll); }
         }
       }
-      r.needed = [...dlls]; r.imports = [...names]; r.importsReadable = true;
+      r.needed = [...dlls]; r.imports = [...names]; r.importProviders = providers; r.ordinalImports = ordinals; r.importsReadable = true;
     } catch { r.importsReadable = false; }
   }
   return r;

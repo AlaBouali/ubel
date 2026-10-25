@@ -19,6 +19,7 @@ import { goBuildInfo, goRecords, goSummary, goNotes } from './lib/go.js';
 import { analyzeNpm } from './lib/npm.js';
 import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
+import { collectBehavior } from './lib/behavior.js';
 import { asciiStrings, utf16Strings } from '../mobile/lib/strings.js';
 import { SecretScanner } from '../mobile/lib/secrets.js';
 import { Findings } from '../mobile/lib/findings.js';
@@ -123,6 +124,16 @@ function riskyImports(importNames, { findings, base, name, stripUnderscore = fal
   }
 }
 
+// ── behavior: what the import table says the file can do (see lib/behavior.js; an inventory of imports, not of call sites) ──────────
+function addBehavior(app, imports, { notes, name, readable = true, windows = false, providers = null, extra = [] }) {
+  const list = [...imports];
+  const behavior = collectBehavior(list, { windows, providers });
+  if (behavior) app.behavior = behavior;
+  if (!readable) notes.push(`${name}: no readable import table, so no behavior inventory was built.`);
+  else if (!behavior) notes.push(`${name}: none of the ${list.length} imported function(s) fall in a behavior category, so no behavior inventory was built.`);
+  for (const x of extra) notes.push(x);
+}
+
 // ── components (version banners, Go build info, Rust crates, packaged npm / Python applications) ────────────────
 // The same CPE can be found twice (the runtime image and a bundled library both carry an OpenSSL banner): NVD answers by CPE, so a
 // CPE is looked up once and keeps every place it was seen.
@@ -220,6 +231,8 @@ function analyzeElf(buf, ctx) {
   if (isStatic) findings.add('binary.static_linked', { ...base, artifact: name, key: 'static_linked', description: 'The executable has no dynamic dependencies, so every library it uses is compiled in and only a rebuild picks up security fixes.', evidence: ['no PT_INTERP and no DT_NEEDED'] });
   if (!elf.symbolsReadable) notes.push(`${name}: no readable dynamic symbol table (statically linked or stripped); stack canary and FORTIFY indicators were not assessed.`);
   riskyImports(elf.imports || [], { findings, base, name });
+  addBehavior(app, elf.imports || [], { notes, name, readable: elf.symbolsReadable,
+    extra: isStatic ? [`${name}: statically linked; the behavior inventory lists only what the import table shows, and most of what this file does is compiled in.`] : [] });
   const pk = runPackagers(buf, { name, notes, app, scanner });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
@@ -281,6 +294,7 @@ function analyzeMachO(buf, ctx) {
   };
   for (const [rule, evidence] of Object.entries(hits)) findings.add(rule, { ...base, artifact: name, key: rule, description: text[rule], evidence, ...(rule === 'binary.no_canary' ? { confidence: 'medium' } : {}) });
   riskyImports(preferred.imports, { findings, base, name, stripUnderscore: true });
+  addBehavior(app, preferred.imports, { notes, name });
   if (preferred.encrypted) { gap(notes, `${name}: FairPlay-encrypted — secrets and component scans were skipped. Scan a decrypted build for full coverage.`); return []; }
   const lines = [];
   for (const part of sectionBuffers(buf, preferred)) {
@@ -312,6 +326,8 @@ function analyzePe(buf, ctx) {
   if (!pe.signed) add('binary.unsigned', 'The file has no Authenticode signature (only the presence of a signature is checked, never its validity).', []);
   if (!pe.importsReadable && pe.kind === 'executable') notes.push(`${name}: the import table could not be read; risky-import checks were skipped.`);
   riskyImports(pe.imports, { findings, base, name });
+  if (!pe.managed) addBehavior(app, pe.imports, { notes, name, readable: pe.importsReadable, windows: true, providers: pe.importProviders,
+    extra: pe.ordinalImports ? [`${name}: ${pe.ordinalImports} function(s) are imported by ordinal; they have no name to classify and are not in the behavior inventory.`] : [] });
   const pk = runPackagers(buf, { name, notes, app, scanner });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);

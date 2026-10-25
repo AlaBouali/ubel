@@ -7,7 +7,7 @@ ubel-binary <binary> [--working-dir <path>] [--min-severity <sev>] [--fail-on <s
 ```
 
 Formats are detected from magic bytes: **ELF** (Linux, Android), **Mach-O** (macOS, iOS; thin and fat) and **PE** (Windows .exe/.dll).
-Output is the same as `ubel-mobile`: `report.binary.json` + `report.binary.html`, written to `.ubel/reports/latest.binary.*` and to a
+Output is the same as `ubel-mobile`, including the Behavior tab: `report.binary.json` + `report.binary.html`, written to `.ubel/reports/latest.binary.*` and to a
 timestamped history zip, with the diff against the previous run, the compliance mapping and the `--fail-on` gate (exit 0/1/2/3).
 
 ## What it checks
@@ -21,11 +21,29 @@ timestamped history zip, with the diff against the previous run, the compliance 
 Also, for every format:
 
 - **Risky imports** (`gets`, `strcpy`/`sprintf` family, `system`/`popen`/`WinExec`, `mktemp`/`tmpnam`, MD5/SHA-1/DES/RC4/Blowfish): reported as vulnerabilities. They come from the import table, so they show a function is linked, not that a call site is exploitable.
+- **Behavior inventory** (`app.behavior`, the report's **Behavior** tab): what the import table says the file can do, grouped into file access, network, process execution, dynamic loading, debugging / process injection, anti-analysis, privilege and persistence, input capture / sensitive devices, cryptography and system information. See *Behavior inventory* below.
 - **Secrets** in the binary's strings (same scanner as `ubel-mobile`).
 - **Known-vulnerable components** (Dependencies tab):
   - C/C++ version banners (OpenSSL, LibreSSL, zlib, libcurl and the libraries it lists, SQLite, libpng, FFmpeg, expat, libxml2, xz, bzip2, BusyBox, Lua, PCRE/PCRE2, glibc, mbed TLS, wolfSSL, libtiff) are mapped to NVD CPEs and checked against the CPE ranges of each CVE (`UBEL_NVD_ENDPOINT` overrides the host).
   - Go module build info and the Go standard-library version, Rust crates from cargo-auditable data (or, failing that, crate paths left in panic messages), and the npm and Python packages of packaged applications (below) are checked against OSV.dev (`UBEL_OSV_ENDPOINT`).
   - Only component names and versions leave the machine. A lookup that fails is reported as an incomplete analysis (exit 3), never as clean.
+
+## Behavior inventory
+
+The Behavior tab is the native counterpart of the Android tab of `ubel-mobile`: a summary of capabilities, **not a list of findings** (nearly every program opens files and sockets), shown next to the findings it bears on (for example *Process execution* links `binary.risky.cmd_exec`).
+
+| Format | Where the names come from |
+| --- | --- |
+| ELF | undefined dynamic symbols (`execve@GLIBC_2.2.5`, `fopen64` and `__isoc99_*` variants are normalised) |
+| Mach-O | imported symbols of the preferred slice, including Objective-C classes (`_OBJC_CLASS_$_NSURLSession`, `NSTask`, `CLLocationManager`, …) |
+| PE | the import table by name, with the DLL that provides each function (`CreateProcessW (kernel32.dll)`); the `A` / `W` suffix is ignored |
+
+What it is, and is not:
+
+- **Imports, not call sites.** `ubel-mobile` counts the call sites its DEX walker reports. Here there is no such walker: a function in the list is *linked and callable*, not shown to be called or reachable, and there are no call counts or app / library split. The report says so.
+- **Short lists are not clean results.** Statically linked and stripped files (most Go and Rust binaries) import little or nothing, so the inventory is small or absent even when the program does a lot; a note says when the file is static or the import table is unreadable. Functions imported **by ordinal** (some old Windows binaries) have no name to classify and are counted in a note. Managed .NET assemblies are not inventoried.
+- **Common functions are left out on purpose** (`sysconf`, `getuid`, `GetTickCount`, `GetModuleHandle`, …). A few that remain (`mprotect`, `GetProcAddress`, `LoadLibrary`, `OpenProcess`) are imported by ordinary programs as well.
+- A long *Debugging / process injection* or *Anti-analysis* list in a program that is neither a debugger nor a protected product is worth a closer look; so is a short import list combined with many *Dynamic loading* entries (functions resolved at run time do not appear in the table).
 
 ## Go, npm-based and Python-based binaries
 
