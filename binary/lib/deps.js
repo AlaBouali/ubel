@@ -1,7 +1,8 @@
 'use strict';
 // deps.js — advisory lookup for the components found inside a binary, shaped exactly like ubel-mobile's dependency block.
 //   PURL records (Go modules, Rust crates)  → OSV.dev through the same code ubel-mobile uses (scanMobileDependencies)
-//   CPE records (C/C++ version banners)      → NVD through the shared SCA engine (submitToNvd), version-verified
+//   CPE records (C/C++ banners, Node.js / Python runtimes) → NVD through the shared SCA engine (submitToNvd), version-verified
+//   inventory records (package seen, version unknown)       → listed as not queryable, no lookup
 // A lookup that fails is reported as a failure of that component, never as "clean".
 
 import { submitToNvd, getFix, scoreToSeverity } from '../../sca/engine.js';
@@ -32,6 +33,8 @@ function finishNvd(v) {
 export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
   const purlRecs = records.filter(r => r.purl);
   const cpeRecs = records.filter(r => !r.purl && r.cpe).map(r => ({ ...r, vulnerabilities: [], vulnerability_count: 0 }));
+  // Inventory-only records (a package that is in the file but whose version could not be recovered): shown, never looked up, never "clean".
+  const inventory = records.filter(r => !r.purl && !r.cpe).map(r => ({ ...r, lookup_status: 'not_queryable', vulnerabilities: [], vulnerability_count: 0 }));
   const first = purlRecs.length ? await scanMobileDependencies(purlRecs, { log }) : { dependencies: [], lookup_error: null };
   let lookupError = first.lookup_error || null;
 
@@ -52,7 +55,7 @@ export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
       for (const dep of pending) { dep.lookup_status = 'lookup_error'; dep.lookup_error = msg; dep.lookup_reason = 'The component could not be conclusively checked against NVD during this scan.'; }
     }
   }
-  const dependencies = [...first.dependencies, ...cpeRecs];
+  const dependencies = [...first.dependencies, ...cpeRecs, ...inventory];
   for (const dep of cpeRecs) if (dep.lookup_status === 'pending') dep.lookup_reason = null;
   settleLookupStatuses(dependencies.filter(d => d.lookup_status === 'pending'));
   for (const dep of cpeRecs) if (dep.lookup_status === 'clean') dep.lookup_reason = 'NVD returned no CVE whose CPE ranges cover this exact version at scan time.';

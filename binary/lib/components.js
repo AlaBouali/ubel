@@ -1,13 +1,13 @@
 'use strict';
 // components.js — what a binary says about the software inside it.
 //   • C/C++ libraries: version banners that libraries leave in their own code (OpenSSL 1.1.1k, zlib 1.2.11, libcurl/7.x …) → NVD CPEs
-//   • Go: module build info (`\xff Go buildinf:`), exact module versions → OSV PURLs (pkg:golang/…)
+//   • Go: see go.js (module build info, exact module versions → OSV PURLs pkg:golang/…)
 //   • Rust: cargo-auditable `.dep-v0` data, or crate paths left in panic messages → OSV PURLs (pkg:cargo/…)
 // A version string proves the code is in the file, not that it is reachable: records carry confidence 'medium' (banner) or 'high' (build metadata).
 
 import zlib from 'zlib';
-
-const C_ECOSYSTEM = 'C/C++ library (version banner)';
+import { cRecord, purlRecord } from './records.js';
+export { goBuildInfo, goRecords } from './go.js';                 // Go build info lives in go.js; re-exported so existing imports keep working
 
 // [name, regex (group 1 = version), CPE vendor, CPE product]
 const BANNERS = [
@@ -35,26 +35,6 @@ const BANNERS = [
 const CURL_PARTS = { openssl: ['OpenSSL', 'openssl', 'openssl'], zlib: ['zlib', 'zlib', 'zlib'], nghttp2: ['nghttp2', 'nghttp2', 'nghttp2'], libssh2: ['libssh2', 'libssh2', 'libssh2'],
   zstd: ['zstd', 'facebook', 'zstandard'], brotli: ['brotli', 'google', 'brotli'] };
 
-const cpeOf = (vendor, product, version) => `cpe:2.3:a:${vendor}:${product}:${version}:*:*:*:*:*:*:*`;
-const specificEnough = v => /^\d+(\.\d+){1,}/.test(String(v || ''));            // same guard as the EASM NVD path: a bare "3" matches every release
-
-function cRecord({ name, version, vendor, product, evidence }) {
-  const cpe = cpeOf(vendor, product, version);
-  return {
-    name, version, ecosystem: C_ECOSYSTEM, purl: null, coordinate: cpe, cpe, platform: 'native',
-    sources: ['embedded version string'], source_types: ['binary version string'], confidence: 'medium', identity: null,
-    lookup_status: specificEnough(version) ? 'pending' : 'not_queryable',
-    lookup_reason: specificEnough(version) ? null : 'The version string is not specific enough for an NVD CPE query.',
-    evidence: String(evidence || '').slice(0, 120), vulnerabilities: [], vulnerability_count: 0,
-  };
-}
-function purlRecord({ name, version, ecosystem, purl, source, sourceType, confidence = 'high' }) {
-  return {
-    name, version, ecosystem, purl, coordinate: null, platform: 'native', sources: [source], source_types: [sourceType], confidence, identity: null,
-    lookup_status: 'pending', lookup_reason: null, vulnerabilities: [], vulnerability_count: 0,
-  };
-}
-
 /** Banner scan over printable strings. @param {Iterable<string>} strings @returns component records (deduplicated by name+version) */
 export function detectBanners(strings) {
   const found = new Map();
@@ -74,57 +54,6 @@ export function detectBanners(strings) {
     }
   }
   return [...found.values()];
-}
-
-// ── Go ───────────────────────────────────────────────────────────────────────────────────────────
-const GO_MAGIC = Buffer.from('\xff Go buildinf:', 'latin1');
-
-function uvarint(buf, at) {
-  let x = 0, s = 0;
-  for (let i = 0; i < 10 && at + i < buf.length; i++) {
-    const b = buf[at + i];
-    if (b < 0x80) return { value: x + b * 2 ** s, next: at + i + 1 };
-    x += (b & 0x7f) * 2 ** s; s += 7;
-  }
-  return null;
-}
-
-/** Go build info (Go ≥ 1.18, inline-string format). @returns {{goVersion:string, modules:{path:string,version:string}[]}|{unsupported:string}|null} */
-export function goBuildInfo(buf) {
-  let at = buf.indexOf(GO_MAGIC);
-  while (at >= 0 && at % 16 !== 0) at = buf.indexOf(GO_MAGIC, at + 1);
-  if (at < 0) return null;
-  const flags = buf[at + 15];
-  if (!(flags & 2)) return { unsupported: 'Go build info uses the pre-1.18 pointer format; module versions were not read.' };
-  const v = uvarint(buf, at + 32); if (!v || v.next + v.value > buf.length) return { unsupported: 'Go build info is truncated.' };
-  const goVersion = buf.toString('latin1', v.next, v.next + v.value).trim();
-  const m = uvarint(buf, v.next + v.value); if (!m || m.next + m.value > buf.length) return { goVersion, modules: [] };
-  let mod = buf.toString('latin1', m.next, m.next + m.value);
-  if (mod.length >= 33 && mod[mod.length - 17] === '\n') mod = mod.slice(16, mod.length - 16);   // strip the 16-byte sentinels
-  const modules = [];
-  let last = null;
-  for (const line of mod.split('\n')) {
-    const f = line.split('\t');
-    if (f[0] === 'dep' && f[1] && f[2]) { last = { path: f[1], version: f[2] }; modules.push(last); }
-    else if (f[0] === '=>' && last) {                                    // replace directive: the replacement is what was compiled in
-      if (f[1] && f[2]) { last.path = f[1]; last.version = f[2]; } else modules.splice(modules.indexOf(last), 1);
-      last = null;
-    } else last = null;
-  }
-  return { goVersion, modules };
-}
-
-export function goRecords(info) {
-  if (!info || info.unsupported) return [];
-  const out = [];
-  const goVer = /^go(\d+\.\d+(?:\.\d+)?)/.exec(info.goVersion || '');
-  const src = 'Go build info', type = 'go buildinfo';
-  if (goVer) out.push(purlRecord({ name: 'Go standard library', version: goVer[1], ecosystem: 'Go', purl: `pkg:golang/stdlib@${goVer[1]}`, source: src, sourceType: type }));
-  for (const m of info.modules) {
-    if (!m.version || m.version === '(devel)') continue;
-    out.push(purlRecord({ name: m.path, version: m.version, ecosystem: 'Go', purl: `pkg:golang/${m.path.split('/').map(encodeURIComponent).join('/')}@${m.version}`, source: src, sourceType: type }));
-  }
-  return out;
 }
 
 // ── Rust ─────────────────────────────────────────────────────────────────────────────────────────

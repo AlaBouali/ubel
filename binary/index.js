@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// ubel-binary — static security scan of a native executable or library (ELF, Mach-O).
+// ubel-binary — static security scan of a native executable or library (ELF, Mach-O, PE), including Go, npm-based (pkg, SEA, Bun) and Python-based (PyInstaller) binaries.
 // Build-hardening misconfigurations and hardcoded secrets, reported like ubel-mobile (report.binary.json + report.binary.html).
 // Reuses the ELF / Mach-O readers, rules, findings, secret scanner, report and --fail-on gate of ubel-mobile.
 // Pure Node built-ins: no third-party libraries and no external binaries. Nothing is executed or loaded.
@@ -14,7 +14,10 @@ import { hardeningRecord, evaluateRecords, groupFailures, summarizeHardening, UN
 import { isMachO, parseMachO, sectionBuffers } from '../mobile/lib/macho.js';
 import { isPe, parsePe } from './lib/pe.js';
 import { elfSections } from './lib/elfsections.js';
-import { detectBanners, goBuildInfo, goRecords, cargoAuditable, cargoRecords, cratesFromStrings } from './lib/components.js';
+import { detectBanners, cargoAuditable, cargoRecords, cratesFromStrings } from './lib/components.js';
+import { goBuildInfo, goRecords, goSummary, goNotes } from './lib/go.js';
+import { analyzeNpm } from './lib/npm.js';
+import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
 import { asciiStrings, utf16Strings } from '../mobile/lib/strings.js';
 import { SecretScanner } from '../mobile/lib/secrets.js';
@@ -50,7 +53,9 @@ Looks for:
   • risky imports (gets, strcpy, system, mktemp, MD5/SHA-1/DES/RC4 …) — heuristics from the import table
   • hardcoded secrets in the binary's strings
   • known-vulnerable components: version banners of C/C++ libraries (OpenSSL, zlib, libcurl, SQLite, libpng, FFmpeg …) are checked
-    against NVD; Go build info and cargo-auditable / Rust crate paths against OSV.dev. Only the component names and versions are sent.
+    against NVD; Go build info (1.13+) and cargo-auditable / Rust crate paths against OSV.dev. Only the component names and versions are sent.
+  • packaged applications: Go binaries; npm-based ones (pkg, Node.js SEA, Bun --compile) with their bundled npm packages and Node.js runtime;
+    Python-based ones (PyInstaller) with their bundled PyPI packages, interpreter and shared libraries — read in memory, nothing is run.
 
 It does NOT look for unknown memory-corruption bugs (that needs disassembly and data-flow analysis). A version banner shows that
 library code is in the file, not that the vulnerable function is reachable. Nothing is executed.
@@ -118,17 +123,82 @@ function riskyImports(importNames, { findings, base, name, stripUnderscore = fal
   }
 }
 
-// ── components (version banners, Go build info, Rust crates) ───────────────────────────────────
-function componentRecords(buf, strings, { notes, name, dep0 }) {
+// ── components (version banners, Go build info, Rust crates, packaged npm / Python applications) ────────────────
+// The same CPE can be found twice (the runtime image and a bundled library both carry an OpenSSL banner): NVD answers by CPE, so a
+// CPE is looked up once and keeps every place it was seen.
+function dedupeRecords(records) {
+  const byCpe = new Map(), out = [];
+  for (const r of records) {
+    if (r.cpe && !r.purl) {
+      const seen = byCpe.get(r.cpe);
+      if (seen) { for (const x of r.sources || []) if (!seen.sources.includes(x)) seen.sources.push(x); continue; }
+      byCpe.set(r.cpe, r);
+    }
+    out.push(r);
+  }
+  return out;
+}
+
+function componentRecords(buf, strings, { notes, name, dep0, app, extra = [] }) {
   const records = [...detectBanners(strings)];
   const go = goBuildInfo(buf);
   if (go && go.unsupported) gap(notes, `${name}: ${go.unsupported}`);
-  else if (go) records.push(...goRecords(go));
+  else if (go) {
+    records.push(...goRecords(go));
+    app.go = goSummary(go);
+    for (const n of goNotes(go, name)) notes.push(n);
+  }
   const exact = dep0 ? cargoAuditable(dep0) : null;
   if (dep0 && !exact) gap(notes, `${name}: the cargo-auditable data (.dep-v0) could not be decoded; Rust crates are taken from embedded paths instead.`);
   const crates = exact || cratesFromStrings(strings);
   records.push(...cargoRecords(crates, { exact: Boolean(exact) }));
-  return records;
+  records.push(...extra);
+  return dedupeRecords(records);
+}
+
+// ── packaged applications: Node.js (pkg, SEA, Bun, nexe) and Python (PyInstaller …) ──────────────────────────
+// The payload of such a file is compressed or embedded in a format of its own, so it is read structurally here; the byte ranges that were read
+// are returned in `regions` and left out of the plain strings pass (they would only be scanned twice, and compressed ones are noise).
+function runPackagers(buf, { name, notes, app, scanner }) {
+  const merged = { records: [], regions: [] };
+  const packaging = [];
+  for (const part of [analyzeNpm(buf, { name }), analyzePython(buf, { name })]) {
+    merged.records.push(...part.records);
+    merged.regions.push(...part.regions);
+    for (const src of part.sources) scanner.add(src.path, src.lines);
+    for (const g of part.gaps) gap(notes, g);
+    for (const n of part.notes || []) notes.push(n);
+    packaging.push(...part.info);
+    if (part.runtimes && part.runtimes.length) (app.runtimes ||= []).push(...part.runtimes);
+  }
+  if (packaging.length) app.packaging = packaging;
+  merged.regions.sort((x, y) => x.start - y.start);
+  return merged;
+}
+
+/** Printable strings of the file without the byte ranges `regions`. A runtime image (Node, Bun) can hold millions of strings, so the budget is larger when a payload was split off. */
+function imageStrings(buf, regions, { notes, name }) {
+  const limit = regions.length ? 2000000 : STR_OPTS.limit;
+  let out;
+  if (!regions.length) out = asciiStrings(buf, STR_OPTS);
+  else {
+    out = [];
+    let at = 0;
+    for (const r of [...regions, { start: buf.length, end: buf.length }]) {
+      if (r.start > at && out.length < limit) {
+        for (const x of asciiStrings(buf.subarray(at, Math.min(r.start, buf.length)), { ...STR_OPTS, limit: limit - out.length })) out.push(x);
+      }
+      at = Math.max(at, r.end);
+    }
+  }
+  if (out.length >= limit) gap(notes, `${name}: more than ${limit} strings; the rest were neither scanned for secrets nor for component versions.`);
+  return out;
+}
+
+/** Secrets are looked for in the application's own bytes. The Node / Bun runtime image around a payload is not the application, and is too large for the secret scanner's line budget. */
+function addImageStrings(scanner, name, strings, packaged, notes) {
+  if (!packaged || strings.length <= 200000) { scanner.add(name, strings); return; }
+  notes.push(`${name}: the runtime image around the packaged application (${strings.length} strings) was checked for component versions but not for secrets; the application's own files were.`);
 }
 
 // ── ELF ──────────────────────────────────────────────────────────────────────────────────────────
@@ -150,11 +220,11 @@ function analyzeElf(buf, ctx) {
   if (isStatic) findings.add('binary.static_linked', { ...base, artifact: name, key: 'static_linked', description: 'The executable has no dynamic dependencies, so every library it uses is compiled in and only a rebuild picks up security fixes.', evidence: ['no PT_INTERP and no DT_NEEDED'] });
   if (!elf.symbolsReadable) notes.push(`${name}: no readable dynamic symbol table (statically linked or stripped); stack canary and FORTIFY indicators were not assessed.`);
   riskyImports(elf.imports || [], { findings, base, name });
-  const strings = asciiStrings(buf, STR_OPTS);
-  if (strings.length >= STR_OPTS.limit) gap(notes, `${name}: more than ${STR_OPTS.limit} strings; the rest were neither scanned for secrets nor for component versions.`);
-  scanner.add(name, strings);
+  const pk = runPackagers(buf, { name, notes, app, scanner });
+  const strings = imageStrings(buf, pk.regions, { notes, name });
+  addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
   const dep = secs.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, strings, { notes, name, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, strings, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 // ── Mach-O ───────────────────────────────────────────────────────────────────────────────────────
@@ -218,8 +288,9 @@ function analyzeMachO(buf, ctx) {
     for (const x of list) if (x.length >= 8) lines.push(x);
   }
   if (lines.length) scanner.add(name, lines);
+  const pk = runPackagers(buf, { name, notes, app, scanner });
   const dep = preferred.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, lines, { notes, name, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, lines, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 // ── PE ───────────────────────────────────────────────────────────────────────────────────────────
@@ -241,11 +312,11 @@ function analyzePe(buf, ctx) {
   if (!pe.signed) add('binary.unsigned', 'The file has no Authenticode signature (only the presence of a signature is checked, never its validity).', []);
   if (!pe.importsReadable && pe.kind === 'executable') notes.push(`${name}: the import table could not be read; risky-import checks were skipped.`);
   riskyImports(pe.imports, { findings, base, name });
-  const strings = asciiStrings(buf, STR_OPTS);
-  if (strings.length >= STR_OPTS.limit) gap(notes, `${name}: more than ${STR_OPTS.limit} strings; the rest were neither scanned for secrets nor for component versions.`);
-  scanner.add(name, strings);
+  const pk = runPackagers(buf, { name, notes, app, scanner });
+  const strings = imageStrings(buf, pk.regions, { notes, name });
+  addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
   const dep = pe.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, strings, { notes, name, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, strings, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 const ANALYZERS = { elf: analyzeElf, macho: analyzeMachO, pe: analyzePe };
