@@ -2991,11 +2991,33 @@ export function scoreToSeverity(score) {
 // set via UBEL_NVD_ENDPOINT may ignore the flag entirely. So every returned CVE
 // is re-checked here against the cpeMatch entries for this vendor:product.
 
+/**
+ * OpenSSL-style versions put a letter after the last number: 1.0.2 < 1.0.2a < 1.0.2z < 1.0.2za. Strict semver rejects them, and
+ * "can't compare" fails open (the CVE is kept), so OpenSSL 3.0.1 was reported against a CVE fixed in 1.1.1l. This is the fallback
+ * for that one shape only; anything else (pre-release tags, dates, odd suffixes) still returns null.
+ */
+function nvdLetterVersionCmp(a, b) {
+  const parse = v => {
+    const m = /^v?(\d+(?:\.\d+)*)([a-z]{1,2})?$/i.exec(String(v ?? "").trim());
+    if (!m) return null;
+    const letters = (m[2] || "").toLowerCase();
+    const rank = letters ? [...letters].reduce((acc, ch) => acc * 27 + (ch.charCodeAt(0) - 96), 0) : 0;   // "" < a < z < za
+    return { nums: m[1].split(".").map(Number), rank };
+  };
+  const pa = parse(a), pb = parse(b);
+  if (!pa || !pb) return null;
+  for (let i = 0; i < Math.max(pa.nums.length, pb.nums.length); i++) {
+    const x = pa.nums[i] ?? 0, y = pb.nums[i] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return pa.rank === pb.rank ? 0 : pa.rank > pb.rank ? 1 : -1;
+}
+
 /** -1 / 0 / 1, or null when either side isn't parseable as a version. */
 function nvdVersionCmp(a, b) {
   const pa = _vr_parseSemver(String(a ?? "").trim());
   const pb = _vr_parseSemver(String(b ?? "").trim());
-  if (!pa || !pb) return null;
+  if (!pa || !pb) return nvdLetterVersionCmp(a, b);
   if (_vr_semverGt(pa, pb)) return 1;
   if (_vr_semverGt(pb, pa)) return -1;
   return 0;

@@ -444,7 +444,7 @@ export function settleLookupStatuses(dependencies) {
   return dependencies;
 }
 
-function summarise(dependencies) {
+export function summarise(dependencies) {
   const summary = {
     total: dependencies.length,
     queryable: 0,

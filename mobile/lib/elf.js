@@ -121,11 +121,12 @@ export function parseElf(buf) {
       dyn.push([tag, val]);
     }
   }
-  let bindNow = false, flags = 0, flags1 = 0, symtabVa = null, strtabVa = null, strsz = 0, hashVa = null, gnuHashVa = null;
+  let hasSoname = false, bindNow = false, flags = 0, flags1 = 0, symtabVa = null, strtabVa = null, strsz = 0, hashVa = null, gnuHashVa = null;
   const tableVas = [];                                   // addresses of the other tables the loader is told about
   for (const [tag, val] of dyn) {
     if (POINTER_TAGS.has(tag) && val > 0) tableVas.push(val);
     switch (tag) {
+      case 14: hasSoname = true; break;                // DT_SONAME: only shared objects have one
       case DT_BIND_NOW: bindNow = true; break;
       case DT_TEXTREL: r.textrel = true; break;
       case DT_FLAGS: flags = val; break;
@@ -143,7 +144,9 @@ export function parseElf(buf) {
   if (flags & DF_TEXTREL) r.textrel = true;        // lld/modern ld emit the flag form rather than DT_TEXTREL
   r.pieFlag = (flags1 & DF_1_PIE) !== 0;           // DF_1_PIE: an ET_DYN that is meant to be run (a PIE executable), not dlopen'ed
   if (relroHdr) r.relro = bindNow ? 'full' : 'partial';
-  if (type === 3) r.kind = (r.interp || r.pieFlag) ? 'executable' : 'shared';
+  // ET_DYN is either a PIE executable or a shared object. DF_1_PIE marks the former on modern linkers; older linkers set only PT_INTERP.
+  // glibc's libc.so.6 also has a PT_INTERP (it can be run), but it carries a DT_SONAME, which no executable has.
+  if (type === 3) r.kind = (r.pieFlag || (r.interp && !hasSoname)) ? 'executable' : 'shared';
 
   // ── section headers (fallback only) ──
   let secSym = null, secStr = null;

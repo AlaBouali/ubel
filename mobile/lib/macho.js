@@ -50,7 +50,7 @@ function parseSlice(buf, base, size) {
   const s = {
     arch: CPU[cputype] || `cpu_${cputype.toString(16)}`, is64, filetype, flags,
     pie: (flags & 0x200000) !== 0, allowStackExec: (flags & 0x20000) !== 0,
-    encrypted: false, cryptid: 0, signed: false, adhoc: false, entitlements: null,
+    encrypted: false, cryptid: 0, signed: false, adhoc: false, cdFlags: null, entitlements: null,
     minOS: null, sdk: null, platform: null, dylibs: [], rpaths: [], imports: new Set(), exports: new Set(),
     sections: [], strings: [],
   };
@@ -83,7 +83,9 @@ function parseSlice(buf, base, size) {
       case 0x21: case 0x2c: s.cryptid = buf.readUInt32LE(p + 16); s.encrypted = s.cryptid !== 0; break;
       case 0x1d: sig = { off: buf.readUInt32LE(p + 8), size: buf.readUInt32LE(p + 12) }; break;
       case 0x32: s.platform = buf.readUInt32LE(p + 8); s.minOS = ver(buf.readUInt32LE(p + 12)); s.sdk = ver(buf.readUInt32LE(p + 16)); break;
-      case 0x25: case 0x24: case 0x2f: s.minOS = s.minOS || ver(buf.readUInt32LE(p + 8)); break;   // LC_VERSION_MIN_*
+      case 0x25: case 0x24: case 0x2f: case 0x30:                                                  // LC_VERSION_MIN_*: the command id names the platform
+        if (s.platform === null) s.platform = ({ 0x24: 1, 0x25: 2, 0x2f: 3, 0x30: 4 })[cmd];
+        s.minOS = s.minOS || ver(buf.readUInt32LE(p + 8)); break;
       default: break;
     }
     p += csz;
@@ -122,7 +124,7 @@ function readSignature(buf, base, s, sig, size) {
     const off = at + buf.readUInt32BE(idxAt + 4);
     if (off + 8 > buf.length) continue;
     const magic = buf.readUInt32BE(off), len = buf.readUInt32BE(off + 4);
-    if (magic === 0xfade0c02 && off + 16 <= buf.length) s.adhoc = (buf.readUInt32BE(off + 12) & 0x2) !== 0;
+    if (magic === 0xfade0c02 && off + 16 <= buf.length) { s.cdFlags = buf.readUInt32BE(off + 12); s.adhoc = (s.cdFlags & 0x2) !== 0; }
     else if (magic === 0xfade7171 && len > 8 && off + len <= buf.length) {
       try { s.entitlements = parsePlist(buf.subarray(off + 8, off + len)); } catch { /* unparseable entitlements */ }
     }

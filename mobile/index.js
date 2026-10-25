@@ -263,7 +263,7 @@ function previousIssues(report) {
 export function diffReports(prev, current) {
   const previousList = prev && previousIssues(prev.report);
   if (!previousList) return null;
-  const ids = r => (r.apps || []).map(a => a.package || a.bundle_id).sort().join(',');
+  const ids = r => (r.apps || []).map(a => a.package || a.bundle_id || a.name).sort().join(',');
   if (ids(prev.report) !== ids(current)) return null;
 
   const keyOf = f => String(f.fingerprint || [f.rule || '', f.artifact || '', f.line || '', f.title || ''].join('|'));

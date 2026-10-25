@@ -22,7 +22,7 @@ const MASVS_FRAMEWORK = {
   version: null,
 };
 
-const MISCONFIG_RULE = /^(?:android\.(?:manifest|nsc|cordova|signing|native|online)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:anti_analysis|build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
+const MISCONFIG_RULE = /^(?:binary\.(?!risky\.)|android\.(?:manifest|nsc|cordova|signing|native|online)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:anti_analysis|build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
 
 export function isMisconfigurationFinding(finding) {
   return MISCONFIG_RULE.test(String(finding?.rule || ''));
@@ -153,7 +153,8 @@ const MASVS_LABEL = {
 
 export function executiveSummary(p) {
   const c = p.summary.counts;
-  const appNames = p.apps.map(a => (a.platform === 'ios' ? `${a.name || a.bundle_id} (${a.bundle_id})` : `${a.package}`));
+  const isBinary = p.apps.some(a => a.platform === 'binary');
+  const appNames = p.apps.map(a => (a.platform === 'binary' ? `${a.name}` : a.platform === 'ios' ? `${a.name || a.bundle_id} (${a.bundle_id})` : `${a.package}`));
   const platform = p.apps.some(a => a.platform === 'ios') ? 'iOS' : 'Android';
   let rating, headline;
   if (c.critical > 0 || c.high >= 3) { rating = 'High risk'; headline = 'Serious weaknesses were found that should be fixed before this app is released or kept in production.'; }
@@ -168,6 +169,7 @@ export function executiveSummary(p) {
   const bc = p.summary.by_category || {};
   const areas = Object.entries(p.summary.by_masvs).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => MASVS_LABEL[k] || k.toLowerCase());
   const paragraphs = [
+    isBinary ? `This report covers the native binary ${appNames.join(', ')}. The file was examined without running it: its headers, load commands, imported symbols and embedded strings were inspected for missing build hardening and hardcoded secrets. It is not a search for memory-corruption bugs: that needs disassembly and data-flow analysis, which this scan does not do.` :
     `This report covers the ${platform} app ${appNames.join(', ') || 'in the scanned package'}. The package was examined without running it: its configuration, embedded files, code and resources were inspected for hardcoded secrets, insecure data handling and risky settings, and the results are mapped to the OWASP Mobile Application Security Verification Standard (MASVS).`,
     `${p.summary.total} issue(s) were recorded — ${bc.vulnerabilities || 0} vulnerabilit${bc.vulnerabilities === 1 ? 'y' : 'ies'}, ${bc.secrets || 0} hardcoded secret(s) and ${bc.misconfigurations || 0} misconfiguration(s) — rated ${c.critical} critical, ${c.high} high, ${c.medium} medium, ${c.low} low and ${c.info} informational.${areas.length ? ` Most of them concern ${areas.join(', ')}.` : ''}`,
     c.critical + c.high > 0
@@ -195,15 +197,52 @@ const HARDENING_BADGE = {
 const HARDENING_LABEL = {
   no_pie: 'No PIE', exec_stack: 'Executable stack', no_gnu_stack: 'No GNU_STACK', wx_segment: 'W+X segment', textrel: 'Text relocations',
   no_relro: 'No RELRO', partial_relro: 'Partial RELRO', no_canary: 'No stack canary', no_fortify: 'No FORTIFY', rpath: 'RPATH / RUNPATH',
+  unsigned: 'Unsigned', adhoc_signed: 'Ad-hoc signature', no_hardened_runtime: 'No hardened runtime', get_task_allow: 'get-task-allow', dangerous_entitlement: 'Risky entitlement',
 };
 
 /**
  * Per-ABI native hardening table (PIE, NX, RELRO, stack canary, FORTIFY, RPATH) for every Android app that has one. Server-rendered
  * and escaped: library names and RPATH values come from the package. Returns '' when no app has native libraries.
  */
+/** Hardening table of a standalone Mach-O (one row per architecture slice). Server-rendered and escaped. */
+function machoHardeningHtml(a) {
+  const h = a.native_hardening;
+  const cell = (text, level, title = '') => `<td class="px-3 py-3"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${HARDENING_BADGE[level]}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span></td>`;
+  const chips = Object.entries(h.failing || {}).filter(([, n]) => n > 0)
+    .map(([k, n]) => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.bad}">${esc(HARDENING_LABEL[k] || k)} × ${Number(n)}</span>`).join(' ');
+  const rows = h.binaries.map(b => {
+    const pie = b.kind !== 'executable' ? cell('n/a', 'na', 'Libraries and bundles are always relocatable') : b.pie ? cell('yes', 'ok') : cell('no', 'bad', 'MH_PIE is not set: the executable loads at a fixed address');
+    const stack = b.stack_exec ? cell('executable', 'bad', 'MH_ALLOW_STACK_EXECUTION is set') : cell('no', 'ok');
+    const canary = b.canary === 'yes' ? cell('yes', 'ok') : b.canary === 'no' ? cell('no', 'bad', 'Unbounded copy functions are imported but no __stack_chk_fail')
+      : cell('none', 'na', 'No canary, but no unbounded copy functions are imported');
+    const sig = b.signature === 'signed' ? cell('signed', 'ok') : b.signature === 'adhoc' ? cell('ad-hoc', 'warn', 'Not tied to a signing identity') : cell('none', 'bad', 'No LC_CODE_SIGNATURE');
+    const rt = b.hardened_runtime === 'yes' ? cell('yes', 'ok') : b.hardened_runtime === 'no' ? cell('no', 'bad', 'CS_RUNTIME is not set in the code directory')
+      : cell('n/a', 'na', 'Applies to signed macOS executables');
+    const ent = (b.entitlements || []).length ? (b.entitlements || []).map(e => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold mono ${HARDENING_BADGE.bad}">${esc(String(e).replace(/^com\.apple\.security\./, ''))}</span>`).join(' ') : '--';
+    return `<tr class="hover:bg-neutral-800/30 transition-colors">
+        <td class="px-3 py-3 mono text-xs whitespace-nowrap">${esc(b.arch)}${b.bits ? ` · ${Number(b.bits)}-bit` : ''}</td>
+        <td class="px-3 py-3 mono text-xs whitespace-nowrap">${esc(b.kind)}</td>
+        ${pie}${stack}${canary}${sig}${rt}
+        <td class="px-3 py-3">${ent}</td>
+        <td class="px-3 py-3 mono text-xs whitespace-nowrap">${b.min_os ? esc(b.min_os) : '--'}</td>
+      </tr>`;
+  }).join('');
+  return `<div class="glass p-6 rounded-xl space-y-4 native-hardening">
+      <div class="flex flex-wrap items-baseline justify-between gap-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Mach-O hardening</h3><span class="mono text-xs text-neutral-500">${esc(a.name || 'Binary')}</span></div>
+      <p class="text-xs text-neutral-400">${Number(h.total)} slice${h.total === 1 ? '' : 's'} · architectures: ${esc((h.abis || []).join(', '))}</p>
+      <div class="flex flex-wrap gap-2">${chips || `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.ok}">No hardening gaps found</span>`}</div>
+      <div class="overflow-x-auto"><table class="w-full text-left text-sm">
+        <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-3 py-3">Slice</th><th class="px-3 py-3">Type</th><th class="px-3 py-3">PIE</th><th class="px-3 py-3">Exec stack</th><th class="px-3 py-3">Canary</th><th class="px-3 py-3">Signature</th><th class="px-3 py-3">Hardened runtime</th><th class="px-3 py-3">Risky entitlements</th><th class="px-3 py-3">Min OS</th></tr></thead>
+        <tbody class="divide-y divide-neutral-800">${rows}</tbody>
+      </table></div>
+      <p class="text-xs text-neutral-500">Every architecture slice of a fat binary is checked on its own. PIE, stack execution, signature and hardened-runtime flags are read from the Mach-O header and code directory; entitlements from the embedded signature. The canary is inferred from imported symbols (<span class="mono">___stack_chk_fail</span>): a binary that imports no unbounded copy function legitimately has none. The signature is read, never verified.</p>
+    </div>`;
+}
+
 export function nativeHardeningHtml(apps) {
   const cell = (text, level, title = '') => `<td class="px-3 py-3"><span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${HARDENING_BADGE[level]}"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span></td>`;
   return (apps || []).filter(a => a?.native_hardening?.binaries?.length).map(a => {
+    if (a.native_hardening.format === 'macho') return machoHardeningHtml(a);
     const h = a.native_hardening;
     const chips = Object.entries(h.failing || {}).filter(([, n]) => n > 0)
       .map(([k, n]) => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold ${HARDENING_BADGE.bad}">${esc(HARDENING_LABEL[k] || k)} × ${Number(n)}</span>`).join(' ');
@@ -369,13 +408,13 @@ export async function buildHtml(p) {
   const dependencyStatusLabel = { vulnerable: 'Vulnerable', clean: 'Safe', not_queryable: 'Not queried', lookup_error: 'Lookup failed', lookup_incomplete: 'Lookup incomplete', pending: 'Pending' };
   const severityColors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3' };
   const total = all.length;
-  const appIdentity = a => a.platform === 'ios' ? (a.name || a.bundle_id || 'iOS app') : (a.package || a.name || 'Android app');
-  const appVersion = a => a.platform === 'ios' ? `${a.version || '?'} (${a.build || '?'})` : `${a.version_name || '?'} (${a.version_code || '?'})`;
-  const appPlatform = a => a.platform === 'ios' ? 'iOS' : 'Android';
+  const appIdentity = a => a.platform === 'binary' ? (a.name || 'Binary') : a.platform === 'ios' ? (a.name || a.bundle_id || 'iOS app') : (a.package || a.name || 'Android app');
+  const appVersion = a => a.platform === 'binary' ? '—' : a.platform === 'ios' ? `${a.version || '?'} (${a.build || '?'})` : `${a.version_name || '?'} (${a.version_code || '?'})`;
+  const appPlatform = a => a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android';
   const appRows = (p.apps || []).map((a, i) => {
-    const id = a.platform === 'ios' ? a.bundle_id : a.package;
-    const scope = a.platform === 'ios' ? (a.min_os ? `iOS ${a.min_os}+` : 'iOS') : `min ${a.min_sdk ?? '?'} / target ${a.target_sdk ?? '?'}`;
-    const componentCount = a.platform === 'ios'
+    const id = a.platform === 'binary' ? (a.arch || '') : a.platform === 'ios' ? a.bundle_id : a.package;
+    const scope = a.platform === 'binary' ? (a.kind || '') : a.platform === 'ios' ? (a.min_os ? `iOS ${a.min_os}+` : 'iOS') : `min ${a.min_sdk ?? '?'} / target ${a.target_sdk ?? '?'}`;
+    const componentCount = a.platform === 'binary' ? (a.needed || []).length : a.platform === 'ios'
       ? (a.frameworks || []).length + (a.extensions || []).length
       : Object.values(a.components || {}).reduce((sum, n) => sum + Number(n || 0), 0) + (a.native_libs || []).length;
     return `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-app-index="${i}" title="Open app metadata">
@@ -870,8 +909,11 @@ function appDetails(index) {
   const a = reportData.apps[index]; if (!a) return;
   const rows = [];
   const add = (k, v) => { if (v !== undefined && v !== null && v !== '') rows.push(modalMetaRow(k, v)); };
-  add('Platform', a.platform === 'ios' ? 'iOS' : 'Android');
-  if (a.platform === 'ios') {
+  add('Platform', a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android');
+  if (a.platform === 'binary') {
+    add('Name', a.name); add('Architecture', (a.architectures || [a.arch]).join(', ')); add('Type', a.kind); add('Bits', a.bits);
+    add('Linked libraries', (a.needed || []).join(', ')); add('Signed', a.signed === undefined ? '' : (a.signed ? 'yes' : 'no'));
+  } else if (a.platform === 'ios') {
     add('Name', a.name); add('Bundle ID', a.bundle_id); add('Version', a.version); add('Build', a.build); add('Minimum iOS', a.min_os); add('Architectures', (a.architectures || []).join(', '));
     add('Binary', a.binary ? ('PIE ' + (a.binary.pie ? 'yes' : 'no') + ', encrypted ' + (a.binary.encrypted ? 'yes' : 'no') + ', signed ' + (a.binary.signed ? 'yes' : 'no') + (a.binary.swift ? ', Swift' : '')) : '—');
     add('Provisioning', a.provisioning ? [a.provisioning.type, a.provisioning.name, a.provisioning.team, 'expires ' + (a.provisioning.expires || '?')].filter(Boolean).join(' — ') : '—');
