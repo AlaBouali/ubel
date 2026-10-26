@@ -27,6 +27,8 @@ Also, for every format:
   - C/C++ version banners (OpenSSL, LibreSSL, zlib, libcurl and the libraries it lists, SQLite, libpng, FFmpeg, expat, libxml2, xz, bzip2, BusyBox, Lua, PCRE/PCRE2, glibc, mbed TLS, wolfSSL, libtiff) are mapped to NVD CPEs and checked against the CPE ranges of each CVE (`UBEL_NVD_ENDPOINT` overrides the host).
   - Go module build info and the Go standard-library version, Rust crates from cargo-auditable data (or, failing that, crate paths left in panic messages), and the npm and Python packages of packaged applications (below) are checked against OSV.dev (`UBEL_OSV_ENDPOINT`).
   - Only component names and versions leave the machine. A lookup that fails is reported as an incomplete analysis (exit 3), never as clean.
+  - Every advisory is also a **finding** (`binary.component.vulnerable`, one per component and advisory, titled `CVE-… in <component> <version>`). It is counted in the issue totals, the risk rating, the executive summary and the Vulnerabilities tab, and takes part in the diff against the previous run. The `--fail-on` gate counts advisories once (from the dependency list), never twice. Several advisories of one component share one recommended action: the lowest release that fixes them all.
+  - The report's **Hardening** tab shows the PE flags (ASLR, high-entropy ASLR, DEP / NX, CFG, SafeSEH, /GS cookie, W+X sections, signature) as a table, next to the existing ELF and Mach-O tables.
 
 ## Behavior inventory
 

@@ -139,6 +139,8 @@ export const RULES = {
   'binary.unsigned':                   R('medium', 'Binary carries no code signature', 'MASVS-RESILIENCE', 347, 'Sign the binary (codesign on macOS, Authenticode on Windows) with a certificate you control.'),
   'binary.not_stripped':               R('info',   'Binary keeps its symbol table or debug information', 'MASVS-RESILIENCE', 497, 'Strip release binaries (strip -s, -Wl,-s, /DEBUG:NONE) and ship debug symbols separately.'),
   'binary.static_linked':              R('info',   'Binary is statically linked', 'MASVS-CODE-3', 1104, 'Statically linked libraries are not patched by operating-system updates: rebuild and redeploy whenever a bundled library has a security fix.'),
+  // Known-vulnerable component (a CVE / advisory for a library found inside the file; the Dependencies tab lists the same advisories)
+  'binary.component.vulnerable':       R('high',   'Known-vulnerable component', 'MASVS-CODE-3', 1395, 'Update the component to a fixed version and rebuild the binary.'),
   // Windows PE
   'binary.pe.no_aslr':                 R('high',   'PE image does not opt in to ASLR (no DYNAMIC_BASE)', 'MASVS-CODE-4', 693, 'Link with /DYNAMICBASE (and keep relocations: no /FIXED).'),
   'binary.pe.relocs_stripped':         R('medium', 'PE image has its relocations stripped', 'MASVS-CODE-4', 693, 'Do not link with /FIXED; keep the .reloc section so the loader can randomise the base address.'),

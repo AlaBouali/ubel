@@ -19,6 +19,7 @@ import { goBuildInfo, goRecords, goSummary, goNotes } from './lib/go.js';
 import { analyzeNpm } from './lib/npm.js';
 import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
+import { addAdvisoryFindings } from './lib/advisories.js';
 import { BehaviorBuilder, sourceOwner } from './lib/behavior.js';
 import { goFunctionNames } from './lib/gosyms.js';
 import { elfCallSites, peCallSites } from './lib/callsites.js';
@@ -327,7 +328,8 @@ function analyzePe(buf, ctx) {
   const { name, findings, base, notes, scanner, app } = ctx;
   const pe = parsePe(buf);
   Object.assign(app, { format: 'pe', arch: pe.arch, bits: pe.bits, kind: pe.kind, needed: pe.needed.slice(0, 200), signed: pe.signed, managed: pe.managed, subsystem: pe.subsystem });
-  const add = (rule, description, evidence, extra = {}) => findings.add(rule, { ...base, artifact: name, key: rule, description, evidence, ...extra });
+  const failedKeys = [];
+  const add = (rule, description, evidence, extra = {}) => { failedKeys.push(rule.replace(/^binary\.(pe\.)?/, '')); return findings.add(rule, { ...base, artifact: name, key: rule, description, evidence, ...extra }); };
   if (!pe.aslr) add('binary.pe.no_aslr', 'The image does not set IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE, so it always loads at its preferred base address.', ['DllCharacteristics: DYNAMIC_BASE not set']);
   else if (pe.relocsStripped) add('binary.pe.relocs_stripped', 'DYNAMIC_BASE is set but the file header says relocations were stripped, so the loader cannot move the image.', ['IMAGE_FILE_RELOCS_STRIPPED']);
   if (pe.bits === 64 && pe.aslr && !pe.highEntropyVa && !pe.managed) add('binary.pe.no_high_entropy_va', 'A 64-bit image without HIGH_ENTROPY_VA is randomised within a much smaller address range.', ['DllCharacteristics: HIGH_ENTROPY_VA not set']);
@@ -340,6 +342,22 @@ function analyzePe(buf, ctx) {
   if (pe.wxSections.length) add('binary.wx_segment', 'A section is both writable and executable.', pe.wxSections.map(n => `section ${n}: IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE`));
   if (!pe.signed) add('binary.unsigned', 'The file has no Authenticode signature (only the presence of a signature is checked, never its validity).', []);
   if (!pe.importsReadable && pe.kind === 'executable') notes.push(`${name}: the import table could not be read; risky-import checks were skipped.`);
+  // Hardening table (Native Binaries / Hardening tab): one row, the flags the findings above were derived from.
+  const cfgApplies = !pe.managed && ['x86', 'x86_64', 'arm64'].includes(pe.arch);
+  const yn = (applies, ok) => (!applies ? 'n/a' : ok ? 'yes' : 'no');
+  const failing = {};
+  for (const k of failedKeys) failing[k] = (failing[k] || 0) + 1;
+  app.native_hardening = {
+    format: 'pe', total: 1, libraries: 1, abis: [pe.arch], unknown_symbols: 0, failing,
+    binaries: [{
+      library: name, arch: pe.arch, bits: pe.bits, kind: pe.kind, managed: pe.managed,
+      aslr: yn(true, pe.aslr && !pe.relocsStripped), high_entropy_va: yn(pe.bits === 64 && !pe.managed, pe.highEntropyVa),
+      nx: yn(true, pe.nx), cfg: yn(cfgApplies, pe.cfg),
+      safeseh: pe.arch !== 'x86' || pe.managed ? 'n/a' : pe.noSeh ? 'not needed' : yn(true, pe.safeSeh === true),
+      gs: yn(!pe.managed, pe.loadConfig && pe.securityCookie !== false),
+      wx_sections: pe.wxSections.slice(0, 8), signed: yn(true, pe.signed), failed: [...new Set(failedKeys)],
+    }],
+  };
   riskyImports(pe.imports, { findings, base, name });
   if (!pe.managed) addBehavior(ctx, pe.imports, { readable: pe.importsReadable, windows: true, providers: pe.importProviders, sites: peCallSites(buf),
     extra: pe.ordinalImports ? [`${name}: ${pe.ordinalImports} function(s) are imported by ordinal; they have no name to classify and are not in the behavior inventory.`] : [] });
@@ -434,8 +452,13 @@ export async function main() {
   const everything = scan.findings.list.slice();
   const rank = SEVERITY_RANK[args.minSeverity];
   scan.findings.list = everything.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
-  const hidden = everything.length - scan.findings.list.length;
+  let hidden = everything.length - scan.findings.list.length;
   await resolveDependencies(scan, scan.notes, args);
+  // Advisories of the bundled components become findings of the report (counts, risk rating, Vulnerabilities tab, diffs). They are added AFTER the
+  // gate's list was taken: the gate counts dependency advisories itself, so feeding both would count every advisory twice.
+  const advisoryFindings = addAdvisoryFindings(scan.findings, scan.dependencies, { app: scan.target.file });
+  scan.findings.list = scan.findings.list.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
+  hidden = everything.length + advisoryFindings.length - scan.findings.list.length;
   const gate = evaluateGate({ failOn: args.failOnParsed, findings: everything, dependencies: scan.dependencies, gaps: scan.notes.gaps || [], allowPartial: args.allowPartial });
   const payload = await writeReports({ hidden, gate }, scan, scan.notes, args);
 

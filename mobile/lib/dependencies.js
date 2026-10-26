@@ -328,7 +328,8 @@ function minimalVulnerability(v) {
   return {
     id: v.id || v.vulnerability_id || 'Unknown advisory',
     summary: v.summary || v.title || '',
-    details: v.details || '',
+    // processVulnerability() folds `details` into `description` and deletes it, so read both.
+    details: v.description || v.details || '',
     aliases: Array.isArray(v.aliases) ? v.aliases : [],
     severity: String(v.severity || 'unknown').toLowerCase(),
     severity_score: v.severity_score == null ? null : Number(v.severity_score),

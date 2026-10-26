@@ -11,8 +11,9 @@ import { scanMobileDependencies, settleLookupStatuses, summarise } from '../../m
 
 function minimal(v) {
   return {
-    id: v.id || v.vulnerability_id || 'Unknown advisory', summary: v.summary || v.title || '', details: v.details || '', aliases: Array.isArray(v.aliases) ? v.aliases : [],
+    id: v.id || v.vulnerability_id || 'Unknown advisory', summary: v.summary || v.title || '', details: v.description || v.details || '',   // processVulnerability() moves `details` into `description` aliases: Array.isArray(v.aliases) ? v.aliases : [],
     severity: String(v.severity || 'unknown').toLowerCase(), severity_score: v.severity_score == null ? null : Number(v.severity_score), severity_vector: v.severity_vector || null,
+    cwes: Array.isArray(v.cwes) ? v.cwes : [],
     published: v.published || null, modified: v.modified || null, url: v.url || (v.id ? `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v.id)}` : null),
     fixed_versions: Array.isArray(v.fixed_versions) ? v.fixed_versions : [], has_fix: Boolean(v.has_fix),
     affected_package_id: v.affected_package_id || null, affected_dependency_version: v.affected_dependency_version || null, is_infection: false,
