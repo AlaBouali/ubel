@@ -21,6 +21,7 @@ import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
 import { addAdvisoryFindings } from './lib/advisories.js';
 import { BehaviorBuilder, sourceOwner } from './lib/behavior.js';
+import { RemoteHostCollector } from './lib/hosts.js';
 import { goFunctionNames } from './lib/gosyms.js';
 import { elfCallSites, peCallSites } from './lib/callsites.js';
 import { asciiStrings, utf16Strings } from '../mobile/lib/strings.js';
@@ -183,7 +184,7 @@ function componentRecords(buf, strings, { notes, name, dep0, app, behavior, extr
 // ── packaged applications: Node.js (pkg, SEA, Bun, nexe) and Python (PyInstaller …) ──────────────────────────
 // The payload of such a file is compressed or embedded in a format of its own, so it is read structurally here; the byte ranges that were read
 // are returned in `regions` and left out of the plain strings pass (they would only be scanned twice, and compressed ones are noise).
-function runPackagers(buf, { name, notes, app, scanner, behavior }) {
+function runPackagers(buf, { name, notes, app, scanner, behavior, hosts }) {
   const merged = { records: [], regions: [] };
   const packaging = [];
   for (const [part, lang] of [[analyzeNpm(buf, { name }), 'js'], [analyzePython(buf, { name }), 'py']]) {
@@ -191,7 +192,10 @@ function runPackagers(buf, { name, notes, app, scanner, behavior }) {
     merged.regions.push(...part.regions);
     for (const src of part.sources) {
       scanner.add(src.path, src.lines);
-      behavior.addBundleText({ ...sourceOwner(src.path, lang), lines: src.lines, tokens: src.tokens || [] });          // owner = the node_modules package / PYZ top-level module
+      const so = sourceOwner(src.path, lang);
+      behavior.addBundleText({ ...so, lines: src.lines, tokens: src.tokens || [] });          // owner = the node_modules package / PYZ top-level module
+      // source text of the application: URLs and IP:port only (a bare `req.id` or `1.2.3.4` in code is not a host)
+      if (hosts && !so.skip) hosts.addStrings(src.lines, so.owner ? `bundled ${lang === 'py' ? 'module' : 'package'}: ${so.owner}` : 'bundled application', { bare: 'ip-port' });
     }
     for (const g of part.gaps) gap(notes, g);
     for (const n of part.notes || []) notes.push(n);
@@ -228,6 +232,15 @@ function addImageStrings(scanner, name, strings, packaged, notes) {
   notes.push(`${name}: the runtime image around the packaged application (${strings.length} strings) was checked for component versions but not for secrets; the application's own files were.`);
 }
 
+/**
+ * Remote hosts (lib/hosts.js): URLs, IP addresses and domain names in the file's own strings. The runtime image around a packaged Node / Bun
+ * application is the runtime, not the application: its strings are not listed (same rule as the secret scan above).
+ */
+function addHostStrings(ctx, strings, packaged) {
+  if (packaged && strings.length > 200000) { ctx.notes.push(`${ctx.name}: the runtime image around the packaged application was not searched for remote hosts; the application's own files were.`); return; }
+  ctx.hosts.addStrings(strings, ctx.name);
+}
+
 // ── ELF ──────────────────────────────────────────────────────────────────────────────────────────
 function analyzeElf(buf, ctx) {
   const { name, findings, base, notes, scanner, app } = ctx;
@@ -249,9 +262,10 @@ function analyzeElf(buf, ctx) {
   riskyImports(elf.imports || [], { findings, base, name });
   addBehavior(ctx, elf.imports || [], { readable: elf.symbolsReadable, providers: elf.importProviders, sites: elfCallSites(buf),
     extra: isStatic ? [`${name}: statically linked; the import table shows only part of what this file does, most of it is compiled in.`] : [] });
-  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior, hosts: ctx.hosts });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
+  addHostStrings(ctx, strings, pk.regions.length > 0);
   const dep = secs.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
   return componentRecords(buf, strings, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
@@ -318,7 +332,8 @@ function analyzeMachO(buf, ctx) {
     for (const x of list) if (x.length >= 8) lines.push(x);
   }
   if (lines.length) scanner.add(name, lines);
-  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
+  ctx.hosts.addStrings(lines, name);
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior, hosts: ctx.hosts });
   const dep = preferred.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
   return componentRecords(buf, lines, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
@@ -361,9 +376,12 @@ function analyzePe(buf, ctx) {
   riskyImports(pe.imports, { findings, base, name });
   if (!pe.managed) addBehavior(ctx, pe.imports, { readable: pe.importsReadable, windows: true, providers: pe.importProviders, sites: peCallSites(buf),
     extra: pe.ordinalImports ? [`${name}: ${pe.ordinalImports} function(s) are imported by ordinal; they have no name to classify and are not in the behavior inventory.`] : [] });
-  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior, hosts: ctx.hosts });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
+  addHostStrings(ctx, strings, pk.regions.length > 0);
+  // Windows programs keep most of their text as UTF-16 (L"https://…"; .NET user strings), which the ASCII pass above does not see.
+  if (pk.regions.length === 0 && buf.length <= 256 * MB) ctx.hosts.addStrings(utf16Strings(buf, { min: 8, max: 512, limit: 200000 }), `${name} (UTF-16)`);
   const dep = pe.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
   return componentRecords(buf, strings, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
@@ -386,13 +404,15 @@ export function scanBinary(file, opts = {}) {
   const base = { app: name };
   const scanner = new SecretScanner(findings, base);
   const app = { platform: 'binary', name, size_bytes: buf.length };
-  const ctx = { name, findings, base, notes, scanner, app, behavior: new BehaviorBuilder(), importCount: 0 };
+  const ctx = { name, findings, base, notes, scanner, app, behavior: new BehaviorBuilder(), hosts: new RemoteHostCollector(), importCount: 0 };
   let records;
   try { records = ANALYZERS[format](buf, ctx); }
   catch (err) { throw new Error(`${FORMAT_LABEL[format]} not readable: ${err.message}`); }
   const behavior = ctx.behavior.summary();
   if (behavior) app.behavior = behavior;
   else if (ctx.importCount) notes.push(`${name}: none of the ${ctx.importCount} imported function(s) fall in a behavior category, so no behavior inventory was built.`);
+  const remoteHosts = ctx.hosts.summary();
+  if (remoteHosts) app.remote_hosts = remoteHosts;
   scanner.run();
   if (scanner.truncated) gap(notes, `${name}: more strings than the secret scanner's line budget; the rest were not scanned.`);
   notes.push('Scope: build hardening, imported-API use, hardcoded secrets and known-vulnerable components. Unknown memory-corruption bugs are not detected, and a component version banner shows the code is present, not that the vulnerable function is reachable.');

@@ -12,6 +12,7 @@ import { Aggregator } from './findings.js';
 import { gap } from './coverage.js';
 import { analyzeFrameworks } from './frameworks.js';
 import { NativeBehavior } from './behavior.js';
+import { RemoteHostCollector } from '../../binary/lib/hosts.js';
 
 const MB = 1024 * 1024;
 const URL_HTTP = /^http:\/\/[^\s"'<>\\]{4,300}$/i;
@@ -65,7 +66,8 @@ export function analyzeIpa(zip, ctx) {
     architectures: [], frameworks: [], extensions: [], url_schemes: [], binary: null,
   };
   const art = `${dir}Info.plist`;
-  plistChecks(info, { findings, base, art, app });
+  const hosts = new RemoteHostCollector();      // remote hosts: URLs / IPs / domains in the strings of the package (binary/lib/hosts.js)
+  plistChecks(info, { findings, base, art, app, hosts });
   scanner.add(art, plistToLines(info));
 
   // provisioning profile → distribution type, expiry, entitlements
@@ -80,7 +82,7 @@ export function analyzeIpa(zip, ctx) {
 
   // Mach-O: main executable, embedded frameworks, app extensions
   const agg = new Aggregator(findings, base);
-  const state = { urls: new Set(), pinned: false, hasSwiftOnly: false, machoPaths: new Set(), native: new NativeBehavior() };
+  const state = { urls: new Set(), pinned: false, hasSwiftOnly: false, machoPaths: new Set(), native: new NativeBehavior(), hosts };
   const targets = [];
   if (app.executable) targets.push({ name: `${dir}${app.executable}`, label: app.executable, main: true, origin: 'app' });
   for (const e of zip.entries) {
@@ -124,8 +126,10 @@ export function analyzeIpa(zip, ctx) {
   }
 
   // cross-platform frameworks (React Native / Hermes, Flutter, Unity, Xamarin / .NET)
-  const fw = analyzeFrameworks(zip, { platform: 'ios', findings, base, scanner, notes, at: n => n, addUrl: u => state.urls.add(u) });
+  const fw = analyzeFrameworks(zip, { platform: 'ios', findings, base, scanner, notes, at: n => n, addUrl: u => { state.urls.add(u); hosts.addText(u, 'cross-platform framework code'); } });
   app.cross_platform = fw.list;
+  const remoteHosts = hosts.summary();
+  if (remoteHosts) app.remote_hosts = remoteHosts;
 
   // cleartext URLs / pinning
   const http = [...state.urls].filter(u => URL_HTTP.test(u) && !NAMESPACE_URL.test(u));
@@ -155,13 +159,14 @@ function summariseEntitlements(ent) {
 }
 
 // ── Info.plist ─────────────────────────────────────────────────────────────────────────────────────
-function plistChecks(info, { findings, base, art, app }) {
+function plistChecks(info, { findings, base, art, app, hosts = null }) {
   const ats = info.NSAppTransportSecurity;
   if (ats && typeof ats === 'object') {
     if (ats.NSAllowsArbitraryLoads === true) findings.add('ios.plist.ats_arbitrary', { ...base, artifact: art, description: 'NSAllowsArbitraryLoads turns App Transport Security off for the whole app: plain HTTP and weak TLS are allowed everywhere.', evidence: ['NSAllowsArbitraryLoads = true'] });
     if (ats.NSAllowsArbitraryLoadsInWebContent === true) findings.add('ios.plist.ats_web', { ...base, artifact: art, description: 'Web views may load insecure content.', evidence: ['NSAllowsArbitraryLoadsInWebContent = true'] });
     const ex = ats.NSExceptionDomains && typeof ats.NSExceptionDomains === 'object' ? ats.NSExceptionDomains : {};
     const insecure = [], oldTls = [];
+    if (hosts) for (const d of Object.keys(ex)) hosts.addText(d, `${art} (ATS exception domain)`);            // domains the app declares rules for
     for (const [d, cfg] of Object.entries(ex)) {
       if (!cfg || typeof cfg !== 'object') continue;
       if (cfg.NSExceptionAllowsInsecureHTTPLoads === true || cfg.NSThirdPartyExceptionAllowsInsecureHTTPLoads === true) insecure.push(d);
@@ -236,6 +241,7 @@ function analyzeMachO(buf, t, { agg, findings, base, scanner, state, notes, app 
     for (const s of list) { strings.add(s); if (part.name !== '__objc_methname' && part.name !== '__objc_classname' && s.length >= 8) lines.push(s); }
   }
   if (lines.length && (t.main || buf.length < 64 * MB)) scanner.add(art, lines);
+  if (lines.length) state.hosts.addStrings(lines, label);
   const has = s => strings.has(s);
   for (const s of strings) { if (s.startsWith('http://')) state.urls.add(s); }
   if (PIN_STRINGS.some(has) || [...strings].some(s => /sha(256|1)\/[A-Za-z0-9+/]{27,44}={0,2}/.test(s))) state.pinned = true;

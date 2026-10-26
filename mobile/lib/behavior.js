@@ -55,6 +55,8 @@ export const BEHAVIOR_LABELS = {
 const ORIGINS = ['app', 'unknown', 'library'];
 const INTENT_INIT = 'Landroid/content/Intent;-><init>', INTENT_SET_ACTION = 'Landroid/content/Intent;->setAction';
 const MAX_APIS = 40, MAX_ACTIONS = 100;
+/** Distinct entries of one origin: `functions` is counted before the list is cut to MAX_APIS; reports from older versions only have the list. */
+export const functionsOf = o => (o && Number.isFinite(o.functions) ? o.functions : Object.keys(o?.apis || {}).length);
 const strArg = a => (a && a.k === 'str' ? a.v : null);
 
 export class BehaviorCollector {
@@ -87,7 +89,7 @@ export class BehaviorCollector {
       categories[cat] = {};
       for (const o of ORIGINS) {
         const c = this.cats[cat][o];
-        if (c) categories[cat][o] = { calls: c.total, apis: Object.fromEntries([...c.apis].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS)) };
+        if (c) categories[cat][o] = { calls: c.total, functions: c.apis.size, apis: Object.fromEntries([...c.apis].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS)) };
       }
     }
     const intent_actions = {};
@@ -101,6 +103,7 @@ export function mergeBehavior(a, b) {
   if (!a) return b || null;
   if (!b) return a;
   const out = { categories: {}, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
+  if (a.counted || b.counted) out.counted = true;
   if (a.native || b.native) out.native = { libraries: (a.native?.libraries || 0) + (b.native?.libraries || 0), counted: Boolean(a.native?.counted || b.native?.counted) };
   for (const cat of new Set([...Object.keys(a.categories), ...Object.keys(b.categories)])) {
     out.categories[cat] = {};
@@ -109,7 +112,9 @@ export function mergeBehavior(a, b) {
       if (!x && !y) continue;
       const apis = { ...(x?.apis || {}) };
       for (const [k, n] of Object.entries(y?.apis || {})) apis[k] = (apis[k] || 0) + n;
-      out.categories[cat][o] = { calls: (x?.calls || 0) + (y?.calls || 0), apis: Object.fromEntries(Object.entries(apis).sort((p, q) => q[1] - p[1] || p[0].localeCompare(q[0])).slice(0, MAX_APIS)) };
+      // distinct entries: the union of the listed names, plus what each side had cut from its own list
+      const functions = Object.keys(apis).length + Math.max(0, functionsOf(x) - Object.keys(x?.apis || {}).length) + Math.max(0, functionsOf(y) - Object.keys(y?.apis || {}).length);
+      out.categories[cat][o] = { calls: (x?.calls || 0) + (y?.calls || 0), functions, apis: Object.fromEntries(Object.entries(apis).sort((p, q) => q[1] - p[1] || p[0].localeCompare(q[0])).slice(0, MAX_APIS)) };
     }
   }
   for (const o of ORIGINS) {
@@ -143,7 +148,8 @@ export class NativeBehavior {
     const o = origin === 'library' ? 'library' : 'app';
     for (const [cat, byProvider] of Object.entries(sum.categories)) {
       for (const v of Object.values(byProvider)) {
-        const c = ((this.cats[cat] ||= {})[o] ||= { total: 0, apis: new Map() });
+        const c = ((this.cats[cat] ||= {})[o] ||= { total: 0, functions: 0, apis: new Map() });
+        c.functions += functionsOf(v);
         for (const [api, n] of Object.entries(v.apis)) {
           const k = `${binary}: ${api}`;
           c.apis.set(k, (c.apis.get(k) || 0) + n);
@@ -159,8 +165,8 @@ export class NativeBehavior {
     for (const [cat, byOrigin] of Object.entries(this.cats)) {
       const key = android && cat === 'dynamic_loading' ? 'native_code' : cat;
       for (const [o, c] of Object.entries(byOrigin)) {
-        const t = ((out[key] ||= {})[o] ||= { total: 0, apis: new Map() });
-        t.total += c.total;
+        const t = ((out[key] ||= {})[o] ||= { total: 0, functions: 0, apis: new Map() });
+        t.total += c.total; t.functions += c.functions;
         for (const [k, n] of c.apis) t.apis.set(k, (t.apis.get(k) || 0) + n);
       }
     }
@@ -178,7 +184,7 @@ export class NativeBehavior {
       categories[cat] = {};
       for (const o of ORIGINS) {
         const c = cats[cat][o];
-        if (c) categories[cat][o] = { calls: c.total, apis: Object.fromEntries([...c.apis].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS)) };
+        if (c) categories[cat][o] = { calls: c.total, functions: c.functions, basis: this.counted ? 'sites' : 'present', apis: Object.fromEntries([...c.apis].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS)) };
       }
     }
     return { categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {}, counted: this.counted, native: this._info() };
@@ -197,7 +203,7 @@ export class NativeBehavior {
         if (!dex && !nat) continue;
         const apis = new Map(Object.entries(dex?.apis || {}));
         for (const [k, n] of nat?.apis || []) apis.set(k, (apis.get(k) || 0) + n);
-        out.categories[cat][o] = { calls: (dex?.calls || 0) + (nat?.total || 0), apis: Object.fromEntries([...apis].sort((p, q) => q[1] - p[1] || p[0].localeCompare(q[0])).slice(0, MAX_APIS)) };
+        out.categories[cat][o] = { calls: (dex?.calls || 0) + (nat?.total || 0), functions: functionsOf(dex) + (nat?.functions ?? (nat?.apis?.size || 0)), apis: Object.fromEntries([...apis].sort((p, q) => q[1] - p[1] || p[0].localeCompare(q[0])).slice(0, MAX_APIS)) };
       }
     }
     out.native = this._info();

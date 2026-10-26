@@ -17,6 +17,7 @@ import { scanBundledFiles } from './files.js';
 import { Aggregator, mask } from './findings.js';
 import { ResilienceCollector, MIN_INDICATORS, RESILIENCE_CALLS, RUNTIME_EXEC, classifyResilienceString } from './resilience.js';
 import { BehaviorCollector, BEHAVIOR, NativeBehavior } from './behavior.js';
+import { RemoteHostCollector } from '../../binary/lib/hosts.js';
 import { elfCallSites } from '../../binary/lib/callsites.js';
 import { captureFirebaseResource, collectVerifyHosts, onlineData, FIREBASE_DB_URL } from './online.js';
 import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, classifyJwt, constantSecretArg } from './signals.js';
@@ -244,11 +245,12 @@ export function analyzeApk(zip, ctx) {
   const namespaces = appNamespaces(pkg, application);
   const urls = new Map();          // url -> artifact
   const addUrl = (u, a) => { if (!urls.has(u)) urls.set(u, a); };
+  const hosts = new RemoteHostCollector();       // remote hosts: every URL / IP / domain in the strings of the package (binary/lib/hosts.js)
   let pinning = false;
 
   manifestChecks({ manifest, application, app, base, findings, at, targetSdk, minSdk, scanner, featureModule });
   const xmlRoots = resourceXml(zip, at, scanner, notes);
-  networkSecurityChecks({ xmlRoots, base, findings, at, flags: { setPinned: () => { pinning = true; } } });
+  networkSecurityChecks({ xmlRoots, base, findings, at, hosts, flags: { setPinned: () => { pinning = true; } } });
   hybridChecks({ xmlRoots, base, findings, at });
 
   // string resources
@@ -262,6 +264,7 @@ export function analyzeApk(zip, ctx) {
         if (seen.has(k) || !s.value) continue;
         seen.add(k);
         if (s.value.length >= 8 || /key|secret|token|pass|pwd|auth|_id$/i.test(s.name)) lines.push(`${s.name} = "${esc(s.value)}"`);
+        hosts.addText(s.value, at(arsc.name));
         if (/^https?:\/\//i.test(s.value)) addUrl(s.value, at(arsc.name));
         captureFirebaseResource(app, s.name, s.value);
       }
@@ -276,19 +279,21 @@ export function analyzeApk(zip, ctx) {
       const dex = new Dex(zip.read(e, 160 * MB), e.name);
       app.dex_files.push(e.name);
       collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
-      if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces, behavior })) pinning = true;
+      if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces, behavior, hosts })) pinning = true;
     } catch (err) { gap(notes, `${at(e.name)}: code not analysed (${err.message}).`); }
   }
   if (!app.dex_files.length && !featureModule) notes.push(`${at('classes.dex')}: no DEX code found.`);
   if (app.dex_files.length) app.behavior = behavior.summary();
 
-  nativeLibraries(zip, { findings, base, at, scanner, notes, app });
+  nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts });
   if (!ctx.module) signing(zip, { findings, base, at, app, minSdk });      // bundle modules carry no signature of their own
   libraries(zip, app);
 
   // cross-platform frameworks: React Native / Hermes, Flutter, Unity, Xamarin / .NET (runs before URL aggregation: it feeds addUrl)
-  const fw = analyzeFrameworks(zip, { platform: 'android', findings, base, scanner, notes, at, addUrl });
+  const fw = analyzeFrameworks(zip, { platform: 'android', findings, base, scanner, notes, at, addUrl: (u, a) => { addUrl(u, a); hosts.addText(u, 'cross-platform framework code'); } });
   app.cross_platform = fw.list;
+  const remoteHosts = hosts.summary();
+  if (remoteHosts) app.remote_hosts = remoteHosts;
 
   // cleartext endpoints / firebase / pinning (collected from DEX + resources)
   const http = [], firebase = [];
@@ -422,7 +427,7 @@ function resourceXml(zip, at, scanner, notes) {
   return roots;
 }
 
-function networkSecurityChecks({ xmlRoots, base, findings, at, flags }) {
+function networkSecurityChecks({ xmlRoots, base, findings, at, flags, hosts = null }) {
   const nsc = xmlRoots.find(x => x.root.tag === 'network-security-config');
   if (!nsc) return;
   const art = at(nsc.name);
@@ -430,6 +435,7 @@ function networkSecurityChecks({ xmlRoots, base, findings, at, flags }) {
   const baseCfg = r.children.find(c => c.tag === 'base-config');
   const domains = r.children.filter(c => c.tag === 'domain-config');
   const hostsOf = d => findAll(d, 'domain').map(x => x.text.trim()).filter(Boolean);
+  if (hosts) for (const d of domains) for (const h of hostsOf(d)) hosts.addText(h, `${art} (network security config)`);      // domains the app declares rules for
   if (baseCfg && baseCfg.attrs.cleartextTrafficPermitted === true) findings.add('android.nsc.cleartext', { ...base, artifact: art, key: 'base', description: 'base-config permits cleartext HTTP for every domain without its own rule.', evidence: ['<base-config cleartextTrafficPermitted="true">'] });
   const clearDomains = domains.filter(d => d.attrs.cleartextTrafficPermitted === true).flatMap(hostsOf);
   if (clearDomains.length) findings.add('android.nsc.cleartext', { ...base, artifact: art, key: 'domains', severity: 'low', description: 'These domains are allowed cleartext HTTP.', evidence: clearDomains });
@@ -457,7 +463,7 @@ function hybridChecks({ xmlRoots, base, findings, at }) {
 }
 
 // ── DEX ────────────────────────────────────────────────────────────────────────────────────────────
-export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [], behavior = null }) {
+export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces = [], behavior = null, hosts = null }) {
   const agg = new Aggregator(findings, base);
   const resil = new ResilienceCollector();
   const users = new Map();                       // string idx -> first class that loads it
@@ -581,10 +587,14 @@ export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespace
   for (let i = 0; i < dex.nStr; i++) {
     const s = dex.string(i);
     if (s.length < 8 || s.length > 2000) continue;
+    if (hosts && s.indexOf('.') > 0) {
+      const o = users.has(i) ? classOrigin(users.get(i), namespaces) : null;
+      hosts.addText(s, `${at(dex.name)} · ${o === 'app' ? 'app code' : o === 'library' ? 'library code' : o === 'unknown' ? 'renamed classes' : 'not loaded by code'}`);
+    }
     if (s.startsWith('http')) { if (URL_HTTP.test(s) || URL_FIREBASE.test(s)) addUrl(s, at(dex.name)); }
     if (!pinned && PIN.test(s)) pinned = true;
     const dec = b64Lines.length < 20000 ? decodeBase64Text(s) : null;       // base64-wrapped keys, URLs, JSON: scan what is inside
-    if (dec) { b64Idx.push(i); b64Lines.push(dec); if (URL_HTTP.test(dec.trim()) || URL_FIREBASE.test(dec.trim())) addUrl(dec.trim(), at(dex.name)); }
+    if (dec) { b64Idx.push(i); b64Lines.push(dec); if (hosts) hosts.addText(dec, `${at(dex.name)} · base64 string`); if (URL_HTTP.test(dec.trim()) || URL_FIREBASE.test(dec.trim())) addUrl(dec.trim(), at(dex.name)); }
     if (TYPE_DESC.test(s)) continue;
     idxs.push(i); lines.push(s);
   }
@@ -608,7 +618,7 @@ const EXTRA_ABI_BUDGET = 512 * MB;           // bytes read for ABI copies other 
  * be missing its canary or PIE in x86. Findings name the exact `abi/library`; `app.native_hardening` holds the per-ABI table.
  * Exported so the policy can be exercised against a small archive without a full APK.
  */
-export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }) {
+export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts = null }) {
   const byName = new Map();                  // library name -> its ABI copies, preferred ABI first
   for (const e of zip.find(/^lib\/[^/]+\/[^/]+\.so$/)) {
     const [, abi, name] = e.name.match(/^lib\/([^/]+)\/([^/]+)$/);
@@ -636,7 +646,11 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }
       }
       if (!elf.symbolsReadable) notes.push(`${where}: dynamic symbol table not readable; stack canary and FORTIFY indicators were not assessed.`);
     } catch (err) { gap(notes, `${where}: ELF not readable (${err.message}); hardening flags not checked.`); }
-    if (strings && !SKIP_STRINGS.test(name)) scanner.add(where, asciiStrings(buf, { min: 8, max: 400, limit: 40000 }));
+    if (strings && !SKIP_STRINGS.test(name)) {
+      const text = asciiStrings(buf, { min: 8, max: 400, limit: 40000 });
+      scanner.add(where, text);
+      if (hosts) hosts.addStrings(text, `lib/${abi}/${name}`);
+    }
     return buf.length;
   };
 

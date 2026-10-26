@@ -16,6 +16,7 @@ import { Notes, gap } from './lib/coverage.js';
 import { analyzeIpa, findAppDir } from './lib/ios.js';
 import { SecretScanner } from './lib/secrets.js';
 import { mergeBehavior } from './lib/behavior.js';
+import { mergeRemoteHosts } from '../binary/lib/hosts.js';
 import { runOnlineChecks, onlineData } from './lib/online.js';
 export { runOnlineChecks };
 import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies } from './lib/dependencies.js';
@@ -181,6 +182,8 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
       base.libraries = [...base.libraries, ...app.libraries.filter(l => !base.libraries.some(b => b.name === l.name && b.version === l.version))];
       base.frameworks = [...new Set([...base.frameworks, ...app.frameworks])];
       base.behavior = mergeBehavior(base.behavior, app.behavior);
+      base.remote_hosts = mergeRemoteHosts(base.remote_hosts, app.remote_hosts);
+      if (!base.remote_hosts) delete base.remote_hosts;
       const bo = onlineData(base), fo = onlineData(app);
       fo.verifyHosts.forEach(h => bo.verifyHosts.add(h)); fo.dbUrls.forEach(u => bo.dbUrls.add(u));
     }

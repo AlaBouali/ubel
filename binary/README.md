@@ -52,6 +52,17 @@ What it is, and is not:
 - **Common functions are left out on purpose** (`sysconf`, `getuid`, `GetTickCount`, `GetModuleHandle`, …). A few that remain (`mprotect`, `GetProcAddress`, `LoadLibrary`, `OpenProcess`) are imported by ordinary programs as well. A name can sit in two categories (`SetWindowsHookEx`: persistence and input capture).
 - A long *Debugging / process injection* or *Anti-analysis* list in a program that is neither a debugger nor a protected product is worth a closer look; so is a short import list combined with many *Dynamic loading* entries (functions resolved at run time do not appear in the table).
 
+### How the numbers on the Behavior tab are counted
+
+- **Functions** is the number of distinct entries listed for a behavior (the rows of its panel). The pill next to each behavior, the *Functions* column of the overview and the number on the tab are the same count; the tab number is the sum of all of them plus the remote hosts. `app.behavior.categories.<cat>.<source>.functions` holds it, counted before the list is cut to 60 entries per source (the panel says how many more there are).
+- **Call sites** are counted for imports only (ELF / PE, x86-64 and arm64): the direct calls found in the code, 0 = imported but no direct call found. Entries from the Go function table or Rust paths are *present* (✓), and entries from the text of a packaged Node / Python application are *mentions* (lines that refer to the module). Each source says which it is (`basis`: `sites`, `present`, `refs`); only `sites` go into the call-site total (`app.behavior.call_sites`).
+
+### Remote hosts
+
+The **Remote hosts** view of the Behavior tab (`app.remote_hosts`) lists the IP addresses and domain names that the file names in its strings: `scheme://host[:port]` URLs (http, https, ws, wss, ftp, ssh, mqtt, redis, postgres, grpc …), `IPv4:port` pairs, IPv6 addresses in URLs, and DNS names that stand alone as a string or follow a key such as `host=` / `server:`. For each host it shows the type, the scheme and port, where it was seen (the file, its UTF-16 strings on Windows, or a bundled package / module), how often it is mentioned and whether it is in a private range or reached through a plain-text scheme (http, ws, ftp …).
+
+It is a list of **references, not of connections**: a name in the file shows that the code mentions it, not that it connects there, when, or with what. Addresses that are built at run time, read from a config file or received from a server are not visible, and documentation links look the same as API endpoints. Left out: XML / schema namespaces and licence URLs, `example.com` / `.test` / `.invalid`, loopback and unspecified addresses, template placeholders (`https://%s`), e-mail addresses, Go / Rust module paths, reverse-DNS class names and version-number lookalikes. The runtime image around a packaged Node / Bun application is not searched (its own files are). Nothing is resolved or contacted.
+
 ## Go, npm-based and Python-based binaries
 
 A native file is often only the wrapper around an application written in another language. `ubel-binary` recognises three kinds by their own structure (never by file name), reads their payload in memory, and reports what is inside next to the usual hardening checks. The report's app metadata shows what was found (`go`, `packaging`, `runtimes`).

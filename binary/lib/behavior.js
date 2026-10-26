@@ -8,6 +8,11 @@
 // sites that reach the import (`basis: 'calls'`, 0 = imported but no direct call found). Either way the result is an inventory, not proof that
 // code runs. It is a summary on the app record (`app.behavior`), never a rule hit: nearly every program does file and network I/O.
 //
+// Counting. Every entry has a count and a BASIS that says what the count is: `sites` (direct call sites found in the code; 0 = imported, no call
+// found), `refs` (lines of bundled source text that mention the module) or `present` (the function is linked or referenced; the count is 1).
+// An origin's summary carries `functions` (how many distinct entries it has, counted BEFORE the list is cut to MAX_APIS), `calls` (the sum of
+// the counts, for old consumers) and `basis`. Only `sites` are call sites: refs and presence are never added to a call-site total.
+//
 // Sources, each filed under an ORIGIN (the library, module or owner the entry belongs to):
 //   imports  the import table. Origin = the library that provides the function: PE the DLL of the import descriptor, ELF the file named by
 //            symbol versioning (libc.so.6), Mach-O the dylib named by the symbol's library ordinal. Imports without a recorded provider
@@ -315,15 +320,17 @@ export function sourceOwner(path, lang) {
 }
 
 export class BehaviorBuilder {
-  constructor() { this.found = new Map(); this.sources = new Set(); this.imports = 0; this.counted = false; }
+  constructor() { this.found = new Map(); this.kinds = new Map(); this.sources = new Set(); this.imports = 0; this.counted = false; }
 
-  /** Records one function under a category and an origin (a repeat is one entry). */
-  add(cat, api, origin, source, n = 1) {
+  /** Records one function under a category and an origin (a repeat is one entry). `kind`: what `n` counts (see the header: sites / refs / present). */
+  add(cat, api, origin, source, n = 1, kind = 'present') {
     if (!NATIVE_BEHAVIOR_LABELS[cat]) return;
     const o = String(origin || UNATTRIBUTED).slice(0, 120), a = String(api).slice(0, 200);
     const byOrigin = this.found.get(cat) || this.found.set(cat, new Map()).get(cat);
     const apis = byOrigin.get(o) || byOrigin.set(o, new Map()).get(o);
-    apis.set(a, (apis.get(a) || 0) + n);                                      // call sites when counted, otherwise 1: present
+    apis.set(a, (apis.get(a) || 0) + n);
+    const key = `${cat}\0${o}`;
+    (this.kinds.get(key) || this.kinds.set(key, new Set()).get(key)).add(kind);
     if (source) this.sources.add(source);
   }
 
@@ -346,10 +353,10 @@ export class BehaviorBuilder {
       const from = providers && providers.get(raw);
       let n = sites ? sites.counts.get(raw) || 0 : 1;
       if (sites && raw === 'ptrace' && sites.traceme > 0) {
-        this.add('anti_analysis', 'ptrace(PTRACE_TRACEME)', from, 'imports', sites.traceme);   // a process that traces itself: no debugger can attach
+        this.add('anti_analysis', 'ptrace(PTRACE_TRACEME)', from, 'imports', sites.traceme, 'sites');   // a process that traces itself: no debugger can attach
         if (n === 0) { hit++; continue; }                                                       // every ptrace call is the anti-debug one
       }
-      for (const cat of cats) this.add(cat, shown, from, 'imports', n);
+      for (const cat of cats) this.add(cat, shown, from, 'imports', n, sites ? 'sites' : 'present');
       hit++;
     }
     return hit;
@@ -373,7 +380,7 @@ export class BehaviorBuilder {
         const key = `${cat}\0${label}`;
         if (seen.has(key)) break;
         seen.add(key);
-        this.add(cat, label, goOwner(sp.pkg, modules), 'go');
+        this.add(cat, label, goOwner(sp.pkg, modules), 'go', 1, 'present');
         n++;
         break;
       }
@@ -391,12 +398,12 @@ export class BehaviorBuilder {
       const rel = s.slice(at + 16).replace(/[:\s].*$/, '');
       for (const [cat, label, re] of RUST_STD) {
         if (!re.test(rel) || seen.has(label)) continue;
-        seen.add(label); this.add(cat, label, RUST_STD_NAME, 'rust'); n++;
+        seen.add(label); this.add(cat, label, RUST_STD_NAME, 'rust', 1, 'present'); n++;
       }
     }
     for (const c of crates) {
       const cat = RUST_CRATE.get(c.name);
-      if (cat) { this.add(cat, c.name, c.name, 'rust'); n++; }
+      if (cat) { this.add(cat, c.name, c.name, 'rust', 1, 'present'); n++; }
     }
     return n;
   }
@@ -411,7 +418,7 @@ export class BehaviorBuilder {
     if (skip) return 0;
     const rules = lang === 'py' ? PY_RULES : JS_RULES;
     let n = 0, current = owner;
-    const scan = (text, who) => { for (const [cat, label, re] of rules) if (re.test(text)) { this.add(cat, label, who, 'bundle'); n++; } };
+    const scan = (text, who) => { for (const [cat, label, re] of rules) if (re.test(text)) { this.add(cat, label, who, 'bundle', 1, 'refs'); n++; } };
     const names = lang === 'py' ? rules.map(r => r[3]) : [];
     for (const line of lines) {
       if (line.length > 4096) continue;
@@ -422,7 +429,7 @@ export class BehaviorBuilder {
       scan(line, current || (lang === 'js' ? 'bundle' : 'app'));
     }
     if (lang === 'py') {
-      rules.forEach(([cat, label], i) => { if (names[i].length && tokens.some(t => names[i].some(nm => tokenIs(t, nm)))) { this.add(cat, label, owner || 'app', 'bundle'); n++; } });
+      rules.forEach(([cat, label], i) => { if (names[i].length && tokens.some(t => names[i].some(nm => tokenIs(t, nm)))) { this.add(cat, label, owner || 'app', 'bundle', 1, 'refs'); n++; } });
     }
     return n;
   }
@@ -438,10 +445,13 @@ export class BehaviorBuilder {
       const weight = m => [...m.values()].reduce((t, v) => t + v, 0);
       for (const [origin, m] of [...byOrigin].sort((x, y) => weight(y[1]) - weight(x[1]) || x[0].localeCompare(y[0]))) {
         const apis = [...m].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS);
-        categories[cat][origin] = { calls: weight(m), apis: Object.fromEntries(apis) };
+        const kinds = this.kinds.get(`${cat}\0${origin}`) || new Set();
+        categories[cat][origin] = { calls: weight(m), functions: m.size, basis: kinds.size === 1 ? [...kinds][0] : 'mixed', apis: Object.fromEntries(apis) };
       }
     }
+    let functions = 0, callSites = 0;
+    for (const byOrigin of Object.values(categories)) for (const o of Object.values(byOrigin)) { functions += o.functions; if (o.basis === 'sites') callSites += o.calls; }
     const order = ['imports', 'go', 'rust', 'bundle'];
-    return { basis: this.counted ? 'calls' : 'presence', counted: this.counted, sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
+    return { basis: this.counted ? 'calls' : 'presence', counted: this.counted, functions, call_sites: this.counted ? callSites : null, sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
   }
 }
