@@ -21,7 +21,7 @@ timestamped history zip, with the diff against the previous run, the compliance 
 Also, for every format:
 
 - **Risky imports** (`gets`, `strcpy`/`sprintf` family, `system`/`popen`/`WinExec`, `mktemp`/`tmpnam`, MD5/SHA-1/DES/RC4/Blowfish): reported as vulnerabilities. They come from the import table, so they show a function is linked, not that a call site is exploitable.
-- **Behavior inventory** (`app.behavior`, the report's **Behavior** tab): what the import table says the file can do, grouped into file access, network, process execution, dynamic loading, debugging / process injection, anti-analysis, privilege and persistence, input capture / sensitive devices, cryptography and system information. See *Behavior inventory* below.
+- **Behavior inventory** (`app.behavior`, the report's **Behavior** tab): what the file can do, grouped into file access, network, process execution, dynamic loading, debugging / process injection, anti-analysis, privilege, persistence, input capture / sensitive devices, cryptography and system information. Read from the import table, and for Go, Rust and packaged applications from what they carry instead of imports. See *Behavior inventory* below.
 - **Secrets** in the binary's strings (same scanner as `ubel-mobile`).
 - **Known-vulnerable components** (Dependencies tab):
   - C/C++ version banners (OpenSSL, LibreSSL, zlib, libcurl and the libraries it lists, SQLite, libpng, FFmpeg, expat, libxml2, xz, bzip2, BusyBox, Lua, PCRE/PCRE2, glibc, mbed TLS, wolfSSL, libtiff) are mapped to NVD CPEs and checked against the CPE ranges of each CVE (`UBEL_NVD_ENDPOINT` overrides the host).
@@ -32,17 +32,21 @@ Also, for every format:
 
 The Behavior tab is the native counterpart of the Android tab of `ubel-mobile`: a summary of capabilities, **not a list of findings** (nearly every program opens files and sockets), shown next to the findings it bears on (for example *Process execution* links `binary.risky.cmd_exec`).
 
-| Format | Where the names come from |
-| --- | --- |
-| ELF | undefined dynamic symbols (`execve@GLIBC_2.2.5`, `fopen64` and `__isoc99_*` variants are normalised) |
-| Mach-O | imported symbols of the preferred slice, including Objective-C classes (`_OBJC_CLASS_$_NSURLSession`, `NSTask`, `CLLocationManager`, …) |
-| PE | the import table by name, with the DLL that provides each function (`CreateProcessW (kernel32.dll)`); the `A` / `W` suffix is ignored |
+| Source | Where the names come from | Origin (the report's **Source** column) |
+| --- | --- | --- |
+| ELF imports | undefined dynamic symbols (`execve`, `fopen64` and `__isoc99_*` variants are normalised) | The library named by symbol versioning (`libc.so.6`). Unversioned symbols (musl, bionic) have no recorded library and are filed under `unattributed` |
+| Mach-O imports | imported symbols of the preferred slice, including Objective-C classes (`_OBJC_CLASS_$_NSURLSession`, `NSTask`, `CLLocationManager`, …) | The dylib named by the symbol's library ordinal (two-level namespace) |
+| PE imports | the import table by name; the `A` / `W` suffix is ignored; `WinHttp*`, `CreateProcess*`, `ShellExecute*`, `RegSetValue*`, `CreateService*`, `EVP_*`, `BCrypt*` are matched as families | The DLL of the import descriptor |
+| Go | the function names of the **pclntab** (`os/exec.Command`, `net/http.(*Client).Do`, `golang.org/x/sys/unix.Ptrace`), also in stripped files; Go 1.18+ layout verified on a real binary, 1.2 and 1.16 layouts implemented from the runtime source | The module that **defines** the function: `Go standard library` or a dependency's module path (from the build info). It says who owns the function, not who calls it |
+| Rust | `library/std/src/{fs,net,process}…` and `registry/src/…/<crate>-<version>/` paths left in panic messages, with a table of crate names | `Rust standard library` or the crate. Weaker than the others: only code that can panic leaves a path |
+| Packaged applications | the text of the files read out of pkg, Node SEA, Bun and PyInstaller applications: `child_process`, `net` / `http`, `fs`, `vm` / `eval`, `crypto`, `os` (JavaScript); `subprocess`, `socket`, `urllib` / `requests`, `ctypes`, `importlib`, `shutil`, `hashlib` (Python) | The owner of the file: the `node_modules` package (pkg: the virtual path; SEA / Bun: the bundler's `// node_modules/…` markers), the PYZ top-level module, or `app`. A bundle without markers is one source, `bundle` |
 
 What it is, and is not:
 
-- **Imports, not call sites.** `ubel-mobile` counts the call sites its DEX walker reports. Here there is no such walker: a function in the list is *linked and callable*, not shown to be called or reachable, and there are no call counts or app / library split. The report says so.
-- **Short lists are not clean results.** Statically linked and stripped files (most Go and Rust binaries) import little or nothing, so the inventory is small or absent even when the program does a lot; a note says when the file is static or the import table is unreadable. Functions imported **by ordinal** (some old Windows binaries) have no name to classify and are counted in a note. Managed .NET assemblies are not inventoried.
-- **Common functions are left out on purpose** (`sysconf`, `getuid`, `GetTickCount`, `GetModuleHandle`, …). A few that remain (`mprotect`, `GetProcAddress`, `LoadLibrary`, `OpenProcess`) are imported by ordinary programs as well.
+- **Presence, not call sites.** `ubel-mobile` counts the call sites its DEX walker reports. Here there is no such walker: an entry is *linked or referenced*, not shown to be called or reachable, and there are no call counts. The report says so. Counting calls would need PLT / IAT resolution and a disassembler; it is not done.
+- **Python is read as names.** PyInstaller modules are marshalled code, where `os.system(...)` leaves `os` and `system` as separate strings. Module names (`subprocess`, `socket`, `ctypes` …) are matched; `os.system` only where it is written out in text. Modules whose top-level name starts with an underscore (private standard-library helpers) are left out.
+- **Short lists are not clean results.** Statically linked and stripped files import little or nothing, so the inventory is small or absent even when the program does a lot; a note says when the file is static or the import table is unreadable. Functions imported **by ordinal** (some old Windows binaries) have no name to classify and are counted in a note. Managed .NET assemblies are not inventoried.
+- **Common functions are left out on purpose** (`sysconf`, `getuid`, `GetTickCount`, `GetModuleHandle`, …). A few that remain (`mprotect`, `GetProcAddress`, `LoadLibrary`, `OpenProcess`) are imported by ordinary programs as well. A name can sit in two categories (`SetWindowsHookEx`: persistence and input capture).
 - A long *Debugging / process injection* or *Anti-analysis* list in a program that is neither a debugger nor a protected product is worth a closer look; so is a short import list combined with many *Dynamic loading* entries (functions resolved at run time do not appear in the table).
 
 ## Go, npm-based and Python-based binaries

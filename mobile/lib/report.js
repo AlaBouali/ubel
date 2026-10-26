@@ -323,11 +323,17 @@ const ANDROID_BEHAVIOR = {
   intro: "API references counted in the app's DEX code, split by who owns the class. <b>Renamed classes</b> are obfuscated classes outside the app's own package: most likely library code, but not provable. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact APIs.",
 };
 const NATIVE_BEHAVIOR = {
-  labels: NATIVE_BEHAVIOR_LABELS, info: NATIVE_BEHAVIOR_INFO, origins: ['app'], originLabel: { app: 'Imported' }, badge: { app: 'text-neutral-300 border-neutral-600 bg-neutral-800/50' },
-  columns: { app: 'Imported functions' }, ownerHeader: 'Source', countHeader: 'Present', totalHeader: 'Total', ipc: false, fallbackName: 'Binary',
-  intro: "Functions the file's import table links, grouped by what they do. An import shows that a function is <b>linked and callable</b>, not that it is called or reachable: call sites are not analysed, so there are no call counts. A statically linked or stripped file lists little here even when it does a lot. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.",
+  labels: NATIVE_BEHAVIOR_LABELS, info: NATIVE_BEHAVIOR_INFO, dynamicOrigins: true, origins: [], originLabel: o => o, badge: () => 'text-neutral-300 border-neutral-600 bg-neutral-800/50',
+  columns: { all: 'Functions' }, ownerHeader: 'Source', countHeader: 'Present', totalHeader: 'Total', ipc: false, fallbackName: 'Binary',
+  intro: b => {
+    const from = { imports: 'the import table', go: 'the Go function table (pclntab)', rust: 'the std and crate paths left in panic messages', bundle: "the text of the packaged application's own files" };
+    const src = (b?.sources?.length ? b.sources : ['imports']).map(x => from[x] || x);
+    return `Functions and modules found in ${src.join(', ')}, grouped by what they do and by <b>Source</b>: the library that provides an import, the module that defines a Go function, the crate, or the owner of a bundled file. An entry shows that the function is <b>linked or referenced</b>, not that it is called or reachable: call sites are not analysed, so there are no call counts. A statically linked or stripped file lists little here even when it does a lot. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
+  },
 };
 const behaviorProfile = a => (a && a.platform === 'binary' ? NATIVE_BEHAVIOR : ANDROID_BEHAVIOR);
+/** Origins of one app's behavior summary: fixed for Android, the libraries / modules / owners that actually occur for a native binary. */
+const behaviorOrigins = (P, b) => (P.dynamicOrigins ? [...new Set(Object.values(b.categories || {}).flatMap(byOrigin => Object.keys(byOrigin || {})))].sort() : P.origins);
 
 /** Number of distinct behavior API references across the apps of a payload (the count shown on the tab). */
 export function behaviorApiCount(apps) {
@@ -345,32 +351,33 @@ export function behaviorHtml(apps, findings = []) {
     : '<p class="text-xs text-neutral-500">No finding in this report bears on this behavior.</p>';
 
   return withBehavior.map(({ a, i }) => {
-    const P = behaviorProfile(a), ORIGINS = P.origins;
-    const originChip = o => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap ${P.badge[o]}">${esc(P.originLabel[o])}</span>`;
+    const P = behaviorProfile(a), b = a.behavior, ORIGINS = behaviorOrigins(P, b);
+    const badgeOf = o => (typeof P.badge === 'function' ? P.badge(o) : P.badge[o]), labelOf = o => (typeof P.originLabel === 'function' ? P.originLabel(o) : P.originLabel[o]);
+    const originChip = o => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap break-all ${badgeOf(o)}">${esc(labelOf(o))}</span>`;
     const related = (app, cat) => {
       const re = P.info[cat]?.rules;
       return re ? findings.filter(f => re.test(String(f.rule || '')) && (!f.app || !app.package || f.app === app.package)) : [];
     };
-    const b = a.behavior;
     const cats = Object.keys(P.labels).filter(c => b.categories[c]);
     const totalCalls = c => ORIGINS.reduce((n, o) => n + callsOf(b.categories[c], o), 0);
     const pill = (id, label, count) => `<button type="button" data-bh-app="${i}" data-bh-pill="${esc(id)}" onclick="switchBehavior(${i}, '${esc(id)}')" class="bh-pill px-3 py-1.5 rounded-full border border-neutral-700 text-xs font-medium text-neutral-300 hover:text-white whitespace-nowrap${id === 'overview' ? ' bh-pill-active' : ''}">${esc(label)}${count == null ? '' : ` <span class="mono text-neutral-500">${Number(count)}</span>`}</button>`;
+    const columns = P.dynamicOrigins ? [{ header: P.columns.all, of: totalCalls }] : ORIGINS.map(o => ({ header: P.columns[o], of: c => callsOf(b.categories[c], o) }));
     const pills = [pill('overview', 'Overview', null), ...cats.map(c => pill(c, P.labels[c], totalCalls(c)))].join('');
-    const showTotal = ORIGINS.length > 1;
+    const showTotal = ORIGINS.length > 1 && !P.dynamicOrigins;                            // a native binary has one column: the origin is shown per function
 
     const matrix = cats.map(c => `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" onclick="switchBehavior(${i}, '${esc(c)}')">
         <td class="px-4 py-3 font-semibold">${esc(P.labels[c])}</td>
-        ${ORIGINS.map(o => `<td class="px-4 py-3 mono text-sm ${callsOf(b.categories[c], o) ? '' : 'text-neutral-600'}">${callsOf(b.categories[c], o)}</td>`).join('')}
+        ${columns.map(col => `<td class="px-4 py-3 mono text-sm ${col.of(c) ? '' : 'text-neutral-600'}">${col.of(c)}</td>`).join('')}
         ${showTotal ? `<td class="px-4 py-3 mono text-sm font-semibold">${totalCalls(c)}</td>` : ''}
         <td class="px-4 py-3 mono text-sm ${related(a, c).length ? 'text-orange-300' : 'text-neutral-600'}">${related(a, c).length}</td></tr>`).join('');
     const it = b.intent_actions_total || {}, ex = b.explicit_intents || {};
     const tiles = P.ipc
       ? [['Explicit intents (app)', ex.app || 0], ['Implicit intent actions (app)', it.app || 0], ['Implicit actions (renamed / library)', `${it.unknown || 0} / ${it.library || 0}`], ['Explicit intents (all)', (ex.app || 0) + (ex.unknown || 0) + (ex.library || 0)]]
-      : [['Recognised imports', cats.reduce((n, c) => n + totalCalls(c), 0)], ['Categories observed', cats.length], ['Linked libraries', (a.needed || []).length], ['Basis', 'Import table']];
+      : [['Functions listed', cats.reduce((n, c) => n + totalCalls(c), 0)], ['Categories observed', cats.length], ['Sources', ORIGINS.length], ['Linked libraries', (a.needed || []).length]];
     const overview = `<div data-bh-app="${i}" data-bh-panel="overview" class="space-y-4">
-        <p class="text-xs text-neutral-400">${P.intro}</p>
+        <p class="text-xs text-neutral-400">${typeof P.intro === 'function' ? P.intro(b) : P.intro}</p>
         <div class="overflow-x-auto"><table class="w-full text-left text-sm">
-          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">Behavior</th>${ORIGINS.map(o => `<th class="px-4 py-3">${esc(P.columns[o])}</th>`).join('')}${showTotal ? `<th class="px-4 py-3">${esc(P.totalHeader)}</th>` : ''}<th class="px-4 py-3">Related findings</th></tr></thead>
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">Behavior</th>${columns.map(c => `<th class="px-4 py-3">${esc(c.header)}</th>`).join('')}${showTotal ? `<th class="px-4 py-3">${esc(P.totalHeader)}</th>` : ''}<th class="px-4 py-3">Related findings</th></tr></thead>
           <tbody class="divide-y divide-neutral-800">${matrix}</tbody></table></div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">${tiles
           .map(([l, v]) => `<div class="glass p-4 rounded-xl"><div class="text-xl font-bold mono">${esc(v)}</div><div class="text-[11px] uppercase tracking-widest text-neutral-500">${esc(l)}</div></div>`).join('')}</div>
@@ -662,8 +669,8 @@ export async function buildHtml(p) {
     </section>
 
     <section id="section-behavior" class="hidden space-y-6">
-      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorCount} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary') ? 'imported function' : 'API reference'}${behaviorCount === 1 ? '' : 's'}</p></div>
-      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'Behavior inventory is built from Android DEX code; it is not collected for iOS packages.' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: the import table is unreadable or holds no function in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorCount} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary') ? 'function' : 'API reference'}${behaviorCount === 1 ? '' : 's'}</p></div>
+      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'Behavior inventory is built from Android DEX code; it is not collected for iOS packages.' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: nothing the scanner reads in this file (import table, Go function table, Rust paths, packaged-application text) falls in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
     </section>
 
     <section id="section-dependencies" class="hidden space-y-6">
@@ -936,8 +943,9 @@ function appDetails(index) {
     if (a.behavior) {
       const labels = ${JSON.stringify(NATIVE_BEHAVIOR_LABELS)};
       for (const [cat, byOrigin] of Object.entries(a.behavior.categories || {})) {
-        const apis = Object.keys((byOrigin.app || {}).apis || {}), n = (byOrigin.app || {}).calls || apis.length;
-        add('Behavior · ' + (labels[cat] || cat), apis.slice(0, 6).join(', ') + (n > 6 ? ' … (' + n + ' imports)' : ''));
+        const origins = Object.keys(byOrigin || {}), n = origins.reduce(function (t, o) { return t + (byOrigin[o].calls || 0); }, 0);
+        const shown = origins.slice(0, 4).map(function (o) { const apis = Object.keys(byOrigin[o].apis || {}); return o + ': ' + apis.slice(0, 3).join(', ') + (byOrigin[o].calls > 3 ? ' …' : ''); });
+        add('Behavior · ' + (labels[cat] || cat), n + ' — ' + shown.join(' · ') + (origins.length > 4 ? ' · … (' + origins.length + ' sources)' : ''));
       }
     }
   } else if (a.platform === 'ios') {

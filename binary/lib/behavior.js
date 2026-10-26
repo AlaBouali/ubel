@@ -1,17 +1,28 @@
 'use strict';
-// behavior.js (binary) — a capability inventory of a native executable or library: what its import table says it can do (file access,
-// network, process execution, dynamic loading, debugging / injection, anti-analysis, privilege and persistence, input capture and
-// sensitive devices, cryptography, system fingerprinting).
+// behavior.js (binary) — a capability inventory of a native executable or library: what it can do (file access, network, process
+// execution, dynamic loading, debugging / injection, anti-analysis, privilege, persistence, input capture and sensitive devices,
+// cryptography, system fingerprinting).
 //
-// Same idea as mobile/lib/behavior.js, with one difference that matters when reading the result. The Android collector counts call
-// SITES reported by the DEX walker. A native file has no such walker here, so this module only knows which functions are IMPORTED: a
-// function in the import table is linked and callable, not proven to be called or reachable. The summary therefore counts distinct
-// imported functions per category (`calls` = number of distinct imports, every api = 1) and says so (`basis: 'imports'`).
-// It is a summary on the app record (`app.behavior`), never a rule hit: nearly every program does file and network I/O.
+// Same idea as mobile/lib/behavior.js, with one difference that matters when reading the result. The Android collector counts call SITES
+// reported by the DEX walker. A native file has no such walker here, so every entry only says that a function is PRESENT: linked and
+// callable, not proven to be called or reachable. The summary therefore counts distinct functions per category (`calls` = number of
+// distinct entries, every api = 1) and says where the entries came from (`sources`). It is a summary on the app record
+// (`app.behavior`), never a rule hit: nearly every program does file and network I/O.
 //
-// Names are normalised before matching: `@GLIBC_2.2.5` version suffixes, the leading underscore of Mach-O symbols, glibc's `64` / `_chk`
-// / `__isoc99_` variants and, for PE, the ANSI/wide `A` / `W` suffix, so CreateProcessW, _CreateProcessA and `execve@GLIBC_2.2.5` all
-// land on the same table entry.
+// Sources, each filed under an ORIGIN (the library, module or owner the entry belongs to):
+//   imports  the import table. Origin = the library that provides the function: PE the DLL of the import descriptor, ELF the file named by
+//            symbol versioning (libc.so.6), Mach-O the dylib named by the symbol's library ordinal. Imports without a recorded provider
+//            (unversioned ELF symbols, flat-namespace Mach-O symbols) go under one origin, `unattributed`.
+//   go       function names of the pclntab (Go binaries import nothing). Origin = the module that DEFINES the function (`Go standard
+//            library`, or a dependency's module path). This is who owns the function, not who calls it: there is no call graph.
+//   rust     std source paths and crate paths left in panic messages. Origin = `Rust standard library` or the crate.
+//   bundle   text of packaged applications (Node pkg / SEA / Bun, PyInstaller). Origin = the owner of the file or module.
+//
+// Import names are normalised before matching: `@GLIBC_2.2.5` version suffixes, the leading underscore of Mach-O symbols, glibc's `64` /
+// `_chk` / `__isoc99_` variants and, for PE, the ANSI/wide `A` / `W` suffix, so CreateProcessW, _CreateProcessA and `execve@GLIBC_2.2.5`
+// all land on the same table entry.
+
+import { splitGoName } from './gosyms.js';
 
 export const NATIVE_BEHAVIOR_LABELS = {
   file_io: 'File access',
@@ -20,7 +31,8 @@ export const NATIVE_BEHAVIOR_LABELS = {
   dynamic_loading: 'Dynamic loading / resolution',
   injection: 'Debugging / process injection',
   anti_analysis: 'Anti-analysis',
-  privilege: 'Privilege and persistence',
+  privilege: 'Privilege',
+  persistence: 'Persistence',
   input_capture: 'Input capture / sensitive devices',
   crypto: 'Cryptography',
   system_info: 'System information',
@@ -39,7 +51,9 @@ export const NATIVE_BEHAVIOR_INFO = {
     rules: /^binary\.(wx_segment|exec_stack|macho\.(get_task_allow|dangerous_entitlement))$/ },
   anti_analysis: { about: 'Checks whether a debugger is attached (IsDebuggerPresent, NtQueryInformationProcess, ...). Used by copy protection and by malware to change behaviour under analysis.',
     rules: null },
-  privilege: { about: 'Changes user or group identity, adjusts tokens and privileges, installs services or writes autorun registry keys. Check that each use is expected for a program of this kind.',
+  privilege: { about: 'Changes user or group identity, adjusts tokens and privileges, changes the root directory or namespaces. Check that each use is expected for a program of this kind.',
+    rules: null },
+  persistence: { about: 'Installs services, writes registry values (autorun keys), registers launch items or hooks. Check that each use is expected for a program of this kind, and that the file is signed.',
     rules: /^binary\.(unsigned|macho\.adhoc_signed)$/ },
   input_capture: { about: 'Reads keystrokes, the clipboard, the screen, camera, microphone or location. Each should match a feature the user can see.',
     rules: null },
@@ -91,10 +105,13 @@ const TABLE = {
   ],
   privilege: [
     'setuid', 'setgid', 'seteuid', 'setegid', 'setreuid', 'setregid', 'setresuid', 'setresgid', 'setgroups', 'initgroups', 'chroot', 'capset', 'unshare', 'setns', 'pivot_root', 'mount', 'umount2',
-    'seccomp', 'AuthorizationExecuteWithPrivileges', 'SMJobBless', 'SMLoginItemSetEnabled', 'launch_msg',
+    'seccomp', 'AuthorizationExecuteWithPrivileges',
     'AdjustTokenPrivileges', 'OpenProcessToken', 'ImpersonateLoggedOnUser', 'DuplicateToken', 'DuplicateTokenEx', 'LogonUser', 'SetTokenInformation', 'LookupPrivilegeValue', 'RtlAdjustPrivilege',
-    'RegSetValue', 'RegSetValueEx', 'RegCreateKey', 'RegCreateKeyEx', 'RegDeleteKey', 'RegDeleteValue', 'CreateService', 'OpenSCManager', 'OpenService', 'StartService', 'ChangeServiceConfig',
-    'ControlService', 'DeleteService', 'SetWindowsHookEx', 'NtSetValueKey', 'ZwSetValueKey',
+  ],
+  persistence: [
+    'SMJobBless', 'SMLoginItemSetEnabled', 'launch_msg',
+    'RegSetValue', 'RegSetValueEx', 'RegSetKeyValue', 'RegCreateKey', 'RegCreateKeyEx', 'RegDeleteKey', 'RegDeleteValue', 'NtSetValueKey', 'ZwSetValueKey',
+    'CreateService', 'OpenSCManager', 'OpenService', 'StartService', 'ChangeServiceConfig', 'ControlService', 'DeleteService', 'SetWindowsHookEx',
   ],
   input_capture: [
     'GetAsyncKeyState', 'GetKeyboardState', 'SetWindowsHookEx', 'RegisterRawInputDevices', 'GetRawInputData', 'GetClipboardData', 'OpenClipboard', 'SetClipboardData',
@@ -126,8 +143,21 @@ const TABLE = {
 // that remain (mprotect, GetProcAddress, LoadLibrary, OpenProcess) are imported by ordinary programs too, which is why the report presents
 // the result as an inventory next to the findings and never as a finding of its own.
 
+// A name can belong to more than one category (SetWindowsHookEx installs hooks that persist and hooks that read keystrokes).
+const EXTRA = { SetWindowsHookEx: ['input_capture'] };
 const LOOKUP = new Map();
-for (const [cat, names] of Object.entries(TABLE)) for (const n of names) if (!LOOKUP.has(n)) LOOKUP.set(n, cat);
+for (const [cat, names] of Object.entries(TABLE)) for (const n of names) { const l = LOOKUP.get(n); if (!l) LOOKUP.set(n, [cat]); else if (!l.includes(cat)) l.push(cat); }
+for (const [n, cats] of Object.entries(EXTRA)) { const l = LOOKUP.get(n) || []; for (const c of cats) if (!l.includes(c)) l.push(c); LOOKUP.set(n, l); }
+
+// Whole families that are listed as a prefix instead of name by name (WinHttp*, CreateProcess*, EVP_* ...). Tried only when no exact
+// name matched. The Windows ones apply to PE imports only.
+const PREFIXES = [
+  ['EVP_', 'crypto'], ['BCrypt', 'crypto'], ['NCrypt', 'crypto'], ['CCCrypt', 'crypto'],
+];
+const WINDOWS_PREFIXES = [
+  ['WinHttp', 'network'], ['Internet', 'network'], ['WSA', 'network'], ['CreateProcess', 'process'], ['ShellExecute', 'process'],
+  ['RegSetValue', 'persistence'], ['CreateService', 'persistence'],
+];
 
 /** Candidate table keys for one imported symbol name, most specific first. */
 export function nameCandidates(raw, { windows = false } = {}) {
@@ -149,37 +179,259 @@ export function nameCandidates(raw, { windows = false } = {}) {
   return [...out].filter(Boolean);
 }
 
-/** Category of one imported function name, or null. */
-export function categoryOf(raw, opts = {}) {
-  for (const c of nameCandidates(raw, opts)) { const cat = LOOKUP.get(c); if (cat) return cat; }
-  return null;
+/** Categories of one imported function name (usually one), or []. */
+export function categoriesOf(raw, opts = {}) {
+  const cands = nameCandidates(raw, opts);
+  for (const c of cands) { const cats = LOOKUP.get(c); if (cats) return cats; }
+  for (const c of cands) for (const [p, cat] of PREFIXES) if (c.startsWith(p)) return [cat];
+  if (opts.windows) for (const c of cands) for (const [p, cat] of WINDOWS_PREFIXES) if (c.startsWith(p)) return [cat];
+  return [];
 }
 
+/** First category of one imported function name, or null. */
+export function categoryOf(raw, opts = {}) { return categoriesOf(raw, opts)[0] || null; }
+
 const MAX_APIS = 60;
+const UNATTRIBUTED = 'unattributed';
+
+// ── Go: functions of the pclntab ───────────────────────────────────────────────────────────────────────────────────────────────
+// [category, test over `pkg` and `fn` (receiver folded: `(*Cmd).Start` is `Cmd.Start`)]. Entries name the function that DOES the thing, so
+// a hit says that this function is linked; with no call graph it cannot say who calls it. The linker drops functions nothing references,
+// which is what makes the list informative, but the standard library itself references some of them (os.Open, for time zones and root
+// certificates), so a short list from the `os` package alone is normal.
+const PKG = 2;                                                                       // a rule that returns PKG lists the package, not each of its functions
+const pkgIs = re => p => (re.test(p) ? PKG : 0);
+const GO_RULES = [
+  ['file_io', (p, f) => (p === 'os' && /^(Open|OpenFile|Create|CreateTemp|Remove|RemoveAll|Rename|Mkdir|MkdirAll|MkdirTemp|ReadFile|WriteFile|ReadDir|Chmod|Chown|Chtimes|Symlink|Link|Truncate)$/.test(f))
+    || (p === 'io/ioutil' && /^(ReadFile|WriteFile|ReadDir|TempFile|TempDir)$/.test(f)) || (p === 'path/filepath' && /^(Walk|WalkDir|Glob)$/.test(f))],
+  ['network', (p, f) => (p === 'net' && /^(Dial|DialTimeout|DialTCP|DialUDP|DialIP|DialUnix|Listen|ListenTCP|ListenUDP|ListenPacket|ListenUnix|LookupHost|LookupIP|LookupAddr|LookupCNAME|LookupMX|LookupTXT|LookupSRV|ResolveTCPAddr|ResolveUDPAddr|Dialer\.Dial(Context)?|ListenConfig\.Listen(Packet)?|Resolver\.Lookup\w+)$/.test(f))
+    || (p === 'net/http' && /^(Get|Post|PostForm|Head|ListenAndServe|ListenAndServeTLS|Serve|NewRequest|NewRequestWithContext|Client\.(Do|Get|Post|Head)|Server\.(ListenAndServe|ListenAndServeTLS|Serve)|Transport\.RoundTrip)$/.test(f))
+    || (p === 'crypto/tls' && /^(Dial|DialWithDialer|Client|Server|Listen)$/.test(f)) || (p === 'net/smtp' && /^(SendMail|Dial)$/.test(f)) || pkgIs(/^(net\/rpc|net\/http\/httputil|golang\.org\/x\/net\/websocket|github\.com\/gorilla\/websocket|nhooyr\.io\/websocket|github\.com\/miekg\/dns|github\.com\/quic-go\/quic-go|google\.golang\.org\/grpc)$/)(p)],
+  ['process', (p, f) => (p === 'os/exec' && /^(Command|CommandContext|Cmd\.(Start|Run|Output|CombinedOutput))$/.test(f)) || (p === 'os' && /^(StartProcess|Exec)$/.test(f))
+    || (/^(syscall|golang\.org\/x\/sys\/(unix|windows))$/.test(p) && /^(Exec|ForkExec|StartProcess|CreateProcess|CreateProcessAsUser|ShellExecute)$/.test(f))],
+  ['dynamic_loading', (p, f) => (p === 'plugin' && /^(Open|Plugin\.Lookup)$/.test(f)) || (/^(syscall|golang\.org\/x\/sys\/windows)$/.test(p) && /^(LoadLibrary|LoadLibraryEx|LoadDLL|MustLoadDLL|NewLazyDLL|NewLazySystemDLL|GetProcAddress|DLL\.FindProc|LazyDLL\.NewProc|LazyProc\.Call|Proc\.Call)$/.test(f))
+    || (p === 'github.com/ebitengine/purego' && /^(Dlopen|Dlsym|OpenLibrary|RegisterLibFunc|RegisterFunc)$/.test(f))],
+  ['injection', (p, f) => (/^(syscall|golang\.org\/x\/sys\/unix)$/.test(p) && /^(Ptrace\w*|Mprotect|MemfdCreate|ProcessVMWritev|ProcessVMReadv|PtraceAttach|PtraceSyscall)$/.test(f))
+    || (p === 'golang.org/x/sys/windows' && /^(VirtualAllocEx|VirtualProtect|VirtualProtectEx|WriteProcessMemory|ReadProcessMemory|CreateRemoteThread|CreateRemoteThreadEx|OpenProcess|QueueUserAPC|NtCreateThreadEx|SetThreadContext|DebugActiveProcess)$/.test(f))],
+  ['privilege', (p, f) => (/^(syscall|golang\.org\/x\/sys\/unix)$/.test(p) && /^(Setuid|Setgid|Seteuid|Setegid|Setreuid|Setregid|Setresuid|Setresgid|Setgroups|Chroot|Unshare|Setns|PivotRoot|Mount|Unmount|Capset|Prctl)$/.test(f))
+    || (p === 'golang.org/x/sys/windows' && /^(AdjustTokenPrivileges|OpenProcessToken|LookupPrivilegeValue|DuplicateTokenEx|ImpersonateSelf|SetTokenInformation|CreateProcessAsUser)$/.test(f))],
+  ['persistence', (p, f) => (p === 'golang.org/x/sys/windows/registry' && /^(Key\.(SetStringValue|SetDWordValue|SetQWordValue|SetBinaryValue|SetExpandStringValue|SetStringsValue|DeleteValue)|CreateKey)$/.test(f))
+    || (p === 'golang.org/x/sys/windows/svc/mgr' && /^(Mgr\.CreateService|Service\.UpdateConfig|Service\.Delete)$/.test(f)) || pkgIs(/^(github\.com\/kardianos\/service|github\.com\/emersion\/go-autostart|github\.com\/ProtonMail\/go-autostart)$/)(p)],
+  ['input_capture', (p, f) => pkgIs(/^(github\.com\/atotto\/clipboard|golang\.design\/x\/clipboard|github\.com\/kbinani\/screenshot|github\.com\/go-vgo\/robotgo|github\.com\/robotn\/gohook|github\.com\/MarinX\/keylogger|github\.com\/moutend\/go-hook|github\.com\/gen2brain\/malgo|github\.com\/gordonklaus\/portaudio|github\.com\/vladimirvivien\/go4vl|github\.com\/blackjack\/webcam)(?:\/.*)?$/)(p)],
+  ['crypto', (p) => pkgIs(/^(crypto\/(aes|cipher|des|rc4|rsa|ecdsa|ecdh|ed25519|elliptic|hmac|md5|sha1|sha256|sha512|sha3|subtle|rand|x509|tls|dsa|hkdf|pbkdf2)|golang\.org\/x\/crypto(\/.*)?|github\.com\/(ProtonMail\/go-crypto|cloudflare\/circl|aead\/chacha20poly1305|minio\/sio)(\/.*)?|filippo\.io\/(age|edwards25519)(\/.*)?)$/)(p)],
+  ['system_info', (p, f) => (p === 'os' && /^(Hostname|UserHomeDir|UserCacheDir|UserConfigDir|Getuid|Geteuid|Getgid|Getpid|Getppid|Executable|Environ)$/.test(f)) || (p === 'os/user' && /^(Current|Lookup|LookupId|LookupGroup)$/.test(f))
+    || (p === 'net' && /^(Interfaces|InterfaceAddrs|Interface\.Addrs)$/.test(f)) || (/^(syscall|golang\.org\/x\/sys\/unix)$/.test(p) && /^(Uname|Sysinfo)$/.test(f))
+    || pkgIs(/^(github\.com\/shirou\/gopsutil(\/v\d+)?(\/.*)?|github\.com\/denisbrodbeck\/machineid|github\.com\/zcalusic\/sysinfo|github\.com\/elastic\/go-sysinfo(\/.*)?)$/)(p)],
+];
+const GO_STD = 'Go standard library';
+
+/** Which module of the build owns a package: a module of the build info (longest path prefix), else the standard library, else the package itself. */
+function goOwner(pkg, modules) {
+  let best = null;
+  for (const m of modules) if ((pkg === m || pkg.startsWith(`${m}/`)) && (!best || m.length > best.length)) best = m;
+  if (best) return best;
+  const first = pkg.split('/')[0];
+  return first === 'vendor' || !first.includes('.') ? GO_STD : pkg;           // the first path element of a standard-library package has no dot
+}
+
+// ── Rust: std and crate paths left in panic messages ─────────────────────────────────────────────────────────────────────────────
+const RUST_STD = [
+  ['file_io', 'std::fs', /(?:^|\/)(?:fs|fs\/[\w.]+|sys\/(?:pal\/)?[a-z]+\/fs|os\/[a-z]+\/fs)\.rs$/],
+  ['network', 'std::net', /(?:^|\/)(?:net(?:\/[\w.]+)?|sys\/(?:pal\/)?[a-z]+\/net|os\/[a-z]+\/net(?:\/[\w.]+)?)\.rs$/],
+  ['process', 'std::process', /(?:^|\/)(?:process|sys\/(?:pal\/)?[a-z]+\/process(?:\/[\w.]+)?|os\/[a-z]+\/process)\.rs$/],
+  ['system_info', 'std::env', /^sys\/(?:pal\/)?[a-z]+\/os\.rs$/],
+];
+const RUST_CRATES = {
+  network: ['reqwest', 'hyper', 'hyper-util', 'ureq', 'surf', 'isahc', 'curl', 'attohttpc', 'tungstenite', 'tokio-tungstenite', 'tonic', 'socket2', 'h2', 'quinn', 'trust-dns-resolver', 'hickory-resolver', 'actix-web', 'axum', 'warp', 'rocket', 'lettre', 'suppaftp', 'ssh2', 'russh', 'libp2p'],
+  process: ['duct', 'subprocess', 'shared_child', 'command-group'],
+  dynamic_loading: ['libloading', 'dlopen', 'dlopen2'],
+  injection: ['region', 'process-memory', 'proc-maps', 'memflow', 'pete'],
+  privilege: ['privdrop', 'caps'],
+  persistence: ['winreg', 'auto-launch', 'service-manager', 'windows-service', 'daemonize'],
+  input_capture: ['rdev', 'device_query', 'arboard', 'clipboard', 'clipboard-win', 'screenshots', 'scrap', 'xcap', 'inputbot', 'cpal', 'nokhwa', 'rscam'],
+  crypto: ['ring', 'rustls', 'openssl', 'openssl-sys', 'native-tls', 'aes', 'aes-gcm', 'chacha20poly1305', 'chacha20', 'rsa', 'sodiumoxide', 'orion', 'sha2', 'sha1', 'md-5', 'hmac', 'argon2', 'pbkdf2', 'scrypt', 'bcrypt', 'ed25519-dalek', 'x25519-dalek', 'p256', 'k256', 'age'],
+  system_info: ['sysinfo', 'hostname', 'whoami', 'machine-uid', 'os_info', 'mac_address', 'get_if_addrs', 'local-ip-address', 'if-addrs', 'sys-info'],
+  file_io: ['walkdir', 'tempfile', 'fs_extra', 'notify', 'remove_dir_all', 'trash'],
+};
+const RUST_CRATE = new Map();
+for (const [cat, names] of Object.entries(RUST_CRATES)) for (const n of names) if (!RUST_CRATE.has(n)) RUST_CRATE.set(n, cat);
+const RUST_STD_NAME = 'Rust standard library';
+
+// ── packaged applications: text of the bundled sources ─────────────────────────────────────────────────────────────────────────
+// [category, label, regex over one line of text]. A line is a string that was read from the application's own files, so a hit shows that
+// the code refers to the module or call, not that the line runs.
+const Q = '[\'"`]';
+const JS_RULES = [
+  ['process', 'child_process', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?child_process${Q}|\\bchild_process\\.\\w+|\\bprocess\\.binding\\(${Q}spawn_sync${Q}\\)`)],
+  ['network', 'net / tls / dgram', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?(?:net|tls|dgram)${Q}`)],
+  ['network', 'http / https / http2', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?https?2?${Q}|\\b(?:https?|http2)\\.(?:request|get|createServer|connect)\\(`)],
+  ['network', 'dns', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?dns(?:\\/promises)?${Q}`)],
+  ['network', 'WebSocket', /\bnew\s+WebSocket(?:Server)?\(/],
+  ['file_io', 'fs', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?fs(?:\\/promises)?${Q}|\\bfs\\.(?:readFile|writeFile|appendFile|unlink|rm|rmdir|mkdir|rename|createWriteStream|createReadStream|readdir)(?:Sync)?\\(`)],
+  ['dynamic_loading', 'process.dlopen', /\bprocess\.dlopen\(/],
+  ['dynamic_loading', 'vm', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?vm${Q}|\\bvm\\.(?:runIn\\w+|Script)\\b`)],
+  ['dynamic_loading', 'eval / new Function', /(?:^|[^\w.$])eval\(|\bnew\s+Function\(/],
+  ['crypto', 'crypto', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?crypto${Q}|\\bcrypto\\.(?:createCipheriv|createDecipheriv|createHash|createHmac|createSign|privateEncrypt|publicEncrypt|subtle)\\b`)],
+  ['system_info', 'os', new RegExp(`(?:require\\(\\s*|from\\s*|import\\(\\s*)${Q}(?:node:)?os${Q}|\\bos\\.(?:hostname|userInfo|networkInterfaces|cpus|platform)\\(`)],
+  ['privilege', 'process.setuid / setgid', /\bprocess\.(?:setuid|setgid|seteuid|setegid|setgroups|initgroups)\(/],
+  ['input_capture', 'clipboard / screen capture', new RegExp(`${Q}(?:clipboardy|copy-paste|screenshot-desktop|robotjs|iohook|node-global-key-listener|desktop-screenshot)${Q}`)],
+];
+// Python modules ship as marshalled code objects, which hold names as separate short strings: `import socket` leaves the string `socket`,
+// and `os.system(...)` leaves `os` and `system` apart. So each rule has a text regex (source text, or a string constant that spells the call out)
+// and a list of module NAMES matched against those short strings. `os.system` is therefore only seen where it is written out in text.
+const PY_RULES = [
+  ['process', 'subprocess', /(?:import\s+subprocess|from\s+subprocess\s+import|subprocess\.(?:Popen|run|call|check_call|check_output|getoutput))\b/, ['subprocess']],
+  ['process', 'os.system / os.popen / os.exec*', /\bos\.(?:system|popen|execv\w*|execl\w*|spawn\w+|startfile)\b|\bpty\.spawn\b/, []],
+  ['network', 'socket', /(?:import\s+socket|from\s+socket\s+import|socket\.(?:socket|create_connection|getaddrinfo|gethostbyname))\b/, ['socket', 'socketserver']],
+  ['network', 'urllib / requests / ssl / ftplib / smtplib', /(?:import|from)\s+(?:urllib|http\.(?:client|server)|requests|httpx|aiohttp|ssl|ftplib|smtplib|telnetlib|paramiko)\b/, ['urllib', 'requests', 'httpx', 'aiohttp', 'ssl', 'ftplib', 'smtplib', 'telnetlib', 'paramiko']],
+  ['dynamic_loading', 'ctypes / cffi', /(?:import\s+ctypes|from\s+ctypes\s+import|ctypes\.(?:CDLL|WinDLL|windll|cdll|cast|CFUNCTYPE)|import\s+cffi)\b/, ['ctypes', 'cffi']],
+  ['dynamic_loading', 'importlib / __import__ / exec / eval', /(?:^|[^\w.])(?:__import__|importlib\.import_module|exec|eval)\(/, ['importlib', '__import__']],
+  ['file_io', 'os / shutil file operations', /\b(?:os\.(?:remove|unlink|rmdir|rename|makedirs|chmod|chown|symlink)|shutil\.(?:rmtree|copy\w*|move))\b/, ['shutil']],
+  ['crypto', 'hashlib / cryptography', /(?:import|from)\s+(?:hashlib|hmac|secrets|cryptography|Crypto|nacl)\b/, ['hashlib', 'hmac', 'cryptography', 'Crypto', 'nacl']],
+  ['system_info', 'platform / getpass', /(?:import|from)\s+(?:platform|getpass)\b|\bsocket\.gethostname\b|\bgetpass\.getuser\b/, ['platform', 'getpass']],
+  ['input_capture', 'pynput / pyperclip / pyautogui', /(?:import|from)\s+(?:pynput|pyperclip|pyautogui|PIL\.ImageGrab|pyaudio)\b/, ['pynput', 'pyperclip', 'pyautogui', 'pyaudio']],
+  ['privilege', 'os.setuid / setgid', /\bos\.(?:setuid|setgid|seteuid|setegid|setgroups|chroot)\b/, []],
+  ['persistence', 'winreg', /(?:import|from)\s+(?:winreg|_winreg)\b/, ['winreg', '_winreg']],
+];
+// A marshalled name is followed by the next object's type byte (and maybe the first printable bytes of its index): `socketr!` is `socket`.
+const tokenIs = (tok, name) => tok === name || (tok.length > name.length && tok.length <= name.length + 4 && tok.startsWith(name) && /^[rZzaAtu)(\]][\x21-\x7e]{0,3}$/.test(tok.slice(name.length)));
+
+/** `// node_modules/@scope/pkg/lib/x.js` → the package name of a bundler marker comment, or null for an application file marker. */
+const MARKER = /^\s*\/\/\s+((?:[\w@.~+\-]+\/)*[\w@.~+\-]+\.(?:[cm]?[jt]sx?|json|node))\s*$/;
+const NM = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//g;
+/** Package that owns a path (the innermost node_modules directory), or null. */
+const npmOwner = path => { let last = null; for (const m of String(path).replace(/\\/g, '/').matchAll(NM)) last = m[1]; return last; };
 
 /**
- * @param {Iterable<string>} imports imported function names
- * @param {{windows?: boolean, providers?: Map<string,string>|null}} [opts] `providers`: import name -> the library that provides it (PE: the DLL)
- * @returns the `app.behavior` summary, or null when the import table holds nothing recognisable
+ * Owner of a source the packagers return, from its report path (`app.exe!/snapshot/app/node_modules/express/index.js`, `app!PYZ/requests.api`).
+ * @returns {{lang:'js'|'py', owner:string|null, skip?:boolean}} owner null = a whole bundle that is split by its own markers; skip = leave the source out
  */
-export function collectBehavior(imports, { windows = false, providers = null } = {}) {
-  const found = new Map();                                                      // category -> Map(display name -> 1)
-  let total = 0;
-  for (const raw of new Set(imports || [])) {
-    const cat = categoryOf(raw, { windows });
-    if (!cat) continue;
-    const from = providers && providers.get(raw);
-    const label = String(raw).replace(/@.*$/, '') + (from ? ` (${from})` : '');
-    const m = found.get(cat) || found.set(cat, new Map()).get(cat);
-    if (!m.has(label)) { m.set(label, 1); total++; }
+export function sourceOwner(path, lang) {
+  const rest = String(path).slice(String(path).indexOf('!') + 1);
+  // A top-level module with a leading underscore is a private helper of the standard library (`_compat_pickle` spells out `socket`, `subprocess`
+  // and `winreg` as data) or a compiled extension; its text says nothing about what the application does, so it is skipped.
+  if (lang === 'py') { const m = /^PYZ\/([^./\\]+)/.exec(rest); return { lang, owner: m ? m[1] : 'app', skip: Boolean(m && m[1].startsWith('_')) }; }
+  if (/^(?:Node SEA blob|Bun module graph)$/.test(rest)) return { lang, owner: null };
+  return { lang, owner: npmOwner(rest) || 'app' };
+}
+
+export class BehaviorBuilder {
+  constructor() { this.found = new Map(); this.sources = new Set(); this.imports = 0; }
+
+  /** Records one function under a category and an origin (a repeat is one entry). */
+  add(cat, api, origin, source) {
+    if (!NATIVE_BEHAVIOR_LABELS[cat]) return;
+    const o = String(origin || UNATTRIBUTED).slice(0, 120), a = String(api).slice(0, 200);
+    const byOrigin = this.found.get(cat) || this.found.set(cat, new Map()).get(cat);
+    const apis = byOrigin.get(o) || byOrigin.set(o, new Set()).get(o);
+    apis.add(a);
+    if (source) this.sources.add(source);
   }
-  if (!total) return null;
-  const categories = {};
-  for (const cat of Object.keys(NATIVE_BEHAVIOR_LABELS)) {
-    const m = found.get(cat);
-    if (!m) continue;
-    const apis = Object.fromEntries([...m.keys()].sort().slice(0, MAX_APIS).map(k => [k, 1]));
-    categories[cat] = { app: { calls: m.size, apis } };
+
+  /**
+   * Import table. `providers`: imported name -> the library that provides it (PE DLL, ELF versioned file, Mach-O dylib).
+   * @returns {number} how many distinct names were recognised
+   */
+  addImports(imports, { windows = false, macho = false, providers = null } = {}) {
+    let hit = 0;
+    const names = new Set(imports || []);
+    this.imports += names.size;
+    for (const raw of names) {
+      const cats = categoriesOf(raw, { windows });
+      if (!cats.length) continue;
+      const shown = macho ? String(raw).replace(/@.*$/, '').replace(/^_/, '') : String(raw).replace(/@.*$/, '');
+      const from = providers && providers.get(raw);
+      for (const cat of cats) this.add(cat, shown, from, 'imports');
+      hit++;
+    }
+    return hit;
   }
-  return { basis: 'imports', categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
+
+  /**
+   * Function names of a Go pclntab. @param {string[]} names @param {{path?:string|null, modules?:{path:string}[]}} [build] Go build info
+   * @returns {number} distinct functions or packages recorded
+   */
+  addGoFunctions(names, build = {}) {
+    const modules = [...(build.modules || []).map(m => m.path), ...(build.path ? [build.path] : []), ...(build.main?.path ? [build.main.path] : [])].filter(Boolean);
+    const seen = new Set();
+    let n = 0;
+    for (const name of names) {
+      const sp = splitGoName(name);
+      if (!sp) continue;
+      for (const [cat, test] of GO_RULES) {
+        const hit = test(sp.pkg, sp.fn);
+        if (!hit) continue;
+        const label = hit === PKG ? sp.pkg : `${sp.pkg}.${sp.fn}`;
+        const key = `${cat}\0${label}`;
+        if (seen.has(key)) break;
+        seen.add(key);
+        this.add(cat, label, goOwner(sp.pkg, modules), 'go');
+        n++;
+        break;
+      }
+    }
+    return n;
+  }
+
+  /** Std paths and crate paths from Rust panic messages. @param {string[]} strings @param {{name:string}[]} crates crates found in the paths */
+  addRust(strings, crates = []) {
+    let n = 0;
+    const seen = new Set();
+    for (const s of strings) {
+      const at = s.length <= 8192 ? s.indexOf('library/std/src/') : -1;
+      if (at < 0) continue;
+      const rel = s.slice(at + 16).replace(/[:\s].*$/, '');
+      for (const [cat, label, re] of RUST_STD) {
+        if (!re.test(rel) || seen.has(label)) continue;
+        seen.add(label); this.add(cat, label, RUST_STD_NAME, 'rust'); n++;
+      }
+    }
+    for (const c of crates) {
+      const cat = RUST_CRATE.get(c.name);
+      if (cat) { this.add(cat, c.name, c.name, 'rust'); n++; }
+    }
+    return n;
+  }
+
+  /**
+   * Text of one packaged application's file or module.
+   * @param {{lang:'js'|'py', owner?:string|null, lines:string[], tokens?:string[]}} src `owner` names the file's owner; without one a JavaScript bundle is split by its
+   *   bundler markers (`// node_modules/pkg/…`)
+   * @returns {number} entries recorded
+   */
+  addBundleText({ lang, owner = null, skip = false, lines = [], tokens = [] }) {
+    if (skip) return 0;
+    const rules = lang === 'py' ? PY_RULES : JS_RULES;
+    let n = 0, current = owner;
+    const scan = (text, who) => { for (const [cat, label, re] of rules) if (re.test(text)) { this.add(cat, label, who, 'bundle'); n++; } };
+    const names = lang === 'py' ? rules.map(r => r[3]) : [];
+    for (const line of lines) {
+      if (line.length > 4096) continue;
+      if (!owner && lang === 'js') {
+        const m = MARKER.exec(line);
+        if (m) { current = npmOwner(m[1]) || 'app'; continue; }
+      }
+      scan(line, current || (lang === 'js' ? 'bundle' : 'app'));
+    }
+    if (lang === 'py') {
+      rules.forEach(([cat, label], i) => { if (names[i].length && tokens.some(t => names[i].some(nm => tokenIs(t, nm)))) { this.add(cat, label, owner || 'app', 'bundle'); n++; } });
+    }
+    return n;
+  }
+
+  /** The `app.behavior` summary, or null when nothing was recognised. */
+  summary() {
+    if (!this.found.size) return null;
+    const categories = {};
+    for (const cat of Object.keys(NATIVE_BEHAVIOR_LABELS)) {
+      const byOrigin = this.found.get(cat);
+      if (!byOrigin) continue;
+      categories[cat] = {};
+      for (const [origin, set] of [...byOrigin].sort((x, y) => y[1].size - x[1].size || x[0].localeCompare(y[0]))) {
+        categories[cat][origin] = { calls: set.size, apis: Object.fromEntries([...set].sort().slice(0, MAX_APIS).map(k => [k, 1])) };
+      }
+    }
+    const order = ['imports', 'go', 'rust', 'bundle'];
+    return { basis: 'presence', sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
+  }
 }

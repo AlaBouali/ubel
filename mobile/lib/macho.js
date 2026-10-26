@@ -51,7 +51,7 @@ function parseSlice(buf, base, size) {
     arch: CPU[cputype] || `cpu_${cputype.toString(16)}`, is64, filetype, flags,
     pie: (flags & 0x200000) !== 0, allowStackExec: (flags & 0x20000) !== 0,
     encrypted: false, cryptid: 0, signed: false, adhoc: false, cdFlags: null, entitlements: null,
-    minOS: null, sdk: null, platform: null, dylibs: [], rpaths: [], imports: new Set(), exports: new Set(),
+    minOS: null, sdk: null, platform: null, dylibs: [], rpaths: [], imports: new Set(), importProviders: new Map(), exports: new Set(),
     sections: [], strings: [],
   };
   let p = base + (is64 ? 32 : 28);
@@ -74,7 +74,7 @@ function parseSlice(buf, base, size) {
         break;
       }
       case 0x2: symtab = { symoff: buf.readUInt32LE(p + 8), nsyms: buf.readUInt32LE(p + 12), stroff: buf.readUInt32LE(p + 16), strsize: buf.readUInt32LE(p + 20) }; break;
-      case 0xc: case 0x80000018: case 0x8000001f: case 0x80000023: {
+      case 0xc: case 0x20: case 0x80000018: case 0x8000001f: case 0x80000023: {      // LOAD_DYLIB, LAZY_LOAD, LOAD_WEAK, REEXPORT, LOAD_UPWARD: the order is what library ordinals count
         const o = buf.readUInt32LE(p + 8);
         s.dylibs.push(buf.toString('utf8', p + o, p + csz).replace(/\0.*$/, ''));
         break;
@@ -109,7 +109,15 @@ function readSymbols(buf, base, s, st, is64, size) {
     if (at >= strEnd) continue;
     let e = buf.indexOf(0, at); if (e < 0 || e > strEnd) e = strEnd;
     const name = buf.latin1Slice(at, e);
-    if (kind === 0) s.imports.add(name); else if (kind === 0x0e) s.exports.add(name);
+    if (kind === 0) {
+      s.imports.add(name);
+      // Two-level namespace: the high byte of n_desc is the 1-based ordinal of the dylib that provides the symbol (0 = this image, 0xfe =
+      // flat lookup, 0xff = the main executable). Ordinals count the dylib load commands in order.
+      if (s.flags & 0x80) {
+        const ord = (buf.readUInt16LE(o + 6) >> 8) & 0xff, lib = ord >= 1 && ord <= s.dylibs.length ? s.dylibs[ord - 1] : null;
+        if (lib && !s.importProviders.has(name)) s.importProviders.set(name, lib.replace(/^.*\//, ''));
+      }
+    } else if (kind === 0x0e) s.exports.add(name);
   }
 }
 

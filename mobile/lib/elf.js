@@ -19,6 +19,7 @@ const PT_LOAD = 1, PT_DYNAMIC = 2, PT_INTERP = 3, PT_GNU_STACK = 0x6474e551, PT_
 // dynamic tags
 const DT_NEEDED = 1, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_STRSZ = 10, DT_TEXTREL = 22, DT_BIND_NOW = 24, DT_RPATH = 15,
   DT_RUNPATH = 29, DT_FLAGS = 30, DT_GNU_HASH = 0x6ffffef5, DT_FLAGS_1 = 0x6ffffffb;
+const DT_VERSYM = 0x6ffffff0, DT_VERNEED = 0x6ffffffe, DT_VERNEEDNUM = 0x6fffffff;
 const DF_TEXTREL = 0x4, DF_BIND_NOW = 0x8, DF_1_NOW = 0x1, DF_1_PIE = 0x08000000;
 // tags whose value is the address of a table: PLTGOT, HASH, STRTAB, SYMTAB, RELA, INIT, FINI, REL, JMPREL, INIT_ARRAY, FINI_ARRAY, GNU_HASH, VERSYM, VERDEF, VERNEED
 const POINTER_TAGS = new Set([3, 4, 5, 6, 7, 12, 13, 17, 23, 25, 26, 0x6ffffef5, 0x6ffffff0, 0x6ffffffc, 0x6ffffffe]);
@@ -79,7 +80,7 @@ export function parseElf(buf) {
     pie: type === 3,                          // position independent image (ET_DYN); text relocations are reported separately
     interp: false, pieFlag: false, execStack: false, hasStackHeader: false, nx: 'missing', wxSegments: 0,
     relro: 'none', canary: false, textrel: false,
-    rpath: null, needed: [], imports: [],
+    rpath: null, needed: [], imports: [], importProviders: new Map(),
     symbols: 'none', symbolsReadable: false,
     fortify: { state: 'n/a', fortified: [], unfortified: [] },
   };
@@ -121,7 +122,7 @@ export function parseElf(buf) {
       dyn.push([tag, val]);
     }
   }
-  let hasSoname = false, bindNow = false, flags = 0, flags1 = 0, symtabVa = null, strtabVa = null, strsz = 0, hashVa = null, gnuHashVa = null;
+  let hasSoname = false, bindNow = false, flags = 0, flags1 = 0, symtabVa = null, strtabVa = null, strsz = 0, hashVa = null, gnuHashVa = null, versymVa = null, vernVa = null, vernNum = 0;
   const tableVas = [];                                   // addresses of the other tables the loader is told about
   for (const [tag, val] of dyn) {
     if (POINTER_TAGS.has(tag) && val > 0) tableVas.push(val);
@@ -136,6 +137,9 @@ export function parseElf(buf) {
       case DT_STRSZ: strsz = val; break;
       case DT_HASH: hashVa = val; break;
       case DT_GNU_HASH: gnuHashVa = val; break;
+      case DT_VERSYM: versymVa = val; break;
+      case DT_VERNEED: vernVa = val; break;
+      case DT_VERNEEDNUM: vernNum = val; break;
       default: break;
     }
   }
@@ -201,6 +205,29 @@ export function parseElf(buf) {
     else if (tag === DT_RPATH || tag === DT_RUNPATH) r.rpath = readStr(val) || r.rpath;
   }
 
+  // Symbol versioning tells which library an import comes from: .gnu.version (DT_VERSYM) gives each dynamic symbol a version index, and
+  // .gnu.version_r (DT_VERNEED) maps that index to the DT_NEEDED file that defines the version (`libc.so.6` for GLIBC_2.2.5). Only versioned
+  // symbols get a provider: musl and bionic libraries do not version their symbols, and an unversioned import has no recorded origin.
+  const verFile = new Map();
+  let versymOff = -1;
+  try {
+    const vo = versymVa !== null && vernVa !== null && vernNum > 0 ? vaToOff(vernVa) : -1;
+    versymOff = versymVa !== null ? vaToOff(versymVa) : -1;
+    if (vo >= 0 && versymOff >= 0) {
+      for (let k = 0, at = vo; k < Math.min(vernNum, 256) && at + 16 <= buf.length; k++) {
+        const cnt = buf.readUInt16LE(at + 2), file = readStr(buf.readUInt32LE(at + 4)), aux = buf.readUInt32LE(at + 8), next = buf.readUInt32LE(at + 12);
+        for (let j = 0, ax = at + aux; j < Math.min(cnt, 512) && ax + 16 <= buf.length; j++) {
+          verFile.set(buf.readUInt16LE(ax + 6) & 0x7fff, file);           // vna_other: the version index that .gnu.version uses
+          const an = buf.readUInt32LE(ax + 12);
+          if (!an) break;
+          ax += an;
+        }
+        if (!next) break;
+        at += next;
+      }
+    }
+  } catch { verFile.clear(); }
+
   if (sym && str) {
     try {
       const n = Math.min(sym.count, MAX_SYMBOLS);
@@ -210,7 +237,12 @@ export function parseElf(buf) {
         const shndx = buf.readUInt16LE(w(o + 6, o + 14));
         if (shndx !== 0) continue;                                   // defined here: not an import
         const name = readStr(buf.readUInt32LE(o));
-        if (name) r.imports.push(name);
+        if (!name) continue;
+        r.imports.push(name);
+        if (verFile.size && versymOff >= 0 && versymOff + i * 2 + 2 <= buf.length) {
+          const file = verFile.get(buf.readUInt16LE(versymOff + i * 2) & 0x7fff);
+          if (file && !r.importProviders.has(name)) r.importProviders.set(name, file);
+        }
       }
       r.symbolsReadable = true;
     } catch { r.symbolsReadable = false; }

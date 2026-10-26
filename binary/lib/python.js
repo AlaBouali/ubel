@@ -18,6 +18,8 @@ import { cRecord, purlRecord, inventoryRecord, pypiPurl, normalisePypi } from '.
 
 const MAGIC = Buffer.from([0x4d, 0x45, 0x49, 0x0c, 0x0b, 0x0a, 0x0b, 0x0e]);
 const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+// Marshalled code keeps names (`socket`, `subprocess`, `ctypes`) as short strings; the secret scanner's 8-character minimum would drop them.
+const NAME_STRINGS = { min: 4, max: 64, limit: 20000 };
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_TOC_BYTES = 64 * 1024 * 1024;
 
@@ -181,7 +183,8 @@ function analyzePyInstaller(buf, ar, out, name) {
         if (/\.(?:png|jpe?g|gif|ico|icns|ttf|otf|woff2?|mo|pyd|zip|gz|bz2|xz|pkl|npy|bin|dat|db|sqlite3?)$/i.test(e.name)) continue;
         const d = entryData(buf, ar, e);
         const lines = d ? asciiStrings(d, { min: 8, max: 2048, limit: 50000 }) : [];
-        if (lines.length) out.sources.push({ path: `${name}!${e.name}`, lines });
+        const tokens = d ? asciiStrings(d, NAME_STRINGS) : [];                    // module and attribute names of the marshalled code (behavior inventory)
+        if (lines.length || tokens.length) out.sources.push({ path: `${name}!${e.name}`, lines, tokens });
       }
     } catch (err) { failed.push(`${e.name} (${String(err.message || err).slice(0, 50)})`); }
   }
@@ -239,7 +242,8 @@ function analyzePyInstaller(buf, ar, out, name) {
         const m = load(x);
         if (!m) continue;
         const lines = asciiStrings(m, { min: 8, max: 2048, limit: 20000 });
-        if (lines.length) out.sources.push({ path: `${name}!PYZ/${x.name}`, lines });
+        const tokens = asciiStrings(m, NAME_STRINGS);
+        if (lines.length || tokens.length) out.sources.push({ path: `${name}!PYZ/${x.name}`, lines, tokens });
       }
       if (enc) out.gaps.push(`${name}: ${enc} module(s) in the PYZ archive could not be decompressed (encrypted with --key, or damaged); their packages and strings were not checked.`);
     }

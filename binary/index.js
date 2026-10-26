@@ -19,7 +19,8 @@ import { goBuildInfo, goRecords, goSummary, goNotes } from './lib/go.js';
 import { analyzeNpm } from './lib/npm.js';
 import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
-import { collectBehavior } from './lib/behavior.js';
+import { BehaviorBuilder, sourceOwner } from './lib/behavior.js';
+import { goFunctionNames } from './lib/gosyms.js';
 import { asciiStrings, utf16Strings } from '../mobile/lib/strings.js';
 import { SecretScanner } from '../mobile/lib/secrets.js';
 import { Findings } from '../mobile/lib/findings.js';
@@ -124,14 +125,17 @@ function riskyImports(importNames, { findings, base, name, stripUnderscore = fal
   }
 }
 
-// ── behavior: what the import table says the file can do (see lib/behavior.js; an inventory of imports, not of call sites) ──────────
-function addBehavior(app, imports, { notes, name, readable = true, windows = false, providers = null, extra = [] }) {
+// ── behavior: what the file can do (see lib/behavior.js; an inventory of what is linked or referenced, not of call sites) ──────────
+// Imports are added by each format's analyzer; Go function names, Rust paths and packaged-application text are added where those are read.
+// `ctx.behavior` is turned into `app.behavior` once the whole file has been analysed (scanBinary).
+function addBehavior(ctx, imports, { readable = true, windows = false, macho = false, providers = null, extra = [] }) {
+  const { notes, name } = ctx;
   const list = [...imports];
-  const behavior = collectBehavior(list, { windows, providers });
-  if (behavior) app.behavior = behavior;
-  if (!readable) notes.push(`${name}: no readable import table, so no behavior inventory was built.`);
-  else if (!behavior) notes.push(`${name}: none of the ${list.length} imported function(s) fall in a behavior category, so no behavior inventory was built.`);
+  const hit = ctx.behavior.addImports(list, { windows, macho, providers });
+  ctx.importCount = (ctx.importCount || 0) + list.length;
+  if (!readable) notes.push(`${name}: no readable import table, so its imports are not in the behavior inventory.`);
   for (const x of extra) notes.push(x);
+  return hit;
 }
 
 // ── components (version banners, Go build info, Rust crates, packaged npm / Python applications) ────────────────
@@ -150,7 +154,7 @@ function dedupeRecords(records) {
   return out;
 }
 
-function componentRecords(buf, strings, { notes, name, dep0, app, extra = [] }) {
+function componentRecords(buf, strings, { notes, name, dep0, app, behavior, extra = [] }) {
   const records = [...detectBanners(strings)];
   const go = goBuildInfo(buf);
   if (go && go.unsupported) gap(notes, `${name}: ${go.unsupported}`);
@@ -161,8 +165,14 @@ function componentRecords(buf, strings, { notes, name, dep0, app, extra = [] }) 
   }
   const exact = dep0 ? cargoAuditable(dep0) : null;
   if (dep0 && !exact) gap(notes, `${name}: the cargo-auditable data (.dep-v0) could not be decoded; Rust crates are taken from embedded paths instead.`);
-  const crates = exact || cratesFromStrings(strings);
+  const pathCrates = cratesFromStrings(strings);
+  const crates = exact || pathCrates;
   records.push(...cargoRecords(crates, { exact: Boolean(exact) }));
+  // behavior: Go imports nothing, so its pclntab is read; Rust leaves std and crate paths in panic messages (only crates seen in a path count: a
+  // cargo-auditable dependency list names what was built in, not what survived the linker)
+  const gofn = goFunctionNames(buf);
+  if (gofn) behavior.addGoFunctions(gofn.names, go && !go.unsupported ? go : {});
+  behavior.addRust(strings, pathCrates);
   records.push(...extra);
   return dedupeRecords(records);
 }
@@ -170,13 +180,16 @@ function componentRecords(buf, strings, { notes, name, dep0, app, extra = [] }) 
 // ── packaged applications: Node.js (pkg, SEA, Bun, nexe) and Python (PyInstaller …) ──────────────────────────
 // The payload of such a file is compressed or embedded in a format of its own, so it is read structurally here; the byte ranges that were read
 // are returned in `regions` and left out of the plain strings pass (they would only be scanned twice, and compressed ones are noise).
-function runPackagers(buf, { name, notes, app, scanner }) {
+function runPackagers(buf, { name, notes, app, scanner, behavior }) {
   const merged = { records: [], regions: [] };
   const packaging = [];
-  for (const part of [analyzeNpm(buf, { name }), analyzePython(buf, { name })]) {
+  for (const [part, lang] of [[analyzeNpm(buf, { name }), 'js'], [analyzePython(buf, { name }), 'py']]) {
     merged.records.push(...part.records);
     merged.regions.push(...part.regions);
-    for (const src of part.sources) scanner.add(src.path, src.lines);
+    for (const src of part.sources) {
+      scanner.add(src.path, src.lines);
+      behavior.addBundleText({ ...sourceOwner(src.path, lang), lines: src.lines, tokens: src.tokens || [] });          // owner = the node_modules package / PYZ top-level module
+    }
     for (const g of part.gaps) gap(notes, g);
     for (const n of part.notes || []) notes.push(n);
     packaging.push(...part.info);
@@ -231,13 +244,13 @@ function analyzeElf(buf, ctx) {
   if (isStatic) findings.add('binary.static_linked', { ...base, artifact: name, key: 'static_linked', description: 'The executable has no dynamic dependencies, so every library it uses is compiled in and only a rebuild picks up security fixes.', evidence: ['no PT_INTERP and no DT_NEEDED'] });
   if (!elf.symbolsReadable) notes.push(`${name}: no readable dynamic symbol table (statically linked or stripped); stack canary and FORTIFY indicators were not assessed.`);
   riskyImports(elf.imports || [], { findings, base, name });
-  addBehavior(app, elf.imports || [], { notes, name, readable: elf.symbolsReadable,
-    extra: isStatic ? [`${name}: statically linked; the behavior inventory lists only what the import table shows, and most of what this file does is compiled in.`] : [] });
-  const pk = runPackagers(buf, { name, notes, app, scanner });
+  addBehavior(ctx, elf.imports || [], { readable: elf.symbolsReadable, providers: elf.importProviders,
+    extra: isStatic ? [`${name}: statically linked; the import table shows only part of what this file does, most of it is compiled in.`] : [] });
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
   const dep = secs.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, strings, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, strings, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 // ── Mach-O ───────────────────────────────────────────────────────────────────────────────────────
@@ -294,7 +307,7 @@ function analyzeMachO(buf, ctx) {
   };
   for (const [rule, evidence] of Object.entries(hits)) findings.add(rule, { ...base, artifact: name, key: rule, description: text[rule], evidence, ...(rule === 'binary.no_canary' ? { confidence: 'medium' } : {}) });
   riskyImports(preferred.imports, { findings, base, name, stripUnderscore: true });
-  addBehavior(app, preferred.imports, { notes, name });
+  addBehavior(ctx, preferred.imports, { macho: true, providers: preferred.importProviders });
   if (preferred.encrypted) { gap(notes, `${name}: FairPlay-encrypted — secrets and component scans were skipped. Scan a decrypted build for full coverage.`); return []; }
   const lines = [];
   for (const part of sectionBuffers(buf, preferred)) {
@@ -302,9 +315,9 @@ function analyzeMachO(buf, ctx) {
     for (const x of list) if (x.length >= 8) lines.push(x);
   }
   if (lines.length) scanner.add(name, lines);
-  const pk = runPackagers(buf, { name, notes, app, scanner });
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
   const dep = preferred.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, lines, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, lines, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 // ── PE ───────────────────────────────────────────────────────────────────────────────────────────
@@ -326,13 +339,13 @@ function analyzePe(buf, ctx) {
   if (!pe.signed) add('binary.unsigned', 'The file has no Authenticode signature (only the presence of a signature is checked, never its validity).', []);
   if (!pe.importsReadable && pe.kind === 'executable') notes.push(`${name}: the import table could not be read; risky-import checks were skipped.`);
   riskyImports(pe.imports, { findings, base, name });
-  if (!pe.managed) addBehavior(app, pe.imports, { notes, name, readable: pe.importsReadable, windows: true, providers: pe.importProviders,
+  if (!pe.managed) addBehavior(ctx, pe.imports, { readable: pe.importsReadable, windows: true, providers: pe.importProviders,
     extra: pe.ordinalImports ? [`${name}: ${pe.ordinalImports} function(s) are imported by ordinal; they have no name to classify and are not in the behavior inventory.`] : [] });
-  const pk = runPackagers(buf, { name, notes, app, scanner });
+  const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
   const strings = imageStrings(buf, pk.regions, { notes, name });
   addImageStrings(scanner, name, strings, pk.regions.length > 0, notes);
   const dep = pe.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, strings, { notes, name, app, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, strings, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 const ANALYZERS = { elf: analyzeElf, macho: analyzeMachO, pe: analyzePe };
@@ -353,9 +366,13 @@ export function scanBinary(file, opts = {}) {
   const base = { app: name };
   const scanner = new SecretScanner(findings, base);
   const app = { platform: 'binary', name, size_bytes: buf.length };
+  const ctx = { name, findings, base, notes, scanner, app, behavior: new BehaviorBuilder(), importCount: 0 };
   let records;
-  try { records = ANALYZERS[format](buf, { name, findings, base, notes, scanner, app }); }
+  try { records = ANALYZERS[format](buf, ctx); }
   catch (err) { throw new Error(`${FORMAT_LABEL[format]} not readable: ${err.message}`); }
+  const behavior = ctx.behavior.summary();
+  if (behavior) app.behavior = behavior;
+  else if (ctx.importCount) notes.push(`${name}: none of the ${ctx.importCount} imported function(s) fall in a behavior category, so no behavior inventory was built.`);
   scanner.run();
   if (scanner.truncated) gap(notes, `${name}: more strings than the secret scanner's line budget; the rest were not scanned.`);
   notes.push('Scope: build hardening, imported-API use, hardcoded secrets and known-vulnerable components. Unknown memory-corruption bugs are not detected, and a component version banner shows the code is present, not that the vulnerable function is reachable.');
