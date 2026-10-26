@@ -21,6 +21,7 @@ import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
 import { BehaviorBuilder, sourceOwner } from './lib/behavior.js';
 import { goFunctionNames } from './lib/gosyms.js';
+import { elfCallSites, peCallSites } from './lib/callsites.js';
 import { asciiStrings, utf16Strings } from '../mobile/lib/strings.js';
 import { SecretScanner } from '../mobile/lib/secrets.js';
 import { Findings } from '../mobile/lib/findings.js';
@@ -128,11 +129,12 @@ function riskyImports(importNames, { findings, base, name, stripUnderscore = fal
 // ── behavior: what the file can do (see lib/behavior.js; an inventory of what is linked or referenced, not of call sites) ──────────
 // Imports are added by each format's analyzer; Go function names, Rust paths and packaged-application text are added where those are read.
 // `ctx.behavior` is turned into `app.behavior` once the whole file has been analysed (scanBinary).
-function addBehavior(ctx, imports, { readable = true, windows = false, macho = false, providers = null, extra = [] }) {
+function addBehavior(ctx, imports, { readable = true, windows = false, macho = false, providers = null, sites = null, extra = [] }) {
   const { notes, name } = ctx;
   const list = [...imports];
-  const hit = ctx.behavior.addImports(list, { windows, macho, providers });
+  const hit = ctx.behavior.addImports(list, { windows, macho, providers, sites });
   ctx.importCount = (ctx.importCount || 0) + list.length;
+  if (hit && !sites && (windows || !macho)) notes.push(`${name}: call sites were not counted (unsupported architecture, no section headers, a static or packed file, or no direct calls found); the import entries show presence only.`);
   if (!readable) notes.push(`${name}: no readable import table, so its imports are not in the behavior inventory.`);
   for (const x of extra) notes.push(x);
   return hit;
@@ -244,7 +246,7 @@ function analyzeElf(buf, ctx) {
   if (isStatic) findings.add('binary.static_linked', { ...base, artifact: name, key: 'static_linked', description: 'The executable has no dynamic dependencies, so every library it uses is compiled in and only a rebuild picks up security fixes.', evidence: ['no PT_INTERP and no DT_NEEDED'] });
   if (!elf.symbolsReadable) notes.push(`${name}: no readable dynamic symbol table (statically linked or stripped); stack canary and FORTIFY indicators were not assessed.`);
   riskyImports(elf.imports || [], { findings, base, name });
-  addBehavior(ctx, elf.imports || [], { readable: elf.symbolsReadable, providers: elf.importProviders,
+  addBehavior(ctx, elf.imports || [], { readable: elf.symbolsReadable, providers: elf.importProviders, sites: elfCallSites(buf),
     extra: isStatic ? [`${name}: statically linked; the import table shows only part of what this file does, most of it is compiled in.`] : [] });
   const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
   const strings = imageStrings(buf, pk.regions, { notes, name });
@@ -339,7 +341,7 @@ function analyzePe(buf, ctx) {
   if (!pe.signed) add('binary.unsigned', 'The file has no Authenticode signature (only the presence of a signature is checked, never its validity).', []);
   if (!pe.importsReadable && pe.kind === 'executable') notes.push(`${name}: the import table could not be read; risky-import checks were skipped.`);
   riskyImports(pe.imports, { findings, base, name });
-  if (!pe.managed) addBehavior(ctx, pe.imports, { readable: pe.importsReadable, windows: true, providers: pe.importProviders,
+  if (!pe.managed) addBehavior(ctx, pe.imports, { readable: pe.importsReadable, windows: true, providers: pe.importProviders, sites: peCallSites(buf),
     extra: pe.ordinalImports ? [`${name}: ${pe.ordinalImports} function(s) are imported by ordinal; they have no name to classify and are not in the behavior inventory.`] : [] });
   const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior });
   const strings = imageStrings(buf, pk.regions, { notes, name });

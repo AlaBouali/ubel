@@ -3,11 +3,10 @@
 // execution, dynamic loading, debugging / injection, anti-analysis, privilege, persistence, input capture and sensitive devices,
 // cryptography, system fingerprinting).
 //
-// Same idea as mobile/lib/behavior.js, with one difference that matters when reading the result. The Android collector counts call SITES
-// reported by the DEX walker. A native file has no such walker here, so every entry only says that a function is PRESENT: linked and
-// callable, not proven to be called or reachable. The summary therefore counts distinct functions per category (`calls` = number of
-// distinct entries, every api = 1) and says where the entries came from (`sources`). It is a summary on the app record
-// (`app.behavior`), never a rule hit: nearly every program does file and network I/O.
+// Same idea as mobile/lib/behavior.js. The Android collector counts call SITES reported by the DEX walker. Here an entry says that a function is
+// PRESENT (linked or referenced, value 1), except for ELF / PE imports of x86-64 and arm64 files, where lib/callsites.js counts the direct call
+// sites that reach the import (`basis: 'calls'`, 0 = imported but no direct call found). Either way the result is an inventory, not proof that
+// code runs. It is a summary on the app record (`app.behavior`), never a rule hit: nearly every program does file and network I/O.
 //
 // Sources, each filed under an ORIGIN (the library, module or owner the entry belongs to):
 //   imports  the import table. Origin = the library that provides the function: PE the DLL of the import descriptor, ELF the file named by
@@ -316,24 +315,28 @@ export function sourceOwner(path, lang) {
 }
 
 export class BehaviorBuilder {
-  constructor() { this.found = new Map(); this.sources = new Set(); this.imports = 0; }
+  constructor() { this.found = new Map(); this.sources = new Set(); this.imports = 0; this.counted = false; }
 
   /** Records one function under a category and an origin (a repeat is one entry). */
-  add(cat, api, origin, source) {
+  add(cat, api, origin, source, n = 1) {
     if (!NATIVE_BEHAVIOR_LABELS[cat]) return;
     const o = String(origin || UNATTRIBUTED).slice(0, 120), a = String(api).slice(0, 200);
     const byOrigin = this.found.get(cat) || this.found.set(cat, new Map()).get(cat);
-    const apis = byOrigin.get(o) || byOrigin.set(o, new Set()).get(o);
-    apis.add(a);
+    const apis = byOrigin.get(o) || byOrigin.set(o, new Map()).get(o);
+    apis.set(a, (apis.get(a) || 0) + n);                                      // call sites when counted, otherwise 1: present
     if (source) this.sources.add(source);
   }
 
   /**
    * Import table. `providers`: imported name -> the library that provides it (PE DLL, ELF versioned file, Mach-O dylib).
+   * `sites`: the result of lib/callsites.js (direct call sites per imported name), or null; with it every entry carries its call-site count (0 =
+   * imported, no direct call found), without it an entry is 1 (present). `ptrace(PTRACE_TRACEME)` is told apart from other ptrace calls only
+   * with call sites: the request is the constant 0.
    * @returns {number} how many distinct names were recognised
    */
-  addImports(imports, { windows = false, macho = false, providers = null } = {}) {
+  addImports(imports, { windows = false, macho = false, providers = null, sites = null } = {}) {
     let hit = 0;
+    if (sites) this.counted = true;
     const names = new Set(imports || []);
     this.imports += names.size;
     for (const raw of names) {
@@ -341,7 +344,12 @@ export class BehaviorBuilder {
       if (!cats.length) continue;
       const shown = macho ? String(raw).replace(/@.*$/, '').replace(/^_/, '') : String(raw).replace(/@.*$/, '');
       const from = providers && providers.get(raw);
-      for (const cat of cats) this.add(cat, shown, from, 'imports');
+      let n = sites ? sites.counts.get(raw) || 0 : 1;
+      if (sites && raw === 'ptrace' && sites.traceme > 0) {
+        this.add('anti_analysis', 'ptrace(PTRACE_TRACEME)', from, 'imports', sites.traceme);   // a process that traces itself: no debugger can attach
+        if (n === 0) { hit++; continue; }                                                       // every ptrace call is the anti-debug one
+      }
+      for (const cat of cats) this.add(cat, shown, from, 'imports', n);
       hit++;
     }
     return hit;
@@ -427,11 +435,13 @@ export class BehaviorBuilder {
       const byOrigin = this.found.get(cat);
       if (!byOrigin) continue;
       categories[cat] = {};
-      for (const [origin, set] of [...byOrigin].sort((x, y) => y[1].size - x[1].size || x[0].localeCompare(y[0]))) {
-        categories[cat][origin] = { calls: set.size, apis: Object.fromEntries([...set].sort().slice(0, MAX_APIS).map(k => [k, 1])) };
+      const weight = m => [...m.values()].reduce((t, v) => t + v, 0);
+      for (const [origin, m] of [...byOrigin].sort((x, y) => weight(y[1]) - weight(x[1]) || x[0].localeCompare(y[0]))) {
+        const apis = [...m].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).slice(0, MAX_APIS);
+        categories[cat][origin] = { calls: weight(m), apis: Object.fromEntries(apis) };
       }
     }
     const order = ['imports', 'go', 'rust', 'bundle'];
-    return { basis: 'presence', sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
+    return { basis: this.counted ? 'calls' : 'presence', counted: this.counted, sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
   }
 }

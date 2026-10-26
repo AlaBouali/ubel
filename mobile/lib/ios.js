@@ -11,6 +11,7 @@ import { scanBundledFiles } from './files.js';
 import { Aggregator } from './findings.js';
 import { gap } from './coverage.js';
 import { analyzeFrameworks } from './frameworks.js';
+import { NativeBehavior } from './behavior.js';
 
 const MB = 1024 * 1024;
 const URL_HTTP = /^http:\/\/[^\s"'<>\\]{4,300}$/i;
@@ -79,7 +80,7 @@ export function analyzeIpa(zip, ctx) {
 
   // Mach-O: main executable, embedded frameworks, app extensions
   const agg = new Aggregator(findings, base);
-  const state = { urls: new Set(), pinned: false, hasSwiftOnly: false, machoPaths: new Set() };
+  const state = { urls: new Set(), pinned: false, hasSwiftOnly: false, machoPaths: new Set(), native: new NativeBehavior() };
   const targets = [];
   if (app.executable) targets.push({ name: `${dir}${app.executable}`, label: app.executable, main: true, origin: 'app' });
   for (const e of zip.entries) {
@@ -111,6 +112,8 @@ export function analyzeIpa(zip, ctx) {
     } catch (e) { gap(notes, `${t.name}: Mach-O not analysed (${e.message}).`); }
   }
   agg.flush(app.executable ? `${dir}${app.executable}` : dir);
+  const behavior = state.native.summary();
+  if (behavior) app.behavior = behavior;
 
   // entitlements (the signed binary's own are authoritative; the profile is the fallback)
   const ent = mainEnt || profileEnt;
@@ -208,6 +211,7 @@ function analyzeMachO(buf, t, { agg, findings, base, scanner, state, notes, app 
     }
   }
   const imports = preferred.imports;
+  state.native.add({ binary: label, origin, imports, providers: preferred.importProviders, macho: true });      // imported functions are readable even when the code is FairPlay-encrypted
   for (const [rule, syms, why] of SYMBOL_RULES) {
     const hit = syms.filter(s => imports.has(s));
     if (hit.length) agg.hit(rule, { origin, evidence: `${hit.join(', ')} (${label})`, description: why, confidence: 'medium' });

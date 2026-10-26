@@ -16,7 +16,8 @@ import { certsFromPkcs7, describeCert, parseApkSigningBlock, WEAK_SIG } from './
 import { scanBundledFiles } from './files.js';
 import { Aggregator, mask } from './findings.js';
 import { ResilienceCollector, MIN_INDICATORS, RESILIENCE_CALLS, RUNTIME_EXEC, classifyResilienceString } from './resilience.js';
-import { BehaviorCollector, BEHAVIOR } from './behavior.js';
+import { BehaviorCollector, BEHAVIOR, NativeBehavior } from './behavior.js';
+import { elfCallSites } from '../../binary/lib/callsites.js';
 import { captureFirebaseResource, collectVerifyHosts, onlineData, FIREBASE_DB_URL } from './online.js';
 import { MethodSignals, SIGNAL_KEYS, sensitiveLabel, schemaSensitive, credentialConstant, maskedConstant, isJwtLiteral, classifyJwt, constantSecretArg } from './signals.js';
 
@@ -619,6 +620,7 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }
   app.native_libs = [...byName.keys()].sort().slice(0, 300);
 
   const records = [];
+  const native = new NativeBehavior();
   const analyse = ({ e, abi }, name, { strings }) => {
     const where = at(`lib/${abi}/${name}`);
     const buf = zip.tryRead(e, 128 * MB);
@@ -627,6 +629,11 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }
     try {
       const elf = parseElf(buf);
       records.push(hardeningRecord(elf, { abi, library: name, path: where, size: buf.length }));
+      // behavior of the preferred copy: imported functions, with call sites where the code can be scanned (ELF x86-64 / arm64, up to 96 MB)
+      if (strings && elf.symbolsReadable) {
+        try { native.add({ binary: name, origin: isVendorNative(name) ? 'library' : 'app', imports: elf.imports, providers: elf.importProviders, sites: buf.length <= 96 * MB ? elfCallSites(buf) : null }); }
+        catch (err) { notes.push(`${where}: behavior inventory not built (${err.message}).`); }
+      }
       if (!elf.symbolsReadable) notes.push(`${where}: dynamic symbol table not readable; stack canary and FORTIFY indicators were not assessed.`);
     } catch (err) { gap(notes, `${where}: ELF not readable (${err.message}); hardening flags not checked.`); }
     if (strings && !SKIP_STRINGS.test(name)) scanner.add(where, asciiStrings(buf, { min: 8, max: 400, limit: 40000 }));
@@ -673,6 +680,8 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app }
     });
   }
   app.native_hardening = records.length ? summarizeHardening(records, evaluated) : null;
+  const behavior = native.into(app.behavior);
+  if (behavior) app.behavior = behavior;
 }
 
 // ── signing ────────────────────────────────────────────────────────────────────────────────────────

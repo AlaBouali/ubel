@@ -317,21 +317,25 @@ const BEHAVIOR_ORIGINS = ['app', 'unknown', 'library'];
 
 // The tab is shared by the Android and native-binary reports. Android counts call sites in DEX code, split by who owns the class; a native
 // binary (`app.platform === 'binary'`) lists the functions its import table links, in one column, because it has no call-site walker.
+// Categories that only native code fills (see mobile/lib/behavior.js): same text as the binary report, related findings are the native hardening rules
+const ANDROID_NATIVE_INFO = Object.fromEntries(['injection', 'anti_analysis', 'privilege', 'persistence', 'input_capture', 'crypto', 'system_info'].map(c => [c, {
+  about: NATIVE_BEHAVIOR_INFO[c].about, rules: c === 'injection' ? /^android\.native\.(exec_stack|wx_segment|textrel)$/ : c === 'crypto' ? /^android\.dex\.(ecb_mode|static_iv|static_gcm_nonce)$/ : null }]));
 const ANDROID_BEHAVIOR = {
-  labels: BEHAVIOR_LABELS, info: BEHAVIOR_INFO, origins: BEHAVIOR_ORIGINS, originLabel: BEHAVIOR_ORIGIN, badge: BEHAVIOR_ORIGIN_BADGE,
+  labels: BEHAVIOR_LABELS, info: { ...ANDROID_NATIVE_INFO, ...BEHAVIOR_INFO }, origins: BEHAVIOR_ORIGINS, originLabel: BEHAVIOR_ORIGIN, badge: BEHAVIOR_ORIGIN_BADGE,
   columns: { app: 'App code', unknown: 'Renamed classes', library: 'Libraries' }, ownerHeader: 'Owner', countHeader: 'Calls', totalHeader: 'Total calls', ipc: true, fallbackName: 'Android app',
-  intro: "API references counted in the app's DEX code, split by who owns the class. <b>Renamed classes</b> are obfuscated classes outside the app's own package: most likely library code, but not provable. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact APIs.",
+  intro: b => "API references counted in the app's DEX code, split by who owns the class. <b>Renamed classes</b> are obfuscated classes outside the app's own package: most likely library code, but not provable. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact APIs." + (b?.native ? " <b>Native libraries</b> (.so files) add the functions they import, labelled <i>library: function</i>, under App code or Libraries by the same rule as the hardening findings; for ELF x86-64 / arm64 the count is the direct call sites found in the library code" + (b.native.counted ? "" : " (not counted here: entries are 1, present)") + "." : ""),
 };
 const NATIVE_BEHAVIOR = {
   labels: NATIVE_BEHAVIOR_LABELS, info: NATIVE_BEHAVIOR_INFO, dynamicOrigins: true, origins: [], originLabel: o => o, badge: () => 'text-neutral-300 border-neutral-600 bg-neutral-800/50',
   columns: { all: 'Functions' }, ownerHeader: 'Source', countHeader: 'Present', totalHeader: 'Total', ipc: false, fallbackName: 'Binary',
   intro: b => {
+    if (b?.native) return `Functions imported by the Mach-O files of the app (the executable, frameworks and extensions), grouped by what they do. <b>Source</b> is <i>app</i> for the app's own binaries and <i>library</i> for embedded frameworks and dylibs; each entry is labelled <i>binary: function</i>. An entry shows that the function is <b>linked</b>, not that it is called: call sites are not counted for Mach-O, so every entry is 1. Calls made through Objective-C messaging or Swift are not functions of this table. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
     const from = { imports: 'the import table', go: 'the Go function table (pclntab)', rust: 'the std and crate paths left in panic messages', bundle: "the text of the packaged application's own files" };
     const src = (b?.sources?.length ? b.sources : ['imports']).map(x => from[x] || x);
-    return `Functions and modules found in ${src.join(', ')}, grouped by what they do and by <b>Source</b>: the library that provides an import, the module that defines a Go function, the crate, or the owner of a bundled file. An entry shows that the function is <b>linked or referenced</b>, not that it is called or reachable: call sites are not analysed, so there are no call counts. A statically linked or stripped file lists little here even when it does a lot. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
+    return `Functions and modules found in ${src.join(', ')}, grouped by what they do and by <b>Source</b>: the library that provides an import, the module that defines a Go function, the crate, or the owner of a bundled file. ${b?.counted ? 'For imports the count is the number of <b>direct call sites</b> found by scanning the code for calls to the import stubs (x86-64 and arm64; approximate: calls through function pointers, <code>dlsym</code> / <code>GetProcAddress</code> results and packed or obfuscated code are not seen, and 0 means imported but no direct call found). Entries from other sources are 1: present.' : 'An entry shows that the function is <b>linked or referenced</b>, not that it is called or reachable: call sites were not counted, so there are no call counts.'} A statically linked or stripped file lists little here even when it does a lot. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
   },
 };
-const behaviorProfile = a => (a && a.platform === 'binary' ? NATIVE_BEHAVIOR : ANDROID_BEHAVIOR);
+const behaviorProfile = a => (a && (a.platform === 'binary' || a.platform === 'ios') ? NATIVE_BEHAVIOR : ANDROID_BEHAVIOR);
 /** Origins of one app's behavior summary: fixed for Android, the libraries / modules / owners that actually occur for a native binary. */
 const behaviorOrigins = (P, b) => (P.dynamicOrigins ? [...new Set(Object.values(b.categories || {}).flatMap(byOrigin => Object.keys(byOrigin || {})))].sort() : P.origins);
 
@@ -361,7 +365,7 @@ export function behaviorHtml(apps, findings = []) {
     const cats = Object.keys(P.labels).filter(c => b.categories[c]);
     const totalCalls = c => ORIGINS.reduce((n, o) => n + callsOf(b.categories[c], o), 0);
     const pill = (id, label, count) => `<button type="button" data-bh-app="${i}" data-bh-pill="${esc(id)}" onclick="switchBehavior(${i}, '${esc(id)}')" class="bh-pill px-3 py-1.5 rounded-full border border-neutral-700 text-xs font-medium text-neutral-300 hover:text-white whitespace-nowrap${id === 'overview' ? ' bh-pill-active' : ''}">${esc(label)}${count == null ? '' : ` <span class="mono text-neutral-500">${Number(count)}</span>`}</button>`;
-    const columns = P.dynamicOrigins ? [{ header: P.columns.all, of: totalCalls }] : ORIGINS.map(o => ({ header: P.columns[o], of: c => callsOf(b.categories[c], o) }));
+    const columns = P.dynamicOrigins ? [{ header: b.counted ? 'Calls' : P.columns.all, of: totalCalls }] : ORIGINS.map(o => ({ header: P.columns[o], of: c => callsOf(b.categories[c], o) }));
     const pills = [pill('overview', 'Overview', null), ...cats.map(c => pill(c, P.labels[c], totalCalls(c)))].join('');
     const showTotal = ORIGINS.length > 1 && !P.dynamicOrigins;                            // a native binary has one column: the origin is shown per function
 
@@ -373,7 +377,7 @@ export function behaviorHtml(apps, findings = []) {
     const it = b.intent_actions_total || {}, ex = b.explicit_intents || {};
     const tiles = P.ipc
       ? [['Explicit intents (app)', ex.app || 0], ['Implicit intent actions (app)', it.app || 0], ['Implicit actions (renamed / library)', `${it.unknown || 0} / ${it.library || 0}`], ['Explicit intents (all)', (ex.app || 0) + (ex.unknown || 0) + (ex.library || 0)]]
-      : [['Functions listed', cats.reduce((n, c) => n + totalCalls(c), 0)], ['Categories observed', cats.length], ['Sources', ORIGINS.length], ['Linked libraries', (a.needed || []).length]];
+      : [[b.counted ? 'Call sites found' : 'Functions listed', cats.reduce((n, c) => n + totalCalls(c), 0)], ['Categories observed', cats.length], ['Sources', ORIGINS.length], ['Linked libraries', (a.needed || []).length]];
     const overview = `<div data-bh-app="${i}" data-bh-panel="overview" class="space-y-4">
         <p class="text-xs text-neutral-400">${typeof P.intro === 'function' ? P.intro(b) : P.intro}</p>
         <div class="overflow-x-auto"><table class="w-full text-left text-sm">
@@ -386,7 +390,7 @@ export function behaviorHtml(apps, findings = []) {
     const panels = cats.map(c => {
       const byOrigin = b.categories[c];
       const rows = ORIGINS.filter(o => byOrigin[o]).flatMap(o => Object.entries(byOrigin[o].apis || {}).map(([api, n]) => ({ o, api, n }))).sort((x, y) => y.n - x.n || x.api.localeCompare(y.api));
-      const shown = rows.map(r => `<tr class="hover:bg-neutral-800/30 transition-colors"><td class="px-4 py-2 mono text-xs break-all">${esc(r.api)}</td><td class="px-4 py-2">${originChip(r.o)}</td><td class="px-4 py-2 mono text-sm">${P.ipc ? Number(r.n) : '✓'}</td></tr>`).join('');
+      const shown = rows.map(r => `<tr class="hover:bg-neutral-800/30 transition-colors"><td class="px-4 py-2 mono text-xs break-all">${esc(r.api)}</td><td class="px-4 py-2">${originChip(r.o)}</td><td class="px-4 py-2 mono text-sm">${P.ipc || b.counted ? Number(r.n) : '✓'}</td></tr>`).join('');
       const truncated = ORIGINS.some(o => byOrigin[o] && Number(byOrigin[o].calls) > Object.values(byOrigin[o].apis || {}).reduce((x, y) => x + y, 0));
       let extra = '';
       if (c === 'ipc' && P.ipc) {
@@ -396,9 +400,9 @@ export function behaviorHtml(apps, findings = []) {
       return `<div data-bh-app="${i}" data-bh-panel="${esc(c)}" class="space-y-4 hidden">
         <div><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">${esc(P.labels[c])}</h3><p class="text-xs text-neutral-400 mt-1">${esc(P.info[c]?.about || '')}</p></div>
         <div class="overflow-x-auto"><table class="w-full text-left text-sm">
-          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">${P.ipc ? 'API' : 'Function'}</th><th class="px-4 py-3">${esc(P.ownerHeader)}</th><th class="px-4 py-3">${esc(P.countHeader)}</th></tr></thead>
+          <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr><th class="px-4 py-3">${P.ipc ? 'API' : 'Function'}</th><th class="px-4 py-3">${esc(P.ownerHeader)}</th><th class="px-4 py-3">${esc(b.counted && P.dynamicOrigins ? 'Calls' : P.countHeader)}</th></tr></thead>
           <tbody class="divide-y divide-neutral-800">${shown}</tbody></table></div>
-        ${truncated ? `<p class="text-xs text-neutral-500">Only the ${P.ipc ? 'most frequent APIs' : 'first functions (alphabetical)'} of each ${P.ipc ? 'owner are' : 'source are'} listed; the ${P.ipc ? 'call ' : ''}totals include the rest.</p>` : ''}
+        ${truncated ? `<p class="text-xs text-neutral-500">Only the ${P.ipc || b.counted ? 'most frequent APIs' : 'first functions (alphabetical)'} of each ${P.ipc ? 'owner are' : 'source are'} listed; the ${P.ipc ? 'call ' : ''}totals include the rest.</p>` : ''}
         ${extra}
         <div class="space-y-2"><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400">Related findings</h4>${findingList(related(a, c))}</div>
       </div>`;
@@ -669,8 +673,8 @@ export async function buildHtml(p) {
     </section>
 
     <section id="section-behavior" class="hidden space-y-6">
-      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorCount} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary') ? 'function' : 'API reference'}${behaviorCount === 1 ? '' : 's'}</p></div>
-      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'Behavior inventory is built from Android DEX code; it is not collected for iOS packages.' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: nothing the scanner reads in this file (import table, Go function table, Rust paths, packaged-application text) falls in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorCount} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary' || a?.platform === 'ios') ? 'function' : 'API reference'}${behaviorCount === 1 ? '' : 's'}</p></div>
+      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'No behavior inventory was built: none of the functions imported by the Mach-O files falls in a behavior category (see the analysis notes).' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: nothing the scanner reads in this file (import table, Go function table, Rust paths, packaged-application text) falls in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
     </section>
 
     <section id="section-dependencies" class="hidden space-y-6">
@@ -949,6 +953,13 @@ function appDetails(index) {
       }
     }
   } else if (a.platform === 'ios') {
+    if (a.behavior) {
+      const labels = ${JSON.stringify(NATIVE_BEHAVIOR_LABELS)};
+      for (const [cat, byOrigin] of Object.entries(a.behavior.categories || {})) {
+        const origins = Object.keys(byOrigin || {}), n = origins.reduce(function (t, o) { return t + (byOrigin[o].calls || 0); }, 0);
+        add('Behavior ? ' + (labels[cat] || cat), n + ' -- ' + origins.map(function (o) { return o + ': ' + Object.keys(byOrigin[o].apis || {}).slice(0, 3).join(', '); }).join(' ? '));
+      }
+    }
     add('Name', a.name); add('Bundle ID', a.bundle_id); add('Version', a.version); add('Build', a.build); add('Minimum iOS', a.min_os); add('Architectures', (a.architectures || []).join(', '));
     add('Binary', a.binary ? ('PIE ' + (a.binary.pie ? 'yes' : 'no') + ', encrypted ' + (a.binary.encrypted ? 'yes' : 'no') + ', signed ' + (a.binary.signed ? 'yes' : 'no') + (a.binary.swift ? ', Swift' : '')) : '—');
     add('Provisioning', a.provisioning ? [a.provisioning.type, a.provisioning.name, a.provisioning.team, 'expires ' + (a.provisioning.expires || '?')].filter(Boolean).join(' — ') : '—');
