@@ -56,6 +56,7 @@ This installs the binaries for the SCA/firewall CLI, the SAST module, the cloud 
 | `ubel-chunk` | SAST | Utility with no LLM cost to preview how a codebase will be chunked |
 | `ubel-cloud` | Cloud | Live AWS/GCP/Azure account scan via each provider's own API for misconfigurations — public exposure, IAM, encryption, audit logging — not a static IaC/manifest scan |
 | `ubel-mobile` | Mobile | Static scan of an Android `.apk` / iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, with no third-party libraries or external binaries — see [mobile/README.md](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
+| `ubel-binary` | Binary | Static scan of a native ELF / Mach-O / PE executable or library for missing build hardening, risky imports, hardcoded secrets, remote hosts, a behavior inventory and known-vulnerable components (C/C++ banners → NVD; Go modules, Rust crates, packaged npm / Python apps → OSV.dev) — see [binary/README.md](https://github.com/AlaBouali/ubel/blob/main/binary/README.md) |
 | `ubel-url` | EASM | Passive HTTP(S) fingerprinting of a domain/URL + OSV/NVD/wpvulnerability.net vulnerability lookup and misconfiguration checks on what it finds — **authorized use only, against infrastructure you own** |
 | `ubel-domain` | EASM | Same as `ubel-url`, but discovers its own target list first — enumerates a domain's subdomains via Certificate Transparency logs (crt.sh), then runs the same fingerprinting/vulnerability/misconfiguration scan against all of them — **authorized use only, against infrastructure you own** |
 | `ubel-host` | EASM | Takes one or more IPs/domains, resolves them to their distinct IPs (handled exactly like `ubel-easm` handles crt.sh hostnames), connect-scans every port in a range (default 1-30000) on each, probes whatever accepts a connection for HTTP(S), then runs the same fingerprinting/vulnerability/misconfiguration scan `ubel-url` does against whatever answered — **authorized use only, against infrastructure you own** |
@@ -408,6 +409,33 @@ Outputs JSON and HTML (no SARIF, no SBOM — this isn't a dependency scan). **Ex
 ubel-mobile app-release.apk
 ubel-mobile Bank.ipa --fail-on high --min-severity medium
 ```
+
+`ubel-mobile` does not send native components to NVD or OSV: `.so`, `.dylib` and embedded frameworks are excluded from dependency enumeration (and it does not run the banner detection of `ubel-binary`; see [Binary](#binary--native-executables-and-libraries)), so an OpenSSL, SQLite or curl bundled inside an app's native library is not looked up. Only `pom.properties`, `META-INF/*.version`, `dependencies.pb` (AAB), `Package.resolved` and `Podfile.lock` produce components, and a library found only by DEX class names has no version and stays `not_queryable`. To check a native library, scan it on its own with `ubel-binary`.
+
+## Binary — Native Executables and Libraries
+
+`ubel-binary <file>` statically analyses one native ELF (Linux, Android), Mach-O (macOS, iOS; thin and fat) or PE (Windows) executable or library — nothing is executed or loaded, and no third-party library or external tool is used. It reports missing build hardening (PIE, NX, RELRO, canary, FORTIFY, hardened runtime, ASLR / DEP / CFG …), risky imports, hardcoded secrets in the file's strings, the remote hosts it names, a behavior inventory, and known-vulnerable components. It shares its reader, report, diff and `--fail-on` gate (exit 0/1/2/3) with `ubel-mobile`, and writes `report.binary.json` / `report.binary.html` (plus `latest.binary.*` under `.ubel/reports/`). Details: [binary/README.md](https://github.com/AlaBouali/ubel/blob/main/binary/README.md).
+
+```bash
+ubel-binary ./build/server
+ubel-binary libfoo.dylib --fail-on high
+```
+
+### How components reach NVD / OSV
+
+Components come from four sources and are looked up as follows:
+
+| Source | Record | Lookup |
+|---|---|---|
+| C/C++ version banners (OpenSSL, zlib, libcurl, SQLite, libxml2 …) | CPE | NVD, version-verified against each CVE's CPE ranges |
+| Go build info | PURL `pkg:golang/…` | OSV.dev |
+| Rust cargo-auditable data or crate paths | PURL `pkg:cargo/…` | OSV.dev |
+| npm / Python packages of packaged applications | PURL | OSV.dev |
+
+- Banners are searched over the **whole file** for ELF, PE and Mach-O alike; a Mach-O no longer depends on its banners sitting in `__cstring`-type sections (Go builds keep text in `__rodata`). For Mach-O secrets, `sectionBuffers` falls back to the whole slice when the slice has no string section.
+- ELF symbol-version tags (`LIBXML2_2.4.30`) are not banners; each false component would cost one rate-limited NVD query.
+- NVD advisories keep their `aliases` in the report.
+- A failed lookup is reported as a failure of that component (exit 3), never as clean. Regression tests: `node --test tests/binary-components.test.js` (hand-built Mach-O fixtures and a local NVD mock).
 
 ## EASM — External Attack Surface Fingerprinting
 

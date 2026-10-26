@@ -326,16 +326,21 @@ function analyzeMachO(buf, ctx) {
   riskyImports(preferred.imports, { findings, base, name, stripUnderscore: true });
   addBehavior(ctx, preferred.imports, { macho: true, providers: preferred.importProviders });
   if (preferred.encrypted) { gap(notes, `${name}: FairPlay-encrypted — secrets and component scans were skipped. Scan a decrypted build for full coverage.`); return []; }
-  const lines = [];
+  // Secrets: the string sections of the preferred slice (the whole slice when it has none, see sectionBuffers). Remote hosts and component
+  // banners: the whole file, as for ELF and PE — a Go build keeps its text in __rodata, and a banner can sit in any data section.
+  const lines = [], utf16 = [];
   for (const part of sectionBuffers(buf, preferred)) {
-    const list = part.name === '__ustring' ? utf16Strings(part.data, { min: 6 }) : asciiStrings(part.data, { min: 6, max: 2048, limit: 200000 });
-    for (const x of list) if (x.length >= 8) lines.push(x);
+    const isU = part.name === '__ustring';
+    const list = isU ? utf16Strings(part.data, { min: 6 }) : asciiStrings(part.data, { min: 6, max: 2048, limit: 200000 });
+    for (const x of list) if (x.length >= 8) { lines.push(x); if (isU) utf16.push(x); }
   }
   if (lines.length) scanner.add(name, lines);
-  ctx.hosts.addStrings(lines, name);
   const pk = runPackagers(buf, { name, notes, app, scanner, behavior: ctx.behavior, hosts: ctx.hosts });
+  const strings = imageStrings(buf, pk.regions, { notes, name });
+  addHostStrings(ctx, strings, pk.regions.length > 0);
+  if (utf16.length) ctx.hosts.addStrings(utf16, `${name} (UTF-16)`);                      // the ASCII pass above does not see UTF-16 text
   const dep = preferred.sections.find(x => x.name === '.dep-v0' && x.size > 0 && x.off + x.size <= buf.length);
-  return componentRecords(buf, lines, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
+  return componentRecords(buf, strings, { notes, name, app, behavior: ctx.behavior, extra: pk.records, dep0: dep ? buf.subarray(dep.off, dep.off + dep.size) : null });
 }
 
 // ── PE ───────────────────────────────────────────────────────────────────────────────────────────

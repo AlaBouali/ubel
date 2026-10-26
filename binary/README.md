@@ -25,6 +25,8 @@ Also, for every format:
 - **Secrets** in the binary's strings (same scanner as `ubel-mobile`).
 - **Known-vulnerable components** (Dependencies tab):
   - C/C++ version banners (OpenSSL, LibreSSL, zlib, libcurl and the libraries it lists, SQLite, libpng, FFmpeg, expat, libxml2, xz, bzip2, BusyBox, Lua, PCRE/PCRE2, glibc, mbed TLS, wolfSSL, libtiff) are mapped to NVD CPEs and checked against the CPE ranges of each CVE (`UBEL_NVD_ENDPOINT` overrides the host).
+  - Banners are searched over the whole file for ELF, PE and Mach-O alike (not only in string sections), so a banner in `__rodata` of a Go-built Mach-O is found. Remote hosts are collected the same way. For Mach-O, secrets are read from the string sections of the preferred slice, or from the whole slice when it has none.
+  - A banner must look like the library's own version string. ELF symbol-version tags such as `LIBXML2_2.4.30` are not banners (`libxml2-2.9.14`, `libxml2 2.9.14` and `libxml2 version 2.9.14` are), so a library that merely exports versioned symbols does not produce a component per tag.
   - Go module build info and the Go standard-library version, Rust crates from cargo-auditable data (or, failing that, crate paths left in panic messages), and the npm and Python packages of packaged applications (below) are checked against OSV.dev (`UBEL_OSV_ENDPOINT`).
   - Only component names and versions leave the machine. A lookup that fails is reported as an incomplete analysis (exit 3), never as clean.
   - Every advisory is also a **finding** (`binary.component.vulnerable`, one per component and advisory, titled `CVE-… in <component> <version>`). It is counted in the issue totals, the risk rating, the executive summary and the Vulnerabilities tab, and takes part in the diff against the previous run. The `--fail-on` gate counts advisories once (from the dependency list), never twice. Several advisories of one component share one recommended action: the lowest release that fixes them all.
@@ -87,6 +89,8 @@ Limits specific to these types:
 
 - It does not find unknown memory-corruption bugs; that needs disassembly and data-flow analysis.
 - A version banner shows that library code is in the file, not that the vulnerable function is reachable. Components are reported with confidence `medium` (banner, crate path) or `high` (Go build info, cargo-auditable).
-- Dynamically linked libraries are not followed: scan each library separately. A binary that only links `libssl.so` carries no OpenSSL banner itself.
+- Dynamically linked libraries are not followed: scan each library separately. A binary that only links `libssl.so` carries no OpenSSL banner itself. Libraries that carry only a bare version string (`libsqlite3`, `libbz2`, `libz`) are not matched by the banner list.
+- More than 400,000 strings (Node, Bun and similar runtime images) is a coverage gap: the rest is not searched and the run exits 3.
+- `ubel-binary` reuses `scanMobileDependencies` for PURL records, so it inherits ubel-mobile's filter that drops native-library entries (`.so`, `.dylib`, frameworks) before the OSV lookup. A record whose name or source evidence is a `.so` / `.dylib` / `.framework` path would be dropped; none of the records `ubel-binary` produced in testing matched. Banner (CPE) records go to NVD directly and are not filtered.
 - Go binaries built before modules (GOPATH mode, ≤ 1.17) have no module list, and a Go binary whose build info was removed on purpose yields no components. Stripped C/C++ binaries that removed their banners yield no components. Managed .NET assemblies get their PE header flags checked, not their IL.
 - Static / stripped ELF files have no dynamic symbol table, so the canary and FORTIFY checks are skipped (and noted in the report).

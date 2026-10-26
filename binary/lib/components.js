@@ -19,7 +19,8 @@ const BANNERS = [
   ['libpng',    /\blibpng version (\d+\.\d+\.\d+)/,                                                 'libpng', 'libpng'],
   ['FFmpeg',    /\bFFmpeg version n?(\d+\.\d+(?:\.\d+)?)/,                                          'ffmpeg', 'ffmpeg'],
   ['expat',     /\bexpat_(\d+\.\d+\.\d+)/,                                                          'libexpat_project', 'libexpat'],
-  ['libxml2',   /\b(?:libxml2|LIBXML)[ _-]?(?:version )?(2\.\d+\.\d+)\b/i,                          'xmlsoft', 'libxml2'],
+  // `_` is deliberately not a separator: ELF symbol-version tags (LIBXML2_2.4.30) are not banners. "libxml2-2.9.14", "libxml2 2.9.14", "libxml2 version 2.9.14" still match.
+  ['libxml2',   /\b(?:libxml2|LIBXML)[ -]?(?:version )?(2\.\d+\.\d+)\b/i,                            'xmlsoft', 'libxml2'],
   ['xz',        /\b(?:XZ Utils|liblzma) (\d+\.\d+\.\d+)/,                                           'tukaani', 'xz'],
   ['bzip2',     /\bbzip2\/libbzip2: version (1\.\d+\.\d+)/,                                         'bzip', 'bzip2'],
   ['BusyBox',   /\bBusyBox v(\d+\.\d+\.\d+)/,                                                       'busybox', 'busybox'],

@@ -13,7 +13,8 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
-| **Mobile** | Static scan of an Android `.apk` / `.aab` or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Pure Node — no third-party libraries, no external binaries. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
+| **Mobile** | Static scan of an Android `.apk` / `.aab` or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Pure Node — no third-party libraries, no external binaries. Dependencies come from package metadata (Maven, Swift Package Manager, CocoaPods); native libraries inside the app are not looked up — scan them with `ubel-binary`. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
+| **Binary** | Static scan of a native ELF, Mach-O (thin or fat) or PE executable or library: build hardening, risky imports, behavior inventory, hardcoded secrets and remote hosts, plus known-vulnerable components — C/C++ version banners (NVD), Go modules, Rust crates and packaged Node / Python apps (OSV.dev). Pure Node — nothing is executed or loaded. | [Binary documentation](https://github.com/AlaBouali/ubel/blob/main/binary/README.md) |
 | **EASM** | Passive fingerprinting and misconfiguration checks of domains, hosts and ports you own. **Authorized use only.** | [EASM documentation](https://github.com/AlaBouali/ubel/blob/main/easm/README.md) |
 
 Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR and CIS Controls v8 (best-effort guidance, not a compliance assessment).
@@ -73,6 +74,7 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |
 | `ubel-mobile` | Android `.apk` / `.aab` and iOS `.ipa` scan: hardcoded secrets, insecure storage and data handling, misconfigurations — static, offline, no third-party libraries or binaries. JSON + HTML reports |
+| `ubel-binary` | Native ELF / Mach-O / PE scan: build hardening, risky imports, behavior inventory, secrets, remote hosts and known-vulnerable components (banners → NVD; Go, Rust, npm and Python packages → OSV.dev). A failed lookup is reported as incomplete (exit 3), never as clean. JSON + HTML reports |
 | `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of the given IPs/domains, combined sweep |
 | *every binary above* | Also accepts three commands instead of a scan: `<binary> asset-id` (show the folder's asset id, creating it if there is none yet — every binary also creates it when it starts, and `<binary> init` does so explicitly), `<binary> set-asset-id <id>` (link the folder to an existing asset id so its scans join that asset's history) and `<binary> version`, plus `get-machine-id` / `set-machine-id <id>` for the machine id in `~/.ubel/ubel_machine.json`, which every report also carries as `machine_id` — e.g. `ubel-npm version`, `ubel-sast asset-id` — and a `--asset-id <uuid>` flag that sets the asset id for a single run (written into the report, SBOM and SARIF, and used to file the history zip). See [Asset id](sca/README.md#asset-id-ubel_assetjson) |
 | *every report* | Carries an `asset_type` — `codebase`, `cloud`, `easm`, `mobile`, `machine`, `agent`, `editor` or `docker` — saying what kind of thing was scanned (shown as *Asset type* in the HTML report). See [Asset types](sca/README.md#asset-types-asset_type) |
@@ -87,6 +89,7 @@ ubel-secrets /path/to/project         # secrets-only scan
 ubel-sast /path/to/project            # AI-powered vulnerability scan
 ubel-cloud                           # providers you have credentials for
 ubel-mobile app-release.apk          # Android / iOS (.ipa) package scan, fully offline
+ubel-binary ./build/server           # ELF / Mach-O / PE scan, components checked against NVD / OSV.dev
 ubel-url staging.your-domain.example --fail-on high   # EASM, your own infrastructure only
 ```
 

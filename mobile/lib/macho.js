@@ -48,7 +48,7 @@ function parseSlice(buf, base, size) {
   const ncmds = buf.readUInt32LE(base + 16);
   const flags = buf.readUInt32LE(base + 24);
   const s = {
-    arch: CPU[cputype] || `cpu_${cputype.toString(16)}`, is64, filetype, flags,
+    arch: CPU[cputype] || `cpu_${cputype.toString(16)}`, is64, filetype, flags, base, size,
     pie: (flags & 0x200000) !== 0, allowStackExec: (flags & 0x20000) !== 0,
     encrypted: false, cryptid: 0, signed: false, adhoc: false, cdFlags: null, entitlements: null,
     minOS: null, sdk: null, platform: null, dylibs: [], rpaths: [], imports: new Set(), importProviders: new Map(), exports: new Set(),
@@ -139,12 +139,21 @@ function readSignature(buf, base, s, sig, size) {
   }
 }
 
-/** Printable strings from the string-bearing sections of a slice (falls back to the whole slice). */
+/**
+ * Buffers to extract printable strings from: the string-bearing sections of a slice. When the slice has none of them (a Go build keeps its
+ * text in `__rodata`, other toolchains use their own section names, a stripped section table has none at all) the whole slice is returned
+ * as one part named `__slice`, so a binary is never reported as having no strings just because its layout is unusual.
+ */
 export function sectionBuffers(buf, slice) {
+  const CAP = 64 * 1024 * 1024;
   const want = new Set(['__cstring', '__ustring', '__objc_methname', '__objc_classname', '__swift5_reflstr', '__const', '__oslogstring']);
   const parts = [];
   for (const sec of slice.sections) {
-    if (want.has(sec.name) && sec.size > 0 && sec.off + sec.size <= buf.length) parts.push({ name: sec.name, data: buf.subarray(sec.off, sec.off + Math.min(sec.size, 64 * 1024 * 1024)) });
+    if (want.has(sec.name) && sec.size > 0 && sec.off + sec.size <= buf.length) parts.push({ name: sec.name, data: buf.subarray(sec.off, sec.off + Math.min(sec.size, CAP)) });
+  }
+  if (!parts.length) {
+    const start = Math.min(slice.base || 0, buf.length), end = Math.min(start + (slice.size || buf.length), buf.length);
+    if (end > start) parts.push({ name: '__slice', data: buf.subarray(start, Math.min(end, start + CAP)) });
   }
   return parts;
 }
