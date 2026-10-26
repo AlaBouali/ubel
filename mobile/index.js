@@ -181,6 +181,7 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
       base.native_hardening = mergeHardening(base.native_hardening, app.native_hardening);
       base.libraries = [...base.libraries, ...app.libraries.filter(l => !base.libraries.some(b => b.name === l.name && b.version === l.version))];
       base.frameworks = [...new Set([...base.frameworks, ...app.frameworks])];
+      base.protections = [...base.protections, ...(app.protections || []).filter(p => !base.protections.some(b => b.name === p.name))];
       base.behavior = mergeBehavior(base.behavior, app.behavior);
       base.remote_hosts = mergeRemoteHosts(base.remote_hosts, app.remote_hosts);
       if (!base.remote_hosts) delete base.remote_hosts;

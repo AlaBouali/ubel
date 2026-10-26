@@ -83,6 +83,7 @@ export const RULES = {
   'android.online.remote_config_exposed': R('info', 'Firebase Remote Config readable with the app\'s embedded API key', 'MASVS-STORAGE-1', 200, 'Remote Config is public to every installation: keep secrets and unreleased features out of it, and restrict the API key to the app.'),
   // ── Android native libraries ──────────────────────────────────────────────
   // Each is checked on every ABI copy of every library (lib/<abi>/*.so), and the evidence names the exact abi/library pair.
+  'android.protection.detected':       R('info',   'Packer, obfuscator or resource obfuscation detected', 'MASVS-RESILIENCE', null, 'Informational. Obfuscation and packing slow reverse engineering but do not protect secrets; code behind a packer is analysed only as far as it is visible in the package.'),
   'android.native.no_pie':             R('high',   'Native binary is not position independent (no PIE)', 'MASVS-CODE-4', 693, 'Build libraries with -fPIC -shared and executables with -fPIE -pie, in every ABI you ship.'),
   'android.native.exec_stack':         R('high',   'Native library requests an executable stack', 'MASVS-CODE-4', 119, 'Link with -z noexecstack.'),
   'android.native.no_gnu_stack':       R('low',    'Native library has no PT_GNU_STACK header (NX not asserted)', 'MASVS-CODE-4', 693, 'Link with -z noexecstack so the toolchain emits a non-executable PT_GNU_STACK header.'),

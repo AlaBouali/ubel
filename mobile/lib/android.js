@@ -6,6 +6,7 @@
 import { findAll, axmlToLines } from './axml.js';
 import { parseBinaryXml, isBinaryXml, parseResourceTableStrings } from './aab.js';
 import { gap } from './coverage.js';
+import { DexProtectionCollector, detectProtections } from './protections.js';
 import { analyzeFrameworks } from './frameworks.js';
 import { parseArscStrings } from './arsc.js';
 import { Dex, isDex } from './dex.js';
@@ -239,7 +240,7 @@ export function analyzeApk(zip, ctx) {
     platform: 'android', package: pkg, version_name: manifest.attrs.versionName ?? null, version_code: manifest.attrs.versionCode ?? null,
     min_sdk: minSdk, target_sdk: targetSdk, debuggable: application.attrs.debuggable === true,
     permissions: [], components: { activity: 0, service: 0, receiver: 0, provider: 0 }, dex_files: [], native_libs: [], native_hardening: null, libraries: [],
-    signing: null, frameworks: [], _detected_dependencies: [],
+    signing: null, frameworks: [], protections: [], _detected_dependencies: [],
     ...(ctx.module ? { module: ctx.module } : {}),
   };
   const namespaces = appNamespaces(pkg, application);
@@ -274,10 +275,12 @@ export function analyzeApk(zip, ctx) {
 
   // code
   const behavior = new BehaviorCollector();
+  const dexProtections = new DexProtectionCollector();
   for (const e of zip.find(/^classes\d*\.dex$/).slice(0, 30)) {
     try {
       const dex = new Dex(zip.read(e, 160 * MB), e.name);
       app.dex_files.push(e.name);
+      dexProtections.add(dex);
       collectThirdPartyNamespaces(dex, e.name, app._detected_dependencies);
       if (analyzeDex(dex, { findings, base, at, scanner, addUrl, namespaces, behavior, hosts })) pinning = true;
     } catch (err) { gap(notes, `${at(e.name)}: code not analysed (${err.message}).`); }
@@ -286,6 +289,7 @@ export function analyzeApk(zip, ctx) {
   if (app.dex_files.length) app.behavior = behavior.summary();
 
   nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts });
+  protectionChecks(zip, { dex: app.dex_files.length ? dexProtections : null, app, base, findings, at, notes });
   if (!ctx.module) signing(zip, { findings, base, at, app, minSdk });      // bundle modules carry no signature of their own
   libraries(zip, app);
 
@@ -313,7 +317,7 @@ export function analyzeApk(zip, ctx) {
   if (!pinning && !featureModule) findings.add('android.network.no_pinning', { ...base, artifact: at('AndroidManifest.xml'), description: 'No pin-set, OkHttp CertificatePinner, TrustKit or hardcoded pin hash was found.', evidence: [], confidence: 'low', key: 'nopin' });
 
   // everything else shipped in the package
-  const handled = /^(classes\d*\.dex|AndroidManifest\.xml|resources\.(arsc|pb)|META-INF\/|lib\/|res\/(?!raw\/)|r\/|kotlin\/|okhttp3\/|DebugProbesKt\.bin)/;
+  const handled = /^(assets\/(?:[^/]+\/)*lib\/[^/]+\/[^/]+\.so$|classes\d*\.dex|AndroidManifest\.xml|resources\.(arsc|pb)|META-INF\/|lib\/|res\/(?!raw\/)|r\/|kotlin\/|okhttp3\/|DebugProbesKt\.bin)/;
   const rest = zip.entries.filter(e => !e.isDir && !handled.test(e.name) && !fw.handled.has(e.name));
   scanBundledFiles(zip, rest, { findings, scanner, base, notes, relName: at, limits: ctx.limits });
   detectFrameworks(zip, app);
@@ -411,18 +415,33 @@ function manifestChecks({ manifest, application, app, base, findings, at, target
 }
 
 // ── res/xml: network security config, backup rules, Cordova config ─────────────────────────────────
+// Resource-obfuscation tools (Redex "resource file renaming", AndResGuard …) move and rename res/ files: res/xml/network_security_config.xml
+// becomes res/Ab.xml, res/xml/a.xml or r/a.xml. The root element identifies the file whatever it is called, so every binary XML under res/ and
+// r/ is opened and kept when its root is one the checks below use; only files in a real res/xml*/ directory are also secret-scanned.
+const RES_XML_ROOTS = new Set(['network-security-config', 'widget', 'full-backup-content', 'data-extraction-rules', 'automotive-app', 'paths']);
+const MAX_RES_XML_PROBES = 6000, MAX_RES_XML_PROBE_BYTES = 256 * 1024;
+
 function resourceXml(zip, at, scanner, notes) {
   const roots = [];
-  for (const e of zip.find(/^(res\/xml[^/]*\/[^/]+|r\/[^/]+)\.xml$/i).slice(0, 400)) {
-    const buf = zip.tryRead(e, 4 * MB);
+  // layouts, drawables, menus … keep their directory and never hold these configs, so they are not probed
+  const entries = zip.find(/^(res|r)\/(?:.+\/)?[^/]+\.xml$/i).filter(e => !/^res\/(raw|anim|animator|color|drawable|font|interpolator|layout|menu|mipmap|navigation|transition)[^/]*\//i.test(e.name));
+  const inXmlDir = e => /^res\/xml[^/]*\/[^/]+\.xml$/i.test(e.name) || /^r\/[^/]+\.xml$/i.test(e.name);
+  const ordered = [...entries.filter(inXmlDir), ...entries.filter(e => !inXmlDir(e))];
+  let probes = 0;
+  for (const e of ordered) {
+    const known = inXmlDir(e);
+    if (known ? roots.length >= 400 : (probes >= MAX_RES_XML_PROBES || e.usize > MAX_RES_XML_PROBE_BYTES)) continue;
+    if (!known) probes++;
+    const buf = zip.tryRead(e, known ? 4 * MB : MAX_RES_XML_PROBE_BYTES);
     if (!buf || !isBinaryXml(buf)) continue;
     try {
       const root = parseBinaryXml(buf);
       if (!root) continue;
+      if (!known && !RES_XML_ROOTS.has(root.tag)) continue;
       roots.push({ name: e.name, root });
       const lines = axmlToLines(root);
       if (lines.length < 5000) scanner.add(at(e.name), lines);
-    } catch { gap(notes, `${at(e.name)}: unreadable binary XML.`); }
+    } catch { if (known) gap(notes, `${at(e.name)}: unreadable binary XML.`); }
   }
   return roots;
 }
@@ -604,6 +623,18 @@ export function analyzeDex(dex, { findings, base, at, scanner, addUrl, namespace
   return pinned;
 }
 
+// ── protections / obfuscation (APKiD-class) ────────────────────────────────────────────────────────
+function protectionChecks(zip, { dex, app, base, findings, at, notes }) {
+  const found = detectProtections(zip, dex);
+  app.protections = found;
+  if (!found.length) return;
+  const packers = found.filter(p => p.kind === 'packer');
+  for (const p of packers) if (p.confidence === 'high') gap(notes, `${p.name} packer detected: the original code is only available at runtime, so the DEX analysis covers the loader stub (${p.evidence[0]}).`);
+  findings.add('android.protection.detected', { ...base, artifact: at('classes.dex'), key: 'protections',
+    description: `This package was built with: ${found.map(p => `${p.name} [${p.kind}, ${p.confidence} confidence]`).join('; ')}.${found.some(p => p.note) ? ` ${[...new Set(found.map(p => p.note).filter(Boolean))].join(' ')}` : ''}`,
+    evidence: found.map(p => `${p.name}: ${p.evidence[0]}`), confidence: 'medium', confidenceCap: false });
+}
+
 // ── native libraries ───────────────────────────────────────────────────────────────────────────────
 const ABI_ORDER = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86', 'armeabi'];
 const SKIP_STRINGS = /^(libapp\.so|libassembly-store|libxamarin-app|libmonodroid|libflutter|libc\+\+_shared|libhermes|libjsc|libmonosgen|libreactnativejni|libfbjni|libjscexecutor|libunity|libil2cpp|libmain|libbitmaps|libimagepipeline|libgifimage|libwebp|libyoga|libglog|libfolly|libv8)/;
@@ -619,26 +650,31 @@ const EXTRA_ABI_BUDGET = 512 * MB;           // bytes read for ABI copies other 
  * Exported so the policy can be exercised against a small archive without a full APK.
  */
 export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts = null }) {
-  const byName = new Map();                  // library name -> its ABI copies, preferred ABI first
-  for (const e of zip.find(/^lib\/[^/]+\/[^/]+\.so$/)) {
-    const [, abi, name] = e.name.match(/^lib\/([^/]+)\/([^/]+)$/);
+  const byName = new Map();                  // library key -> its ABI copies, preferred ABI first
+  // Besides lib/<abi>/*.so, apps ship libraries under assets/…/lib/<abi>/ (loaded at runtime with System.load / a custom loader, which the
+  // platform never inspects), so those are analysed as well; the copies keep their own group so lib/ and assets/ binaries never merge.
+  for (const e of zip.find(/^(?:assets\/(?:[^/]+\/)*)?lib\/[^/]+\/[^/]+\.so$/)) {
+    const [, loc, abi, name] = e.name.match(/^((?:assets\/(?:[^/]+\/)*)?lib)\/([^/]+)\/([^/]+)$/);
     const rank = ABI_ORDER.indexOf(abi) < 0 ? 99 : ABI_ORDER.indexOf(abi);
-    if (!byName.has(name)) byName.set(name, []);
-    byName.get(name).push({ e, abi, rank });
+    const key = loc === 'lib' ? name : `${loc}/${name}`;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push({ e, abi, rank, name, loc });
   }
   for (const copies of byName.values()) copies.sort((a, b) => a.rank - b.rank || a.abi.localeCompare(b.abi));
-  app.native_libs = [...byName.keys()].sort().slice(0, 300);
+  app.native_libs = [...new Set([...byName.values()].map(c => c[0].name))].sort().slice(0, 300);
 
   const records = [];
   const native = new NativeBehavior();
-  const analyse = ({ e, abi }, name, { strings }) => {
-    const where = at(`lib/${abi}/${name}`);
+  const analyse = ({ e, abi, loc }, name, { strings }) => {
+    const where = at(`${loc}/${abi}/${name}`);
     const buf = zip.tryRead(e, 128 * MB);
     if (!buf) { gap(notes, `${where}: native library could not be read (encrypted, corrupt or over the size limit).`); return 0; }
     if (!isElf(buf)) { notes.push(`${where}: not an ELF file; hardening flags not checked.`); return buf.length; }
     try {
       const elf = parseElf(buf);
-      records.push(hardeningRecord(elf, { abi, library: name, path: where, size: buf.length }));
+      const rec = hardeningRecord(elf, { abi, library: name, path: where, size: buf.length });
+      if (loc !== 'lib') rec.location = loc;       // runtime-loaded copy under assets/: named in the evidence so it is told apart from lib/<abi>/
+      records.push(rec);
       // behavior of the preferred copy: imported functions, with call sites where the code can be scanned (ELF x86-64 / arm64, up to 96 MB)
       if (strings && elf.symbolsReadable) {
         try { native.add({ binary: name, origin: isVendorNative(name) ? 'library' : 'app', imports: elf.imports, providers: elf.importProviders, sites: buf.length <= 96 * MB ? elfCallSites(buf) : null }); }
@@ -649,7 +685,7 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, 
     if (strings && !SKIP_STRINGS.test(name)) {
       const text = asciiStrings(buf, { min: 8, max: 400, limit: 40000 });
       scanner.add(where, text);
-      if (hosts) hosts.addStrings(text, `lib/${abi}/${name}`);
+      if (hosts) hosts.addStrings(text, `${loc}/${abi}/${name}`);
     }
     return buf.length;
   };
@@ -657,7 +693,8 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, 
   // pass 1 — the preferred ABI of every library: hardening + strings, exactly the coverage the scan always had
   let n = 0;
   const analysed = [];
-  for (const [name, copies] of byName) {
+  for (const [key, copies] of byName) {
+    const name = copies[0].name;
     if (++n > MAX_NATIVE_LIBS) { gap(notes, `More than ${MAX_NATIVE_LIBS} native libraries: the rest were not analysed.`); break; }
     analysed.push([name, copies]);
     analyse(copies[0], name, { strings: true });
@@ -667,7 +704,7 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, 
   const skipped = [];
   for (const [name, copies] of analysed) {
     for (const copy of copies.slice(1)) {
-      if (total >= MAX_NATIVE_BINARIES || copy.e.usize > budget) { skipped.push(`${copy.abi}/${name}`); continue; }
+      if (total >= MAX_NATIVE_BINARIES || copy.e.usize > budget) { skipped.push(`${copy.loc === 'lib' ? '' : `${copy.loc}/`}${copy.abi}/${name}`); continue; }
       total++;
       budget -= analyse(copy, name, { strings: false });
     }

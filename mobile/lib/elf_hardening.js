@@ -119,7 +119,7 @@ export function groupFailures(evaluated) {
     if (!hits.length) continue;
     out.push({
       check, rule, text: TEXT[check], confidence: CONFIDENCE[check],
-      entries: hits.map(e => `${e.record.abi}/${e.record.library}${typeof e.fails[check] === 'string' ? ` (${e.fails[check]})` : ''}`),
+      entries: hits.map(e => `${e.record.location ? `${e.record.location}/` : ''}${e.record.abi}/${e.record.library}${typeof e.fails[check] === 'string' ? ` (${e.fails[check]})` : ''}`),
       libraries: hits.map(e => e.record.library),
       records: hits.map(e => e.record),
       abis: [...new Set(hits.map(e => e.record.abi))].sort(),
