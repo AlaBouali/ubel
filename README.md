@@ -1,6 +1,6 @@
 # UBEL — Unified Bill / Enforced Law (Node.js)
 
-**Software supply-chain and source-code security: dependency scanning, an install-time firewall, AI-powered SAST, cloud misconfiguration scanning and external attack surface scanning.**
+**Software supply-chain and source-code security: dependency scanning, an install-time firewall, AI-powered SAST, cloud misconfiguration scanning, mobile app and native binary scanning, and external attack surface scanning.**
 
 UBEL is a zero-dependency, source-available (internal-use-only; see [License](https://github.com/AlaBouali/ubel/blob/main/LICENSE.md)) application security toolkit. This package (`@arcane-spark/ubel-node`) ships one CLI per job. Full details live in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) and the per-module READMEs.
 
@@ -13,8 +13,8 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
-| **Mobile** | Static scan of an Android `.apk` / `.aab` or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Pure Node — no third-party libraries, no external binaries. Dependencies come from package metadata (Maven, Swift Package Manager, CocoaPods), and the native libraries inside the app (`lib/<abi>/*.so`, Mach-O frameworks) are read with `ubel-binary`'s component detection: bundled OpenSSL / SQLite / curl … banners go to NVD, Go modules and Rust crates to OSV.dev. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
-| **Binary** | Static scan of a native ELF, Mach-O (thin or fat) or PE executable or library: build hardening, risky imports, behavior inventory, hardcoded secrets and remote hosts, plus known-vulnerable components — C/C++ version banners (NVD), Go modules, Rust crates and packaged Node / Python apps (OSV.dev). Pure Node — nothing is executed or loaded. | [Binary documentation](https://github.com/AlaBouali/ubel/blob/main/binary/README.md) |
+| **Mobile** | Static scan of an Android `.apk` / `.aab` (and split bundles `.xapk` / `.apks` / `.apkm`) or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Reads React Native / Hermes, Flutter, Unity and Xamarin app code, checks native-library hardening per ABI, detects packers and obfuscators, and adds a behavior inventory with the remote hosts the app names. Pure Node — no third-party libraries, no external binaries. Dependencies come from package metadata (Maven, Swift Package Manager, CocoaPods), and the native libraries inside the app (`lib/<abi>/*.so`, Mach-O frameworks) are read with `ubel-binary`'s component detection: bundled OpenSSL / SQLite / curl … banners go to NVD, Go modules and Rust crates to OSV.dev. An opt-in `--online` mode adds three read-only checks against hosts the app names. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
+| **Binary** | Static scan of a native ELF, Mach-O (thin or fat) or PE executable or library: build hardening, risky imports, behavior inventory (with direct call sites for ELF / PE imports on x86-64 and arm64), hardcoded secrets and remote hosts, plus known-vulnerable components — C/C++ version banners (NVD), Go modules, Rust crates and packaged apps (pkg, Node SEA, Bun, PyInstaller; OSV.dev). Pure Node — nothing is executed or loaded. A lookup that fails is an incomplete analysis (exit 3), never a clean result. | [Binary documentation](https://github.com/AlaBouali/ubel/blob/main/binary/README.md) |
 | **EASM** | Passive fingerprinting and misconfiguration checks of domains, hosts and ports you own. **Authorized use only.** | [EASM documentation](https://github.com/AlaBouali/ubel/blob/main/easm/README.md) |
 
 Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR and CIS Controls v8 (best-effort guidance, not a compliance assessment).
@@ -41,8 +41,12 @@ Every finding is also mapped to OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 270
 | Linux host (apt/dnf/yum) | ✅ | ✅ | — | — | — | — | ✅ | — |
 | Windows host | ✅ | ❌ | — | — | — | — | ✅ | — |
 | VS Code / Cursor / VSCodium extensions | ✅ | — | — | — | — | — | — | — |
+| Android / iOS apps (`.apk` / `.aab` / `.ipa`) | ⚠️ | — | — | — | — | — | — | ✅ |
+| Native binaries (ELF / Mach-O / PE) | ⚠️ | — | — | — | — | — | — | ✅ |
 
 ✅ = built and shipped ("lockfile required" = the firewall scans an existing lockfile instead of resolving a candidate) · ⚠️ = partial, see that ecosystem's section in the [full reference](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md) · ❌ = not currently possible/present for a stated reason · — = not applicable to that layer.
+
+mobile / binary caveat: `ubel-mobile` and `ubel-binary` scan a built artifact (a package or a single file), not a dependency tree you resolve, so they have no firewall, hook, LLM SAST, reachability or license layer. Their SCA is ⚠️ because only components whose identity can be read from the file are looked up — exact package URLs (Maven, SwiftPM, CocoaPods, Go build info, cargo-auditable, bundled npm / PyPI metadata) go to OSV.dev and C/C++ version banners go to NVD; a package without a readable version is listed as `not_queryable`, never as clean. See the [Mobile](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md#limits) and [Binary](https://github.com/AlaBouali/ubel/blob/main/binary/README.md#what-it-does-not-do) limits.
 
 cargo caveat: only crates.io crates are scanned — git and alternative-registry dependencies are listed in a warning but not matched, and `build.rs`/proc-macros still run at `cargo build`, outside the firewall.
 
@@ -73,8 +77,8 @@ Node.js `>=18.0.0` required. `ubel-pip`/`ubel-uv`/`ubel-pipx` need Python on `PA
 | `ubel-agent` / `ubel-cicd` / `ubel-platform` | Fixed-configuration scans: AI-agent workspace, built CI/CD workspace, host |
 | `ubel-sast` / `ubel-mal` / `ubel-chunk` | Vulnerability SAST, malicious-code scan, chunking preview (no LLM cost) |
 | `ubel-cloud` | AWS / GCP / Azure misconfiguration scan |
-| `ubel-mobile` | Android `.apk` / `.aab` and iOS `.ipa` scan: hardcoded secrets, insecure storage and data handling, misconfigurations — static, offline, no third-party libraries or binaries. JSON + HTML reports |
-| `ubel-binary` | Native ELF / Mach-O / PE scan: build hardening, risky imports, behavior inventory, secrets, remote hosts and known-vulnerable components (banners → NVD; Go, Rust, npm and Python packages → OSV.dev). A failed lookup is reported as incomplete (exit 3), never as clean. JSON + HTML reports |
+| `ubel-mobile` | Android `.apk` / `.aab` / `.xapk` / `.apks` / `.apkm` and iOS `.ipa` scan: hardcoded secrets, insecure storage and data handling, misconfigurations, native-library hardening, behavior inventory and known-vulnerable bundled components — static, no third-party libraries or binaries; the app is never executed or uploaded, only package URLs and component names / versions are looked up (OSV.dev, NVD). `--online` (off by default) adds three read-only checks against hosts the app names. JSON + HTML reports |
+| `ubel-binary` | Native ELF / Mach-O / PE scan: build hardening, risky imports, behavior inventory, secrets, remote hosts and known-vulnerable components (banners → NVD; Go, Rust, npm and Python packages → OSV.dev). Same report, diff and `--fail-on` gate as `ubel-mobile`. A failed lookup is reported as incomplete (exit 3), never as clean. JSON + HTML reports |
 | `ubel-url` / `ubel-domain` / `ubel-host` / `ubel-easm` | EASM: known hosts, CT-log subdomain discovery, port sweep of the given IPs/domains, combined sweep |
 | *every binary above* | Also accepts three commands instead of a scan: `<binary> asset-id` (show the folder's asset id, creating it if there is none yet — every binary also creates it when it starts, and `<binary> init` does so explicitly), `<binary> set-asset-id <id>` (link the folder to an existing asset id so its scans join that asset's history) and `<binary> version`, plus `get-machine-id` / `set-machine-id <id>` for the machine id in `~/.ubel/ubel_machine.json`, which every report also carries as `machine_id` — e.g. `ubel-npm version`, `ubel-sast asset-id` — and a `--asset-id <uuid>` flag that sets the asset id for a single run (written into the report, SBOM and SARIF, and used to file the history zip). See [Asset id](sca/README.md#asset-id-ubel_assetjson) |
 | *every report* | Carries an `asset_type` — `codebase`, `cloud`, `easm`, `mobile`, `machine`, `agent`, `editor` or `docker` — saying what kind of thing was scanned (shown as *Asset type* in the HTML report). See [Asset types](sca/README.md#asset-types-asset_type) |
@@ -88,7 +92,7 @@ ubel-npm check                       # firewall: dry-run, exit non-zero if polic
 ubel-secrets /path/to/project         # secrets-only scan
 ubel-sast /path/to/project            # AI-powered vulnerability scan
 ubel-cloud                           # providers you have credentials for
-ubel-mobile app-release.apk          # Android / iOS (.ipa) package scan, fully offline
+ubel-mobile app-release.apk          # Android (.apk/.aab) / iOS (.ipa) package scan; nothing executed or uploaded
 ubel-binary ./build/server           # ELF / Mach-O / PE scan, components checked against NVD / OSV.dev
 ubel-url staging.your-domain.example --fail-on high   # EASM, your own infrastructure only
 ```
@@ -107,11 +111,13 @@ Every CLI prints the UBEL banner (name, version, author, license) once when it s
 
 - **Cloud:** governed by its own `--fail-on`; exits `3` when no finding trips it but a requested provider was skipped or stopped part-way (`--allow-partial` accepts that).
 
+- **Mobile / Binary:** governed by `--fail-on` (default `critical`; `none` disables the gate, `5:high` tolerates five). It counts every finding and dependency advisory, whatever `--min-severity` hides from the report. Exit `0` only when the gate passed **and** the analysis was complete; `1` when the scan failed (file missing, unreadable or unsupported, report not written); `2` when the gate tripped or the arguments are bad; `3` when nothing tripped it but part of the file could not be analysed, including a failed OSV / NVD lookup (`--allow-partial` accepts that).
+
 See the [CI/CD integration details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#cicd-integration) for GitHub Actions and Docker examples.
 
 ## Privacy
 
-No telemetry and no UBEL-operated backend. Dependency scans send only package identifiers to OSV.dev and NVD (mirrorable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`), and CVE ids to FIRST.org's EPSS API. **SAST sends code chunks to the LLM provider you configure** — use a local endpoint if code must not leave your network. EASM and cloud scanners contact only the targets and APIs you point them at, plus public data sources documented in their READMEs.
+No telemetry and no UBEL-operated backend. Dependency scans send only package identifiers to OSV.dev and NVD (mirrorable via `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT`), and CVE ids to FIRST.org's EPSS API. **SAST sends code chunks to the LLM provider you configure** — use a local endpoint if code must not leave your network. `ubel-mobile` and `ubel-binary` never upload the app or the file: only package URLs and component names / versions are sent to OSV.dev and NVD. `ubel-mobile --online` is opt-in and additionally contacts hosts **named by the app** (read-only, no redirects, no credentials, public names only). EASM and cloud scanners contact only the targets and APIs you point them at, plus public data sources documented in their READMEs.
 
 ## License
 

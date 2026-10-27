@@ -1,8 +1,8 @@
 name: 'UBEL Security Scan and dependencies firewall'
-description: 'Supply-chain, secrets, SAST, and cloud misconfiguration scanning via UBEL'
+description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app and native binary scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -104,6 +104,26 @@ runs:
     #   Azure: AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET, plus
     #          AZURE_SUBSCRIPTION_ID (always required regardless of provider)
     #
+    # `mobile` (`ubel-mobile`) and `binary` (`ubel-binary`) scan a BUILT ARTIFACT, not
+    # the checked-out project: `args` is the path of the file, e.g. `app-release.apk` /
+    # `.aab` / `.ipa` / `.xapk` / `.apks` / `.apkm` for `mobile`, or an ELF / Mach-O / PE
+    # executable or library for `binary`, followed by any flags. The file has to exist on
+    # the runner already, so build or download it in an earlier step. Neither command needs
+    # a toolchain, an SDK or credentials (no aapt, apktool, otool, readelf ... — both read the
+    # file with Node built-ins, and nothing in it is executed). The file itself is never
+    # uploaded; the only outbound traffic is the lookup of package URLs / component names and
+    # versions against OSV.dev and NVD, so the runner needs network access to both (mirrorable
+    # through UBEL_OSV_ENDPOINT / UBEL_NVD_ENDPOINT, set as env vars on this step). Both
+    # exit 0 only when the `--fail-on` gate passed AND the analysis was complete: exit 2 means
+    # the gate tripped (or bad arguments), and exit 3 means nothing tripped it but part of the
+    # file could not be analysed (an unreadable entry, a failed OSV/NVD lookup, a FairPlay-
+    # encrypted binary ...), which fails the step on purpose — a clean result over partial
+    # coverage is not a pass. Add `--allow-partial` to `args` to accept it, or
+    # `--fail-on none` to disable the gate. `mobile --online` is the one exception to the
+    # network rule above: it also contacts hosts NAMED BY THE APP (assetlinks.json of its
+    # verified link hosts, one shallow read of a Firebase Realtime Database, one Remote Config
+    # fetch). Same rule as `url`: only pass it an app you are allowed to test.
+    #
     # `url` (EASM/`ubel-url`) is different from every other command above in
     # one important way: the thing it acts on — the target domain/URL — is
     # itself part of `args`, not a separately-credentialed resource. Unlike
@@ -151,10 +171,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
             exit 1
             ;;
         esac
