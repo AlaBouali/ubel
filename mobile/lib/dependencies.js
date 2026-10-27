@@ -357,11 +357,16 @@ function isNativeDependency(component) {
     || isNativePath(String(component?.name || '')) || isNativePath(sourceEvidence);
 }
 
-/** Query exact, versioned PURLs through UBEL's shared engine and enrich OSV advisory IDs. */
-export async function scanMobileDependencies(components, { log = () => {} } = {}) {
-  // Native binaries/frameworks are intentionally outside mobile SCA scope. Their
-  // hardening and secret checks remain in the static analyzer, but they are not sent to OSV.
-  const dependencies = mergeDependencies((components || []).filter(c => !isNativeDependency(c)).map(c => ({
+/**
+ * Query exact, versioned PURLs through UBEL's shared engine and enrich OSV advisory IDs.
+ *
+ * A package's own native binaries / frameworks (a `.so`, a `.dylib`, an embedded framework listed as a dependency by name or path) are not
+ * dependencies of the package: their hardening and secret checks live in the static analyzer, and the components bundled INSIDE them are
+ * read by ubel-binary's detection (see native_components.js) and looked up by that path. So they are dropped here, unless the caller passes
+ * `includeNative` — which ubel-binary and ubel-mobile do for exactly those component records.
+ */
+export async function scanMobileDependencies(components, { log = () => {}, includeNative = false } = {}) {
+  const dependencies = mergeDependencies((components || []).filter(c => includeNative || !isNativeDependency(c)).map(c => ({
     ...c,
     sources: Array.isArray(c.sources) ? [...c.sources] : (c.source ? [c.source] : []),
     source_types: Array.isArray(c.source_types) ? [...c.source_types] : (c.source_type ? [c.source_type] : []),

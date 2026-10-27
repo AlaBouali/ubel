@@ -39,22 +39,35 @@ function readZipEntry(zipFile, entryName) {
   return null;
 }
 
+/** Most older bundles inspected when looking for one that `accept`s; bounds the work on a busy asset folder. */
+const MAX_CANDIDATES = 100;
+
 /**
  * @param {string} zipPath    the zip about to be written for this scan
- * @param {string} reportTag  'cloud'
+ * @param {string} reportTag  'cloud', 'mobile', 'binary', ...
  * @param {string} entryName  report json name inside the zip (reportFileName('report', tag, 'json'))
+ * @param {(report: object) => boolean} [accept]  optional: only an earlier report this returns true for counts as "previous".
+ *        An asset folder can hold reports of SEVERAL targets (ubel-mobile / ubel-binary scan one file per run, and every run
+ *        in the same working directory shares one asset id). Without `accept` the newest earlier bundle wins whatever it
+ *        scanned, so a scan of another app in between hides the real baseline. With it, older bundles are walked newest to
+ *        oldest until one of the same target is found.
  * @returns {{file: string, report: object} | null}
  */
-function loadPreviousReport(zipPath, reportTag, entryName) {
+function loadPreviousReport(zipPath, reportTag, entryName, accept) {
   try {
     const dir     = path.dirname(zipPath);
     const current = path.basename(zipPath);
     const suffix  = `.${reportTag}.zip`;
     const earlier = fs.readdirSync(dir).filter(n => n.endsWith(suffix) && n < current).sort().reverse();
+    let inspected = 0;
     for (const n of earlier) {
+      if (accept && ++inspected > MAX_CANDIDATES) break;
       try {
         const data = readZipEntry(path.join(dir, n), entryName);
-        if (data) return { file: n, report: JSON.parse(data.toString('utf8')) };
+        if (!data) continue;
+        const report = JSON.parse(data.toString('utf8'));
+        if (accept && !accept(report)) continue;     // another target's report: keep looking further back
+        return { file: n, report };
       } catch { /* unreadable bundle: try the next older one */ }
     }
   } catch { /* no history folder yet: first report of this asset */ }

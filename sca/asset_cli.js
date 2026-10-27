@@ -48,7 +48,7 @@ import {
   ASSET_FILE_NAME, MACHINE_FILE_NAME, MACHINE_IDENTITY, ASSET_ID_EXAMPLE, machineUbelDir, readAsset, ensureAsset, setAssetId,
   historyForAsset, isValidAssetId, setRuntimeAssetId,
 } from "./report_naming.js";
-import { TOOL_NAME, TOOL_VERSION } from "./info.js";
+import { TOOL_NAME, TOOL_VERSION, bannerForRun } from "./info.js";
 
 /** The words that are commands rather than scan arguments. */
 export const ASSET_COMMAND_NAMES = [
@@ -350,5 +350,8 @@ export function runAssetCommand(args, ctx = {}) {
   }
   const rest = extracted.args;
   const handler = Object.hasOwn(HANDLERS, rest[0]) ? HANDLERS[rest[0]] : null;
-  return handler ? handler(rest.slice(1), ctx) : null;
+  if (handler) return handler(rest.slice(1), ctx);
+  // Not an asset command, so this run is the CLI's real work: every ubel CLI announces itself here (see info.js for what suppresses it).
+  bannerForRun(rest, cli);
+  return null;
 }

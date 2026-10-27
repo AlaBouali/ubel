@@ -19,6 +19,7 @@ import { goBuildInfo, goRecords, goSummary, goNotes } from './lib/go.js';
 import { analyzeNpm } from './lib/npm.js';
 import { analyzePython } from './lib/python.js';
 import { scanBinaryDependencies } from './lib/deps.js';
+export { scanBinaryDependencies };           // the lookup of a component list (NVD for CPE records, OSV.dev for PURLs), for callers of scanEmbeddedComponents()
 import { addAdvisoryFindings } from './lib/advisories.js';
 import { BehaviorBuilder, sourceOwner } from './lib/behavior.js';
 import { RemoteHostCollector } from './lib/hosts.js';
@@ -30,7 +31,7 @@ import { Findings } from '../mobile/lib/findings.js';
 import { Notes, gap } from '../mobile/lib/coverage.js';
 import { SEVERITY_RANK, SEVERITIES } from '../mobile/lib/rules.js';
 import { buildPayload, buildHtml, flattenFindings } from '../mobile/lib/report.js';
-import { parseFailOn, evaluateGate, diffReports } from '../mobile/index.js';
+import { parseFailOn, evaluateGate, diffReports, reportIdentity } from '../mobile/index.js';
 import { loadPreviousReport } from '../cloud/lib/previous_report.js';
 import { buildZip } from '../sca/zip_writer.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
@@ -392,6 +393,31 @@ function analyzePe(buf, ctx) {
 }
 
 const ANALYZERS = { elf: analyzeElf, macho: analyzeMachO, pe: analyzePe };
+
+/**
+ * The components (version banners → NVD CPEs, Go modules, Rust crates, packaged npm / Python apps → OSV PURLs) inside ONE native binary that
+ * is part of something bigger — a .so / .dylib / framework of an APK or IPA. This is ubel-binary's own component detection, run over a buffer
+ * the caller already read; secrets, hardening and behavior are not collected (ubel-mobile has its own pass over those) and nothing is looked up
+ * here: the records go to scanBinaryDependencies() like a standalone scan's.
+ *
+ * @param {Buffer} buf
+ * @param {string} name  file name, used in messages
+ * @returns {{format: string, records: object[], gaps: string[]} | null}  null when the buffer is not ELF / Mach-O / PE; THROWS when the format is recognised but unreadable
+ */
+export function scanEmbeddedComponents(buf, name) {
+  const format = sniffFormat(buf);
+  if (!format) return null;
+  const findings = new Findings();
+  const notes = new Notes();
+  const base = { app: name };
+  const scanner = new SecretScanner(findings, base);       // the analyzers feed it strings; it is never run here
+  const app = { platform: 'binary', name, size_bytes: buf.length };
+  const ctx = { name, findings, base, notes, scanner, app, behavior: new BehaviorBuilder(), hosts: new RemoteHostCollector(), importCount: 0 };
+  let records;
+  try { records = ANALYZERS[format](buf, ctx); }
+  catch (err) { throw new Error(`${FORMAT_LABEL[format]} not readable: ${err.message}`); }
+  return { format, records, gaps: [...notes.gaps] };
+}
 const FORMAT_LABEL = { elf: 'ELF', macho: 'Mach-O', pe: 'PE' };
 
 /** Scans one binary. Never writes reports and never touches the network (component records are looked up later). */
@@ -448,7 +474,7 @@ async function writeReports(meta, scan, notes, args) {
   };
   const build = diffs => buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs });
   let payload = build(null);
-  payload = build(diffReports(loadPreviousReport(zipPath, TAG, jsonName), payload));
+  payload = build(diffReports(loadPreviousReport(zipPath, TAG, jsonName, r => reportIdentity(r) === reportIdentity(payload)), payload));
   const json = JSON.stringify(payload, null, 2);
   const html = await buildHtml(payload);
   const latestJson = path.join(latestDir, reportFileName('latest', TAG, 'json'));

@@ -288,7 +288,7 @@ export function analyzeApk(zip, ctx) {
   if (!app.dex_files.length && !featureModule) notes.push(`${at('classes.dex')}: no DEX code found.`);
   if (app.dex_files.length) app.behavior = behavior.summary();
 
-  nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts });
+  nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts, components: ctx.components || null });
   protectionChecks(zip, { dex: app.dex_files.length ? dexProtections : null, app, base, findings, at, notes });
   if (!ctx.module) signing(zip, { findings, base, at, app, minSdk });      // bundle modules carry no signature of their own
   libraries(zip, app);
@@ -649,7 +649,7 @@ const EXTRA_ABI_BUDGET = 512 * MB;           // bytes read for ABI copies other 
  * be missing its canary or PIE in x86. Findings name the exact `abi/library`; `app.native_hardening` holds the per-ABI table.
  * Exported so the policy can be exercised against a small archive without a full APK.
  */
-export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts = null }) {
+export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, hosts = null, components = null }) {
   const byName = new Map();                  // library key -> its ABI copies, preferred ABI first
   // Besides lib/<abi>/*.so, apps ship libraries under assets/…/lib/<abi>/ (loaded at runtime with System.load / a custom loader, which the
   // platform never inspects), so those are analysed as well; the copies keep their own group so lib/ and assets/ binaries never merge.
@@ -670,6 +670,9 @@ export function nativeLibraries(zip, { findings, base, at, scanner, notes, app, 
     const buf = zip.tryRead(e, 128 * MB);
     if (!buf) { gap(notes, `${where}: native library could not be read (encrypted, corrupt or over the size limit).`); return 0; }
     if (!isElf(buf)) { notes.push(`${where}: not an ELF file; hardening flags not checked.`); return buf.length; }
+    // components bundled in the library (version banners, Go modules, Rust crates): the preferred ABI copy of each library, whatever the
+    // secret scan skips — a framework library such as libflutter.so is exactly where an embedded OpenSSL / SQLite / curl lives
+    if (strings && components) components.add(buf, { name, where, notes });
     try {
       const elf = parseElf(buf);
       const rec = hardeningRecord(elf, { abi, library: name, path: where, size: buf.length });

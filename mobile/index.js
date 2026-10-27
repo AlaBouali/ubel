@@ -19,7 +19,9 @@ import { mergeBehavior } from './lib/behavior.js';
 import { mergeRemoteHosts } from '../binary/lib/hosts.js';
 import { runOnlineChecks, onlineData } from './lib/online.js';
 export { runOnlineChecks };
-import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies } from './lib/dependencies.js';
+import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies, summarise } from './lib/dependencies.js';
+import { NativeComponents } from './lib/native_components.js';
+import { addAdvisoryFindings } from '../binary/lib/advisories.js';
 export { extractMobileDependencies, scanMobileDependencies };
 import { Findings } from './lib/findings.js';
 import { SEVERITY_RANK, SEVERITIES } from './lib/rules.js';
@@ -43,11 +45,12 @@ Usage:
 
 Looks for:
   • hardcoded secrets (API keys, tokens, private keys …) in code, resources, plists, bundled files and native libraries
+  • known-vulnerable components bundled inside the native libraries (.so / Mach-O): OpenSSL, SQLite, curl … version banners (NVD), Go modules and Rust crates (OSV.dev)
   • insecure storage and data handling (backups, world-readable files, weak crypto, constant keys/IVs, bundled keystores/databases)
   • misconfigurations (debuggable builds, cleartext traffic, ATS exceptions, exported components, WebView settings,
     TLS validation bypasses, weak signing, missing binary hardening)
 
-Nothing is executed. The app package is never uploaded; with --online, the hosts the app names are contacted (see below); when exact dependency identities and versions can be extracted, UBEL sends only their package URLs/versions to OSV.dev through the shared SCA engine.
+Nothing is executed. The app package is never uploaded; with --online, the hosts the app names are contacted (see below); when exact dependency identities and versions can be extracted, UBEL sends only their package URLs/versions to OSV.dev through the shared SCA engine. Components bundled inside native libraries are read with ubel-binary's detection and looked up the same way (C/C++ version banners as NVD CPE ids, Go modules and Rust crates as package URLs); a component whose version could not be read is listed, never reported as clean.
 
 Every run writes report.mobile.json + report.mobile.html into a timestamped zip under
 $HOME/.ubel/history/<asset_id>/<timestamp>.mobile.zip and always-overwritten copies to
@@ -151,7 +154,7 @@ function sha256File(file) {
  * other modules (dynamic features, asset packs) are folded into its summary so the report still describes one app. Their findings keep a
  * `<module>!` artifact prefix. Signing is read once, from the bundle's own META-INF (jar signature with the upload key).
  */
-function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log }) {
+function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log, components }) {
   const modules = aabModules(zip);
   if (!modules.length) throw new Error('App Bundle has no module with a manifest/AndroidManifest.xml');
   const baseName = modules.includes('base') ? 'base' : modules[0];
@@ -162,7 +165,7 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
     log(`Bundle module: ${m}`);
     let app;
     try {
-      app = analyzeApk(view, { findings, notes, newScanner, prefix: `${m}!`, module: m, featureModule: !isBase, limits });
+      app = analyzeApk(view, { findings, notes, newScanner, prefix: `${m}!`, module: m, featureModule: !isBase, limits, components });
     } catch (err) {
       if (isBase) throw new Error(`base module ${m}: ${err.message}`);
       gap(notes, `${m}: module not analysed (${err.message}).`);
@@ -199,9 +202,11 @@ function scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits,
 }
 
 /**
- * Scans one package and returns { findings, apps, dependencies, notes, target }. Never writes files.
+ * Scans one package and returns { findings, apps, dependencies, nativeComponents, notes, target }. Never writes files.
+ * `dependencies` are the package's own (Maven, SwiftPM, CocoaPods); `nativeComponents` are the components found INSIDE its native libraries
+ * (version banners, Go modules, Rust crates) and are empty unless `opts.nativeScanner` — ubel-binary's `scanEmbeddedComponents` — is given.
  * @param {string} file
- * @param {{maxEntryMb?:number, log?:(m:string)=>void}} [opts]
+ * @param {{maxEntryMb?:number, log?:(m:string)=>void, nativeScanner?:Function}} [opts]
  */
 export function scanPackage(file, opts = {}) {
   const log = opts.log || (() => {});
@@ -214,22 +219,25 @@ export function scanPackage(file, opts = {}) {
   const apps = [];
   const dependencies = [];
   const newScanner = base => new SecretScanner(findings, base);
+  // components bundled inside the native libraries (OpenSSL / SQLite / curl banners, Go modules, Rust crates): ubel-binary's detection, injected
+  // by the CLI (opts.nativeScanner); a library caller that passes none gets the scan it always had
+  const components = new NativeComponents(opts.nativeScanner);
   let kind;
   const zip = new ZipArchive(file, zipOpts);
   try {
     if (zip.duplicateNames.length) gap(notes, `The archive contains ${zip.duplicateNames.length} duplicate entry name(s) (e.g. ${zip.duplicateNames[0]}); only the first of each was analysed. Duplicate names are a known package-tampering trick.`);
     if (isAab(zip)) {
       kind = 'aab'; log('Android App Bundle detected');
-      scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log });
+      scanAab(zip, { findings, notes, apps, dependencies, newScanner, limits, log, components });
     } else if (zip.has('AndroidManifest.xml')) {
       kind = 'apk'; log('Android package detected');
-      const app = analyzeApk(zip, { findings, notes, newScanner, limits });
+      const app = analyzeApk(zip, { findings, notes, newScanner, limits, components });
       apps.push(app);
       dependencies.push(...extractMobileDependencies(zip, { platform: 'android', appSummary: app }));
       delete app._detected_dependencies;
     } else if (findAppDir(zip)) {
       kind = 'ipa'; log('iOS package detected');
-      const app = analyzeIpa(zip, { findings, notes, newScanner, limits });
+      const app = analyzeIpa(zip, { findings, notes, newScanner, limits, components });
       apps.push(app);
       dependencies.push(...extractMobileDependencies(zip, { platform: 'ios', appSummary: app }));
     } else {
@@ -241,7 +249,7 @@ export function scanPackage(file, opts = {}) {
         try {
           const inner = new ZipArchive(zip.read(e, 1024 * 1024 * 1024), zipOpts);
           if (!inner.has('AndroidManifest.xml')) { notes.push(`${e.name}: no AndroidManifest.xml (resource-only split).`); continue; }
-          const app = analyzeApk(inner, { findings, notes, newScanner, prefix: `${e.name}!`, limits });
+          const app = analyzeApk(inner, { findings, notes, newScanner, prefix: `${e.name}!`, limits, components });
           apps.push(app);
           dependencies.push(...extractMobileDependencies(inner, { platform: 'android', prefix: `${e.name}!`, appSummary: app }));
           delete app._detected_dependencies;
@@ -250,7 +258,7 @@ export function scanPackage(file, opts = {}) {
       if (!apps.length) throw new Error('no analysable APK inside the bundle');
     }
   } finally { zip.close(); }
-  return { findings, apps, dependencies, notes, target: { file: path.basename(file), kind, size_bytes: st.size, sha256: sha256File(file) } };
+  return { findings, apps, dependencies, nativeComponents: components.records, notes, target: { file: path.basename(file), kind, size_bytes: st.size, sha256: sha256File(file) } };
 }
 
 /**
@@ -264,11 +272,21 @@ function previousIssues(report) {
   return null;
 }
 
+/**
+ * What a report is about, for deciding whether two reports may be diffed: the app ids (package / bundle id / name), and for a
+ * binary also its format. Every run in one working directory shares an asset id, so the history folder mixes reports of
+ * different targets; this is how the right baseline is told apart from another target's report.
+ */
+export function reportIdentity(report) {
+  const apps = report?.apps || [];
+  const ids = apps.map(a => a.package || a.bundle_id || a.name).sort().join(',');
+  return apps.length && apps.every(a => a.platform === 'binary') ? `${ids}|${report?.target?.kind || ''}` : ids;
+}
+
 export function diffReports(prev, current) {
   const previousList = prev && previousIssues(prev.report);
   if (!previousList) return null;
-  const ids = r => (r.apps || []).map(a => a.package || a.bundle_id || a.name).sort().join(',');
-  if (ids(prev.report) !== ids(current)) return null;
+  if (reportIdentity(prev.report) !== reportIdentity(current)) return null;
 
   const keyOf = f => String(f.fingerprint || [f.rule || '', f.artifact || '', f.line || '', f.title || ''].join('|'));
   const normalize = f => ({
@@ -363,12 +381,28 @@ export function diffReports(prev, current) {
 
 /** Writes report.mobile.json / .html: latest copies under .ubel/reports and a timestamped bundle in the history. */
 async function resolveDependencies(scan, notes, args) {
-  const dependencyScan = await scanMobileDependencies(scan.dependencies || [], { log: args.quiet ? () => {} : m => console.log(m) });
+  const log = args.quiet ? () => {} : m => console.log(m);
+  const dependencyScan = await scanMobileDependencies(scan.dependencies || [], { log });
   scan.dependencies = dependencyScan.dependencies;
   scan.dependencySummary = dependencyScan.summary;
   // A failed advisory lookup is a coverage gap, not a clean result (same fail-closed rule as the rest of UBEL).
   if (dependencyScan.lookup_error) gap(notes, `Mobile dependency OSV lookup was incomplete: ${dependencyScan.lookup_error}`);
   if (dependencyScan.summary.lookup_errors) gap(notes, `${dependencyScan.summary.lookup_errors} mobile dependency record(s) could not be fully checked against OSV.dev; see the Dependencies tab.`);
+
+  // Components bundled inside the native libraries (C/C++ version banners → NVD, Go modules / Rust crates → OSV.dev): looked up exactly like
+  // the ones of a standalone `ubel-binary` scan and listed in the same Dependencies tab.
+  scan.nativeDependencies = [];
+  const nativeRecords = scan.nativeComponents || [];
+  if (!nativeRecords.length) return;
+  const { scanBinaryDependencies } = await import('../binary/lib/deps.js');         // loaded only when there is something to look up (it pulls in the SCA engine)
+  const native = await scanBinaryDependencies(nativeRecords, { log });
+  if (native.lookup_error) gap(notes, `Native library component lookup was incomplete: ${native.lookup_error}`);
+  if (native.summary.lookup_errors) gap(notes, `${native.summary.lookup_errors} component(s) bundled in native libraries could not be fully checked against NVD / OSV.dev; see the Dependencies tab.`);
+  scan.nativeDependencies = native.dependencies;
+  scan.dependencies = [...scan.dependencies, ...native.dependencies];
+  const summary = summarise(scan.dependencies);
+  summary.queryable += native.dependencies.filter(d => !d.purl && d.cpe && d.lookup_status !== 'not_queryable').length;     // summarise() counts PURLs only
+  scan.dependencySummary = summary;
 }
 
 async function writeReports(meta, scan, notes, args) {
@@ -385,7 +419,7 @@ async function writeReports(meta, scan, notes, args) {
     report_id: generateReportId(TAG, asset.asset_id), asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, machine_id: asset.machine_id,
   };
   let payload = buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs: null });
-  payload = buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs: diffReports(loadPreviousReport(zipPath, TAG, jsonName), payload) });
+  payload = buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs: diffReports(loadPreviousReport(zipPath, TAG, jsonName, r => reportIdentity(r) === reportIdentity(payload)), payload) });
 
   const json = JSON.stringify(payload, null, 2);
   const html = await buildHtml(payload);
@@ -407,9 +441,15 @@ export async function main() {
   if (!fs.existsSync(file)) { console.error(`File not found: ${file}`); process.exitCode = 1; return; }
   provisionAssetAt(args.workingDir);
   const log = args.verbose ? m => console.log(m) : () => {};
+  // ubel-binary's component reader, for the libraries inside the package. Loaded here rather than imported at the top: ubel-binary imports this
+  // module, and a failure to load it must not stop the scan — it becomes a coverage gap below instead.
+  let nativeScanner = null, nativeLoadError = null;
+  try { ({ scanEmbeddedComponents: nativeScanner } = await import('../binary/index.js')); }
+  catch (e) { nativeLoadError = e.message; }
   let scan;
-  try { scan = scanPackage(file, { maxEntryMb: args.maxEntryMb, log }); }
+  try { scan = scanPackage(file, { maxEntryMb: args.maxEntryMb, log, nativeScanner }); }
   catch (e) { console.error(`[ubel-mobile] ${e.message}`); process.exitCode = 1; return; }
+  if (nativeLoadError) gap(scan.notes, `ubel-binary's component reader could not be loaded (${nativeLoadError}); components bundled in the native libraries were not looked up.`);
 
   if (args.online) {
     if (!args.quiet) console.log('[ubel-mobile] --online: contacting hosts named by the app (assetlinks.json, Firebase). Read-only; no credentials are sent.');
@@ -419,8 +459,17 @@ export async function main() {
   const everything = scan.findings.list.slice();
   const rank = SEVERITY_RANK[args.minSeverity];
   scan.findings.list = everything.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
-  const hidden = everything.length - scan.findings.list.length;
+  let hidden = everything.length - scan.findings.list.length;
   await resolveDependencies(scan, scan.notes, args);
+  // Advisories of the components bundled in native libraries become findings too (counts, risk rating, Vulnerabilities tab, diff against the
+  // previous run), exactly as in ubel-binary. They are added AFTER the gate's list was taken: evaluateGate() counts dependency advisories itself,
+  // so feeding both would count every advisory twice.
+  const only = scan.apps.length === 1 ? (scan.apps[0].package || scan.apps[0].bundle_id) : undefined;
+  const advisoryFindings = addAdvisoryFindings(scan.findings, scan.nativeDependencies || [], { app: only });
+  if (advisoryFindings.length) {
+    scan.findings.list = scan.findings.list.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
+    hidden = everything.length + advisoryFindings.length - scan.findings.list.length;
+  }
   const gate = evaluateGate({ failOn: args.failOnParsed, findings: everything, dependencies: scan.dependencies, gaps: scan.notes.gaps || [], allowPartial: args.allowPartial });
   const payload = await writeReports({ hidden, gate }, scan, scan.notes, args);
 

@@ -284,7 +284,7 @@ import { CargoManagerInstance } from "./cargo_runner.js";
 import { LinuxManagerInstance } from "./linux_runner.js";
 import { LockfileGateManager } from "./lockfile_runner.js";
 import { LOCKFILE_MANAGER_ENGINES, LOCKFILE_INSTALL_ENABLED, isLockfileGated, lockfileInstallDisabledMessage } from "./lockfile_gate.js";
-import { banner }               from "./info.js";
+import { printBanner }           from "./info.js";
 import { loadEnvironment }       from "./utils.js";
 import { DockerImageScanner }    from "./docker_runner.js";
 import { ensureUbelIgnoreEntries } from "./ignore_files.js";
@@ -1038,7 +1038,7 @@ async function main(programmaticOptions) {
 
     eng.initiateLocalPolicy();
 
-    console.log(banner);
+    printBanner();
     console.log(`Reports location: ${eng.reportsLocation}`);
     console.log();
     console.log(`Policy location: ${eng.policyDir}`);
@@ -1201,7 +1201,7 @@ async function main(programmaticOptions) {
 
   eng.initiateLocalPolicy();
 
-  console.log(banner);
+  printBanner();
   console.log(`Reports location: ${eng.reportsLocation}`);
   console.log();
   console.log(`Policy location: ${eng.policyDir}`);
@@ -1515,7 +1515,7 @@ export async function resbomScan({ sbom, projectRoot, policyOverrides = {}, is_s
 
   try {
     if (!is_script) {
-      console.log(banner);
+      printBanner();
       console.log(`Reports location: ${path.join(resolvedRoot, ".ubel", "reports")}`);
       console.log();
       console.log(`Policy location: ${eng.policyDir}`);

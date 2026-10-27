@@ -108,6 +108,8 @@ export function analyzeIpa(zip, ctx) {
     state.machoPaths.add(t.name);
     const buf = zip.tryRead(entry, 1024 * MB);
     if (!buf || !isMachO(buf)) { if (t.main) gap(notes, `${t.name}: not a readable Mach-O executable.`); else if (!buf) gap(notes, `${t.name}: could not be read (encrypted, corrupt or over the size limit).`); continue; }
+    // components bundled in this Mach-O (statically linked OpenSSL / SQLite / curl banners, Go modules, Rust crates)
+    if (ctx.components) ctx.components.add(buf, { name: path.posix.basename(t.name), where: t.name, notes });
     try {
       const r = analyzeMachO(buf, t, { agg, findings, base, scanner, state, notes, app });
       if (t.main) mainEnt = r.entitlements;

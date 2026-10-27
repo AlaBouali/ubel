@@ -68,6 +68,10 @@ Node.js `>=18.0.0` required.
 
 ---
 
+## Startup banner
+
+Every CLI shows the UBEL banner once when it starts — it is printed by the shared entry point (`runAssetCommand()` in `sca/asset_cli.js`, which every `bin/*.js` calls first), and the SCA engine's own calls are no-ops once it is out, so it never appears twice. It goes to stdout; `ubel-agent`, `ubel-cicd`, `ubel-platform` and `ubel-license` print their JSON result on stdout, so for them it goes to stderr. It is suppressed by `--json` and `--quiet`, by `UBEL_NO_BANNER=1` (any value but empty or `0`), and for the `asset-id` / `set-asset-id` / `version` commands. Programmatic callers of the SCA API are unaffected.
+
 ## SCA — Dependency Vulnerability Scanning
 
 Resolves dependencies (with PURL generation), scans them against OSV.dev and NVD, and annotates each finding with a heuristic **reachability** verdict (package type, scope, dependency depth, attack vector, and optional source-level import-scan confirmation). Malicious-package advisories (`MAL-*`) are always flagged. Output: JSON, HTML, CycloneDX v1.6 SBOM, and SARIF 2.1.0 reports.
@@ -410,7 +414,7 @@ ubel-mobile app-release.apk
 ubel-mobile Bank.ipa --fail-on high --min-severity medium
 ```
 
-`ubel-mobile` does not send native components to NVD or OSV: `.so`, `.dylib` and embedded frameworks are excluded from dependency enumeration (and it does not run the banner detection of `ubel-binary`; see [Binary](#binary--native-executables-and-libraries)), so an OpenSSL, SQLite or curl bundled inside an app's native library is not looked up. Only `pom.properties`, `META-INF/*.version`, `dependencies.pb` (AAB), `Package.resolved` and `Podfile.lock` produce components, and a library found only by DEX class names has no version and stays `not_queryable`. To check a native library, scan it on its own with `ubel-binary`.
+Two kinds of component are looked up. The package's own dependencies come from `pom.properties`, `META-INF/*.version`, `dependencies.pb` (AAB), `Package.resolved` and `Podfile.lock` (OSV.dev); a library found only by DEX class names has no version and stays `not_queryable`. The software bundled *inside* the app's native libraries — the preferred-ABI copy of every `lib/<abi>/*.so` (and the `assets/**/lib/<abi>/` ones) of an APK / AAB, and every Mach-O of an IPA (main executable, frameworks, dylibs, extensions) — is read with the component detection of `ubel-binary` (see [Binary](#binary--native-executables-and-libraries)): C/C++ version banners (OpenSSL, SQLite, libcurl, zlib, …) become NVD CPE queries, Go modules and Rust crates become OSV.dev package URLs. Those components appear in the same Dependencies tab (the file they were seen in is listed as their source), their advisories are reported as `binary.component.vulnerable` findings and count towards `--fail-on`, and a component whose version could not be read is listed as `not_queryable`, never as clean. A native library that cannot be read, or a failed NVD / OSV lookup, is a coverage gap (exit 3 unless `--allow-partial`). A version banner shows the code is in the library, not that the vulnerable function is reachable. The standalone `ubel-binary` is still the tool for a binary that is not inside a package.
 
 ## Binary — Native Executables and Libraries
 

@@ -37,7 +37,7 @@ export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
   const cpeRecs = records.filter(r => !r.purl && r.cpe).map(r => ({ ...r, vulnerabilities: [], vulnerability_count: 0 }));
   // Inventory-only records (a package that is in the file but whose version could not be recovered): shown, never looked up, never "clean".
   const inventory = records.filter(r => !r.purl && !r.cpe).map(r => ({ ...r, lookup_status: 'not_queryable', vulnerabilities: [], vulnerability_count: 0 }));
-  const first = purlRecs.length ? await scanMobileDependencies(purlRecs, { log }) : { dependencies: [], lookup_error: null };
+  const first = purlRecs.length ? await scanMobileDependencies(purlRecs, { log, includeNative: true }) : { dependencies: [], lookup_error: null };
   let lookupError = first.lookup_error || null;
 
   const pending = cpeRecs.filter(r => r.lookup_status === 'pending');

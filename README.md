@@ -13,7 +13,7 @@ UBEL is a zero-dependency, source-available (internal-use-only; see [License](ht
 | **Secrets** | Trivy-derived ruleset plus UBEL's own rules. Standalone via `ubel-secrets`. | [Secrets details](https://github.com/AlaBouali/ubel/blob/main/DETAILS.md#secrets-detection) |
 | **SAST** | LLM-powered scan → verify → taint-trace pipeline for vulnerabilities, plus a separate malicious-code scan. | [SAST documentation](https://github.com/AlaBouali/ubel/blob/main/sast/README.md) |
 | **Cloud** | Read-only AWS / GCP / Azure account scan for misconfigurations. | [Cloud documentation](https://github.com/AlaBouali/ubel/blob/main/cloud/README.md) |
-| **Mobile** | Static scan of an Android `.apk` / `.aab` or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Pure Node — no third-party libraries, no external binaries. Dependencies come from package metadata (Maven, Swift Package Manager, CocoaPods); native libraries inside the app are not looked up — scan them with `ubel-binary`. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
+| **Mobile** | Static scan of an Android `.apk` / `.aab` or iOS `.ipa` for hardcoded secrets, insecure storage and misconfigurations, mapped to OWASP MASVS. Pure Node — no third-party libraries, no external binaries. Dependencies come from package metadata (Maven, Swift Package Manager, CocoaPods), and the native libraries inside the app (`lib/<abi>/*.so`, Mach-O frameworks) are read with `ubel-binary`'s component detection: bundled OpenSSL / SQLite / curl … banners go to NVD, Go modules and Rust crates to OSV.dev. | [Mobile documentation](https://github.com/AlaBouali/ubel/blob/main/mobile/README.md) |
 | **Binary** | Static scan of a native ELF, Mach-O (thin or fat) or PE executable or library: build hardening, risky imports, behavior inventory, hardcoded secrets and remote hosts, plus known-vulnerable components — C/C++ version banners (NVD), Go modules, Rust crates and packaged Node / Python apps (OSV.dev). Pure Node — nothing is executed or loaded. | [Binary documentation](https://github.com/AlaBouali/ubel/blob/main/binary/README.md) |
 | **EASM** | Passive fingerprinting and misconfiguration checks of domains, hosts and ports you own. **Authorized use only.** | [EASM documentation](https://github.com/AlaBouali/ubel/blob/main/easm/README.md) |
 
@@ -92,6 +92,10 @@ ubel-mobile app-release.apk          # Android / iOS (.ipa) package scan, fully 
 ubel-binary ./build/server           # ELF / Mach-O / PE scan, components checked against NVD / OSV.dev
 ubel-url staging.your-domain.example --fail-on high   # EASM, your own infrastructure only
 ```
+
+## Startup banner
+
+Every CLI prints the UBEL banner (name, version, author, license) once when it starts. It goes to **stdout**, except for `ubel-agent`, `ubel-cicd`, `ubel-platform` and `ubel-license`, whose stdout is their JSON result — there it goes to **stderr**, so piping their output keeps working. It is not printed with `--json` or `--quiet`, when `UBEL_NO_BANNER` is set to anything but `0` (handy in CI logs), or by the `asset-id` / `set-asset-id` / `version` commands, whose output a script may read.
 
 ## CI exit codes
 
