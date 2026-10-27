@@ -632,13 +632,13 @@ All binaries exit non-zero on findings that clear their respective gate, so any 
 - uses: AlaBouali/ubel@<commit-sha>   # pin to a commit SHA, not a mutable tag
   with:
     command: npm
-    version: 0.23.0
+    version: 0.24.0
     args: check
 
 - uses: AlaBouali/ubel@<commit-sha>
   with:
     command: npm                      # `command` selects the bin; the mode (check/install/health) goes in `args`
-    version: 0.23.0
+    version: 0.24.0
     args: install
 
 - uses: AlaBouali/ubel@<commit-sha>
