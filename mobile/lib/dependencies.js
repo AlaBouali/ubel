@@ -398,7 +398,7 @@ export async function scanMobileDependencies(components, { log = () => {}, inclu
     return { dependencies, summary: summarise(dependencies), lookup_error: null };
   }
 
-  log(`[*] Querying OSV.dev for ${purls.length} versioned mobile dependency PURL(s)...`);
+  log(`[*] Querying OSV.dev for ${purls.length} versioned dependency PURL(s)...`);
   let advisoryIds;
   try {
     advisoryIds = await submitToOsv(purls);

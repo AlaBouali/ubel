@@ -279,6 +279,8 @@ function previousIssues(report) {
  */
 export function reportIdentity(report) {
   const apps = report?.apps || [];
+  const pkg = apps.find(a => a.platform === 'package');
+  if (pkg) return `package:${pkg.ecosystem || ''}:${pkg.name}`;                    // one identity for every version of a package, so a rescan of another version diffs against the last
   const ids = apps.map(a => a.package || a.bundle_id || a.name).sort().join(',');
   return apps.length && apps.every(a => a.platform === 'binary') ? `${ids}|${report?.target?.kind || ''}` : ids;
 }

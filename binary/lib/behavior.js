@@ -20,6 +20,7 @@
 //   go       function names of the pclntab (Go binaries import nothing). Origin = the module that DEFINES the function (`Go standard
 //            library`, or a dependency's module path). This is who owns the function, not who calls it: there is no call graph.
 //   rust     std source paths and crate paths left in panic messages. Origin = `Rust standard library` or the crate.
+//   source   text of a package's own source files (ubel-package): modules and calls the code refers to. Origin = where the file runs or lives.
 //   bundle   text of packaged applications (Node pkg / SEA / Bun, PyInstaller). Origin = the owner of the file or module.
 //
 // Import names are normalised before matching: `@GLIBC_2.2.5` version suffixes, the leading underscore of Mach-O symbols, glibc's `64` /
@@ -40,6 +41,8 @@ export const NATIVE_BEHAVIOR_LABELS = {
   input_capture: 'Input capture / sensitive devices',
   crypto: 'Cryptography',
   system_info: 'System information',
+  credentials: 'Credentials / secrets access',
+  obfuscation: 'Obfuscation / encoded payloads',
 };
 
 export const NATIVE_BEHAVIOR_INFO = {
@@ -65,6 +68,10 @@ export const NATIVE_BEHAVIOR_INFO = {
     rules: /^binary\.risky\.weak_crypto$/ },
   system_info: { about: 'Reads host, user and network-interface identity. Normal for diagnostics and licensing; also the first step of reconnaissance and host fingerprinting.',
     rules: null },
+  credentials: { about: 'Reads credential stores (SSH keys, cloud and registry tokens, browser profiles, wallets), secret-named environment variables or the whole environment. Filled by the source scanner of `ubel-package`; a build tool reading its own token is normal, a library collecting every variable is not.',
+    rules: /^package\.code\.credential_access$/ },
+  obfuscation: { about: 'Evaluates or executes decoded data (base64 / hex / zlib into eval, exec or Function) and ships packer or obfuscator output. Filled by the source scanner of `ubel-package`. Legitimate for a few minified bundles; in an install-time script it is the usual way to hide a payload.',
+    rules: /^package\.code\.obfuscated$/ },
 };
 
 // ── tables ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -451,7 +458,7 @@ export class BehaviorBuilder {
     }
     let functions = 0, callSites = 0;
     for (const byOrigin of Object.values(categories)) for (const o of Object.values(byOrigin)) { functions += o.functions; if (o.basis === 'sites') callSites += o.calls; }
-    const order = ['imports', 'go', 'rust', 'bundle'];
+    const order = ['imports', 'go', 'rust', 'bundle', 'source'];
     return { basis: this.counted ? 'calls' : 'presence', counted: this.counted, functions, call_sites: this.counted ? callSites : null, sources: order.filter(x => this.sources.has(x)), categories, intent_actions: {}, intent_actions_total: {}, explicit_intents: {} };
   }
 }

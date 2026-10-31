@@ -426,10 +426,16 @@ export function scanBinary(file, opts = {}) {
   if (!st.isFile()) throw new Error(`${file} is not a file`);
   const maxBytes = (opts.maxSizeMb || 512) * MB;
   if (st.size > maxBytes) throw new Error(`file is ${Math.round(st.size / MB)} MB, over the ${Math.round(maxBytes / MB)} MB limit (--max-size-mb)`);
-  const buf = fs.readFileSync(file);
+  return scanBinaryBuffer(fs.readFileSync(file), path.basename(file));
+}
+
+/**
+ * Scans one binary that is already in memory (ubel-package scans the native files of a package this way). Same result as scanBinary();
+ * `name` is the label used in findings, notes and the behavior origin. Throws when the buffer is not ELF / Mach-O / PE or cannot be read.
+ */
+export function scanBinaryBuffer(buf, name) {
   const format = sniffFormat(buf);
   if (!format) throw new Error('unsupported format: not ELF, Mach-O or PE (checked by magic bytes)');
-  const name = path.basename(file);
   const findings = new Findings();
   const notes = new Notes();
   const base = { app: name };

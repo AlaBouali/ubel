@@ -46,7 +46,7 @@ function remediationFor(dep) {
 }
 
 /** Adds one finding per (component, advisory). `minSeverity` is applied by the caller; this adds everything. Returns the added findings. */
-export function addAdvisoryFindings(findings, dependencies, { app } = {}) {
+export function addAdvisoryFindings(findings, dependencies, { app, ruleFor = null, describe = null } = {}) {
   const added = [];
   for (const dep of dependencies || []) {
     for (const v of dep.vulnerabilities || []) {
@@ -60,12 +60,14 @@ export function addAdvisoryFindings(findings, dependencies, { app } = {}) {
         v.url ? `Advisory: ${v.url}` : null,
       ].filter(Boolean);
       const text = clip(v.details || v.summary, 1500) || 'No description was supplied for this advisory.';
-      const f = findings.add('binary.component.vulnerable', {
+      // `ruleFor(dep, advisory)` / `describe(dep, advisory, text)` let another scanner (ubel-package) file the same advisories under its own rules and wording
+      const custom = describe ? describe(dep, v, text) : null;
+      const f = findings.add(ruleFor ? ruleFor(dep, v) : 'binary.component.vulnerable', {
         app, artifact: `${dep.name}${dep.version ? ` ${dep.version}` : ''}`, key: `${v.id}|${identity}`,
-        title: `${v.id} in ${dep.name}${dep.version ? ` ${dep.version}` : ''}`,
-        description: `${text} The component's version was read from the file; the vulnerable code is present, which does not prove the affected function is reachable.`,
-        evidence, severity: sevOf(v), confidence: 'medium', confidenceCap: false,
-        remediation: remediationFor(dep),
+        title: custom?.title || `${v.id} in ${dep.name}${dep.version ? ` ${dep.version}` : ''}`,
+        description: custom?.description || `${text} The component's version was read from the file; the vulnerable code is present, which does not prove the affected function is reachable.`,
+        evidence: custom?.evidence || evidence, severity: custom?.severity || sevOf(v), confidence: 'medium', confidenceCap: false,
+        remediation: custom?.remediation || remediationFor(dep),
       });
       if (!f) continue;
       const cwe = (v.cwes || []).find(n => Number.isFinite(Number(n)));

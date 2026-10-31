@@ -1,8 +1,8 @@
 name: 'UBEL Security Scan and dependencies firewall'
-description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app and native binary scanning via UBEL'
+description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app, native binary and dependency-release scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -164,6 +164,21 @@ runs:
     # CI should pin `args` down with `--exclude`/`--exclude-ip` for anything
     # not exclusively the caller's own, the same care `url`'s own comment
     # above asks for around caller-influenced targets generally.
+    # `package` (`ubel-package`) downloads ONE dependency release from a registry and
+    # analyses the archive: `args` is `<name> <version> <ecosystem>` followed by any flags,
+    # e.g. `left-pad 1.3.0 npm --fail-on high` (add `--registry <url>` for a mirror or private
+    # registry). Nothing is installed, built or run, and no toolchain is needed on the runner:
+    # only network access to the registry and to OSV.dev / NVD (mirrorable through
+    # UBEL_OSV_ENDPOINT / UBEL_NVD_ENDPOINT). Exit codes are the same as `mobile` / `binary`:
+    # 2 = the gate tripped (or bad arguments), 3 = nothing tripped it but part of the package
+    # could not be analysed (a failed OSV / NVD lookup, `--offline`, a file over a limit), which
+    # fails the step on purpose; add `--allow-partial` to `args` to accept it.
+    # Like `url`, `package` acts on a caller-influenced target: the package name, the version and
+    # any `--registry` / `--header` / `--token` in `args` decide which server the runner contacts
+    # and which credentials it sends there (credentials only ever go to the registry's own host).
+    # Never build `args` from anything less trusted than the workflow's own hardcoded config
+    # (a PR title, an issue body, another job's output).
+    #
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -171,10 +186,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|package|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
             exit 1
             ;;
         esac

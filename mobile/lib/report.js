@@ -24,13 +24,23 @@ export const BINARY_LIMITS = [
   'Packed or obfuscated code, encrypted strings and code downloaded at run time are only partly visible. Hardcoded-secret detection uses UBEL’s shared secrets rules; a match proves the string is in the file, not that the credential is still valid.',
 ];
 
+export const PACKAGE_LIMITS = [
+  'Static analysis only: the package is downloaded and read, never installed, built, imported or run. Only the package name, version and ecosystem go to the registry you named; only names and exact versions of dependencies and bundled components are sent to OSV.dev / NVD. The package contents, its strings and any secrets are not uploaded.',
+  'Install-time behaviour is read from the files that run at install, build or import time (npm lifecycle scripts, setup.py, build.rs, gem extensions, MSBuild targets, Composer plugins, pub build hooks). Pattern matching shows that code REFERS to an action, not that it is reachable or runs with attacker data; packed, encrypted or downloaded code is only partly visible.',
+  'A dependency range (^1.2, >=2) is resolved by the package manager at install time, so the version that is installed cannot be known from the package alone. Only exact versions (and Go / NuGet minimum versions) are looked up for advisories; ranges are listed with their pin class.',
+  'A clean result is not proof of safety: it means no advisory or rule matched at scan time. Hardcoded-secret detection uses UBEL’s shared secrets rules; a match proves the string is in the package, not that the credential is still valid.',
+];
+const isNativeApp = a => Boolean(a) && (a.platform === 'binary' || a.platform === 'package');
+
 const MASVS_FRAMEWORK = {
   id: 'owasp_masvs_mobile',
   name: 'OWASP Mobile Application Security Verification Standard (MASVS)',
   version: null,
 };
 
-const MISCONFIG_RULE = /^(?:binary\.(?!risky\.|component\.)|android\.(?:manifest|nsc|cordova|signing|native|online|protection)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:anti_analysis|build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
+/** What a finding's `app` is matched against: a package app is `name@version` (its `package` field is the info object, not a name). */
+const appKey = a => (a?.platform === 'package' ? `${a.name}@${a.version}` : a?.package);
+const MISCONFIG_RULE = /^(?:package\.(?:config\.|archive\.|metadata\.|files\.|dep\.(?:unpinned|range|non_registry|bundled)$|integrity\.unverified$|install\.native_build$)|binary\.(?!risky\.|component\.)|android\.(?:manifest|nsc|cordova|signing|native|online|protection)\.|ios\.(?:plist|profile|macho)\.|bundle\.debug_build$|rn\.dev_bundle$|unity\.(?:development_build|certificate_handler)$|dotnet\.(?:tls_validation_disabled|debug_build)$|android\.dex\.(?:anti_analysis|build_debug|debug_libraries|weak_tls_protocol|trust_all_certs|allow_all_hostnames|custom_trust_manager|webview_ssl_proceed|webview_js_interface|webview_file_access|webview_mixed_content|webview_debugging|cleartext_urls|world_accessible_storage|external_storage)$|ios\.code\.(?:tls_validation_disabled|custom_auth_challenge|cleartext_urls|no_pinning|wkwebview_file_access|uiwebview|keychain_always|file_protection_none)$)/;
 
 export function isMisconfigurationFinding(finding) {
   return MISCONFIG_RULE.test(String(finding?.rule || ''));
@@ -74,7 +84,7 @@ export function complianceForMobileFinding(finding) {
   const categories = [...new Set(base?.categories || [])];
   const frameworks = (base?.frameworks || []).map(fw => ({ ...fw, controls: [...(fw.controls || [])] }));
   const controlId = String(finding?.masvs || '').trim();
-  if (controlId && !/^binary\./.test(String(finding?.rule || ''))) {          // MASVS is a mobile-app standard: native-binary findings keep their CWE mapping only
+  if (controlId && !/^(?:binary|package)\./.test(String(finding?.rule || ''))) {          // MASVS is a mobile-app standard: native-binary findings keep their CWE mapping only
     let masvs = frameworks.find(fw => fw.id === MASVS_FRAMEWORK.id);
     if (!masvs) {
       masvs = { ...MASVS_FRAMEWORK, controls: [] };
@@ -99,7 +109,7 @@ function buildMobileStats(findings, apps) {
     byOrigin[origin]++;
     const confidence = ['high', 'medium', 'low'].includes(finding.confidence) ? finding.confidence : 'low';
     byConfidence[confidence]++;
-    const appName = finding.app || (apps.length === 1 ? (apps[0].package || apps[0].bundle_id || apps[0].name) : 'Not attributed to one app');
+    const appName = finding.app || (apps.length === 1 ? (appKey(apps[0]) || apps[0].bundle_id || apps[0].name) : 'Not attributed to one app');
     byApp[appName || 'Unknown app'] = (byApp[appName || 'Unknown app'] || 0) + 1;
   }
   return { by_rule: byRule, by_origin: byOrigin, by_confidence: byConfidence, by_app: byApp };
@@ -135,13 +145,13 @@ export function buildPayload({ meta, target, apps, findings, dependencies = [], 
     dependencies: Array.isArray(dependencies) ? dependencies : [],
     dependency_summary: dependencySummary || { total: 0, queryable: 0, vulnerable_dependencies: 0, vulnerabilities: 0, clean_dependencies: 0, not_queryable: 0, lookup_errors: 0, by_severity: { critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 } },
     analysis_notes: notes,
-    limits: apps.length && apps.every(a => a.platform === 'binary') ? BINARY_LIMITS : LIMITS,
+    limits: apps.some(a => a.platform === 'package') ? PACKAGE_LIMITS : apps.length && apps.every(a => a.platform === 'binary') ? BINARY_LIMITS : LIMITS,
     diffs: diffs || null,
   };
   payload.compliance_summary = summarizeCompliance(sorted.map(f => f.compliance));
-  const binaryOnly = apps.length > 0 && apps.every(a => a.platform === 'binary');
+  const binaryOnly = apps.length > 0 && apps.every(isNativeApp);
   payload.compliance_summary.disclaimer = binaryOnly
-    ? `${payload.compliance_summary.disclaimer} Binary findings are mapped, where a CWE mapping exists, to general security-framework references. This is guidance, not a certified assessment.`
+    ? apps.some(a => a.platform === 'package') ? `${payload.compliance_summary.disclaimer} Package findings are mapped, where a CWE mapping exists, to general security-framework references. This is guidance, not a certified assessment.` : `${payload.compliance_summary.disclaimer} Binary findings are mapped, where a CWE mapping exists, to general security-framework references. This is guidance, not a certified assessment.`
     : `${payload.compliance_summary.disclaimer} Mobile findings are mapped to their catalogued MASVS control and, where a CWE mapping exists, to general security-framework references. This is guidance, not a certified assessment.`;
   payload.executive_summary = executiveSummary(payload);
   // Coverage: places the scan could not look. A clean list over incomplete coverage must not read as "all clear".
@@ -164,10 +174,11 @@ const MASVS_LABEL = {
 
 export function executiveSummary(p) {
   const c = p.summary.counts;
-  const isBinary = p.apps.length > 0 && p.apps.every(a => a.platform === 'binary');
-  const appNames = p.apps.map(a => (a.platform === 'binary' ? `${a.name}` : a.platform === 'ios' ? `${a.name || a.bundle_id} (${a.bundle_id})` : `${a.package}`));
+  const isBinary = p.apps.length > 0 && p.apps.every(isNativeApp);
+  const pkgApp = p.apps.find(a => a.platform === 'package') || null;
+  const appNames = p.apps.map(a => (a.platform === 'package' ? `${a.name}@${a.version}` : a.platform === 'binary' ? `${a.name}` : a.platform === 'ios' ? `${a.name || a.bundle_id} (${a.bundle_id})` : `${a.package}`));
   const platform = p.apps.some(a => a.platform === 'ios') ? 'iOS' : 'Android';
-  const subject = isBinary ? 'binary' : 'app';
+  const subject = pkgApp ? 'package' : isBinary ? 'binary' : 'app';
   let rating, headline;
   if (c.critical > 0 || c.high >= 3) { rating = 'High risk'; headline = `Serious weaknesses were found that should be fixed before this ${subject} is released or kept in production.`; }
   else if (c.high > 0) { rating = 'Elevated risk'; headline = 'At least one significant weakness was found; fix it soon.'; }
@@ -182,7 +193,24 @@ export function executiveSummary(p) {
   const areas = Object.entries(p.summary.by_masvs).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => MASVS_LABEL[k] || k.toLowerCase());
   const counts = `${p.summary.total} issue(s) were recorded — ${bc.vulnerabilities || 0} vulnerabilit${bc.vulnerabilities === 1 ? 'y' : 'ies'}, ${bc.secrets || 0} hardcoded secret(s) and ${bc.misconfigurations || 0} misconfiguration(s) — rated ${c.critical} critical, ${c.high} high, ${c.medium} medium, ${c.low} low and ${c.info} informational.${areas.length ? ` Most of them concern ${areas.join(', ')}.` : ''}`;
   let paragraphs;
-  if (isBinary) {
+  if (pkgApp) {
+    const ds = p.dependency_summary || {};
+    const pk = pkgApp.package || {};
+    const hooks = (pk.hooks || []).filter(h => h.consumer === true || h.consumer === 'conditional');
+    const pins = pk.pin_summary || {};
+    const sev = ds.by_severity || {};
+    const sevText = ['critical', 'high', 'medium', 'low'].filter(k => sev[k]).map(k => `${sev[k]} ${k}`).join(', ');
+    const hostN = pkgApp.remote_hosts?.total || 0;
+    paragraphs = [
+      `This report covers ${pkgApp.ecosystem_label || pkgApp.ecosystem} package ${appNames[0]}${pkgApp.size_bytes ? `, ${(pkgApp.size_bytes / 1048576).toFixed(2)} MB` : ''}, downloaded from ${pkgApp.registry || 'the registry'}${pk.integrity ? ` (archive digest ${pk.integrity.state})` : ''}. The archive was read without installing, building or running anything: its metadata, install-time hooks, source files, dependencies, bundled components, native binaries and strings were inspected.`,
+      `${hooks.length ? `${hooks.length} hook${hooks.length === 1 ? '' : 's'} run code on the machine of whoever installs, builds against or imports it (${[...new Set(hooks.map(h => h.id))].slice(0, 4).join(', ')}).` : 'No install-time, build-time or import-time hook was found.'} ${pk.dependency_total ? `It declares ${pk.dependency_total} dependenc${pk.dependency_total === 1 ? 'y' : 'ies'}: ${pins.exact || 0} pinned, ${(pins.floor || 0) ? `${pins.floor} minimum-version, ` : ''}${pins.range || 0} in ranges, ${pins.open || 0} unbounded and ${pins.non_registry || 0} from outside the registry.` : 'It declares no dependencies.'} ${hostN ? `${hostN} remote host${hostN === 1 ? ' is' : 's are'} named in its files.` : ''}`.trim(),
+      counts,
+      ds.vulnerable_dependencies ? `${ds.vulnerable_dependencies} component${ds.vulnerable_dependencies === 1 ? ' has' : 's have'} known advisories (${ds.vulnerabilities} match${ds.vulnerabilities === 1 ? '' : 'es'}${sevText ? `: ${sevText}` : ''}); they are counted in the issues above and listed on the Dependencies tab.` : 'No known advisory matched the exact versions that could be looked up.',
+      c.critical + c.high > 0
+        ? 'Critical and high issues should be resolved before this package is installed or kept in use; findings in install-time code are the most urgent because they run before anything else can inspect the package.'
+        : 'None of the issues is rated critical or high.',
+    ];
+  } else if (isBinary) {
     const a = p.apps[0] || {}, t = p.target || {}, ds = p.dependency_summary || {};
     const fmt = a.format === 'pe' ? 'Windows PE' : a.format === 'macho' ? 'Mach-O' : 'ELF';
     const mb = Number(t.size_bytes || a.size_bytes || 0) / 1048576;
@@ -351,6 +379,60 @@ export function nativeHardeningHtml(apps) {
 }
 
 /** Number of native binaries (every ABI copy) across the Android apps of a payload. */
+// ── Package tab (ubel-package) ─────────────────────────────────────────────────────────────────────
+// Server-rendered, escaped: every string here comes from the downloaded package (hook commands, dependency specs, file names, host names).
+const PIN_BADGE = {
+  exact: 'text-green-400 border-green-500/50 bg-green-500/10', floor: 'text-green-300 border-green-500/40 bg-green-500/10', range: 'text-yellow-300 border-yellow-500/40 bg-yellow-500/10',
+  open: 'text-orange-300 border-orange-500/50 bg-orange-500/10', non_registry: 'text-red-300 border-red-500/50 bg-red-500/10', unknown: 'text-neutral-400 border-neutral-700 bg-neutral-800/50',
+};
+const PIN_TEXT = { exact: 'pinned', floor: 'minimum version', range: 'range', open: 'unbounded', non_registry: 'not from registry', unknown: 'unknown' };
+export function packageInfoHtml(apps) {
+  const pk = (apps || []).find(a => a?.platform === 'package');
+  if (!pk || !pk.package) return '';
+  const P = pk.package;
+  const badge = (text, cls) => `<span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold whitespace-nowrap ${cls}">${esc(text)}</span>`;
+  const th = labels => `<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>${labels.map(l => `<th class="px-4 py-3">${esc(l)}</th>`).join('')}</tr></thead>`;
+  const card = (title, body, note = '') => `<div class="glass p-6 rounded-xl space-y-3"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">${esc(title)}</h3>${body}${note ? `<p class="text-xs text-neutral-500">${note}</p>` : ''}</div>`;
+  const table = (heads, rows, empty) => (rows.length ? `<div class="overflow-x-auto"><table class="w-full text-left text-xs">${th(heads)}<tbody class="divide-y divide-neutral-800">${rows.join('')}</tbody></table></div>` : `<p class="text-sm text-neutral-500">${esc(empty)}</p>`);
+  const kv = (k, v) => (v == null || v === '' ? '' : `<div class="flex justify-between border-b border-neutral-800 pb-2 gap-4"><span class="text-neutral-500 text-xs">${esc(k)}</span><span class="mono text-xs text-right break-all">${esc(v)}</span></div>`);
+  const integ = P.integrity || {};
+  const integBadge = integ.state === 'verified' ? badge('verified', PIN_BADGE.exact) : integ.state === 'mismatch' ? badge('MISMATCH', PIN_BADGE.non_registry) : badge('unverified', PIN_BADGE.open);
+
+  const meta = card('Package', `<div class="grid md:grid-cols-2 gap-x-8 gap-y-2">${[
+    kv('Ecosystem', pk.ecosystem_label || pk.ecosystem), kv('Name', pk.name), kv('Version', pk.version), kv('Registry', pk.registry), kv('License', P.info?.license), kv('Repository', P.info?.repository), kv('Homepage', P.info?.homepage),
+    kv('Published', P.published_at), kv('Publisher', P.publisher), kv('Maintainers', (P.maintainers || []).join(', ')), kv('Files / unpacked', P.file_count != null ? `${P.file_count} files · ${(Number(P.unpacked_bytes || 0) / 1048576).toFixed(2)} MB` : ''),
+    kv('Yanked / retracted', P.yanked ? (P.yanked_reason || 'yes') : ''), kv('Deprecated', P.deprecated || ''), kv('Provenance / signatures', P.provenance != null ? `${P.provenance ? 'provenance attestation' : 'no provenance'} · ${P.signatures || 0} registry signature(s)` : ''),
+  ].join('')}</div>
+    <div class="space-y-2 pt-2"><div class="text-xs text-neutral-500 uppercase tracking-widest">Downloaded archive${(P.artifacts || []).length === 1 ? '' : 's'} ${integBadge}</div>${table(['File', 'Kind', 'Size', 'SHA-256', 'Digest check'], (P.artifacts || []).map(a => `<tr><td class="px-4 py-3 break-all">${esc(a.filename)}</td><td class="px-4 py-3">${esc(a.kind)}</td><td class="px-4 py-3 mono">${esc(`${(Number(a.size || 0) / 1024).toFixed(1)} KB`)}</td><td class="px-4 py-3 mono break-all">${esc(a.sha256)}</td><td class="px-4 py-3">${esc(a.integrity ? `${a.integrity.state}${a.integrity.algo ? ` (${a.integrity.algo}${a.integrity.source ? `, ${a.integrity.source}` : ''})` : ''}` : '—')}</td></tr>`), 'No archive information.')}</div>`);
+
+  const hookRows = (P.hooks || []).map(h => {
+    const runs = h.consumer === true ? badge('runs for consumers', PIN_BADGE.non_registry) : h.consumer === 'conditional' ? badge('conditional', PIN_BADGE.open) : badge('not for consumers', PIN_BADGE.unknown);
+    const sig = (h.signals || []).map(x => badge(x.replace(/_/g, ' '), /download_exec|credential|persistence|destructive|obfuscated|reverse_shell|exfiltration/.test(x) ? PIN_BADGE.non_registry : PIN_BADGE.open)).join(' ');
+    return `<tr><td class="px-4 py-3 font-semibold">${esc(h.id)}</td><td class="px-4 py-3">${esc(h.phase)}</td><td class="px-4 py-3">${esc(h.trigger)}</td><td class="px-4 py-3">${runs}</td><td class="px-4 py-3 mono break-all">${esc(h.command)}${h.file ? `<div class="text-neutral-500">${esc(h.file)}</div>` : ''}${h.note ? `<div class="text-neutral-500 font-sans">${esc(h.note)}</div>` : ''}</td><td class="px-4 py-3 space-x-1">${sig || '<span class="text-neutral-600">—</span>'}</td></tr>`;
+  });
+  const hooks = card('Install-time, build-time and import-time hooks', table(['Hook', 'Phase', 'Runs when', 'Consumers', 'Command / file', 'What it does'], hookRows, 'No hook that runs code on installation, build or import was found.'),
+    'A hook is code the package manager (or the language runtime) runs on the machine of whoever installs, builds against or imports the package. “What it does” is read from the command line and from the files the hook runs; nothing was executed.');
+  const installs = (P.install_installs || []).length ? card('Packages installed while a hook runs', table(['Hook', 'Command', 'Installs'], P.install_installs.map(x => `<tr><td class="px-4 py-3">${esc(x.hook)}</td><td class="px-4 py-3 mono break-all">${esc(x.command)}</td><td class="px-4 py-3">${esc(x.what)}</td></tr>`), ''),
+    'These packages are fetched by the hook itself, outside the dependency list, the lockfile and the advisory check.') : '';
+
+  const pins = P.pin_summary || {};
+  const pinChips = ['exact', 'floor', 'range', 'open', 'non_registry', 'unknown'].filter(k => pins[k]).map(k => `${badge(PIN_TEXT[k], PIN_BADGE[k])} <span class="text-xs text-neutral-400 mr-3">${Number(pins[k])}</span>`).join('');
+  const depRows = (P.dependencies || []).map(d => `<tr><td class="px-4 py-3 font-semibold break-all">${esc(d.name)}</td><td class="px-4 py-3 mono break-all">${esc(d.spec || '—')}</td><td class="px-4 py-3">${esc(d.kind)}${d.installed === false ? ' <span class="text-neutral-600">(not installed for consumers)</span>' : ''}</td><td class="px-4 py-3">${badge(PIN_TEXT[d.pin] || d.pin, PIN_BADGE[d.pin] || PIN_BADGE.unknown)}</td><td class="px-4 py-3">${esc(d.source && d.source !== 'registry' ? d.source : 'registry')}${d.immutable === true ? ' · fixed' : d.immutable === false ? ' · can move' : ''}</td><td class="px-4 py-3 text-neutral-500">${esc(d.detail || '')}</td></tr>`);
+  const deps = card(`Declared dependencies (${(P.dependencies || []).length})`, `<div class="flex flex-wrap items-center gap-1">${pinChips}</div>${table(['Dependency', 'Declared', 'Kind', 'Pin', 'Source', 'Note'], depRows, (P.bundled || []).length || (P.bundled_unversioned || []).length ? 'The package declares no dependencies of its own, but it ships vendored copies of other libraries (see Bundled components): they are installed with it.' : 'The package declares no dependencies.')}`,
+    'Pin classes: <b>pinned</b> = one exact version; <b>minimum version</b> = Go and NuGet declare a floor that the resolver installs when nothing else needs more; <b>range</b> = a new release can change what is installed; <b>unbounded</b> = any version; <b>not from registry</b> = git, URL or path, outside the registry’s advisory and takedown checks. Only pinned and minimum versions can be looked up for advisories.');
+  const bundled = (P.bundled || []).length || (P.bundled_unversioned || []).length ? card(`Bundled components (${(P.bundled || []).length + (P.bundled_unversioned || []).length})`, table(['Name', 'Version', 'Path', 'Found by'], [...(P.bundled || []).map(b => `<tr><td class="px-4 py-3 font-semibold">${esc(b.name)}</td><td class="px-4 py-3 mono">${esc(b.version)}</td><td class="px-4 py-3 mono break-all">${esc(b.path)}${(b.paths || []).length > 1 ? `<div class="text-neutral-500">also ${esc(b.paths.slice(1, 4).join(', '))}${b.paths.length > 4 ? ` and ${b.paths.length - 4} more` : ''}</div>` : ''}</td><td class="px-4 py-3">${b.source ? esc(b.source) : b.declaredBundled ? 'declared as bundled' : '<span class="text-orange-300">not declared as bundled</span>'}</td></tr>`), ...(P.bundled_unversioned || []).map(b => `<tr><td class="px-4 py-3 font-semibold">${esc(b.name)}</td><td class="px-4 py-3 text-orange-300">version not readable</td><td class="px-4 py-3 mono break-all">${esc(b.path)}</td><td class="px-4 py-3">${esc(b.source || '')}</td></tr>`)], ''), 'Copies shipped inside the archive are not updated when the registry copy is fixed. A vendored copy with an unreadable version cannot be looked up in the advisory databases.') : '';
+  const lockfiles = (P.lockfiles || []).length ? card(`Lockfiles and pinned lists (${P.lockfiles.length})`, table(['File', 'Format', 'Packages', 'Pinned', 'With hashes', 'Not from registry'], P.lockfiles.map(l => `<tr><td class="px-4 py-3 mono break-all">${esc(l.file)}</td><td class="px-4 py-3">${esc(l.format)}</td><td class="px-4 py-3 mono">${Number(l.packages || 0)}</td><td class="px-4 py-3 mono">${Number(l.pinned || 0)}</td><td class="px-4 py-3 mono">${Number(l.hashes || 0)}</td><td class="px-4 py-3 mono">${l.non_registry ? `<span class="text-orange-300">${Number(l.non_registry)}</span>` : 0}</td></tr>`), ''), `A lockfile shipped in a published package records what the publisher's own environment used. A consumer's installer ignores it, so these entries are not counted as dependencies; their exact versions are still checked against OSV.dev.${P.locked_total > (P.locked_sample || []).length ? ` ${P.locked_total} entries in all.` : ''}`) : '';
+
+  const hosts = (pk.remote_hosts?.hosts || []).filter(h => (h.flags || []).length);
+  const flagged = hosts.length ? card(`Flagged remote hosts (${hosts.length})`, table(['Host', 'Flags', 'Seen in'], hosts.map(h => `<tr><td class="px-4 py-3 mono break-all">${esc(h.host)}</td><td class="px-4 py-3 space-x-1">${h.flags.map(f => badge(f.replace(/_/g, ' '), /install|paste|tunnel|exfil|ip/.test(f) ? PIN_BADGE.non_registry : PIN_BADGE.open)).join(' ')}</td><td class="px-4 py-3 mono break-all">${esc((h.seen_in || []).join(', '))}</td></tr>`), ''),
+    'The full host list is on the Behavior tab. A host is something the files refer to; the scan cannot tell whether it is contacted.') : '';
+
+  const interest = [...(P.archive_problems || []).map(x => ({ kind: `archive: ${x.kind}`, path: x.path, detail: x.detail })), ...(P.files_of_interest || [])];
+  const files = interest.length ? card(`Archive and file observations (${interest.length})`, table(['Observation', 'Path', 'Detail'], interest.slice(0, 200).map(x => `<tr><td class="px-4 py-3 whitespace-nowrap">${esc(x.kind)}</td><td class="px-4 py-3 mono break-all">${esc(x.path)}</td><td class="px-4 py-3 text-neutral-400">${esc(x.detail || '')}</td></tr>`), ''), '') : '';
+  const natives = (P.native_files || []).length ? card(`Native files (${P.native_files.length})`, table(['Path', 'Format', 'Architecture', 'Size', 'Scanned'], P.native_files.map(n => `<tr><td class="px-4 py-3 mono break-all">${esc(n.path)}</td><td class="px-4 py-3">${esc(n.format || '—')}</td><td class="px-4 py-3">${esc(n.arch || '—')}</td><td class="px-4 py-3 mono">${esc(`${(Number(n.size || 0) / 1024).toFixed(1)} KB`)}</td><td class="px-4 py-3">${esc(n.scanned ? 'yes' : (n.skipped || 'no'))}</td></tr>`), ''), 'Binaries that could be read are scanned like ubel-binary does: hardening flags, imports, strings, components. Their findings are listed with the file’s path.') : '';
+  return `<div class="space-y-6">${[meta, hooks, installs, deps, bundled, lockfiles, flagged, files, natives].filter(Boolean).join('')}</div>`;
+}
+
 export function nativeBinaryCount(apps) {
   return (apps || []).reduce((n, a) => n + Number(a?.native_hardening?.binaries?.length || 0), 0);
 }
@@ -398,12 +480,23 @@ const NATIVE_BEHAVIOR = {
   columns: { all: 'Functions' }, ownerHeader: 'Source', countHeader: 'Present', totalHeader: 'Total', ipc: false, fallbackName: 'Binary',
   intro: b => {
     if (b?.native) return `Functions imported by the Mach-O files of the app (the executable, frameworks and extensions), grouped by what they do. <b>Source</b> is <i>app</i> for the app's own binaries and <i>library</i> for embedded frameworks and dylibs; each entry is labelled <i>binary: function</i>. An entry shows that the function is <b>linked</b>, not that it is called: call sites are not counted for Mach-O, so entries show a check mark and the numbers on this tab count functions. Calls made through Objective-C messaging or Swift are not functions of this table. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
-    const from = { imports: 'the import table', go: 'the Go function table (pclntab)', rust: 'the std and crate paths left in panic messages', bundle: "the text of the packaged application's own files" };
+    const from = { imports: 'the import table', go: 'the Go function table (pclntab)', rust: 'the std and crate paths left in panic messages', bundle: "the text of the packaged application's own files", source: "the package's own source and script files (origin: where the code runs: install-time, package code, bundled dependency, test / docs)" };
     const src = (b?.sources?.length ? b.sources : ['imports']).map(x => from[x] || x);
     return `Functions and modules found in ${src.join(', ')}, grouped by what they do and by <b>Source</b>: the library that provides an import, the module that defines a Go function, the crate, or the owner of a bundled file. <b>Functions</b> is the number of distinct entries listed for a behavior (the rows of its panel). ${b?.counted ? '<b>Call sites</b> counts only imports: the <b>direct calls</b> found by scanning the code for calls to the import stubs (x86-64 and arm64; approximate: calls through function pointers, <code>dlsym</code> / <code>GetProcAddress</code> results and packed or obfuscated code are not seen, and 0 means imported but no direct call found). Entries from the Go / Rust tables are shown as present (✓) and entries from bundled source text count the lines that mention the module (<i>Mentions</i>); neither is added to the call-site total.' : 'An entry shows that the function is <b>linked or referenced</b>, not that it is called or reachable: call sites were not counted, so there are no call counts.'} A statically linked or stripped file lists little here even when it does a lot. This is an inventory of what the code can do, not a list of weaknesses. Select a row to see the exact functions.`;
   },
 };
-const behaviorProfile = a => (a && (a.platform === 'binary' || a.platform === 'ios') ? NATIVE_BEHAVIOR : ANDROID_BEHAVIOR);
+// Package reports: which findings bear on a behavior category (the same rules for install-time and ordinary source code)
+const PACKAGE_BEHAVIOR_RULES = {
+  network: /^package\.(?:install|code)\.(?:remote_fetch|download_exec|insecure_tls|exfiltration)$/,
+  process: /^package\.install\.(?:shell_exec|runtime_install|reverse_shell|native_build|hook|download_exec)$|^package\.code\.(?:reverse_shell|download_exec)$/,
+  credentials: /^package\.(?:install|code)\.(?:credential_access|exfiltration)$|^secret\./,
+  obfuscation: /^package\.(?:install|code)\.obfuscated$/,
+  persistence: /^package\.(?:install|code)\.persistence$|^package\.install\.pth_file$/,
+  privilege: /^package\.install\.privilege$/,
+  file_io: /^package\.(?:install|code)\.destructive$/,
+  dynamic_loading: /^package\.(?:install|code)\.(?:obfuscated|download_exec)$/,
+};
+const behaviorProfile = a => (a && (a.platform === 'binary' || a.platform === 'package' || a.platform === 'ios') ? NATIVE_BEHAVIOR : ANDROID_BEHAVIOR);
 /** Origins of one app's behavior summary: fixed for Android, the libraries / modules / owners that actually occur for a native binary. */
 const behaviorOrigins = (P, b) => (P.dynamicOrigins ? [...new Set(Object.values(b.categories || {}).flatMap(byOrigin => Object.keys(byOrigin || {})))].sort() : P.origins);
 
@@ -421,7 +514,7 @@ export function remoteHostCount(apps) {
 }
 
 // Findings that bear on the hosts an app reaches (cleartext endpoints, Firebase databases, network policy).
-const REMOTE_HOST_RULES = /^(android\.dex\.(cleartext_urls|firebase_urls|trust_all_certs|allow_all_hostnames|weak_tls_protocol)|android\.nsc\.|android\.manifest\.cleartext|android\.network\.|android\.online\.|ios\.code\.cleartext_urls|ios\.plist\.ats_)/;
+const REMOTE_HOST_RULES = /^(package\.install\.remote_fetch$|package\.code\.exfiltration$|android\.dex\.(cleartext_urls|firebase_urls|trust_all_certs|allow_all_hostnames|weak_tls_protocol)|android\.nsc\.|android\.manifest\.cleartext|android\.network\.|android\.online\.|ios\.code\.cleartext_urls|ios\.plist\.ats_)/;
 const HOST_CHIP = {
   domain: ['Domain', 'text-neutral-300 border-neutral-600 bg-neutral-800/50'], ipv4: ['IPv4', 'text-blue-300 border-blue-500/40 bg-blue-500/10'], ipv6: ['IPv6', 'text-blue-300 border-blue-500/40 bg-blue-500/10'],
   private: ['private range', 'text-yellow-300 border-yellow-500/40 bg-yellow-500/10'], cleartext: ['plain-text scheme', 'text-orange-300 border-orange-500/40 bg-orange-500/10'],
@@ -441,10 +534,10 @@ export function behaviorHtml(apps, findings = []) {
     const P = behaviorProfile(a), b = a.behavior || { categories: {}, counted: false }, ORIGINS = behaviorOrigins(P, b), rh = hasHosts(a) ? a.remote_hosts : null;
     const badgeOf = o => (typeof P.badge === 'function' ? P.badge(o) : P.badge[o]), labelOf = o => (typeof P.originLabel === 'function' ? P.originLabel(o) : P.originLabel[o]);
     const originChip = o => `<span class="px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap break-all ${badgeOf(o)}">${esc(labelOf(o))}</span>`;
-    const forApp = list => list.filter(f => !f.app || !a.package || f.app === a.package);
+    const forApp = list => list.filter(f => !f.app || !appKey(a) || f.app === appKey(a));
     const related = (app, cat) => {
-      const re = P.info[cat]?.rules;
-      return re ? findings.filter(f => re.test(String(f.rule || '')) && (!f.app || !app.package || f.app === app.package)) : [];
+      const re = app?.platform === 'package' ? PACKAGE_BEHAVIOR_RULES[cat] : P.info[cat]?.rules;
+      return re ? findings.filter(f => re.test(String(f.rule || '')) && (!f.app || !appKey(app) || f.app === appKey(app))) : [];
     };
     const hostRelated = forApp(findings.filter(f => REMOTE_HOST_RULES.test(String(f.rule || ''))));
     const cats = Object.keys(P.labels).filter(c => b.categories[c]);
@@ -546,7 +639,7 @@ export function behaviorHtml(apps, findings = []) {
     }
 
     return `<div class="glass p-6 rounded-xl space-y-4 behavior-block">
-      <div class="flex flex-wrap items-baseline justify-between gap-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Behavior checks</h3><span class="mono text-xs text-neutral-500">${esc(a.package || a.name || P.fallbackName)}</span></div>
+      <div class="flex flex-wrap items-baseline justify-between gap-2"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">Behavior checks</h3><span class="mono text-xs text-neutral-500">${esc((typeof a.package === 'string' && a.package) || a.name || P.fallbackName)}</span></div>
       <div class="flex flex-wrap gap-2">${pills}</div>
       ${overview}${panels}${hostsPanel}
     </div>`;
@@ -560,17 +653,21 @@ export async function buildHtml(p) {
   const c = p.summary?.counts || {};
   const es = p.executive_summary || executiveSummary(p);
   const targetFile = p.target?.file || 'Unknown file';
-  const appNames = (p.apps || []).map(a => a.package || a.bundle_id || a.name).filter(Boolean);
+  const appNames = (p.apps || []).map(a => appKey(a) || a.bundle_id || a.name).filter(Boolean);
   const appLabel = appNames.join(', ') || targetFile;
-  const isBinary = (p.apps || []).length > 0 && (p.apps || []).every(a => a.platform === 'binary');
-  const T = isBinary ? {
+  const isBinary = (p.apps || []).length > 0 && (p.apps || []).every(isNativeApp);
+  const isPackage = (p.apps || []).some(a => a.platform === 'package');
+  const T = isPackage ? {
+    title: 'Package Security Report', execLabel: 'Package security summary', inventoryTab: 'Package Info', nativeTab: 'Native binaries', depTab: 'Dependencies', nativeHeading: 'Native binaries inside the package',
+    area: 'Area', areaPlural: 'Areas', file: 'File', clean: 'No known advisory', chart2: 'Issues by Area', chart3: 'Issues by Category',
+  } : isBinary ? {
     title: 'Binary Security Report', execLabel: 'Binary security summary', inventoryTab: 'File Info', nativeTab: 'Hardening', depTab: 'Components', nativeHeading: 'Hardening Checks',
     area: 'Area', areaPlural: 'Areas', file: 'File', clean: 'No known advisory', chart2: 'Issues by Area', chart3: 'Issues by Category',
   } : {
     title: 'Mobile Application Security Report', execLabel: 'Mobile application security summary', inventoryTab: 'App Inventory', nativeTab: 'Native Binaries', depTab: 'Dependencies', nativeHeading: 'Native Binaries Analysis',
     area: 'MASVS', areaPlural: 'MASVS Areas', file: 'App', clean: 'Safe', chart2: 'Issues by MASVS Area', chart3: 'Issues by Origin',
   };
-  const AREA_NAMES = { 'MASVS-STORAGE': 'Data storage', 'MASVS-CRYPTO': 'Cryptography', 'MASVS-AUTH': 'Authentication', 'MASVS-NETWORK': 'Network', 'MASVS-PLATFORM': 'Platform interaction', 'MASVS-CODE': 'Code & build hygiene', 'MASVS-RESILIENCE': 'Tamper resistance', 'MASVS-PRIVACY': 'Privacy', Unmapped: 'Unmapped' };
+  const AREA_NAMES = { 'MASVS-STORAGE': 'Data storage', 'MASVS-CRYPTO': 'Cryptography', 'MASVS-AUTH': 'Authentication', 'MASVS-NETWORK': 'Network', 'MASVS-PLATFORM': 'Platform interaction', 'MASVS-CODE': 'Code & build hygiene', 'MASVS-RESILIENCE': 'Tamper resistance', 'MASVS-PRIVACY': 'Privacy', 'PKG-INSTALL': 'Install-time code', 'PKG-CODE': 'Source behaviour', 'PKG-DEPS': 'Dependencies', 'PKG-INTEGRITY': 'Integrity & metadata', 'PKG-CONTENT': 'Content & configuration', Unmapped: 'Unmapped' };
   const areaKey = v => String(v || 'Unmapped').replace(/-\d+$/, '');
   const areaText = v => (isBinary ? (AREA_NAMES[areaKey(v)] || areaKey(v)) : String(v || 'Unmapped'));
   const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info', 'unknown'];
@@ -590,11 +687,21 @@ export async function buildHtml(p) {
   const dependencyStatusLabel = { vulnerable: 'Vulnerable', clean: T.clean, not_queryable: 'Not queried', lookup_error: 'Lookup failed', lookup_incomplete: 'Lookup incomplete', pending: 'Pending' };
   const severityColors = { critical: '#ef4444', high: '#f87171', medium: '#fb923c', low: '#60a5fa', info: '#a3a3a3' };
   const total = all.length;
-  const appIdentity = a => a.platform === 'binary' ? (a.name || 'Binary') : a.platform === 'ios' ? (a.name || a.bundle_id || 'iOS app') : (a.package || a.name || 'Android app');
+  const appIdentity = a => a.platform === 'package' ? `${a.name || 'Package'}${a.version ? `@${a.version}` : ''}` : a.platform === 'binary' ? (a.name || 'Binary') : a.platform === 'ios' ? (a.name || a.bundle_id || 'iOS app') : (a.package || a.name || 'Android app');
   const appVersion = a => a.platform === 'binary' ? '—' : a.platform === 'ios' ? `${a.version || '?'} (${a.build || '?'})` : `${a.version_name || '?'} (${a.version_code || '?'})`;
-  const appPlatform = a => a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android';
+  const appPlatform = a => a.platform === 'package' ? (a.ecosystem_label || a.ecosystem || 'Package') : a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android';
   const fmtSize = n => (Number(n) >= 1048576 ? `${(Number(n) / 1048576).toFixed(1)} MB` : `${(Number(n) / 1024).toFixed(1)} KB`);
+  const packageRow = (a, i) => `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-app-index="${i}" title="Open package details">
+      <td class="px-6 py-4">${esc(appPlatform(a))}</td>
+      <td class="px-6 py-4 font-semibold break-all">${esc(a.name || 'Package')}</td>
+      <td class="px-6 py-4 mono text-xs">${esc(a.version || '—')}</td>
+      <td class="px-6 py-4 text-xs">package</td>
+      <td class="px-6 py-4 text-xs">${esc(`${(a.package?.hooks || []).filter(h => h.consumer !== false).length} install / build hook(s) · ${(a.package?.native_files || []).length} native file(s)`)}</td>
+      <td class="px-6 py-4 mono text-xs">${esc(fmtSize(a.size_bytes || p.target?.size_bytes || 0))}</td>
+      <td class="px-6 py-4 text-right mono">${Number(a.package?.dependency_total || 0)}</td>
+    </tr>`;
   const binaryRows = (p.apps || []).map((a, i) => {
+    if (a.platform === 'package') return packageRow(a, i);
     const pack = [...(a.runtimes || []).map(r => `${r.name} ${r.version || ''}`.trim()), ...(a.packaging || []).map(x => x.kind), ...(a.go ? [`Go ${a.go.version || a.go.go_version || ''}`.trim()] : [])];
     return `<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-app-index="${i}" title="Open file details">
       <td class="px-6 py-4">${esc(appPlatform(a))}</td>
@@ -607,7 +714,7 @@ export async function buildHtml(p) {
     </tr>`;
   }).join('');
   const appRows = isBinary ? binaryRows : (p.apps || []).map((a, i) => {
-    const id = a.platform === 'binary' ? (a.arch || '') : a.platform === 'ios' ? a.bundle_id : a.package;
+    const id = a.platform === 'binary' ? (a.arch || '') : a.platform === 'ios' ? a.bundle_id : appKey(a);
     const scope = a.platform === 'binary' ? (a.kind || '') : a.platform === 'ios' ? (a.min_os ? `iOS ${a.min_os}+` : 'iOS') : `min ${a.min_sdk ?? '?'} / target ${a.target_sdk ?? '?'}`;
     const componentCount = a.platform === 'binary' ? (a.needed || []).length : a.platform === 'ios'
       ? (a.frameworks || []).length + (a.extensions || []).length
@@ -828,22 +935,23 @@ export async function buildHtml(p) {
       <div class="glass rounded-xl overflow-x-auto">
         <table class="w-full text-left text-sm">
           <thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest">${isBinary
-            ? '<tr><th class="px-6 py-4">Format</th><th class="px-6 py-4">File</th><th class="px-6 py-4">Architecture</th><th class="px-6 py-4">Type</th><th class="px-6 py-4">Packaging / runtime</th><th class="px-6 py-4">Size</th><th class="px-6 py-4 text-right">Linked libraries</th></tr>'
+            ? (isPackage ? '<tr><th class="px-6 py-4">Ecosystem / format</th><th class="px-6 py-4">Name</th><th class="px-6 py-4">Version / architecture</th><th class="px-6 py-4">Type</th><th class="px-6 py-4">Details</th><th class="px-6 py-4">Size</th><th class="px-6 py-4 text-right">Dependencies / linked libraries</th></tr>' : '<tr><th class="px-6 py-4">Format</th><th class="px-6 py-4">File</th><th class="px-6 py-4">Architecture</th><th class="px-6 py-4">Type</th><th class="px-6 py-4">Packaging / runtime</th><th class="px-6 py-4">Size</th><th class="px-6 py-4 text-right">Linked libraries</th></tr>')
             : '<tr><th class="px-6 py-4">Platform</th><th class="px-6 py-4">Application</th><th class="px-6 py-4">Package / Bundle ID</th><th class="px-6 py-4">Version</th><th class="px-6 py-4">OS / SDK</th><th class="px-6 py-4 text-right">Components</th></tr>'}</thead>
           <tbody id="apps-table-body" class="divide-y divide-neutral-800">${appRows || `<tr><td colspan="${isBinary ? 7 : 6}" class="px-6 py-4 text-sm text-neutral-500">No ${isBinary ? 'file' : 'app'} metadata was extracted.</td></tr>`}</tbody>
         </table>
       </div>
+      ${isPackage ? packageInfoHtml(p.apps) : ''}
       <p class="text-xs text-neutral-500">${isBinary ? 'Select the row to inspect the metadata read from the file. This is static analysis; the file is never executed or loaded.' : 'Select an app row to inspect extracted package metadata. This is static package analysis; the app is not executed.'}</p>
     </section>
 
     <section id="section-native" class="hidden space-y-6">
       <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">${esc(T.nativeHeading)}</h2>${isBinary ? '' : `<p class="text-xs text-neutral-500 mono">${nativeCount} binar${nativeCount === 1 ? 'y' : 'ies'}</p>`}</div>
-      ${nativeHtml || (isBinary ? '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No hardening data could be read from this file (see the analysis notes on the Scan Info tab).</div>' : '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No native libraries or executables were found in this package, so there is nothing to analyse.</div>')}
+      ${nativeHtml || (isPackage ? '<div class="glass rounded-xl p-6 text-sm text-neutral-400">This package contains no native executables or libraries that could be read (ELF, Mach-O or PE).</div>' : isBinary ? '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No hardening data could be read from this file (see the analysis notes on the Scan Info tab).</div>' : '<div class="glass rounded-xl p-6 text-sm text-neutral-400">No native libraries or executables were found in this package, so there is nothing to analyse.</div>')}
     </section>
 
     <section id="section-behavior" class="hidden space-y-6">
-      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorFunctions} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary' || a?.platform === 'ios') ? 'function' : 'API'}${behaviorFunctions === 1 ? '' : 's'} · ${hostCount} remote host${hostCount === 1 ? '' : 's'}</p></div>
-      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'No behavior inventory was built: none of the functions imported by the Mach-O files falls in a behavior category (see the analysis notes).' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: nothing the scanner reads in this file (import table, Go function table, Rust paths, packaged-application text) falls in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Behavior Checks</h2><p class="text-xs text-neutral-500 mono">${behaviorFunctions} ${(p.apps || []).length && (p.apps || []).every(a => a?.platform === 'binary' || a?.platform === 'package' || a?.platform === 'ios') ? 'function' : 'API'}${behaviorFunctions === 1 ? '' : 's'} · ${hostCount} remote host${hostCount === 1 ? '' : 's'}</p></div>
+      ${behaviorPanels || `<div class="glass rounded-xl p-6 text-sm text-neutral-400">${(p.apps || []).some(a => a?.platform === 'ios') && !(p.apps || []).some(a => a?.behavior) ? 'No behavior inventory was built: none of the functions imported by the Mach-O files falls in a behavior category (see the analysis notes).' : (p.apps || []).some(a => a?.platform === 'package') ? 'No behavior inventory was built: no source file or native binary of this package refers to a call or module in a behavior category (see the analysis notes).' : (p.apps || []).some(a => a?.platform === 'binary') ? 'No behavior inventory was built: nothing the scanner reads in this file (import table, Go function table, Rust paths, packaged-application text) falls in a behavior category (see the analysis notes).' : 'No behavior data was collected: the package has no DEX code to inventory.'}</div>`}
     </section>
 
     <section id="section-dependencies" class="hidden space-y-6">
@@ -862,7 +970,8 @@ export async function buildHtml(p) {
       </div>
       <p id="dependencies-empty" class="hidden text-sm text-neutral-500 italic">No components or dependencies match the selected filters.</p>
       <p id="dependencies-filter-count" class="text-xs text-neutral-500"></p>
-      ${isBinary ? '<p class="text-xs text-neutral-500">Components are found from version banners in the file (C / C++ libraries, Node.js and Python runtimes), Go build info, Rust crates and the packages of npm- and Python-based applications. Banners are matched against NVD CPE ranges; Go, Rust, npm and Python packages against OSV.dev. Only component names and versions leave the machine. A component with no advisory is not proof of safety: it only means none was published for that exact version at scan time. Every advisory is also listed on the Vulnerabilities tab and counted in the totals. Click a row for the advisory text, CVSS score and fixed versions.</p>' : ''}
+      ${isPackage ? '<p class="text-xs text-neutral-500">Rows are the package itself, its declared dependencies with an exact (or minimum) version, dependencies bundled inside the archive, and components found inside native binaries. Exact versions are looked up on OSV.dev (npm, PyPI, crates.io, Go, RubyGems, NuGet, Packagist, pub); C / C++ library banners in native files on NVD. Ranges and unbounded declarations cannot be looked up because the installed version is chosen at install time: they are shown as Not queried, with their pin class on the Package Info tab. A known-malicious package (an OSV MAL- advisory) is reported as critical.</p>' : ''}
+      ${isBinary && !isPackage ? '<p class="text-xs text-neutral-500">Components are found from version banners in the file (C / C++ libraries, Node.js and Python runtimes), Go build info, Rust crates and the packages of npm- and Python-based applications. Banners are matched against NVD CPE ranges; Go, Rust, npm and Python packages against OSV.dev. Only component names and versions leave the machine. A component with no advisory is not proof of safety: it only means none was published for that exact version at scan time. Every advisory is also listed on the Vulnerabilities tab and counted in the totals. Click a row for the advisory text, CVSS score and fixed versions.</p>' : ''}
       <p class="text-xs text-neutral-500 ${isBinary ? 'hidden' : ''}">Only exact, supported, versioned package URLs are queried. Native .so/.dylib binaries and embedded native frameworks are excluded from the Dependencies tab and are never submitted to OSV; native hardening and secret checks remain separate. If an APK/IPA omits its build lockfiles or package metadata, a package may remain Not queried rather than being reported as clean. Click a row to inspect advisory details and source evidence.</p>
     </section>
 
@@ -1123,8 +1232,24 @@ function appDetails(index) {
     const rh = a.remote_hosts;
     add('Remote hosts', rh.total + ' (' + rh.domains + ' domain(s), ' + rh.ips + ' IP address(es)) — ' + (rh.hosts || []).slice(0, 8).map(function (h) { return h.host; }).join(', ') + (rh.total > 8 ? ' …' : ''));
   }
-  add('Platform', a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android');
-  if (a.platform === 'binary') {
+  add('Platform', a.platform === 'package' ? 'Package (' + (a.ecosystem_label || a.ecosystem) + ')' : a.platform === 'binary' ? (a.format === 'macho' ? 'Mach-O' : a.format === 'pe' ? 'PE' : 'ELF') : a.platform === 'ios' ? 'iOS' : 'Android');
+  if (a.platform === 'package') {
+    var pk = a.package || {};
+    add('Name', a.name); add('Version', a.version); add('Registry', a.registry); add('Download URL', (pk.artifacts || []).map(function (x) { return x.url; }).join(' · '));
+    add('SHA-256', (pk.artifacts || []).map(function (x) { return x.filename + ': ' + x.sha256; }).join(' · ')); add('Size', a.size_bytes ? (a.size_bytes / 1048576).toFixed(2) + ' MB' : '');
+    add('Archive digest', pk.integrity ? pk.integrity.state + (pk.integrity.algo ? ' (' + pk.integrity.algo + ', ' + pk.integrity.source + ')' : '') : '');
+    add('License', pk.info && pk.info.license); add('Repository', pk.info && pk.info.repository); add('Homepage', pk.info && pk.info.homepage); add('Published', pk.published_at); add('Publisher', pk.publisher);
+    add('Files', pk.file_count); add('Unpacked size', pk.unpacked_bytes ? (pk.unpacked_bytes / 1048576).toFixed(2) + ' MB' : '');
+    add('Install-time hooks', (pk.hooks || []).filter(function (h) { return h.consumer !== false; }).map(function (h) { return h.id + ' / ' + h.phase; }).join(', '));
+    add('Dependencies', pk.dependency_total); add('Bundled components', (pk.bundled || []).length); if (pk.locked_total) add('Locked entries', pk.locked_total); add('Native files', (pk.native_files || []).length);
+    if (a.behavior) {
+      const labels = ${JSON.stringify(NATIVE_BEHAVIOR_LABELS)};
+      for (const [cat, byOrigin] of Object.entries(a.behavior.categories || {})) {
+        const origins = Object.keys(byOrigin || {}), n = origins.reduce(function (t, o) { const x = byOrigin[o]; return t + (x.functions != null ? x.functions : Object.keys(x.apis || {}).length); }, 0);
+        add('Behavior · ' + (labels[cat] || cat), n + ' entr' + (n === 1 ? 'y' : 'ies') + ' — ' + origins.slice(0, 4).map(function (o) { return o + ': ' + Object.keys(byOrigin[o].apis || {}).slice(0, 3).join(', '); }).join(' · '));
+      }
+    }
+  } else if (a.platform === 'binary') {
     add('Name', a.name); add('Size', a.size_bytes ? (a.size_bytes / 1048576).toFixed(2) + ' MB' : ''); add('Architecture', (a.architectures || [a.arch]).join(', ')); add('Type', a.kind); add('Bits', a.bits);
     add('Linked libraries', (a.needed || []).join(', ')); add('Signed', a.signed === undefined ? '' : (a.signed ? 'yes (presence only, not verified)' : 'no'));
     add('Stripped', a.stripped === undefined ? '' : (a.stripped ? 'yes' : 'no')); add('Statically linked', a.static === undefined ? '' : (a.static ? 'yes' : 'no')); add('.NET assembly', a.managed ? 'yes' : '');
