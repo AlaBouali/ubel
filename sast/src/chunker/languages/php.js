@@ -100,7 +100,9 @@ function chunkPHP(filePath, lines) {
 
     if (stripped.length > 0 && !stripped.startsWith('<?') && !stripped.startsWith('?>') &&
         !classRe.test(stripped) && !funcRe.test(stripped) &&
-        !/^(?:use\s+|require|include)/.test(stripped) &&
+        // import-style statements live in the imports chunk; a DYNAMIC include/require (`include $page;`,
+        // `require __DIR__ . $f;`) is code that matters, so it stays in module code instead of vanishing.
+        !/^(?:use\s+|require(?:_once)?\s*[\('"]|include(?:_once)?\s*[\('"])/.test(stripped) &&
         stripped !== '{' && stripped !== '}') {
       if (moduleLevelStart === -1) moduleLevelStart = i;
       moduleLevel.push(line);

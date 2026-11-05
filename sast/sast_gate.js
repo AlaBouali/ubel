@@ -63,7 +63,7 @@ function coverageLoss(results, scanOptions) {
   const out = [];
 
   const failed = chunks.filter((r) => r?.error).length;
-  if (failed) out.push({ key: "scan_failed", count: failed, text: `${unit(failed)} could not be analyzed because the AI request failed` });
+  if (failed) out.push({ key: "scan_failed", count: failed, text: `${unit(failed)} could not be analyzed because ${so.engine === "static" ? "the rule engine failed on them" : "the AI request failed"}` });
 
   const unreadable = chunks.filter((r) => !r?.error && Array.isArray(r?.findings) && r.findings.some((f) => f && f._parse_error)).length;
   if (unreadable) out.push({ key: "unreadable", count: unreadable, text: `${unit(unreadable)} could not be analyzed because the AI reply was unreadable` });
@@ -85,6 +85,8 @@ function coverageLoss(results, scanOptions) {
 export const COVERAGE_TRIGGER_KEYS = new Set(["scan_failed", "unreadable", "partial_output", "files_skipped", "chunks_dropped"]);
 
 const COVERAGE_RULE = " It also fails when part of the code was not analyzed (a failed or unreadable AI call, a cut-off reply, a file skipped for size, or code dropped by the default per-run limit), because absent findings there are not evidence of a clean result.";
+const COVERAGE_RULE_STATIC = " It also fails when part of the code was not analyzed (a rule-engine failure, a file skipped for size, or code dropped by the default per-run limit), because absent findings there are not evidence of safety.";
+const coverageRule = (scanOptions) => (scanOptions && scanOptions.engine === "static" ? COVERAGE_RULE_STATIC : COVERAGE_RULE);
 
 // Plain-language statement of each rule, for the report (no flags in the text).
 const RULE_TEXT = {
@@ -134,7 +136,7 @@ export function evaluateSastGate(results, { mode = "analyze", failOn, verify, ta
     }
     if (loss.length) { shouldFail = true; triggers.push(...loss); }
     counts.not_covered = lossTotal;
-    const rule = RULE_TEXT.malware[fo === "confirmed" ? "confirmed" : "any"] + COVERAGE_RULE;
+    const rule = RULE_TEXT.malware[fo === "confirmed" ? "confirmed" : "any"] + coverageRule(scanOptions);
     return { shouldFail, failOn: fo, rule, counts, triggers };
   }
 
@@ -175,6 +177,6 @@ export function evaluateSastGate(results, { mode = "analyze", failOn, verify, ta
   if (loss.length) { shouldFail = true; triggers.push(...loss); }
   counts.not_covered = lossTotal;
 
-  const rule = RULE_TEXT.analyze[fo === "exploitable" || fo === "valid" ? fo : "any"] + COVERAGE_RULE;
+  const rule = RULE_TEXT.analyze[fo === "exploitable" || fo === "valid" ? fo : "any"] + coverageRule(scanOptions);
   return { shouldFail, failOn: fo, rule, counts, triggers };
 }

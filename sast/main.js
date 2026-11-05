@@ -6,6 +6,7 @@ import path from 'path';
 
 import { buildChunks }            from './src/chunker/index.js';
 import { analyzeSast, analyzeMalware } from './src/analyzer/index.js';
+import { STATIC_ENGINE_VERSION } from './src/static/engine.js';
 import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
 import { buildSastExecutiveSummary } from './executive_summary.js';
@@ -37,7 +38,7 @@ const clip  = (v, n) => String(v ?? '').slice(0, n);
 // Flags that never take a value. Without this list, `ubel-sast --only-diff
 // /path/to/project` read "/path/to/project" as the value of --only-diff, left
 // the target path unset, and silently scanned the current directory instead.
-const BOOLEAN_FLAGS = new Set(['no-retry', 'no-verify', 'no-taint', 'include-signals', 'only-diff', 'no-pack', 'include-generated', 'skip-tests']);
+const BOOLEAN_FLAGS = new Set(['no-llm', 'no-retry', 'no-verify', 'no-taint', 'include-signals', 'only-diff', 'no-pack', 'include-generated', 'skip-tests']);
 
 function parseArgs(args) {
   const flags = {};
@@ -113,8 +114,12 @@ function scanOptionsFor(opts, mode, results) {
   const stats    = (results && results.scan_stats) || null;
   const coverage = stats ? stats.coverage : null;
   const tooLarge = coverage && Array.isArray(coverage.files_skipped_too_large) ? coverage.files_skipped_too_large : null;
+  const staticEngine = mode === 'analyze' && !!opts.noLlm;
   return {
     mode,
+    engine:          staticEngine ? 'static' : 'llm',        // 'static' = --no-llm: deterministic rule engine, no model was used
+    engine_version:  staticEngine ? STATIC_ENGINE_VERSION : null,
+    llm:             !staticEngine,
     verify:          opts.verify !== false,
     taint_trace:     mode === 'analyze' ? opts.taintTrace !== false : false,
     include_signals: opts.skipSignals === false,
@@ -126,7 +131,7 @@ function scanOptionsFor(opts, mode, results) {
     chunks_start:    opts.chunksStart  || null,
     max_chunks:      opts.maxChunks    || null,              // only when set explicitly
     max_chunks_effective: opts.maxChunks || coverage?.max_chunks_effective || 1000,
-    pack_size:       opts.packSize ?? 12000,
+    pack_size:       staticEngine ? null : (opts.packSize ?? 12000),
     max_file_size:   opts.maxFileSize ?? 512000,
     include_folders: opts.includeFolders || null,
     include_generated: mode === 'malware' ? opts.includeMinified !== false : !!opts.includeMinified,
@@ -194,8 +199,8 @@ async function collectMetadata(opts) {
   return {
     generated_at:    new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
     tool_version:    TOOL_VERSION,
-    provider:        opts.provider || null,
-    model:           opts.model    || null,
+    provider:        opts.noLlm ? 'none (--no-llm, static rules)' : (opts.provider || null),
+    model:           opts.noLlm ? `ubel-static-rules ${STATIC_ENGINE_VERSION}` : (opts.model || null),
     workingDir:      opts.workingDir,
     platform:        process.platform,
     arch:            process.arch,
@@ -284,6 +289,78 @@ async function writeAnalyzeReports(results, opts) {
     diffs,
     results,
   }, null, 2);
+  // ── Console summary ────────────────────────────────────────────────────────
+  const exploitableResults = results.filter(r =>
+    r.findings.some(f => f.taint?.exploitable === true)
+  );
+
+  const unresolvedFindings = results.flatMap(r =>
+    r.findings
+      .filter(f => !f._parse_error)
+      .map(f => ({ result: r, finding: f }))
+  ).filter(({ finding: f }) => isUnresolvedSastFinding(f));
+
+  if (exploitableResults.length > 0) {
+    console.log('\n── Exploitable findings ─────────────────────────────────────');
+    for (const result of exploitableResults.slice(0, 10)) {
+      for (const f of result.findings.filter(f => f.taint?.exploitable === true)) {
+        console.log(`\n  ⚠️ [${upper(f.confidence)}] ${f.vuln_name}`);
+        console.log(`  Chunk : ${result.id}`);
+        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
+        if (f.line) console.log(`  Line  : ${f.line}`);
+        console.log(`  Issue : ${f.description}`);
+        console.log(`  Snip  : ${clip(f.code_snippet, 100)}`);
+        console.log(`  Fix   : ${clip(f.fix, 120)}`);
+        if (f.taint?.flow_path) console.log(`  Flow  : ${f.taint.flow_path}`);
+        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 200)}`);
+      }
+    }
+  } else if (unresolvedFindings.length === 0) {
+    console.log('\n[ubel-sast] No exploitable vulnerabilities found.');
+  } else {
+    console.log(`\n[ubel-sast] No CONFIRMED exploitable vulnerabilities — but ${unresolvedFindings.length} finding(s) below could not be resolved either way. Review them before treating this run as clean.`);
+  }
+
+  const verifiedResults = results.filter(r =>
+    r.findings.some(f => f.is_valid === true && f.taint?.exploitable !== true)
+  );
+
+  if (verifiedResults.length > 0) {
+    console.log('\n── Verified but mitigated findings ──────────────────────────');
+    for (const result of verifiedResults.slice(0, 5)) {
+      for (const f of result.findings.filter(f => f.is_valid === true && f.taint?.exploitable !== true)) {
+        const status = f.taint?.reachable === false ? '(not reachable)' :
+                       f.taint?.sanitized === true ? '(sanitized)' :
+                       f.taint?.exploitable === false ? '(mitigated)' :
+                       f.taint_skipped ? '(no attacker input needed)' : '(unknown)';
+        console.log(`  🛡️ [${upper(f.confidence)}] ${f.vuln_name} ${status}`);
+        console.log(`  Chunk : ${result.id}`);
+        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
+        if (f.line) console.log(`  Line  : ${f.line}`);
+        console.log(`  Issue : ${f.description}`);
+        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 150)}`);
+      }
+    }
+  }
+
+  if (unresolvedFindings.length > 0) {
+    console.log('\n── ⚠️  Unverified / untraced findings (NOT cleared, NOT confirmed) ──');
+    for (const { result, finding: f } of unresolvedFindings.slice(0, 10)) {
+      const why = f.verification_error?.reason || f.taint?.error?.reason ||
+                  f.taint?.inconclusive_reason ||
+                  (f.is_valid === null ? 'unknown' : 'unresolved');
+      const detail = f.verification_error?.detail || f.taint?.error?.detail || '';
+      console.log(`\n  ❓ [${upper(f.confidence)}] ${f.vuln_name}  (reason: ${why})`);
+      console.log(`  Chunk : ${result.id}`);
+      console.log(`  Lines : ${result.startLine}–${result.endLine}`);
+      if (f.line) console.log(`  Line  : ${f.line}`);
+      console.log(`  Issue : ${f.description}`);
+      if (detail) console.log(`  Detail: ${String(detail).slice(0, 150)}`);
+    }
+    if (unresolvedFindings.length > 10) {
+      console.log(`\n  … and ${unresolvedFindings.length - 10} more — see ${zipPath}`);
+    }
+  }
   atomicWriteFile(latestJson, jsonPayload);
   bundleEntries.push({ name: reportFileName('report', tag, 'json'), data: jsonPayload });
   console.log(`\n[ubel-sast] JSON  report : ${latestJson}`);
@@ -313,74 +390,6 @@ async function writeAnalyzeReports(results, opts) {
   console.log(`\n[ubel-sast] Timestamped bundle : ${zipPath}`);
   console.log(`[ubel-sast] Latest reports      : ${latestDir}`);
 
-  // ── Console summary ────────────────────────────────────────────────────────
-  const exploitableResults = results.filter(r =>
-    r.findings.some(f => f.taint?.exploitable === true)
-  );
-
-  const unresolvedFindings = results.flatMap(r =>
-    r.findings
-      .filter(f => !f._parse_error)
-      .map(f => ({ result: r, finding: f }))
-  ).filter(({ finding: f }) => isUnresolvedSastFinding(f));
-
-  if (exploitableResults.length > 0) {
-    console.log('\n── Exploitable findings ─────────────────────────────────────');
-    for (const result of exploitableResults.slice(0, 10)) {
-      for (const f of result.findings.filter(f => f.taint?.exploitable === true)) {
-        console.log(`\n  ⚠️ [${upper(f.confidence)}] ${f.vuln_name}`);
-        console.log(`  Chunk : ${result.id}`);
-        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
-        console.log(`  Issue : ${f.description}`);
-        console.log(`  Snip  : ${clip(f.code_snippet, 100)}`);
-        console.log(`  Fix   : ${clip(f.fix, 120)}`);
-        if (f.taint?.flow_path) console.log(`  Flow  : ${f.taint.flow_path}`);
-        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 200)}`);
-      }
-    }
-  } else if (unresolvedFindings.length === 0) {
-    console.log('\n[ubel-sast] No exploitable vulnerabilities found.');
-  } else {
-    console.log(`\n[ubel-sast] No CONFIRMED exploitable vulnerabilities — but ${unresolvedFindings.length} finding(s) below could not be resolved either way. Review them before treating this run as clean.`);
-  }
-
-  const verifiedResults = results.filter(r =>
-    r.findings.some(f => f.is_valid === true && f.taint?.exploitable !== true)
-  );
-
-  if (verifiedResults.length > 0) {
-    console.log('\n── Verified but mitigated findings ──────────────────────────');
-    for (const result of verifiedResults.slice(0, 5)) {
-      for (const f of result.findings.filter(f => f.is_valid === true && f.taint?.exploitable !== true)) {
-        const status = f.taint?.reachable === false ? '(not reachable)' :
-                       f.taint?.sanitized === true ? '(sanitized)' :
-                       f.taint?.exploitable === false ? '(mitigated)' : '(unknown)';
-        console.log(`  🛡️ [${upper(f.confidence)}] ${f.vuln_name} ${status}`);
-        console.log(`  Chunk : ${result.id}`);
-        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
-        console.log(`  Issue : ${f.description}`);
-        if (f.taint?.reasoning) console.log(`  Reason: ${clip(f.taint.reasoning, 150)}`);
-      }
-    }
-  }
-
-  if (unresolvedFindings.length > 0) {
-    console.log('\n── ⚠️  Unverified / untraced findings (NOT cleared, NOT confirmed) ──');
-    for (const { result, finding: f } of unresolvedFindings.slice(0, 10)) {
-      const why = f.verification_error?.reason || f.taint?.error?.reason ||
-                  f.taint?.inconclusive_reason ||
-                  (f.is_valid === null ? 'unknown' : 'unresolved');
-      const detail = f.verification_error?.detail || f.taint?.error?.detail || '';
-      console.log(`\n  ❓ [${upper(f.confidence)}] ${f.vuln_name}  (reason: ${why})`);
-      console.log(`  Chunk : ${result.id}`);
-      console.log(`  Lines : ${result.startLine}–${result.endLine}`);
-      console.log(`  Issue : ${f.description}`);
-      if (detail) console.log(`  Detail: ${String(detail).slice(0, 150)}`);
-    }
-    if (unresolvedFindings.length > 10) {
-      console.log(`\n  … and ${unresolvedFindings.length - 10} more — see ${zipPath}`);
-    }
-  }
 
   // ── Pass/fail evaluation ────────────────────────────────────────────────────
   // One shared definition (sast_gate.js): the executive summary states the same
@@ -601,6 +610,15 @@ function runAnalyzeCommand(args) {
 
   const opts = {};
 
+  // --no-llm: the deterministic rule engine (src/static). No provider, key, model or network.
+  if (flags['no-llm']) {
+    opts.noLlm = true;
+    const ignored = ['provider', 'api-key', 'api-key-header', 'api-key-prefix', 'endpoint', 'model', 'concurrency', 'temperature',
+      'max-tokens', 'timeout', 'max-retries', 'no-retry', 'include-signals', 'pack-size', 'pack-max-chunks', 'no-pack',
+      'verify-concurrency', 'taint-concurrency', 'verification-max-tokens', 'taint-max-tokens', 'taint-chain-chars'].filter(k => flags[k] !== undefined);
+    if (ignored.length) console.warn(`[ubel-sast] --no-llm: ignoring LLM-only option(s): ${ignored.map(k => '--' + k).join(' ')}`);
+  }
+
   if (flags['provider'])       opts.provider        = String(flags['provider']);
   if (flags['api-key'])        opts.apiKey          = String(flags['api-key']);
   if (flags['api-key-header']) opts.apiKeyHeader     = String(flags['api-key-header']);
@@ -680,6 +698,11 @@ function runAnalyzeCommand(args) {
 
 function runMalwareCommand(args) {
   const { flags, positional } = parseArgs(args);
+
+  if (flags['no-llm']) {
+    console.error('Error: --no-llm is only available for the SAST analysis (ubel-sast / analyze). The malware scan has no static engine; run it with an LLM provider.');
+    process.exit(2);
+  }
 
   const opts = {};
 
@@ -782,6 +805,10 @@ PROVIDER / REQUEST OPTIONS  (analyze, malware)
   --no-retry                     Disable the parse-error-triggered retry
 
 PIPELINE CONTROLS  (analyze, malware)
+  --no-llm                       analyze only: use the built-in deterministic rule engine instead of an LLM. No API key, no
+                                 model, no network, no code leaves the machine, no 3rd-party dependency or binary.
+                                 LLM-only options are ignored; --no-verify / --no-taint switch the engine's own static
+                                 verification / taint passes. See the README ("--no-llm") for what it can and cannot find.
   --no-verify                    Skip Pass 2 (verification) — findings get is_valid: undefined
   --no-taint                     Skip Pass 3 (taint-trace) — analyze only; findings get no taint field
   --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default; ~6x the catalog size)
@@ -824,6 +851,8 @@ EXAMPLES
   ubel-sast /path/to/project
   ubel-sast --only-diff --diff-base main
   ubel-sast --provider anthropic --model claude-haiku-4-5-20251001
+  ubel-sast --no-llm                                         # offline, deterministic, free
+  ubel-sast --no-llm --only-diff --fail-on exploitable       # CI gate with no secrets needed
   ubel-mal --fail-on confirmed
   ubel-mal ./project --include-folders node_modules,dist     # sweep a dependency tree / build output
   ubel-sast --skip-tests --pack-size 16000
@@ -873,6 +902,7 @@ export async function main(programmaticOptions) {
     if (save_reports) { ensureUbelIgnoreFiles(opts.workingDir); provisionAssetAt(opts.workingDir); }
 
     if (mode === "malware") {
+      if (opts.noLlm) throw new Error('noLlm is only available for mode "analyze"; the malware scan has no static engine.');
       const results = await analyzeMalware([], opts);
       const report  = save_reports ? await writeMalwareReports(results, opts) : {};
       return { mode, results, ...report };

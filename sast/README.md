@@ -3,6 +3,8 @@
 
 Ubel chunks a codebase into semantically-bounded units, runs them through a three-pass LLM pipeline — **scan → verify → taint trace** — and cross-references findings against a structured, CWE-mapped vulnerability catalog to surface real, exploitable bugs instead of generic pattern-matches.
 
+Run it with an LLM, or — for SAST — fully offline with `--no-llm`, which swaps the three LLM passes for a built-in deterministic rule engine (no API key, no model, no network, no third-party dependency or binary; see [`--no-llm`](#--no-llm--the-offline-rule-engine)).
+
 This document covers the **SAST / malware-scan** component (source-level code analysis, as opposed to the dependency/SCA firewall).
 
 ---
@@ -24,11 +26,12 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - **Executive Summary** in the JSON and HTML reports — a plain-language overview for non-technical readers (overall risk rating, top risks, what to do first, suggested actions, methodology and limitations), printable as a one-page summary (see [Executive summary](#executive-summary))
 - **Diffs against the previous report** — every report carries a **Diffs** tab (`diffs` in the JSON): the code units (chunks), findings and — per compliance framework — mapped findings that are new, unchanged or removed since the asset's previous report of the same type (see [Diffs against the previous report](#diffs-against-the-previous-report))
 - **Compliance framework mapping** — every finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
+- **`--no-llm` offline engine** — `ubel-sast --no-llm` runs a deterministic, dependency-free rule engine (own lexer, taint analysis and call-graph tracing, 295 rules over all 15 language families) in place of the LLM: same findings schema, reports, SARIF, gate and diffs; zero tokens, zero network, reproducible results (see [`--no-llm`](#--no-llm--the-offline-rule-engine))
 - Zero external runtime dependencies (Node.js stdlib only)
 
 ---
 
-> **Data handling:** SAST sends the code chunks it analyzes to the LLM provider you select (`--provider`, `openrouter` by default). Choose a local or self-hosted endpoint (e.g. Ollama-compatible) if source code must not leave your network. UBEL itself has no telemetry and no UBEL-operated backend.
+> **Data handling:** with `--no-llm` nothing leaves the machine — no model is called. Otherwise SAST sends the code chunks it analyzes to the LLM provider you select (`--provider`, `openrouter` by default). Choose a local or self-hosted endpoint (e.g. Ollama-compatible) if source code must not leave your network. UBEL itself has no telemetry and no UBEL-operated backend.
 
 ## Installation
 
@@ -62,7 +65,7 @@ So `ubel-sast [args]` ≡ `node main.js analyze [args]`, and `ubel-mal [args]` �
 ## Requirements
 
 - Node.js `>=18.0.0`
-- An API key for your chosen LLM provider (set via `--api-key` or the provider's environment variable, e.g. `ANTHROPIC_API_KEY`) — not required for `local`, `docker`, or `docker-desktop` providers
+- An API key for your chosen LLM provider (set via `--api-key` or the provider's environment variable, e.g. `ANTHROPIC_API_KEY`) — not required for `local`, `docker`, or `docker-desktop` providers, nor for `ubel-sast --no-llm`
 - `git` on `PATH` if using `--only-diff`
 
 ---
@@ -143,6 +146,59 @@ The malware scan omits Pass 3 — intent-based findings (a planted backdoor, a h
 
 ---
 
+## `--no-llm` — the offline rule engine
+
+`ubel-sast --no-llm` runs SAST with **no LLM**. The same chunker feeds a deterministic engine (`src/static/`) that produces the same result records as the LLM pipeline — same `vuln_class` names, `is_valid`, `taint` object, `line`, SARIF/HTML/JSON reports, `--fail-on` gate, `--only-diff` and report diffs — so everything downstream is unchanged.
+
+```bash
+ubel-sast --no-llm                                    # scan the current directory, offline
+ubel-sast --no-llm --only-diff --fail-on exploitable  # CI gate, no secrets needed
+```
+
+**Is a true LLM-free SAST with no third-party dependencies or binaries possible?** Yes, with honest limits. The engine is plain Node.js (stdlib `fs`/`path` only): it has its own comment/string-aware lexer for every supported language, a minimal YAML/HCL structure parser, a taint engine and a call-graph tracer. It never spawns a process, never touches the network and needs no Semgrep/CodeQL/tree-sitter. It is **not** a full parser per language, so it reasons about calls, assignments and string building (not complete type/alias analysis), and it cannot judge intent (see [Not covered](#not-covered)).
+
+### How the three passes map
+
+| Pass | LLM mode | `--no-llm` |
+|---|---|---|
+| 1 · Scan | Model proposes candidates per chunk | 295 rules (call/assignment sinks, patterns, config & structure checks) run over each chunk. Comments and string text are masked by the lexer so a word in a comment or string is never mistaken for code; interpolated expressions (`${x}`, `f"{x}"`, `#{x}`, `$x`, `\(x)`) are kept as code |
+| 2 · Verify (`--no-verify` skips) | Model re-reads each candidate | Fixed false-positive evidence: placeholder/example secrets, non-security hash use (checksum, cache key, ETag), constant arguments, a fixed destination host (input affects only path/query), hardened XML parser elsewhere in the file, null-prototype/`__proto__`-guarded merges, tied-to-keystore biometrics. Dismissed findings stay in the report with `is_valid:false` and `verification_reason` |
+| 3 · Taint (`--no-taint` skips) | Model traces callers | Static data-flow inside the function (assignments, concatenation, interpolation, destructuring, loops, mutators like `list.append`, C copy/out-parameters), sanitizer/neutraliser recognition per sink class (parameterised query, `shlex.quote`, `htmlspecialchars`, `basename`, numeric casts, …), then **call-graph tracing across files** (depth ≤ 6, memoised, work-bounded). Result fields are the usual `reachable` / `sanitized` / `exploitable` / `flow_path` / `reasoning` |
+
+Findings carry an exact `line` (verified against the file) plus `rule_id` and `detection: "static"`.
+
+### Precision policy (what is and is not reported)
+
+- **Input sources are context-aware.** Request objects (`req.query`, `request.args`, `params`, `Request.Form`, Go `r.FormValue`, …) count only in files that show a web context. Command-line arguments, stdin and environment are *local* sources: they matter for command/code/SQL injection, deserialization and memory-safety classes, but a CLI reading its own `--file` argument is not reported as path traversal, SSRF or log injection.
+- **Parameter flows must be proven.** If the dangerous value is a function parameter, the engine follows every caller. It reports the finding only when a call chain brings attacker data to it (`exploitable: true`, with the chain in `flow_path`). Flows where all callers pass safe values, or that end at a parameter whose callers are outside the scanned code (library API boundary), are not listed; their counts are recorded in `scan_stats.pipeline` (`param_flows_cleared`, `param_flows_unresolved`) and printed in the run summary.
+- **Generic method names need context.** `find`/`get`/`query`/`request` only mean database/GraphQL/LDAP when the file imports a matching library or the argument looks like SQL.
+- **Honest undecided results.** Pattern findings in classes that need attacker input but cannot be tied to a value (for example a PHP loose comparison) are reported with `taint.inconclusive_reason: "static_input_flow_not_determined"`, which the gate treats as unresolved.
+- **Secrets reuse the repository's secret scanner** (`sca/secrets.js`: Trivy-derived ruleset, entropy checks, allow-rules). Test/example paths follow the same allow policy as the repo-wide secret scan; the raw secret is never written to the report.
+
+### Coverage by ecosystem
+
+Rules exist for every language family the chunker supports. Depth differs: injection-class sinks and web-framework sources are deepest for JavaScript/TypeScript, Python, PHP, Ruby, Go, Java, Kotlin and C#.
+
+| Family | Main coverage |
+|---|---|
+| JS/TS · Python · PHP · Ruby · Go · Rust · Java · Kotlin · C# | SQL/NoSQL/LDAP/XPath/command/code/EL injection, path traversal & LFI, XSS & template injection, SSRF, open redirect, XXE, unsafe deserialization, header/log/host-header injection, prototype pollution (JS), file upload, GraphQL, JWT, cookies, CORS, CSRF, debug mode, security headers, crypto (weak hashes/ciphers/ECB/RNG/key sizes/static IV/TLS off), TOCTOU, ReDoS (with attacker-controlled subject), PHP type juggling, hardcoded secrets |
+| C / C++ | Unsafe/unbounded string and memory APIs, `gets`, `scanf %s`, format string, integer overflow in allocation size, attacker-controlled copy lengths and indexes, use-after-free, double free, command injection, TOCTOU |
+| Rust | Command injection, `unsafe` without a `SAFETY` justification, unchecked accesses, SQL/path/SSRF/XSS sinks, double free/use-after-free on raw pointers |
+| Dart/Flutter · Swift | Insecure local storage, TLS/certificate validation, cleartext endpoints, WebView/JS bridge, deep-link input reaching navigation/WebView/query sinks, biometric-only gates, plus the web-style classes where applicable |
+| Docker / Compose | Root user, privileged/host namespaces/capabilities, secrets in `ENV`/`ARG`/environment, unpinned `:latest` images, remote `ADD`, `curl \| sh`, disabled TLS in build steps, Docker-socket and sensitive bind mounts |
+| Kubernetes | Pod security context (privileged, root, host namespaces, hostPath, capabilities, missing hardening), public Service/Ingress exposure, committed Secrets and literal secret env vars, RBAC wildcards/cluster-admin/anonymous bindings, allow-all NetworkPolicy, unpinned images |
+| IaC (Terraform · CloudFormation · Ansible) | Public buckets/databases/security groups, open SSH/RDP/DB ports, hardcoded secrets, disabled encryption at rest/in transit, wildcard IAM and `Principal: "*"`, unprotected Terraform state, `validate_certs: false` |
+
+### Not covered
+
+These catalog classes need an understanding of intent or whole-program state and have no static rules: **missing authentication check**, **broken access control / privilege escalation**, **insecure direct object reference (IDOR)**, **business logic flaw**, **null / nil dereference**, **uninitialized variable / memory read**, **missing rate limiting / brute force exposure**. They are listed in `scan_stats.pipeline.classes_not_statically_decidable` and in the report limitations. Run an LLM scan (or manual review) for them. Expect lower recall than an LLM on flaws that depend on custom helper functions, unmodelled frameworks or dynamic dispatch; expect fully reproducible results and no per-scan cost.
+
+### Reports and CI
+
+Reports state the engine (`scan_options.engine: "static"`, `llm: false`, provider `none (--no-llm, static rules)`), and the executive summary and gate text describe a rule-based scan: no statement says code was sent to an AI. `scan_stats.usage` is all zeros. Programmatic use: `main({ mode: 'analyze', noLlm: true, … })` / `analyzeSast(chunks, { noLlm: true })`. `UBEL_STATIC_DEBUG=1` logs any chunk that takes over a second to analyze.
+
+---
+
 ## Modes, Flags, and Examples
 
 ### `chunk` *(lower-level utility, both binaries support it via `main.js chunk`)*
@@ -196,6 +252,7 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 
 | Flag | Type | Default | What it does |
 |---|---|---|---|
+| `--no-llm` | flag | off | `analyze` only. Use the built-in deterministic rule engine instead of an LLM — no API key, model, network or third-party dependency. LLM-only options (`--provider`, `--api-key`, `--model`, `--concurrency`, `--pack-size`, …) are ignored with a warning; `--no-verify` / `--no-taint` switch the engine's own verification / taint passes. `ubel-mal --no-llm` is rejected (exit 2). See [`--no-llm`](#--no-llm--the-offline-rule-engine) |
 | `--no-verify` | flag | verify on | Skip Pass 2 — findings get `is_valid: undefined` |
 | `--no-taint` | flag | taint on | Skip Pass 3 — findings get no `taint` field |
 | `--include-signals` | flag | off (signals omitted by default) | Include the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept regardless of this flag. Roughly 6–7× the catalog size |
@@ -567,6 +624,8 @@ RUN ubel-sast --fail-on valid .
 ---
 
 ## Token Consumption & Optimization
+
+> Not applicable with `--no-llm`: the offline engine makes no model calls and records zero tokens.
 
 Every scan is, mechanically, a batch of HTTP calls to a chat-completions endpoint. Total token spend is a function of **(a) how many calls are made** and **(b) how large each call's prompt is**. `--concurrency` and friends change *wall-clock time*, not total tokens consumed — that distinction matters, because it's the first thing people reach for when trying to "reduce usage" and it does nothing for cost.
 

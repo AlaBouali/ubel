@@ -10,6 +10,8 @@ import { runPool } from './pool.js';
 import { verifyChunkFindings, traceChunkFindings } from './workers.js';
 import { resolveGitDiffFiles } from './gitDiff.js';
 import { runScanPass, emptyUsage, usageSink, makeCatalogPackKey, packedMaxTokensWarning } from './scanEngine.js';
+import { runStaticAnalysis, STATIC_ENGINE_VERSION } from '../static/engine.js';
+import { ALL_RULES, STATIC_UNSUPPORTED_CLASSES } from '../static/rules/index.js';
 
 // ─── Extension → display language label ───────────────────────────────────────
 
@@ -81,6 +83,11 @@ const EXT_LANG = {
 async function analyzeSast(chunks, opts = {}) {
   const {
     // ── LLM / analysis params ────────────────────────────────────────────
+    // ── Engine ───────────────────────────────────────────────────────────
+    // noLlm: run the deterministic rule engine (src/static) instead of an LLM.
+    //   No provider, API key, model or network is used; `verify` / `taintTrace`
+    //   then switch the engine's own static verification / taint passes.
+    noLlm           = false,
     provider        = 'openrouter',
     apiKey,
     apiKeyHeader,
@@ -141,6 +148,10 @@ async function analyzeSast(chunks, opts = {}) {
     });
   }
   const chunkInfo = resolvedChunks.info || null;   // coverage record from the chunker (null when chunks were supplied)
+
+  if (noLlm) {
+    return analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log });
+  }
 
   if (!PROVIDERS[provider]) {
     throw new Error(
@@ -451,6 +462,92 @@ async function analyzeSast(chunks, opts = {}) {
     enumerable: false, writable: true,
   });
 
+  return results;
+}
+
+
+// ─── --no-llm: deterministic engine ──────────────────────────────────────────
+//
+// Same inputs, same result records and scan_stats shape as the LLM pipeline, so the
+// report / SARIF / gate / diff code downstream does not know which engine ran.
+// Nothing here touches a provider, an API key or the network.
+
+async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log }) {
+  log(`[ubel-sast] Engine      : static rules (--no-llm), engine v${STATIC_ENGINE_VERSION}, ${ALL_RULES.length} rules`);
+  log(`[ubel-sast] Privacy     : no model is called and no source code leaves this machine`);
+  if (onlyDiff)   log(`[ubel-sast] Diff mode   : enabled (base: ${diffBase})`);
+  log(`[ubel-sast] Verification: ${verify ? 'enabled (static false-positive checks)' : 'disabled'}`);
+  log(`[ubel-sast] Taint trace : ${taintTrace ? 'enabled (static data-flow + call-graph)' : 'disabled'}`);
+
+  const enrich = c => ({
+    ...c,
+    language: KIND_LABEL[c.type] || EXT_LANG[path.extname(c.file).toLowerCase()] || 'unknown',
+  });
+  const enriched = resolvedChunks.map(enrich);
+  const contextChunks = (resolvedChunks.all && resolvedChunks.all !== resolvedChunks)
+    ? resolvedChunks.all.map(enrich) : enriched;
+
+  let diffFileSet = null;
+  if (onlyDiff) {
+    diffFileSet = resolveGitDiffFiles(workingDir, diffBase, log);
+    if (diffFileSet === null) {
+      log('[ubel-sast] ⚠  --only-diff: git diff failed, falling back to full scan');
+    } else if (diffFileSet.size === 0) {
+      log('[ubel-sast] --only-diff: no modified files found — nothing to scan');
+      return [];
+    } else {
+      log(`[ubel-sast] --only-diff: ${diffFileSet.size} modified file(s) in diff`);
+    }
+  }
+
+  // Import chunks ARE scanned here: they hold the statements an LLM prompt would waste tokens on but a
+  // rule engine reads for free (PHP include/require → file inclusion, dynamic require, secrets).
+  const toAnalyze = enriched.filter(c => (diffFileSet !== null ? diffFileSet.has(path.resolve(c.file)) : true));
+  log(`[ubel-sast] Chunks      : ${toAnalyze.length} to analyze\n`);
+
+  const knownClasses = new Set(ALL_RULES.map(r => r.cls.toLowerCase()));
+  const noRules = vulnClasses.filter(v => !knownClasses.has(String(v.name).toLowerCase())).map(v => v.name);
+
+  const startTime = Date.now();
+  const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log });
+  pipeline.classes_without_static_rules = noRules;
+  pipeline.classes_not_statically_decidable = STATIC_UNSUPPORTED_CLASSES;
+
+  const all = results.flatMap(r => r.findings);
+  const unresolved = all.filter(f => f.taint && f.taint.exploitable === null).length;
+  log('\n── Analysis complete ─────────────────────────────────────────────');
+  log(`   Engine          : static rules (no LLM)`);
+  log(`   Chunks analyzed : ${toAnalyze.length}`);
+  log(`   Total findings  : ${all.length}  (high: ${all.filter(f => f.confidence === 'high').length}  medium: ${all.filter(f => f.confidence === 'medium').length}  low: ${all.filter(f => f.confidence === 'low').length})`);
+  if (verify) {
+    log(`   Verified valid  : ${all.filter(f => f.is_valid === true).length}`);
+    log(`   False positives : ${all.filter(f => f.is_valid === false).length}`);
+  }
+  if (taintTrace) {
+    log(`   Exploitable     : ${all.filter(f => f.taint?.exploitable === true).length}`);
+    const mitigated = all.filter(f => f.taint?.exploitable === false).length;
+    if (mitigated) log(`   Mitigated       : ${mitigated}`);
+    if (unresolved) log(`   Undetermined    : ${unresolved}  (reach of attacker input could not be decided statically — review manually)`);
+  }
+  if (taintTrace && (pipeline.param_flows_unresolved || pipeline.param_flows_cleared)) {
+    log(`   Parameter flows : ${pipeline.param_flows_cleared || 0} cleared (all callers pass safe values), ${pipeline.param_flows_unresolved || 0} not reported (reach a parameter whose callers are outside the scanned code)`);
+  }
+  log(`   Rule errors     : ${pipeline.rules_errored}`);
+  log(`   Elapsed         : ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+  log(`   LLM calls       : 0`);
+  if (noRules.length) log(`   ⚠️ No static rules for ${noRules.length} requested class(es): ${noRules.join(', ')}`);
+  log(`   ⚠️ Not statically decidable (need semantic review): ${STATIC_UNSUPPORTED_CLASSES.join('; ')}`);
+  if (chunkInfo?.truncated) log(`   ⚠️ NOT SCANNED   : ${chunkInfo.chunks_dropped_by_cap} chunk(s) beyond --max-chunks ${chunkInfo.max_chunks}`);
+  if (chunkInfo?.files_skipped_too_large?.length) log(`   ⚠️ NOT SCANNED   : ${chunkInfo.files_skipped_too_large.length} file(s) over ${chunkInfo.max_file_size} chars`);
+
+  Object.defineProperty(results, 'scan_stats', {
+    value: {
+      coverage: buildCoverage(chunkInfo, { analyzed: toAnalyze.length, importSkipped: 0, diffMode: diffFileSet !== null, results }),
+      usage: { scan: emptyUsage(), verify: emptyUsage(), taint: emptyUsage() },
+      pipeline,
+    },
+    enumerable: false, writable: true,
+  });
   return results;
 }
 

@@ -422,6 +422,7 @@ function overallRisk(m) {
 // corresponding pass actually ran, so the text never claims work that wasn't
 // done.
 function buildMethodology(ctx) {
+  const staticEng = ctx.staticEngine === true;
   const { mode, units, files, languages, provider, model, verifyRan, taintRan, opts, unreadable, hasCompliance, gapsScope, gate } = ctx;
   const mal = mode === "malware";
   const steps = [];
@@ -437,7 +438,12 @@ function buildMethodology(ctx) {
   const who = provider || model
     ? `the AI model configured for this run (${[provider, model].filter(Boolean).join(" / ")})`
     : "the AI model configured for this run (provider and model were not recorded because defaults were used)";
-  steps.push({
+  if (staticEng) steps.push({
+    step: "Reading the code for weaknesses",
+    detail: "Each code unit was checked against a built-in set of deterministic rules for its programming language: calls to dangerous functions, insecure configuration values, hardcoded credentials and unsafe patterns in infrastructure files. " +
+      "Matches are rule hits, not opinions: the same code always gives the same result. No AI model was used, and no source code left this machine.",
+  });
+  else steps.push({
     step: mal ? "Reading the code for malicious intent" : "Reading the code for weaknesses",
     detail: `Each code unit was cleaned of comments and sent, together with a built-in catalog of ${mal ? "malicious-code patterns" : "weakness types relevant to its programming language"}, to ${who}. ` +
       `The model proposed candidate findings. Candidates are suggestions, not conclusions: the AI can be wrong in both directions. ` +
@@ -448,8 +454,11 @@ function buildMethodology(ctx) {
   if (verifyRan === true) {
     steps.push({
       step: "Verification",
-      detail: "Every candidate was shown to the AI again, with the code around it, and asked a narrower question: is this actually " + (mal ? "malicious" : "a real weakness") + " in context? " +
-        "Each was judged real, a false alarm (dismissed and not counted as risk), or inconclusive (not cleared and not confirmed, so it stays on the list for a human to settle).",
+      detail: staticEng
+        ? "Every candidate was re-checked against fixed evidence that makes a match a false alarm: a placeholder or example secret, a value that is a constant rather than input, a fixed destination host, a hash used only for a checksum or cache key, or a safe configuration elsewhere in the same file. " +
+          "Each was judged real or a false alarm (dismissed and not counted as risk)."
+        : "Every candidate was shown to the AI again, with the code around it, and asked a narrower question: is this actually " + (mal ? "malicious" : "a real weakness") + " in context? " +
+        (staticEng ? "" : "Each was judged real, a false alarm (dismissed and not counted as risk), or inconclusive (not cleared and not confirmed, so it stays on the list for a human to settle)."),
     });
   } else if (verifyRan === false) {
     steps.push({
@@ -469,8 +478,11 @@ function buildMethodology(ctx) {
   } else if (taintRan === true) {
     steps.push({
       step: "Exploitability check",
-      detail: "For findings that need attacker-controlled input to be exploitable, the scanner followed the code's calls across files, up to a fixed depth, and asked the AI whether attacker input can really reach the flawed spot and whether anything cleans it on the way. " +
-        "Result: confirmed exploitable, or not exploitable (unreachable, cleaned or otherwise blocked). Code that nothing calls and that is not an entry point cannot be traced and is left inconclusive.",
+      detail: staticEng
+        ? "For findings that need attacker-controlled input to be exploitable, the scanner followed values through the code with a static data-flow analysis: from request data, command-line arguments and other inputs to the flawed spot, through assignments, string building and sanitising calls, and across function calls up to a fixed depth. " +
+          "Result: confirmed exploitable, or not exploitable (every caller passes constants, or the value is neutralised on the way). Code that nothing calls, calls it cannot resolve statically, and input arriving through frameworks the engine does not model are left inconclusive for a human to settle."
+        : "For findings that need attacker-controlled input to be exploitable, the scanner followed the code's calls across files, up to a fixed depth, and asked the AI whether attacker input can really reach the flawed spot and whether anything cleans it on the way. " +
+        (staticEng ? "" : "Result: confirmed exploitable, or not exploitable (unreachable, cleaned or otherwise blocked). Code that nothing calls and that is not an entry point cannot be traced and is left inconclusive."),
     });
   } else if (taintRan === false) {
     steps.push({
@@ -539,7 +551,9 @@ function buildMethodology(ctx) {
 
   const limitations = [
     "This is a point-in-time view of the source code. Code changes constantly, and anything changed after the scan is not reflected.",
-    "The analysis is performed by an AI model. It can miss real " + (mal ? "implants" : "weaknesses") + " and can raise false alarms, and running the scan again can give somewhat different results. " +
+    staticEng
+      ? "The analysis is performed by a deterministic rule engine, not an AI model: the same code always gives the same result. It finds weaknesses that have a recognisable shape in code or configuration. It cannot judge intent, so flaws in business logic, missing or wrong authorization checks, insecure direct object references, missing rate limiting, null-dereference and uninitialised-memory bugs are not covered, and weaknesses that depend on custom helper functions or unmodelled frameworks can be missed or reported as inconclusive. Rules can also raise false alarms. A clean result is not proof of safety."
+      : "The analysis is performed by an AI model. It can miss real " + (mal ? "implants" : "weaknesses") + " and can raise false alarms, and running the scan again can give somewhat different results. " +
       "Verification and the exploitability check reduce false alarms but do not remove them, and neither can make the first pass find something it missed. A clean result is not proof of safety.",
     "Each code unit is analyzed on its own, plus a bounded set of related code for the exploitability check. Flaws that only emerge from the interaction of many parts of a system, from runtime behavior or from how the application is deployed can go unseen.",
     "Only the code and languages listed under Scope were examined. Third-party libraries and their known vulnerabilities, deployed infrastructure and live systems are not examined by this scan; a dependency (SCA) scan and a cloud or external scan cover those.",
@@ -551,8 +565,8 @@ function buildMethodology(ctx) {
   if (opts?.only_diff) {
     limitations.push("Because the scan was limited to changed code, weaknesses in code that was not changed are not covered, and a clean result applies only to the changes. If the change set could not be determined, the scanner scans everything instead; this report does not record which happened.");
   }
-  if (verifyRan === false) limitations.push("Verification was off, so every finding in this report is an unconfirmed AI suggestion.");
-  if (unreadable > 0) limitations.push(`${count(unreadable, "code unit")} could not be analyzed (unreadable AI reply), so absent findings there are not evidence of a clean result.`);
+  if (verifyRan === false) limitations.push(staticEng ? "Verification was off, so every finding in this report is an unconfirmed rule match." : "Verification was off, so every finding in this report is an unconfirmed AI suggestion.");
+  if (unreadable > 0) limitations.push(`${count(unreadable, "code unit")} could not be analyzed (${staticEng ? "the rule engine failed on them" : "unreadable AI reply"}), so absent findings there are not evidence of a clean result.`);
 
   return { steps, rating_rules: ratingRules, severity_note: severityNote, prioritization, timeframes, limitations };
 }
@@ -573,6 +587,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   // summary can never claim a confirmed-exploitable finding the report also
   // says it could not check for.
   const anyFinding = (fn) => chunks.some((c) => (Array.isArray(c?.findings) ? c.findings : []).some((f) => f && !f._parse_error && fn(f)));
+  const staticEng = opts.engine === "static";   // --no-llm: a deterministic rule engine produced this report, no AI model
   const verifyRan = stageRan(opts.verify, anyFinding((f) => f.is_valid === true || f.is_valid === false || f.is_valid === null));
   const taintRan = mal ? false : stageRan(opts.taint_trace, anyFinding((f) => f.taint));
   const taintApplicable = !mal;
@@ -663,7 +678,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   }
 
   const gaps = [];
-  if (unreadable > 0) gaps.push(`${count(unreadable, "code unit")} could not be analyzed because the AI's reply was unreadable`);
+  if (unreadable > 0) gaps.push(`${count(unreadable, "code unit")} could not be analyzed because ${staticEng ? "the rule engine failed on them" : "the AI's reply was unreadable"}`);
   for (const g of gapsLimits) gaps.push(g);
   if (verifyRan === false) gaps.push("verification was skipped, so no finding was double-checked");
   if (taintApplicable && taintRan === false) gaps.push("the exploitability check was skipped, so no finding could be confirmed exploitable");
@@ -845,7 +860,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   }
   if (verifyRan === false) {
     gapFinding("Findings were not double-checked",
-      "Verification was switched off, so every finding is an unconfirmed AI suggestion and some may be false alarms.");
+      (staticEng ? "Verification was switched off, so every finding is an unconfirmed rule match and some may be false alarms." : "Verification was switched off, so every finding is an unconfirmed AI suggestion and some may be false alarms."));
   }
   if (taintApplicable && taintRan === false) {
     gapFinding("Exploitability was not checked",
@@ -896,7 +911,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     keyFindings.push({
       severity: "low",
       title: "False alarms dismissed",
-      detail: `${count(S.false_positive, "candidate finding")} raised by the AI ${plural(S.false_positive, "was", "were")} checked and judged not to be real. They are not counted as risk, but remain listed in the Findings tab.`,
+      detail: `${count(S.false_positive, "candidate finding")} raised by the ${staticEng ? "rules" : "AI"} ${plural(S.false_positive, "was", "were")} checked and judged not to be real. They are not counted as risk, but remain listed in the Findings tab.`,
       info: true,
     });
   }
@@ -919,7 +934,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
 
   if (!rated) {
     push("Before relying on this report",
-      "Find out why no code could be analyzed (scan scope, AI provider errors or response size), then run the scan again.",
+      "Find out why no code could be analyzed (scan scope, " + (staticEng ? "rule-engine errors" : "AI provider errors or response size") + "), then run the scan again.",
       "An empty or unreadable result gives no assurance about security.",
       "Security team");
   }
@@ -1014,7 +1029,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     {
       stage: mal ? "Read the code for malicious intent" : "Read the code for weaknesses",
       status: (unreadable > 0 || gapsLimits.length > 0) ? "partial" : (units > 0 ? "done" : "skipped"),
-      detail: `${count(units, "code unit")} sent to the AI` + (unreadable > 0 ? `; ${unreadable} came back unreadable` : "") + ".",
+      detail: (staticEng ? `${count(units, "code unit")} analyzed by the built-in rule engine (no AI model, nothing sent anywhere)` : `${count(units, "code unit")} sent to the AI`) + (unreadable > 0 ? `; ${unreadable} came back unreadable` : "") + ".",
     },
     {
       stage: "Verification",
@@ -1045,7 +1060,9 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     scan_type: mode,
     description: mal
       ? "This report is an automated, AI-assisted review of source code for code that appears to have been written on purpose to do harm, such as backdoors, hidden remote connections and data theft."
-      : "This report is an automated, AI-assisted review of source code for security weaknesses, with each candidate then double-checked and traced for exploitability.",
+      : (staticEng
+        ? "This report is an automated, rule-based (no AI) review of source code for security weaknesses, with each match then re-checked and traced for exploitability by static data-flow analysis."
+        : "This report is an automated, AI-assisted review of source code for security weaknesses, with each candidate then double-checked and traced for exploitability."),
     discovery: "The code was read from disk and split into code units; nothing was run, built, deployed or changed.",
     subject,
     code_units: units,
@@ -1067,17 +1084,18 @@ export function buildSastExecutiveSummary(results, meta = {}) {
 
   const notes = [];
   notes.push("Everything in this report comes from automated analysis of the source code at the time of the scan. It is not a penetration test, and nothing was run or exploited.");
-  notes.push("Findings are produced by an AI model and can include false alarms or miss real flaws. Confirm a finding with the code owner before acting on it" + (mal ? ", and treat a confirmed one as a possible compromise." : "."));
+  notes.push((staticEng ? "Findings are produced by a deterministic rule engine and can include false alarms or miss real flaws. Confirm a finding with the code owner before acting on it" : "Findings are produced by an AI model and can include false alarms or miss real flaws. Confirm a finding with the code owner before acting on it") + (mal ? ", and treat a confirmed one as a possible compromise." : "."));
   notes.push(`The Findings tab lists every candidate (${recs.length}), including ${S.false_positive} dismissed as false alarms, so its total is higher than the open ${plural(openTotal, noun)} counted here.`);
   notes.push("Compliance references are best-effort guidance and are not a substitute for a formal audit.");
-  if (meta?.provider || meta?.model) notes.push("Excerpts of the source code were sent to the AI provider named in this report.");
+  if (staticEng) notes.push("No AI model was used for this report and no source code was sent to any third party; the analysis ran entirely on the machine that performed the scan.");
+  else if (meta?.provider || meta?.model) notes.push("Excerpts of the source code were sent to the AI provider named in this report.");
   else notes.push("Excerpts of the source code were sent to the AI provider configured for the run (the provider was not recorded because defaults were used).");
   for (const g of gaps) notes.push(`${g.charAt(0).toUpperCase() + g.slice(1)}.`);
 
   const glossary = [
     { term: "Code unit", meaning: "One function, class or configuration block. The scanner splits the code into these and examines each one." },
-    { term: "Candidate finding", meaning: "A possible weakness proposed by the AI. It becomes a real finding only after the later checks agree." },
-    { term: "Verification", meaning: "A second look by the AI at each candidate, asking whether it is genuinely a problem in context." },
+    { term: "Candidate finding", meaning: staticEng ? "A possible weakness matched by a rule. It becomes a real finding only after the later checks agree." : "A possible weakness proposed by the AI. It becomes a real finding only after the later checks agree." },
+    { term: "Verification", meaning: staticEng ? "A second look at each candidate against fixed evidence of a false alarm (placeholder values, constants, safe configuration elsewhere in the file)." : "A second look by the AI at each candidate, asking whether it is genuinely a problem in context." },
     { term: "Confirmed exploitable", meaning: "The exploitability check found a path by which attacker-controlled input reaches the flawed code with nothing blocking it." },
     { term: "False alarm", meaning: "A candidate that the checks judged not to be a real issue. It is dismissed and not counted as risk." },
     { term: "Not cleared", meaning: "A finding that a check could not settle either way (an error or inconclusive result), or that was never verified. It needs a human decision." },
@@ -1119,19 +1137,19 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     unresolved: S.unresolved,
     unverified: S.unverified,
     false_positives: S.false_positive,
-    statement: `The AI proposed ${count(recs.length, "candidate finding")}. Each falls into exactly one group below; the groups add up to the total. Only the open groups count as risk.`,
+    statement: `${staticEng ? "The rules matched" : "The AI proposed"} ${count(recs.length, "candidate finding")}. Each falls into exactly one group below; the groups add up to the total. Only the open groups count as risk.`,
   };
 
   const glanceCards = [
     { label: "Code units analyzed", value: units, sub: `in ${count(files, "file")}`, tone: units === 0 ? "high" : "" },
-    { label: "Candidates raised", value: na(recs.length), sub: "Proposed by the AI", tone: "" },
+    { label: "Candidates raised", value: na(recs.length), sub: staticEng ? "Matched by the rules" : "Proposed by the AI", tone: "" },
     { label: confirmedLabel, value: confirmedVal, sub: confirmedKnown ? (mal ? "Judged malicious by verification" : "Attacker can reach it") : confirmedSkipNote, tone: figureTone("critical", confirmedVal) },
     ...(mal ? [] : [{ label: "Confirmed real, reach not checked", value: na(S.valid), sub: "Not shown to be exploitable", tone: figureTone("high", na(S.valid)) }]),
     { label: "Not cleared", value: na(S.unresolved), sub: "A check failed or was inconclusive", tone: figureTone("medium", na(S.unresolved)) },
     { label: "Unverified", value: verifyRan === false ? null : na(S.unverified), sub: verifyRan === false ? "Verification was skipped" : "Never double-checked", tone: figureTone("medium", verifyRan === false ? null : na(S.unverified)) },
     ...(mal ? [] : [{ label: "Blocked by other code", value: taintRan === false ? null : na(S.mitigated), sub: taintRan === false ? "Not checked: no exploitability check" : "Real, but not reachable today", tone: "" }]),
     { label: "Dismissed as false alarms", value: verifyRan === false ? null : na(S.false_positive), sub: verifyRan === false ? "Verification was skipped" : "Not counted as risk", tone: "" },
-    { label: "Unreadable code units", value: na(unreadable), sub: "AI reply could not be decoded", tone: figureTone("medium", na(unreadable)) },
+    { label: "Unreadable code units", value: na(unreadable), sub: staticEng ? "Rule engine could not analyze" : "AI reply could not be decoded", tone: figureTone("medium", na(unreadable)) },
     { label: "Compliance frameworks", value: complianceOverview ? complianceOverview.frameworks_touched : (rated ? 0 : null), sub: "With at least one related finding", tone: "" },
   ];
 
@@ -1160,7 +1178,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     repository: git.url ? safeRemote(git.url) : null,
     code_version: [git.branch, git.latest_commit ? String(git.latest_commit).slice(0, 12) : null].filter(Boolean).join(" @ ") || null,
     classification: "Confidential — contains security findings; share only with authorized recipients.",
-    statement: "Produced by an automated, AI-assisted review of source code the operator is authorized to scan. It reflects the code at the time of the scan; excerpts of the code were sent to the AI provider configured for the run.",
+    statement: staticEng ? "Produced by an automated, rule-based review of source code the operator is authorized to scan. It reflects the code at the time of the scan; no AI model was used and no code left the machine." : "Produced by an automated, AI-assisted review of source code the operator is authorized to scan. It reflects the code at the time of the scan; excerpts of the code were sent to the AI provider configured for the run.",
   };
 
   const bottomLine = {
@@ -1199,7 +1217,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     methodology: buildMethodology({
       mode, units, files, languages: languageNames,
       provider: meta?.provider || null, model: meta?.model || null,
-      verifyRan, taintRan, opts, unreadable, gapsScope, gate,
+      verifyRan, taintRan, opts, unreadable, gapsScope, gate, staticEngine: staticEng,
       hasCompliance: Array.isArray(meta?.compliance_summary?.frameworks),
     }),
     notes,
