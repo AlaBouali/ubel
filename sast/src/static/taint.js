@@ -273,7 +273,7 @@ class Flow {
     const gate = WEB_CONTEXT[this.family];
     if (gate) {
       const text = readFileText(this.chunk.file, this.chunk.code);
-      this.webContext = gate.test(text) || gate.test(this.chunk.code);
+      this.webContext = this.chunk.webContext === true || gate.test(text) || gate.test(this.chunk.code);
       if (!this.webContext) base = NON_WEB_SOURCES[this.family] || null;
     } else this.webContext = true;
     if (this.family === 'js' && base && JS_MESSAGE_CONTEXT.test(readFileText(this.chunk.file, this.chunk.code))) {

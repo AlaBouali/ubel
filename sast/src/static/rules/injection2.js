@@ -489,6 +489,34 @@ const PP_RULES = [
     verify: (cand, flow) => (/__proto__|hasOwnProperty|hasOwn\s*\(|Object\.create\(\s*null\s*\)|new\s+Map\b|=== ?['"]constructor['"]|key\s*===?\s*['"]__proto__/.test(flow.ctx.literal) ? { valid: false, reason: 'the key is checked against __proto__/own-property, or the target is a null-prototype object / Map' } : null) }),
 ];
 
+// ── client-side template engines: browser scripts and the inline <script> blocks of HTML files ───────────────
+XSS_RULES.push(
+  // AngularJS evaluates a string given to $compile / $parse / $interpolate / $eval / $watch / $apply as an Angular expression or template.
+  call({ ...STI, id: 'xss-js-angularjs-eval', langs: ['js'], args: [0], conf: 'medium',
+    what: 'evaluates it as an AngularJS expression or template, so the input can run script (client-side template injection)',
+    callee: /^\$(?:compile|parse|interpolate)$|(?:^|\.)\$(?:eval|evalAsync|watch|watchCollection|apply|applyAsync)$/ }),
+  call({ ...XSS, id: 'xss-js-angularjs-trust', langs: ['js'], args: [0],
+    what: 'marks it as trusted HTML / JS / URL, bypassing AngularJS strict contextual escaping',
+    callee: /(?:^|\.)\$sce\.trustAs(?:Html|Js|Url|ResourceUrl|Css)?$/ }),
+  // jQuery: a string that starts with '<' (or, before 1.9, merely contains one) is parsed as HTML.
+  call({ ...XSS, id: 'xss-js-jquery-selector', langs: ['js'], args: [0], conf: 'low', sev: 'medium',
+    what: 'is passed to jQuery as a selector, and jQuery parses a string that looks like markup as HTML',
+    callee: /^(?:\$|jQuery)$/, when: (c) => !c.viaDot }),
+  // Vue: `template:` is compiled at run time (new Vue / createApp / component / extend), so its value is template source.
+  custom({ ...STI, id: 'xss-js-vue-template', langs: ['js'], conf: 'medium',
+    run(flow, emit) {
+      for (const c of flow.ctx.calls) {
+        if (!/^(?:Vue|Vue\.extend|Vue\.component|Vue\.createApp|createApp|defineComponent|\w+\.component|\w+\.mixin)$/.test(c.callee)) continue;
+        const a = c.args.find((arg) => /\btemplate\s*:/.test(arg.text)); if (!a) continue;
+        const mm = /\btemplate\s*:\s*([\s\S]*?)\s*(?:,\s*[A-Za-z_$][\w$]*\s*:|\}\s*$)/.exec(a.text); if (!mm || !mm[1]) continue;
+        const from = a.text.indexOf(mm[1], mm.index);
+        const st = flow.state(mm[1], a.lit.slice(from, from + mm[1].length), c.line).filter((s) => !isCleared(s, 'ssti'));
+        if (st.length) emit(c.start, { desc: `${st[0].origin || 'Parameter "' + st[0].param + '"'} is used as the Vue template of ${c.callee}(), so the input can execute template expressions (client-side template injection).`, flowInfo: flowOf(st[0]) });
+      }
+    } }),
+  call({ ...STI, id: 'xss-js-vue-compile', langs: ['js'], args: [0], what: ssti, callee: /^(?:Vue\.compile|compileToFunctions|Vue\.compileToFunctions)$/ }),
+);
+
 export const INJECTION2_RULES = [
   ...XSS_RULES, ...REDIRECT_RULES, ...SSRF_RULES, ...XXE_RULES, ...NOSQL_RULES, ...LDAP_RULES, ...HEADER_RULES,
   ...LOG_RULES, ...HOST_RULES, ...EL_RULES, ...LFI_RULES, ...UP_RULES, ...GQL_RULES, ...PP_RULES,

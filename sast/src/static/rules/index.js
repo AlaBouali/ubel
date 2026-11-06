@@ -6,9 +6,10 @@ import { SECRETS_CRYPTO_RULES } from './secrets_crypto.js';
 import { NATIVE_RULES } from './native.js';
 import { MOBILE_RULES } from './mobile.js';
 import { CONFIG_RULES } from './config.js';
+import { MARKUP_RULES } from './markup.js';
 
 export const ALL_RULES = [
-  ...INJECTION_RULES, ...INJECTION2_RULES, ...SECRETS_CRYPTO_RULES, ...NATIVE_RULES, ...MOBILE_RULES, ...CONFIG_RULES,
+  ...INJECTION_RULES, ...INJECTION2_RULES, ...SECRETS_CRYPTO_RULES, ...NATIVE_RULES, ...MOBILE_RULES, ...CONFIG_RULES, ...MARKUP_RULES,
 ];
 
 // Catalog classes this engine has no rules for (they need semantic understanding of intent

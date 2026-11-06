@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { FlowEngine, isCleared, isUsable } from './taint.js';
 import { accessPaths, resolveFamily } from './context.js';
+import { isMarkupFile, expandMarkupChunk, clearMarkupCache } from './markup.js';
 import { ALL_RULES } from './rules/index.js';
 import { readFileText } from './filetext.js';
 
@@ -213,13 +214,17 @@ function toFinding(cand, flow) {
   return f;
 }
 
+// A flow through a parameter is provisional (the call graph may clear it later), so it must not displace a definite finding
+// on the same line just because its severity is higher.
+const provisional = (f) => (f._cand?.flowInfo?.kind === 'param' ? 1 : 0);
 function dedupe(findings) {
   const best = new Map();
   for (const f of findings) {
     const key = `${f.vuln_class}|${f.line}`;
     const prev = best.get(key);
-    if (!prev || (SEV_ORDER[f.severity] || 0) > (SEV_ORDER[prev.severity] || 0) ||
-        ((SEV_ORDER[f.severity] || 0) === (SEV_ORDER[prev.severity] || 0) && f.rule_id < prev.rule_id)) best.set(key, f);
+    if (!prev || provisional(f) < provisional(prev) ||
+        (provisional(f) === provisional(prev) && ((SEV_ORDER[f.severity] || 0) > (SEV_ORDER[prev.severity] || 0) ||
+        ((SEV_ORDER[f.severity] || 0) === (SEV_ORDER[prev.severity] || 0) && f.rule_id < prev.rule_id)))) best.set(key, f);
   }
   return [...best.values()].sort((a, b) => a.line - b.line);
 }
@@ -288,6 +293,21 @@ function rulesFor(family, classSet) {
  * @returns {{ results: object[], pipeline: object }}
  */
 export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify = true, taintTrace = true, log = () => {} } = {}) {
+  // HTML / template files: one markup chunk (template-engine rules) plus one JavaScript chunk per inline <script> and one for the
+  // inline event handlers / javascript: URLs. A file that also maps to a code family (.erb .jsp .cshtml .phtml) keeps that chunk.
+  const expand = (list) => {
+    const out = [];
+    for (const c of list) {
+      if (c.type === 'imports' || c.family || !isMarkupFile(c.file)) { out.push(c); continue; }
+      const fam = resolveFamily(c);
+      if (fam && fam !== 'html') out.push(c, ...expandMarkupChunk(c, { keepId: false }));
+      else out.push(...expandMarkupChunk(c));
+    }
+    return out;
+  };
+  clearMarkupCache();
+  toAnalyze = expand(toAnalyze);
+  contextChunks = expand(contextChunks);
   const classSet = vulnClasses ? new Set(vulnClasses.map(v => String(v.name).toLowerCase())) : null;
   const needsInput = new Map();
   for (const v of vulnClasses || []) needsInput.set(String(v.name).toLowerCase().trim(), v.needsUserInput !== false);
@@ -296,6 +316,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
   const fe = new FlowEngine(contextChunks.filter(c => c.type !== 'imports' && resolveFamily(c)));
   const ruleCache = new Map();
   const results = [];
+  const recById = new Map();
   const pipeline = { engine: 'static', engine_version: STATIC_ENGINE_VERSION, rules_loaded: ALL_RULES.length, rules_errored: 0, chunks_unsupported_language: 0 };
   let done = 0;
   const total = toAnalyze.length;
@@ -326,6 +347,11 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
           } catch (e) { pipeline.rules_errored++; pipeline.last_rule_error = `${rule.id}: ${e.message}`; }
         }
         findings = dedupe(cands.map(c => toFinding(c, flow)));
+        // scripts cut out of a markup file: show the file's own line, not the neutralised copy the engine analysed
+        if (chunk.origin === 'markup' && chunk.type === 'script') {
+          const fl = fileLines(chunk.file);
+          if (fl) for (const f of findings) { const l = fl[f.line - 1]; if (l && l.trim()) f.code_snippet = l.trim().slice(0, 400); }
+        }
         if (verify) findings.forEach(verifyFinding); else findings.forEach(f => { f.verification_skipped = true; });
         for (const f of findings) {
           if (verify && f.is_valid !== true) continue;
@@ -351,7 +377,13 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
     }
     rec.findings = findings;
     if (debug && Date.now() - t0 > 1000) log(`[static-debug] ${Date.now() - t0}ms  ${chunk.id}  (${chunk.code.length} chars)`);
-    results.push(rec);
+    // chunks cut out of a markup file report under that file's own record
+    const owner = chunk.parent ? recById.get(chunk.parent) : null;
+    if (owner) {
+      const seen = new Set(owner.findings.map((f) => `${f.vuln_class}|${f.line}`));
+      for (const f of findings) if (!seen.has(`${f.vuln_class}|${f.line}`)) owner.findings.push(f);
+      if (rec.error && !owner.error) owner.error = rec.error;
+    } else { results.push(rec); recById.set(chunk.id, rec); }
     done++;
     const flag = findings.length ? `⚠  ${findings.length} finding(s)` : '✓  clean';
     log(`  [${String(done).padStart(4)}/${total}] ${flag.padEnd(18)} ${String(chunk.id).slice(-60)}`);

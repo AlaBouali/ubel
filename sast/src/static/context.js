@@ -13,6 +13,7 @@ import { lex, familyToLexer } from './lexer.js';
 import { EXT_FAMILY } from '../chunker/constants.js';
 import { detectConfigKind, familyForKind } from '../chunker/configDetect.js';
 import path from 'path';
+import { MARKUP_ONLY_EXT, MARKUP_CODE_EXT } from './markup.js';
 
 // Words that may stand in front of a real call; any OTHER identifier in front of
 // `name(` means a declaration (`String name(`, `int main(`) in C-like languages.
@@ -29,8 +30,11 @@ const C_LIKE = new Set(['java', 'csharp', 'c', 'dart', 'kotlin', 'swift', 'go', 
 const NOT_CALLS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'foreach', 'using', 'lock', 'sizeof', 'typeof', 'elif', 'when', 'match', 'with', 'fn', 'func', 'fun', 'def', 'await', 'async', 'yield', 'throw', 'new', 'in', 'not', 'and', 'or', 'unless', 'until', 'defined', 'alignof', 'decltype', 'static_assert', 'assert_eq', 'defer', 'go', 'select', 'synchronized', 'do', 'else']);
 
 export function resolveFamily(chunk) {
+  if (chunk.family) return chunk.family;                       // synthetic chunks cut out of a markup file name their own family
   const ext = path.extname(chunk.file || '').toLowerCase();
+  if (MARKUP_ONLY_EXT.has(ext)) return 'html';                 // HTML / template files are never lexed as JavaScript or any other code
   let family = EXT_FAMILY[ext];
+  if (!family && MARKUP_CODE_EXT.has(ext)) family = 'html';
   if (!family) {
     const kind = detectConfigKind(chunk.file || '', chunk.code);
     if (kind) family = familyForKind(kind);
@@ -250,8 +254,8 @@ export function accessPaths(text) {
 
 // ── Public ────────────────────────────────────────────────────────────────────
 export function prepareChunk(chunk, family) {
-  const lexFamily = familyToLexer(family, chunk.file || '');
-  const { literal, code } = lex(chunk.code, lexFamily);
+  // markup is read raw: the JavaScript lexer would take apostrophes in text and `//` in URLs for strings and comments
+  const { literal, code } = family === 'html' ? { literal: chunk.code, code: chunk.code } : lex(chunk.code, familyToLexer(family, chunk.file || ''));
 
   const starts = [0];
   for (let i = 0; i < chunk.code.length; i++) if (chunk.code[i] === '\n') starts.push(i + 1);
