@@ -12,7 +12,7 @@
 //   client-side template injection  AngularJS ng-app / in-DOM Vue around server-rendered values
 //   engine misconfiguration         autoescape off, noEscape, Jinja2 Environment() without autoescape
 
-import { custom, pattern } from './helpers.js';
+import { custom, pattern, fileText } from './helpers.js';
 import { lineStarts, lineOfOffset, scriptBlocks, extOf } from '../markup.js';
 
 const MK = {
@@ -38,10 +38,47 @@ const TAG = new RegExp([
 ].join('|'), 'g');
 
 const RAW_FILTER = /\|\s*(?:safe|raw|noescape|unescape|safeHTML|safeHTMLAttr|safeJS|safeCSS|safeURL|html_safe|htmlSafe)\b|\b(?:mark_safe|Markup|raw|safe_join|html_safe)\s*\(|\.html_safe\b/i;
-const HTML_SAFE = /\|\s*(?:escape|force_escape|e|h|striptags|sanitize|purify|bleach|clean|strip_tags|urlencode|tojson|escapejs|json_script|int|float|length|count|abs|round)\b|\b(?:esc_html|esc_attr|esc_url|esc_js|htmlspecialchars|htmlentities|escapeHtml|sanitize|DOMPurify|absint|intval|e|h)\s*\(/i;
-const JS_SAFE = /\|\s*(?:tojson|escapejs|json_script|json_encode|json|to_json|jsonify|js|e\s*\(\s*['"]js['"]\s*\)|escape\s*\(\s*['"]js['"]\s*\))\b|\b(?:JSON\.stringify|json_encode|wp_json_encode|esc_js|escapeJs|js_escape|encodeURIComponent|Json\.Serialize|Json\.Encode|to_json|tojson|escape_javascript|j|raw_json)\s*\(/i;
+const HTML_SAFE = /\|\s*(?:escape|force_escape|e|h|striptags|sanitize|purify|bleach|clean|strip_tags|urlencode|tojson|escapejs|json_script|int|float|length|count|abs|round)\b|\b(?:esc_(?:html|attr|url|js|textarea)\w*|wp_kses\w*|sanitize_\w+|htmlspecialchars|htmlentities|escapeHtml|sanitize|DOMPurify|absint|intval|floatval|number_format|count|esc|e|h)\s*\(|(?:->|::)\s*(?:escape\w*|e|encode)\s*\(|\b(?:Html|HttpUtility|WebUtility|Encoder|AntiXss)\s*\.\s*(?:Html)?Encode\s*\(|\(\s*(?:int|float|bool)\s*\)/i;
+const JS_SAFE = /\|\s*(?:tojson|escapejs|json_script|json_encode|json|to_json|jsonify|js|e\s*\(\s*['"]js['"]\s*\)|escape\s*\(\s*['"]js['"]\s*\))\b|\b(?:JSON\.stringify|json_encode|wp_json_encode|esc_js|escapeJs|js_escape|encodeURIComponent|Json\.Serialize|Json\.Encode|to_json|tojson|escape_javascript|json_escape|Js::from|intval|absint|floatval|j|raw_json)\s*\(|\|\s*(?:dump|int|float|abs|round|length|count|floatformat)\b|\.to_json\b|(?<![\w@.:$])(?:j|escape_javascript|json_escape)\s+[@\w]|\(\s*(?:int|float)\s*\)/i;
 const LITERAL = /^\s*(?:'[^']*'|"[^"]*"|-?\d+(?:\.\d+)?|true|false|null|none)\s*(?:\|[^|]*)*$/i;
-const URL_HELPER = /\b(?:url_for|route|static|asset|path|reverse|url|admin_url|home_url|site_url|esc_url|get_permalink|base_url|Url\.Action|Url\.Content)\s*\(|\|\s*url\b|\{%\s*url\b|\{%\s*static\b|\bth:href\b/i;
+// ── engine profiles ──────────────────────────────────────────────────────────
+// What each engine already does for the value, so a finding is only raised where the engine does NOT protect it.
+//
+//   Go html/template, Hugo   context-aware: JS in <script> / on*= handlers is JSON / JS-string escaped, URL attributes (href src action
+//                            formaction data …) have an unsafe scheme rewritten to #ZgotmplZ. Opt-outs: | safeHTML safeJS safeURL
+//                            safeHTMLAttr, or a Go-side template.HTML / JS / URL value (not visible from the template).
+//   AngularJS / Angular      {{ }} in href / src goes through the URL sanitiser ($$sanitizeUri / DomSanitizer).
+//   everything else          HTML-escapes only: no scheme check, no JS escaping.
+//
+// A bare {{end}}, {{define "x"}}, {{template "x"}}, {{range .X}}, {{if .X}} or a leading-dot field {{.X}} is Go-only: Handlebars and Mustache
+// close blocks with {{/if}} and open them with {{#if}} (a lone {{else}} is NOT evidence), Jinja / Twig / Django / Liquid use {% %}, Angular's
+// {{ $ctrl.x }} starts with $, and no other engine has a {{.x}} field.
+const GO_TPL = /\{\{-?\s*(?:end\s*-?\}\}|define\s+"|template\s+"|block\s+"|range\s+[.$]|with\s+[.$]|if\s+(?:[.$]|(?:not|and|or|eq|ne|lt|le|gt|ge)\s)|else\s+(?:if|with)\s+(?:[.$]|(?:not|and|or|eq|ne|lt|le|gt|ge)\s)|\.[A-Za-z_]|\$\w+\s*:?=|\/\*)/;
+const GO_OPT_OUT = /\bsafe(?:URL|JS|HTML|HTMLAttr|CSS|JSStr)\b|\btemplate\.(?:URL|JS|HTML|HTMLAttr|CSS|JSStr)\b/i;
+const ANGULAR_CLIENT = /\b(?:data-|x-)?ng-(?:app|controller|repeat|model|click|bind|if|show|init|href|src)\b|\*ng(?:If|For|Switch)\b|\[\(?ngModel\)?\]|\bng-version=/;
+// engine slots that print the already-rendered page / partial, not data:  <%- include('x') %>  {{{body}}}  {!! $slot !!}
+const EJS_SLOT = /^\s*(?:include|partial|block|contentFor|defineContent|body|script|style|meta)\s*(?:\(|$)/;
+const HBS_SLOT = /^\s*(?:body|yield|outlet)\s*$/;
+const BLADE_TRUSTED = /^\s*(?:(?:csrf_field|method_field|csrf_token|route|asset|secure_asset|mix|vite)\s*\(|Form\s*::|Vite\s*::|\$slot\s*$|\$__env\s*->\s*yieldContent\b)|->\s*links\s*\(/;
+const RAW_TRUSTED = /^\s*(?:(?:super|caller|parent|block|include|render_esi|form_\w+|form|path|url|asset|csrf_token|url_for|static)\s*\(|block\.super\b|form\.(?:media|hidden_tag|csrf_token)\b|csrf_input\b|\w+\.hidden_tag\s*\()/;
+const ERB_TRUSTED = /(?<![\w@.:$])(?:render|yield|content_for|capture|csrf_meta_tags|csp_meta_tag|javascript_include_tag|stylesheet_link_tag|image_tag|link_to|button_to|content_tag|simple_format|sanitize|strip_tags|number_to_\w+|pluralize|t|translate|I18n\.(?:t|translate)|j|h|html_escape|json_escape|escape_javascript|ERB::Util\.\w+)\s*[(\s]/;
+// numbers, encoded or application-built URLs cannot carry a javascript: / data: scheme
+const PHP_TRUSTED = /\b(?:site_url|home_url|admin_url|includes_url|content_url|plugins_url|network_site_url|get_home_url|get_site_url|get_template_directory_uri|get_stylesheet_directory_uri|get_stylesheet_uri|get_theme_file_uri|wp_nonce_field|wp_create_nonce|base_url|asset|route|csrf_field|csrf_token|mix|secure_asset)\s*\(\s*(?:'[^']*'|"[^"$]*")?\s*(?:,\s*(?:'[^']*'|"[^"$]*"|true|false|null)\s*)*\)/;
+const URL_HELPER = /\b(?:url_for|route|static|asset|path|reverse|url|admin_url|home_url|site_url|esc_url|get_permalink|base_url|secure_url|secure_asset|action|mix|vite|asset_path|image_path|stylesheet_path|content_url|plugins_url|includes_url|network_site_url|get_home_url|get_site_url|get_template_directory_uri|get_stylesheet_directory_uri|get_stylesheet_uri|get_theme_file_uri|get_post_permalink|get_term_link|get_author_posts_url|wp_login_url|wp_logout_url|get_edit_post_link|Url\.(?:Action|Content|RouteUrl|Page|Link)|Html\.ActionLink|link_to|url_to|polymorphic_(?:path|url)|resolve_url|reverse_lazy|urlencode|rawurlencode|encodeURIComponent|intval|absint|floatval)\s*\(|\|\s*(?!safe)[a-z_]*url[a-z_]*\b|\|\s*(?:int|float|abs|round|length|count|number_format|floatformat|slugify|date|format_date|filesizeformat)\b|\|\s*(?:e|escape)\s*(?:\(\s*|:\s*)['"]url['"]|\{%\s*url\b|\{%\s*static\b|\bth:href\b|\(\s*(?:int|float)\s*\)/i;
+// application-defined base URL / context path: the scheme is fixed by configuration
+const URL_BASE = /(?:^|[.\s])(?:context_?path|base_?url|base_?path|root_?url|site_?url|static_?url|media_?url|app_?url|public_?(?:url|path)|asset_?(?:url|path|host)|cdn_?url)\s*(?:\(\s*\))?\s*$/i;
+const URL_PREFIX_OK = String.raw`(?:\/(?!\/)|#|\?|\.{1,2}\/|https?:\/\/|mailto:|tel:)`;
+const URL_PREFIX_CONCAT = new RegExp(String.raw`^\s*\(?\s*(['"])${URL_PREFIX_OK}[^'"]*\1\s*(?:[~+.]|\|\s*(?:append|add)\b|\)?\s*$)|^\s*\x60${URL_PREFIX_OK}[^\x60]*\x60\s*$|\|\s*prepend\s*:\s*['"]${URL_PREFIX_OK}`);
+// an element whose attribute really navigates / loads active content (img src, video poster, <link href> run no script)
+const URL_SINKS = { href: ['a', 'area'], 'xlink:href': ['a'], src: ['iframe', 'frame', 'embed', 'script'], action: ['form'], formaction: ['button', 'input'], data: ['object'] };
+// Rails route helpers (users_path(@u), root_path) in ERB are bare identifiers; `user.avatar_url` is data
+const ERB_ROUTE = /^\s*[a-z]\w*_(?:path|url)\b(?:\s*\(|\s*$)/;
+// config checks only matter when the engine renders HTML
+const ENGINE_JS = /\b(?:nunjucks|handlebars|swig|twig|liquid|ejs|pug|jade|mustache|dust|hbs|marko|eta)\b/i;
+const ENGINE_PY = /\bjinja2?\b|\bflask\b|\bFileSystemLoader\b|\bDictLoader\b|\bPackageLoader\b|\bselect_autoescape\b|\brender_template\b/i;
+const HTML_HINT = /\.(?:html?|xhtml|svg)\b|<\s*(?:html|body|div|p|a|span|table|ul|h[1-6]|form)\b|text\/html|\bHTMLResponse\b|\brender_template\b|\bres\.(?:render|send)\b|\bMarkup\b|\bsend_mail\b|\bhtml_message\b|MIMEText\s*\([^)]*['"]html['"]/i;
+const PLAIN_HINT = /\b(?:text\/plain|\.txt|\.md|\.sql|\.sh|\.ya?ml|\.toml|\.conf|\.ini|\.tf|\.cfg)\b/i;
+const plainOnly = (txt) => PLAIN_HINT.test(txt) && !HTML_HINT.test(txt);
 
 function analyze(flow) {
   if (flow._mk) return flow._mk;
@@ -51,6 +88,8 @@ function analyze(flow) {
   const blocks = scriptBlocks(text);
   const lodash = /_\.template|lodash|underscore|\.template\s*\(/.test(text) || blocks.some((b) => b.kind === 'template');
   const ejs = ext === '.ejs' || /\bejs\b/.test(text);
+  const goTpl = ext === '.gohtml' || (!ejs && ext !== '.vue' && ext !== '.svelte' && GO_TPL.test(text));
+  const ngClient = !goTpl && ANGULAR_CLIENT.test(text);
   const tags = [];
   let m; TAG.lastIndex = 0;
   while ((m = TAG.exec(text)) !== null) {
@@ -77,7 +116,7 @@ function analyze(flow) {
     t.tmpl = blk && blk.kind === 'template' ? blk : null;
     t.attr = t.script || t.tmpl ? null : attrContext(text, t.off);
   }
-  return (flow._mk = { text, starts, ext, blocks, tags, lodash, ejs, line: (off) => lineOfOffset(starts, off), raw: text.split('\n') });
+  return (flow._mk = { text, starts, ext, blocks, tags, lodash, ejs, goTpl, ngClient, line: (off) => lineOfOffset(starts, off), raw: text.split('\n') });
 }
 
 // text of the (...) argument list whose '(' is at `open`
@@ -89,13 +128,15 @@ function argOf(text, open) {
 
 // attribute (and its value so far) the offset sits in, or null when it is plain markup
 function attrContext(text, off) {
-  const lt = text.lastIndexOf('<', off), gt = text.lastIndexOf('>', off);
+  // start before the tag itself: `<%= x %>` / `<?= x ?>` begin with '<', which is not the opening of the element they sit in
+  const lt = text.lastIndexOf('<', off - 1), gt = text.lastIndexOf('>', off - 1);
   if (lt < 0 || lt < gt) return null;
   const seg = text.slice(lt, off);
   let mm = /([^\s=<>"'\/]+)\s*=\s*("[^"]*|'[^']*)$/.exec(seg);
-  if (mm) return { name: mm[1].toLowerCase(), quote: mm[2][0], before: mm[2].slice(1) };
+  const tag = (/^<\s*([A-Za-z][\w:-]*)/.exec(seg) || [])[1] || '';
+  if (mm) return { name: mm[1].toLowerCase(), tag, quote: mm[2][0], before: mm[2].slice(1) };
   mm = /([^\s=<>"'\/]+)\s*=\s*([^\s"'>]*)$/.exec(seg);
-  return mm ? { name: mm[1].toLowerCase(), quote: '', before: mm[2] } : null;
+  return mm ? { name: mm[1].toLowerCase(), tag, quote: '', before: mm[2] } : null;
 }
 
 // quote character the end of `src` is inside (JavaScript string state), or null
@@ -121,18 +162,18 @@ const isVar = (body) => /[A-Za-z_$]/.test(body.replace(/'[^']*'|"[^"]*"/g, '')) 
 function rawKind(an, t) {
   const b = t.body, ext = an.ext;
   switch (t.kind) {
-    case 'tri': return '{{{ }}} (Handlebars / Mustache unescaped)';
+    case 'tri': return HBS_SLOT.test(b) ? null : '{{{ }}} (Handlebars / Mustache unescaped)';
     case 'amp': return '{{& }} (Mustache unescaped)';
-    case 'blade': return '{!! !!} (Blade unescaped)';
+    case 'blade': return BLADE_TRUSTED.test(b) ? null : '{!! !!} (Blade unescaped)';
     case 'pctraw': return '<%== %> (unescaped)';
     case 'razor': return '@Html.Raw()';
-    case 'out': return RAW_FILTER.test(b) ? '|safe / |raw (auto-escaping switched off for this value)' : null;
-    case 'pctdash': return an.lodash && !an.ejs && ext !== '.ejs' ? null : '<%- %> (EJS unescaped)';
+    case 'out': return RAW_FILTER.test(b) && !RAW_TRUSTED.test(b) ? '|safe / |raw (auto-escaping switched off for this value)' : null;
+    case 'pctdash': return (an.lodash && !an.ejs && ext !== '.ejs') || EJS_SLOT.test(b) ? null : '<%- %> (EJS unescaped)';
     case 'pcteq':
       if (ext === '.jsp' || ext === '.jspx') return /\brequest\s*\.\s*(?:getParameter|getHeader|getQueryString|getRequestURI|getRequestURL|getCookies|getAttribute)\b|\bparam\b/.test(b) ? 'JSP expression <%= %> printing request data' : null;
-      if (ext === '.erb') return /\braw\b|\.html_safe\b/.test(b) ? '<%= raw / html_safe %>' : null;
+      if (ext === '.erb') return /\braw\b|\.html_safe\b/.test(b) && !ERB_TRUSTED.test(b) ? '<%= raw / html_safe %>' : null;
       return an.lodash && !an.ejs ? '<%= %> (Underscore / lodash templates do not escape this tag)' : null;
-    case 'phpe': return HTML_SAFE.test(b) ? null : '<?= ?> (PHP prints without escaping)';
+    case 'phpe': return HTML_SAFE.test(b) || PHP_TRUSTED.test(b) ? null : '<?= ?> (PHP prints without escaping)';
     default: return null;
   }
 }
@@ -173,6 +214,7 @@ const scriptContext = html({
     if (['.vue', '.svelte', '.astro'].includes(an.ext)) return;
     for (const t of an.tags) {
       if (!t.script || t.kind === 'stmt' || t.kind === 'pctstmt' || !isVar(t.body) || JS_SAFE.test(t.body)) continue;
+      if (an.goTpl && !GO_OPT_OUT.test(t.body)) continue;                       // html/template JSON / JS-string escapes values in a <script>
       if (t.kind === 'phpe' && HTML_SAFE.test(t.body) && /esc_js|json_encode/.test(t.body)) continue;
       const q = jsStringAt(an.text.slice(t.script.start, t.off));          // from the start of the block: template literals span lines
       const rawTag = ['tri', 'amp', 'blade', 'pctraw', 'razor'].includes(t.kind) || RAW_FILTER.test(t.body) || t.kind === 'pctdash' && !an.lodash;
@@ -204,6 +246,7 @@ const handlerContext = html({
       if (!t.attr || t.kind === 'stmt' || t.kind === 'pctstmt' || !isVar(t.body) || JS_SAFE.test(t.body)) continue;
       const isHandler = t.attr.name.startsWith('on'), isJsUrl = /^\s*javascript:/i.test(t.attr.before);
       if (!isHandler && !isJsUrl) continue;
+      if (an.goTpl && isHandler && !GO_OPT_OUT.test(t.body)) continue;          // html/template escapes on*= values as JavaScript
       emitAt(flow, emit, an, t.line, {
         title: 'Template value interpolated into an event handler', sev: 'high', conf: 'medium',
         desc: `The template value \`${t.body.replace(/\s+/g, ' ').slice(0, 80)}\` is placed inside ${isHandler ? 'the ' + t.attr.name + ' handler' : 'a javascript: URL'}. The browser HTML-decodes an attribute before running it as JavaScript, so HTML escaping (&#39; → ') does not stop the value from closing the string and adding code.`,
@@ -220,11 +263,18 @@ const urlAttr = html({
     const an = analyze(flow);
     for (const t of an.tags) {
       if (!t.attr || t.script || t.tmpl || !['out', 'tri', 'pcteq', 'pctdash', 'blade', 'phpe'].includes(t.kind) || !isVar(t.body)) continue;
-      if (!/^(?:href|src|action|formaction|xlink:href|data|poster)$/.test(t.attr.name)) continue;
-      if (t.attr.before.trim() !== '' || URL_HELPER.test(t.body)) continue;     // a fixed prefix pins the scheme
+      const sinks = URL_SINKS[t.attr.name];
+      if (!sinks) continue;                                                   // not a URL attribute that can run script
+      const tag = (t.attr.tag || '').toLowerCase();
+      if (tag && !sinks.includes(tag)) continue;                              // <img src>, <video poster>, <link href> … load, they do not navigate / execute
+      if (t.attr.before.trim() !== '' || URL_HELPER.test(t.body)) continue;   // a fixed prefix pins the scheme; helpers / numbers / encoders cannot carry one
+      if (an.goTpl && !GO_OPT_OUT.test(t.body)) continue;                     // Go html/template rewrites an unsafe scheme to #ZgotmplZ
+      if (an.ngClient) continue;                                              // AngularJS / Angular sanitise interpolated URLs
+      if (URL_PREFIX_CONCAT.test(t.body) || URL_BASE.test(t.body)) continue;  // '/x/' ~ id, | prepend: '/x/', contextPath, base_url
+      if (an.ext === '.erb' && ERB_ROUTE.test(t.body)) continue;              // root_path, users_path(@u)
       emitAt(flow, emit, an, t.line, {
         title: 'Template value used as a whole URL', sev: 'medium', conf: 'low',
-        desc: `\`${t.body.replace(/\s+/g, ' ').slice(0, 80)}\` supplies the whole ${t.attr.name}= URL. HTML escaping does not remove a javascript: or data: scheme, so an attacker-chosen value runs script when the link is followed.`,
+        desc: `\`${t.body.replace(/\s+/g, ' ').slice(0, 80)}\` supplies the whole ${t.attr.name}= URL${tag ? ' of <' + tag + '>' : ''}. HTML escaping does not remove a javascript: or data: scheme, so an attacker-chosen value runs script when the link is followed.`,
         fix: 'Validate the scheme on the server (allow only http, https, mailto, relative paths) or build the URL from a fixed prefix.',
       });
     }
@@ -246,7 +296,8 @@ const DIRECTIVES = [
   { re: /\$\{[^}]*\?no_esc\s*\}/gi, name: '?no_esc (FreeMarker)', conf: 'medium', sev: 'high', noExpr: true },
   { re: /\{%-?\s*autoescape\s+(?:false|off|'false')\s*-?%\}/gi, name: '{% autoescape off %}', conf: 'medium', sev: 'high', noExpr: true },
   { re: /\{[^{}]*\bnofilter\b[^{}]*\}|\{\$[^}|]*\|\s*noescape\s*\}/gi, name: 'nofilter / |noescape (Smarty / Latte)', conf: 'medium', sev: 'high', noExpr: true },
-  { re: /(?:^|\s)!=\s+\S|!\{[^}]+\}/g, name: '!= / !{} (Pug unescaped)', conf: 'medium', sev: 'high', noExpr: true, exts: ['.pug', '.jade'] },
+  // `p!= x`, `div(a=1)!= x`, `!= x` and `!{x}`; not a comparison inside `- code`, `if (a != b)`, `each`, … lines
+  { re: /(?:^[ \t]*|[\w\])])!=[ \t]+\S|!\{[^}]+\}/gm, name: '!= / !{} (Pug unescaped)', conf: 'medium', sev: 'high', noExpr: true, exts: ['.pug', '.jade'], lineSkip: /^\s*(?:-|if\b|else\b|unless\b|while\b|case\b|when\b|each\b|for\b|\/\/)/ },
 ];
 const directives = html({
   id: 'tpl-raw-directive',
@@ -258,9 +309,12 @@ const directives = html({
       let m;
       while ((m = d.re.exec(an.text)) !== null) {
         if (m[0] === '') { d.re.lastIndex++; continue; }
+        if (d.lineSkip && d.lineSkip.test(an.raw[an.line(m.index) - 1] || '')) continue;
         const expr = (m.slice(1).find((g) => g !== undefined) || '').trim();
         if (!d.noExpr && (!expr || LITERAL.test(expr) || /^\s*['"`][\s\S]*['"`]\s*$/.test(expr))) continue;      // a constant string is not attacker data
         if (!d.noExpr && /\b(?:DOMPurify|sanitize|sanitizeHtml|purify|\$sce\.trustAsHtml|escapeHtml)\b/i.test(expr)) continue;
+        if (d.name.startsWith('th:utext') && /^\s*#\{[^$}]*\}\s*$/.test(expr)) continue;                  // message key without variables: developer-authored text
+        if (d.name.startsWith('ng-bind-html') && /\bngSanitize\b|\$sanitize\b|angular-sanitize/.test(an.text)) continue;   // ngSanitize cleans ng-bind-html
         emitAt(flow, emit, an, an.line(m.index), {
           title: `Raw HTML output: ${d.name}`, sev: d.sev, conf: d.conf,
           desc: `${d.name} writes ${expr ? '`' + expr.replace(/\s+/g, ' ').slice(0, 80) + '`' : 'its content'} into the page as HTML, bypassing the engine's escaping. Anything attacker-influenced that reaches it executes as script.`,
@@ -301,10 +355,12 @@ const J2_ENV = /\b(?:jinja2\.)?Environment\s*\(/g;
 const engineConfig = [
   pattern({ ...MK, id: 'tpl-autoescape-off-js', langs: ['js'], view: 'code', title: 'Template engine escaping disabled', conf: 'medium',
     re: /\bautoescape\s*:\s*false\b|\bnoEscape\s*:\s*true\b/,
+    check: (m, flow) => { const t = fileText(flow); return ENGINE_JS.test(t) && !plainOnly(t); },     // some template engine is in play, and it renders HTML
     desc: 'The template engine is configured with autoescape/noEscape off, so every {{ value }} is printed unescaped; any attacker-influenced value becomes XSS.',
     fix: 'Leave autoescape on (the default in nunjucks and Handlebars) and mark individual trusted values safe instead.' }),
   pattern({ ...MK, id: 'tpl-autoescape-off-py', langs: ['python'], view: 'code', title: 'Template engine escaping disabled', conf: 'medium',
     re: /\bautoescape\s*=\s*False\b/,
+    check: (m, flow) => { const t = fileText(flow); return ENGINE_PY.test(t) && !plainOnly(t); },     // Jinja2 rendering HTML, not config / script generation
     desc: 'Jinja2 is configured with autoescape=False, so every {{ value }} is printed unescaped; any attacker-influenced value becomes XSS.',
     fix: 'Use autoescape=select_autoescape() (or True) and mark individual trusted values with |safe / Markup.' }),
   pattern({ ...MK, id: 'tpl-autoescape-default-py', langs: ['python'], view: 'code', title: 'Jinja2 Environment without autoescape', conf: 'medium',
@@ -312,7 +368,9 @@ const engineConfig = [
     check: (m, flow, text) => {
       const open = m.index + m[0].length - 1; let d = 0, end = text.length;
       for (let k = open; k < text.length; k++) { if (text[k] === '(') d++; else if (text[k] === ')') { d--; if (d === 0) { end = k; break; } } }
-      return /\bautoescape\b/.test(text.slice(open, end)) ? false : true;
+      if (/\bautoescape\b/.test(text.slice(open, end))) return false;
+      const t = fileText(flow);
+      return ENGINE_PY.test(t) && !plainOnly(t);                                  // `Environment(` of another library, or Jinja2 for .sh / .conf / .yaml output
     },
     desc: 'A Jinja2 Environment is created without autoescape; the default is off, so every {{ value }} is printed unescaped (Bandit B701).',
     fix: 'Pass autoescape=select_autoescape() (or True).' }),
