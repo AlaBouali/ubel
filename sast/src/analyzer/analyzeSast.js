@@ -11,6 +11,7 @@ import { verifyChunkFindings, traceChunkFindings } from './workers.js';
 import { resolveGitDiffFiles } from './gitDiff.js';
 import { runScanPass, emptyUsage, usageSink, makeCatalogPackKey, packedMaxTokensWarning } from './scanEngine.js';
 import { runStaticAnalysis, STATIC_ENGINE_VERSION } from '../static/engine.js';
+import { discoverMarkupChunks, fileKey } from '../static/markup_files.js';
 import { ALL_RULES, STATIC_UNSUPPORTED_CLASSES } from '../static/rules/index.js';
 
 // ─── Extension → display language label ───────────────────────────────────────
@@ -150,7 +151,13 @@ async function analyzeSast(chunks, opts = {}) {
   const chunkInfo = resolvedChunks.info || null;   // coverage record from the chunker (null when chunks were supplied)
 
   if (noLlm) {
-    return analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log });
+    // Scope for the HTML / template files the chunker has no entry for (found by the static engine itself).
+    // An untouched `languages` default means "no filter"; a caller-supplied list is honoured (add `html` to keep templates).
+    const markupScope = {
+      skipFolders, skipFiles, includeFolders, maxFileSize, skipTests, chunksStart,
+      languages: languages === DEFAULT_LANGUAGES ? null : languages,
+    };
+    return analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope });
   }
 
   if (!PROVIDERS[provider]) {
@@ -472,7 +479,7 @@ async function analyzeSast(chunks, opts = {}) {
 // report / SARIF / gate / diff code downstream does not know which engine ran.
 // Nothing here touches a provider, an API key or the network.
 
-async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log }) {
+async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope = {} }) {
   log(`[ubel-sast] Engine      : static rules (--no-llm), engine v${STATIC_ENGINE_VERSION}, ${ALL_RULES.length} rules`);
   log(`[ubel-sast] Privacy     : no model is called and no source code leaves this machine`);
   if (onlyDiff)   log(`[ubel-sast] Diff mode   : enabled (base: ${diffBase})`);
@@ -486,6 +493,27 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   const enriched = resolvedChunks.map(enrich);
   const contextChunks = (resolvedChunks.all && resolvedChunks.all !== resolvedChunks)
     ? resolvedChunks.all.map(enrich) : enriched;
+
+  // ── HTML / template files ───────────────────────────────────────────────────
+  // The chunker only knows code and IaC files, so .html / .gohtml / .ejs / .vue … never became chunks and were never scanned.
+  // Find them here (same scope rules as the chunker) and add them as whole-file chunks; engine.js expands each into the markup
+  // chunk + its inline <script> / event-handler JavaScript. Only when the chunks were built from disk (chunkInfo set — a caller
+  // that supplied its own chunks gets exactly those) and only in the first --chunks-start window, so paging does not repeat them.
+  // They join the coverage record, so --max-file-size skips are reported and gated like any other file.
+  let markup = null;
+  if (chunkInfo && !(markupScope.chunksStart > 0)) {
+    const known = new Set(contextChunks.map(c => fileKey(c.file)));
+    markup = discoverMarkupChunks({ root: path.resolve(workingDir), ...markupScope }, known);
+    const { chunks: mk, stats: ms } = markup;
+    enriched.push(...mk);
+    if (contextChunks !== enriched) contextChunks.push(...mk);
+    chunkInfo.total_chunks    += mk.length;
+    chunkInfo.chunks_returned += mk.length;
+    chunkInfo.files_found     += mk.length + ms.files_skipped_too_large.length;
+    chunkInfo.files_skipped_too_large.push(...ms.files_skipped_too_large);
+    if (ms.found) log(`[ubel-sast] Templates   : ${mk.length} HTML/template file(s) added to the scan` +
+      (ms.files_skipped_too_large.length ? `, ${ms.files_skipped_too_large.length} over ${chunkInfo.max_file_size} chars skipped` : ''));
+  }
 
   let diffFileSet = null;
   if (onlyDiff) {
@@ -512,6 +540,10 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log });
   pipeline.classes_without_static_rules = noRules;
   pipeline.classes_not_statically_decidable = STATIC_UNSUPPORTED_CLASSES;
+  if (markup) {
+    pipeline.markup_files_found = markup.stats.found;
+    pipeline.markup_files_scanned = markup.chunks.filter(c => diffFileSet === null || diffFileSet.has(path.resolve(c.file))).length;
+  }
 
   const all = results.flatMap(r => r.findings);
   const unresolved = all.filter(f => f.taint && f.taint.exploitable === null).length;

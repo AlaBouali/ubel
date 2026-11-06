@@ -104,7 +104,7 @@ export function expandMarkupChunk(chunk, { keepId = true } = {}) {
   const starts = lineStarts(text);
   const out = [];
 
-  out.push({ ...chunk, id: keepId ? chunk.id : `${chunk.id}#markup`, type: 'markup', family: 'html', language: 'html', origin: 'markup', parent: keepId ? undefined : chunk.id });
+  out.push({ ...chunk, id: keepId ? chunk.id : `${chunk.id}#markup`, type: 'markup', family: 'html', language: 'HTML', origin: 'markup', parent: keepId ? undefined : chunk.id });
 
   const blocks = scriptBlocks(text);
   for (const b of blocks) {
@@ -115,7 +115,7 @@ export function expandMarkupChunk(chunk, { keepId = true } = {}) {
     out.push({
       ...chunk, id: `${chunk.id}#script@${startLine}`, type: 'script', name: `script@${startLine}`, class: undefined,
       code, startLine, endLine: startLine + (code.match(/\n/g) || []).length,
-      language: 'javascript', family: 'js', webContext: true, origin: 'markup', parent: chunk.id,
+      language: 'JavaScript', family: 'js', webContext: true, origin: 'markup', parent: chunk.id,
     });
   }
 
@@ -132,7 +132,7 @@ export function expandMarkupChunk(chunk, { keepId = true } = {}) {
     out.push({
       ...chunk, id: `${chunk.id}#handlers`, type: 'script', name: 'inline-event-handlers', class: undefined,
       code, startLine: base, endLine: base + (code.match(/\n/g) || []).length,
-      language: 'javascript', family: 'js', webContext: true, origin: 'markup', parent: chunk.id,
+      language: 'JavaScript', family: 'js', webContext: true, origin: 'markup', parent: chunk.id,
     });
   }
   CACHE.set(key, out);

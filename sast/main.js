@@ -835,6 +835,8 @@ SCOPE & CHUNKING  (chunk, analyze, malware)
   --skip-tests                   Skip test folders and test-named files (scanned by default)
   --include-generated            Scan *.min.js / *.bundle.js (analyze skips them by default; malware scans them)
   --languages <a,b,c>            Comma-separated language filter, e.g. java,kotlin,flutter,swift
+                                 (--no-llm also scans HTML/template files: .html .ejs .vue .gohtml ... A filter leaves them out
+                                 unless it lists "html" or the extension, e.g. --languages go,html)
 
 DIFF MODE  (analyze, malware)
   --only-diff                    Restrict Pass 1 to diff-changed chunks; full chunk set is still built for Pass 3
