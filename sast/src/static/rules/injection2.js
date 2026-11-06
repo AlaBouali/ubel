@@ -18,6 +18,32 @@ const goNonHtmlResponse = (cand, flow) => {
 const XSS = { cls: 'XSS / template injection', group: 'html', sev: 'high', fix: 'Encode output for its context (HTML-escape, or use the framework auto-escaping template), never mark input as "safe"/raw HTML, and never use input as a template source. For rich HTML use a sanitiser with an allowlist (DOMPurify, bleach, Loofah).' };
 const xssWhat = 'writes it into an HTML response / DOM without escaping';
 const ssti = 'compiles it as a template, so the input can execute template expressions';
+const sstiFix = 'Never build template source from input: keep the template fixed and pass the value as a context variable (render_template("page.html", name=name), ejs.render(tpl, { name }), $twig->render("page.twig", [...])). If users must author templates, use a sandboxed engine and treat the template as code.';
+// Group 'ssti', not 'html': escaping <>&"' does nothing against {{7*7}} / <%= … %> / ${…}, so html escapers must not clear it.
+const STI = { ...XSS, group: 'ssti', sev: 'critical', fix: sstiFix };
+const stiFile = 'selects the template file the engine loads, so the input can pick (or traverse to) any template';
+
+// Start offset of the primary expression whose last member is the '.' at `end` (walks back over strings, bracket groups and call chains).
+function rubyReceiverStart(text, end) {
+  let i = end - 1;
+  for (;;) {
+    if (i < 0) return 0;
+    const c = text[i];
+    if (c === ')' || c === ']' || c === '}') {
+      let d = 0;
+      for (; i >= 0; i--) { const ch = text[i]; if (ch === ')' || ch === ']' || ch === '}') d++; else if (ch === '(' || ch === '[' || ch === '{') { d--; if (d === 0) break; } }
+      i--;
+      while (i >= 0 && /[\w@$:?!]/.test(text[i])) i--;         // the name the group belongs to:  params[…]  h(…)
+    } else if (c === '"' || c === "'" || c === '`') {
+      i--; while (i >= 0 && text[i] !== c) i--;
+      i--;
+    } else if (/[\w@$:?!]/.test(c)) {
+      while (i >= 0 && /[\w@$:?!]/.test(text[i])) i--;
+    } else return i + 1;
+    if (i >= 0 && text[i] === '.') i--;        // continue through a method chain:  a.b(c).d
+    else return i + 1;
+  }
+}
 
 const XSS_RULES = [
   call({ ...XSS, id: 'xss-js-send', langs: ['js'], what: xssWhat, args: [0], chain: true, callee: /^(?:res|response|reply|resp|ctx\.res)(?:\.(?:status|type|set|header|contentType|code)\(\))*\.(?:send|write|end|html)$/, conf: 'medium' }),
@@ -27,7 +53,9 @@ const XSS_RULES = [
   call({ ...XSS, id: 'xss-js-docwrite', langs: ['js'], what: xssWhat, args: 'any', callee: x('document\\.write|document\\.writeln') }),
   call({ ...XSS, id: 'xss-js-jquery', langs: ['js'], what: xssWhat, args: [0], callee: /^(?:\$|jQuery|\$\(\)|jQuery\(\))\.(?:html|append|prepend|after|before|replaceWith|wrap)$|^\$\(\)\.(?:html|append|prepend|after|before|replaceWith)$/, chain: true, argUnless: FN_VALUE }),
   call({ ...XSS, id: 'xss-js-trust', langs: ['js'], what: 'tells the framework to trust it as safe HTML/script/URL', args: [0], callee: m('bypassSecurityTrustHtml|bypassSecurityTrustScript|bypassSecurityTrustUrl|bypassSecurityTrustResourceUrl|bypassSecurityTrustStyle|trustAsHtml|trustAsJs|trustAsResourceUrl') }),
-  call({ ...XSS, id: 'xss-js-ssti', langs: ['js'], what: ssti, sev: 'critical', args: [0], callee: x('(?:ejs|pug|jade|nunjucks|swig|dust|hogan|eta|doT)\\.(?:render|renderString|compile|template)|(?:Handlebars|handlebars|hbs)\\.compile|(?:_|lodash)\\.template|template') , when: (c) => /\./.test(c.callee) }),
+  call({ ...STI, id: 'xss-js-ssti', langs: ['js'], what: ssti, args: [0],
+    callee: /^(?:ejs|pug|jade|nunjucks|swig|dust|hogan|Hogan|eta|Eta|doT|dot|Mustache|mustache|twig|Twig|art|artTemplate)\.(?:render|renderString|compile|compileClient|template|twig|renderSource|precompile|compileSource|parse)$|^(?:Handlebars|handlebars|hbs|hbs\.handlebars)\.(?:compile|precompile)$|^(?:_|lodash|underscore)\.template$|^(?:new\s*)?nunjucks\.Template$|^\w+\.parseAndRender(?:Sync)?$/,
+    when: (c) => /\./.test(c.callee) }),
   custom({ ...XSS, id: 'xss-js-react', langs: ['js'], what: xssWhat,
     run(flow, emit) {
       const re = /dangerouslySetInnerHTML\s*=\s*\{\{\s*__html\s*:/g; let mm;
@@ -44,35 +72,57 @@ const XSS_RULES = [
   call({ ...XSS, id: 'xss-py-markup', langs: ['python'], what: 'marks it as safe HTML (no auto-escaping)', args: [0], callee: x('(?:markupsafe\\.|django\\.utils\\.safestring\\.|flask\\.)?(?:Markup|mark_safe|SafeString|SafeText)') }),
   call({ ...XSS, id: 'xss-py-response', langs: ['python'], what: xssWhat, args: [0], callee: x('HttpResponse|HTMLResponse|make_response|self\\.write|self\\.finish|web\\.Response|Response|(?:flask\\.)?Response'),
     when: (c) => !/(?:json|JSON)/.test(c.callee) && !/content_type\s*=\s*['"]application\/json|mimetype\s*=\s*['"]application\/json|media_type\s*=\s*['"](?:application|text\/plain)/.test(c.lit) }),
-  call({ ...XSS, id: 'xss-py-ssti', langs: ['python'], what: ssti, sev: 'critical', args: [0], callee: x('render_template_string|(?:jinja2\\.|jinja2\\.environment\\.)?Template|\\w+\\.from_string|Environment\\(\\)\\.from_string|mako\\.template\\.Template|Template|tornado\\.template\\.Template|django\\.template\\.Template|Engine\\(\\)\\.from_string'), }),
+  call({ ...STI, id: 'xss-py-ssti', langs: ['python'], what: ssti, sev: 'critical', args: [0], callee: x('render_template_string|(?:jinja2\\.|jinja2\\.environment\\.)?Template|\\w+\\.from_string|Environment\\(\\)\\.from_string|mako\\.template\\.Template|Template|tornado\\.template\\.Template|django\\.template\\.Template|Engine\\(\\)\\.from_string'), }),
   call({ ...XSS, id: 'xss-php-echo', langs: ['php'], what: xssWhat, args: 'any', callee: x('echo|print|printf|print_r|var_dump|die|exit|vprintf|fprintf'), conf: 'medium',
     when: (c) => !/^fprintf$/.test(c.callee) || /STDOUT|php:\/\/output/.test(c.lit) }),
   custom({ ...XSS, id: 'xss-php-shorttag', langs: ['php'], what: xssWhat,
     run(flow, emit) {
-      const re = /<\?=\s*([^?]+?)\s*\?>/g; let mm;
+      // The expression may itself contain '?' (`$a ?? ''`, `$a ?: $b`); strings and comments are blanked in the code
+      // view, so the first '?>' really is the end of the tag. The literal view of the same span lets the engine read
+      // string-literal callback names such as array_map('absint', …) and wp_kses allow-lists.
+      const re = /<\?=\s*([\s\S]+?)\s*\?>/g; let mm;
       while ((mm = re.exec(flow.ctx.code)) !== null) {
-        const st = flow.state(mm[1], '', flow.ctx.lineAt(mm.index)).filter(s => !isCleared(s, 'html'));
+        const from = mm.index + /^<\?=\s*/.exec(mm[0])[0].length;
+        const st = flow.state(mm[1], flow.ctx.literal.slice(from, from + mm[1].length), flow.ctx.lineAt(mm.index)).filter(s => !isCleared(s, 'html'));
         if (st.length) emit(mm.index, { desc: `<?= echoes ${st[0].origin || 'parameter "' + st[0].param + '"'} without escaping.`, flowInfo: flowOf(st[0]) });
       }
     } }),
-  call({ ...XSS, id: 'xss-ruby-raw', langs: ['ruby'], what: 'marks it as safe HTML (no auto-escaping)', args: [0], callee: x('raw|ERB\\.new|Haml::Engine\\.new|Slim::Template\\.new|Liquid::Template\\.parse|ActionController::Base\\.helpers\\.raw|html_safe|safe_concat') }),
-  call({ ...XSS, id: 'xss-ruby-render', langs: ['ruby'], what: xssWhat, args: 'any', callee: x('render'), when: (c) => /\b(?:inline|html|text)\s*:/.test(c.text) }),
+  call({ ...XSS, id: 'xss-ruby-raw', langs: ['ruby'], what: 'marks it as safe HTML (no auto-escaping)', args: [0], callee: x('raw|ActionController::Base\\.helpers\\.raw|html_safe|safe_concat') }),
+  call({ ...STI, id: 'xss-ruby-ssti', langs: ['ruby'], what: ssti, args: [0], callee: /^(?:ERB\.new|Erubi::Engine\.new|Erubis::Eruby\.new|Haml::Engine\.new|Hamlit::Engine\.new|Slim::Template\.new|Liquid::Template\.parse|Tilt\.new|Tilt::\w+Template\.new|Mustache\.render|Handlebars\.compile)$/ }),
+  call({ ...XSS, id: 'xss-ruby-render', langs: ['ruby'], what: xssWhat, args: 'any', callee: x('render'), when: (c) => /\btext\s*:/.test(c.text) }),
+  // render inline: compiles its argument as an ERB template; render file: / template: / partial: / action: load a template chosen by the input
+  call({ ...STI, id: 'xss-ruby-render-inline', langs: ['ruby'], what: ssti, args: 'any', callee: x('render|render_to_string'), when: (c) => /\binline\s*:/.test(c.text) }),
+  call({ ...STI, id: 'xss-ruby-render-file', langs: ['ruby'], what: stiFile, sev: 'high', args: 'any', callee: x('render|render_to_string'), when: (c) => /\b(?:file|template|partial|action|layout)\s*:/.test(c.text) }),
+  // Sinatra / Roda style blocks return the value of their LAST expression:  get '/' do … html end
+  custom({ ...XSS, id: 'xss-ruby-sinatra', langs: ['ruby'], what: xssWhat, conf: 'medium',
+    run(flow, emit) {
+      if (!/^\s*(?:get|post|put|delete|patch|any)\s+['"%\/]/m.test(flow.ctx.code)) return;
+      const lines = flow.ctx.logical.filter(l => l.text.trim() && !/^\s*(?:end|\})\s*$/.test(l.text));
+      const last = lines[lines.length - 1];
+      if (!last || /^\s*(?:get|post|put|delete|patch|any|halt|redirect|content_type|status|headers|erb|haml|slim|json)\b/.test(last.text)) return;
+      if (!/<\s*[a-zA-Z!\/]/.test(last.lit) && !mentionsHtmlName(flow, last.text)) return;
+      const st = flow.state(last.text, last.lit, last.line).filter(s => !isCleared(s, 'html'));
+      if (st.length) emit(last.start, { desc: `The block's value (the response body) is HTML built from ${st[0].origin || 'parameter "' + st[0].param + '"'} without escaping it.`, flowInfo: flowOf(st[0]) });
+    } }),
   custom({ ...XSS, id: 'xss-ruby-htmlsafe', langs: ['ruby'], what: xssWhat,
     run(flow, emit) {
       for (const ll of flow.ctx.logical) {
-        const mm = /(\S+?)\.html_safe\b/.exec(ll.text); if (!mm) continue;
-        const st = flow.state(mm[1], '', ll.line).filter(s => !isCleared(s, 'html'));
+        const mm = /\.html_safe\b/.exec(ll.text); if (!mm) continue;
+        // the receiver is the whole primary expression before `.html_safe`: a string literal with #{…} interpolation,
+        // a parenthesised expression, or a call chain (`"<b>#{x}</b>".html_safe`, `(a + b).html_safe`, `h(x).html_safe`)
+        const from = rubyReceiverStart(ll.text, mm.index);
+        const st = flow.state(ll.text.slice(from, mm.index), ll.lit.slice(from, mm.index), ll.line).filter(s => !isCleared(s, 'html'));
         if (st.length) emit(ll.start + mm.index, { desc: `html_safe disables escaping for ${st[0].origin || 'parameter "' + st[0].param + '"'}.`, flowInfo: flowOf(st[0]) });
       }
     } }),
   call({ ...XSS, id: 'xss-go-template', langs: ['go'], what: 'marks it as trusted HTML/JS/URL, bypassing html/template escaping', args: [0], callee: x('template\\.(?:HTML|HTMLAttr|JS|JSStr|CSS|URL|Srcset)|(?:\\w+\\.)?(?:template\\.HTML)') }),
   call({ ...XSS, id: 'xss-go-write', langs: ['go'], what: xssWhat, args: 'any', verify: goNonHtmlResponse, callee: x('fmt\\.(?:Fprintf|Fprint|Fprintln)|io\\.WriteString|(?:w|rw|resp|res|writer|wr)\\.Write|(?:c|ctx)\\.(?:String|Writer\\.Write|Data|HTML)'),
-    when: (c) => /^(?:fmt\.F|io\.WriteString)/.test(c.callee) ? /^(?:w|rw|resp|res|writer|wr|c\.Writer|ctx\.Writer)\b/.test(c.args[0]?.text || '') : true,
+    when: (c) => /^(?:fmt\.F|io\.WriteString)/.test(c.callee) ? /^(?:w|rw|resp|res|writer|wr|c\.Writer|ctx\.Writer)\b/.test(c.args[0]?.text || '') : !/^(?:c|ctx)\.HTML$/.test(c.callee) || c.args.length === 2,   // Gin c.HTML(code, tmpl, data) renders a template; Echo c.HTML(code, html) writes the string
     argsFn: (c) => /^(?:fmt\.F|io\.WriteString)/.test(c.callee) ? c.args.map((_, i) => i).filter(i => i > 0) : /^(?:c|ctx)\.(?:String|Data|HTML)$/.test(c.callee) ? c.args.map((_, i) => i).filter(i => i > 0) : [0] }),
   call({ ...XSS, id: 'xss-rust', langs: ['rust'], what: xssWhat, args: [0], chain: true, callee: /^HttpResponse::\w+\(\)(?:\.\w+\(\))*\.body$|^(?:axum::response::)?Html$|^(?:maud::)?PreEscaped$|^(?:warp::)?reply::html$|^RawHtml$|^content::RawHtml$|^(?:HttpResponse::\w+\(\)\.content_type\(\))\.body$/ }),
   call({ ...XSS, id: 'xss-jvm-writer', langs: JVM, what: xssWhat, args: 'any', chain: true, callee: /^(?:response|resp|res)\.getWriter\(\)\.(?:println|print|write|append|printf|format)$|^(?:response|resp|res)\.(?:writer|outputStream)\.(?:println|print|write|append)$/ }),
   call({ ...XSS, id: 'xss-jvm-out', langs: JVM, what: xssWhat, args: 'any', callee: x('(?:out|writer|pw|printWriter|w)\\.(?:println|print|write|append|printf)'), when: (c, f) => /getWriter\s*\(|HttpServletResponse|response\./.test(f.ctx.code) }),
-  call({ ...XSS, id: 'xss-jvm-ssti', langs: JVM, what: ssti, sev: 'critical', args: 'any', callee: x('(?:\\w*[tT]emplateEngine|engine|thymeleaf)\\.process|Velocity\\.evaluate|(?:\\w+\\.)?(?:evaluate)|Template|StringTemplateLoader\\.putTemplate|\\w+\\.putTemplate'),
+  call({ ...STI, id: 'xss-jvm-ssti', langs: JVM, what: ssti, sev: 'critical', args: 'any', callee: x('(?:\\w*[tT]emplateEngine|engine|thymeleaf)\\.process|Velocity\\.evaluate|(?:\\w+\\.)?(?:evaluate)|Template|StringTemplateLoader\\.putTemplate|\\w+\\.putTemplate'),
     when: (c, f) => /process|putTemplate/.test(c.callee) || (/Velocity\.evaluate/.test(c.callee)) || (c.isNew && /StringReader/.test(c.text)) }),
   call({ ...XSS, id: 'xss-kotlin-ktor', langs: ['kotlin'], what: xssWhat, args: [0], callee: x('call\\.respondText|call\\.respondHtml|call\\.respondBytes'), when: (c) => /Html|text\/html/.test(c.text) }),
   call({ ...XSS, id: 'xss-csharp', langs: ['csharp'], what: xssWhat, args: [0], callee: x('(?:HttpContext\\.)?Response\\.Write|(?:HttpContext\\.)?Response\\.WriteAsync|(?:Html|@Html)\\.Raw|HtmlString|MvcHtmlString\\.Create|Content|Results\\.Content|ContentResult|Server\\.HtmlDecode|new\\.HtmlString'),
@@ -83,22 +133,112 @@ const XSS_RULES = [
     argsFn: (c) => c.name === 'loadHTMLString' ? [0] : [0] }),
 ];
 
-// Returning HTML built from input: Flask/Spring/etc. handlers
-function returnHtmlRule(id, langs, gate) {
+// Names that hold HTML this handler assembled:  html = '<ul>'   html += '<li>' + x   parts.append('<li>' …)   sb.append("<b>")
+// A tag only counts when it sits inside a string literal (the code view blanks strings), so generics (List<String>) are ignored.
+function htmlBuiltNames(flow) {
+  if (flow._htmlNames) return flow._htmlNames;
+  const names = new Set();
+  const tagInString = (ll) => { const re = /<\s*\/?\s*[a-zA-Z!]/g; let m; while ((m = re.exec(ll.lit)) !== null) if (ll.text[m.index] !== ll.lit[m.index]) return true; return false; };
+  for (const ll of flow.ctx.logical) {
+    if (!tagInString(ll)) continue;
+    const a = flow._parseAssignment(ll.text);
+    if (a) for (const n of a.lhs) names.add(n);
+    const mu = /^\s*([\w$.]+?)\s*\.\s*(?:append|push|add|write|writeln|concat|extend|insert|AppendLine|Append|AppendFormat|WriteString|push_str|print|println)\s*\(/.exec(ll.text);
+    if (mu) names.add(mu[1]);
+  }
+  return (flow._htmlNames = names);
+}
+const mentionsHtmlName = (flow, expr) => {
+  const names = htmlBuiltNames(flow);
+  if (!names.size) return false;
+  for (const tok of expr.match(/[\w$.]+/g) || []) if (names.has(tok) || names.has(tok.split('.')[0])) return true;
+  return false;
+};
+
+// Returning HTML built from input: Flask / Spring / Fastify / Nest / WordPress shortcodes and filters / Laravel controllers.
+// The returned expression is HTML when it contains an HTML literal itself or names a variable assembled from HTML literals.
+function returnHtmlRule(id, langs, gate, opts = {}) {
   return custom({ ...XSS, id, langs, what: xssWhat, conf: 'medium',
     run(flow, emit) {
       if (gate && !gate(flow)) return;
       for (const ll of flow.ctx.logical) {
-        const mm = /^\s*return\s+([\s\S]+)$/.exec(ll.text); if (!mm) continue;
+        const mm = /^\s*return\b\s*([\s\S]+)$/.exec(ll.text); if (!mm) continue;
+        if (opts.unless && opts.unless.test(mm[1])) continue;
         const lit = ll.lit.slice(ll.lit.length - mm[1].length);
-        if (!/<\s*[a-zA-Z!\/]/.test(lit)) continue;
+        if (!/<\s*[a-zA-Z!\/]/.test(lit) && !mentionsHtmlName(flow, mm[1])) continue;
         const st = flow.state(mm[1], lit, ll.line).filter(s => !isCleared(s, 'html'));
         if (st.length) emit(ll.start, { desc: `A response is built as HTML by concatenating ${st[0].origin || 'parameter "' + st[0].param + '"'} without escaping it.`, flowInfo: flowOf(st[0]) });
       }
     } });
 }
-XSS_RULES.push(returnHtmlRule('xss-py-return', ['python'], (f) => /@\s*[\w.]+\s*\.\s*(?:route|get|post|put|delete|patch)\s*\(|def\s+(?:get|post|put|delete|patch)\b|HttpResponse|View\b/.test(f.chunk.code.slice(0, 900)) || f.routeHandler));
+XSS_RULES.push(returnHtmlRule('xss-py-return', ['python'], (f) => {
+  if (/\bfastapi\b|\bstarlette\b/i.test(fileText(f)) && !/response_class\s*=\s*(?:HTMLResponse|Response)\b|HTMLResponse/.test(f.chunk.code.slice(0, 900))) return false;   // FastAPI returns JSON by default
+  return /@\s*[\w.]+\s*\.\s*(?:route|get|post|put|delete|patch)\s*\(|def\s+(?:get|post|put|delete|patch)\b|HttpResponse|View\b/.test(f.chunk.code.slice(0, 900)) || f.routeHandler;
+}));
 XSS_RULES.push(returnHtmlRule('xss-jvm-return', JVM, (f) => /@ResponseBody|@RestController|produces\s*=\s*["']text\/html/.test(f.chunk.code.slice(0, 1200)) || /@RestController/.test(f.chunk.code)));
+
+// Route handlers in Fastify / Nest / Hapi / Koa that return an HTML string; WordPress shortcodes, filters and Laravel / Symfony
+// actions that return one. (Express handlers write with res.send, which xss-js-send covers.)
+XSS_RULES.push(returnHtmlRule('xss-js-return', ['js'],
+  (f) => /@(?:Get|Post|Put|Delete|Patch|All|Head|Options)\s*\(|\b(?:fastify|server|app|router|api|route)\s*\.\s*(?:get|post|put|delete|patch|route|all)\s*\(|\breply\b|\bh\.response\b|\bctx\b/.test(f.chunk.code),
+  { unless: /\.json\s*\(|\.jsonp\s*\(|JSON\.stringify|^\s*[{\[]|\.redirect\s*\(|\.sendStatus\s*\(/ }));
+XSS_RULES.push(returnHtmlRule('xss-php-return', ['php'], null,
+  { unless: /\b(?:json_encode|wp_json_encode|wp_send_json\w*|rest_ensure_response|WP_REST_Response|WP_Error|JsonResponse)\b|->\s*json\s*\(|\barray\s*\(|^\s*\[/ }));
+
+XSS_RULES.push(
+  call({ ...XSS, id: 'xss-php-response', langs: ['php'], what: xssWhat, args: [0], callee: /^(?:response|Response|HtmlResponse)$/, when: (c) => !/application\/json|text\/plain/i.test(c.lit) }),
+
+  // ── server-side template injection: more engines and the template-selection variants ──────────────────────
+  call({ ...STI, id: 'xss-js-ssti-file', langs: ['js'], what: stiFile, sev: 'high', args: [0], callee: /^(?:ejs|pug|jade|nunjucks|swig|hogan|dust|hbs|handlebars)\.(?:renderFile|__express)$/ }),
+  call({ ...STI, id: 'xss-js-render-view', langs: ['js'], what: stiFile, sev: 'high', args: [0], chain: true,
+    callee: /^(?:res|response|reply|resp|ctx|app)(?:\.(?:status|type|set|header)\(\))*\.(?:render|view)$/, when: (c) => /\./.test(c.chain) }),
+  call({ ...STI, id: 'xss-js-render-opts', langs: ['js'], conf: 'low', sev: 'high', args: [1], chain: true,
+    what: 'receives the whole request object as render options, so the request can set template-engine options (outputFunctionName, layout, …); this is how EJS render options became RCE (CVE-2022-29078)',
+    callee: /^(?:res|response|reply|resp|ctx|app)(?:\.(?:status|type|set|header)\(\))*\.(?:render|view)$/,
+    when: (c, f) => /^\s*(?:\{\s*\.\.\.\s*)?(?:req|request|ctx\.request|ctx)\.(?:query|body|params)\s*\}?\s*$/.test(c.args[1] ? c.args[1].text : '') && /\bejs\b|view\s*engine/i.test(fileText(f)) }),
+
+  call({ ...STI, id: 'xss-php-ssti', langs: ['php'], what: ssti, args: [0],
+    callee: /(?:^|[.:])(?:createTemplate|compileString|renderString|render_string|template_from_string|ArrayLoader|Twig_Loader_Array|Twig_Loader_String|StringLoader)$|^Blade::render$/ }),
+  call({ ...STI, id: 'xss-php-ssti-engine', langs: ['php'], what: ssti, args: [0], conf: 'medium',
+    callee: /(?:^|[.:])(?:fetch|display|render|renderToString|loadString|isCached)$/,
+    fileGate: /\bsmarty\b|mustache|handlebars|latte\\|plates|dwoo|savant|twig/i }),
+  call({ ...STI, id: 'xss-php-ssti-view', langs: ['php'], what: stiFile, sev: 'high', conf: 'low', args: [0], callee: /^(?:view|View::make|View::first|Response::view)$/ }),
+
+  call({ ...STI, id: 'xss-go-ssti', langs: ['go'], what: 'compiles it as a template (or loads it as a template file), so the input can execute template actions', args: 'any', chain: true,
+    callee: /(?:^|\.)(?:Parse|ParseFiles|ParseGlob|ParseFS)$/,
+    when: (c, f) => /["`](?:html|text)\/template["`]/.test(fileText(f)) && /template|tmpl|tpl|\.New\(\)/i.test(c.chain) && !/^(?:url|time|flag|strconv|net|netip|uuid|semver|mail|json|yaml|toml|big|version)\./.test(c.chain) }),
+  call({ ...XSS, id: 'xss-go-texttemplate', langs: ['go'], what: 'is executed through text/template into the HTTP response, which does not HTML-escape (use html/template)', verify: goNonHtmlResponse, conf: 'medium',
+    callee: /(?:^|\.)(?:Execute|ExecuteTemplate)$/,
+    when: (c, f) => /["`]text\/template["`]/.test(fileText(f)) && !/["`]html\/template["`]/.test(fileText(f)) && /^(?:w|rw|resp|res|writer|wr|c\.Writer|ctx\.Writer)\b/.test(c.args[0] ? c.args[0].text : ''),
+    argsFn: (c) => /ExecuteTemplate$/.test(c.callee) ? [2] : [1] }),
+
+  call({ ...STI, id: 'xss-csharp-ssti', langs: ['csharp'], what: ssti,
+    callee: /(?:^|\.)(?:Razor\.(?:Parse|Compile|RunCompile)|Template\.(?:Parse|ParseLiquid|ParseScriban|Evaluate)|Handlebars\.Compile|\w+\.(?:RunCompile|CompileRenderString|CompileRenderStringAsync|RenderStringAsync|ParseAndRender|ParseAndRenderAsync|CompileTemplateAsync|ParseTemplate))$/,
+    argsFn: (c) => /CompileRenderString/.test(c.callee) ? [1] : [0] }),
+  call({ ...STI, id: 'xss-csharp-ssti-fluid', langs: ['csharp'], what: ssti, args: [0], callee: /(?:^|\.)(?:Parse|TryParse)$/,
+    fileGate: /\bFluid\b|FluidParser|Scriban|DotLiquid|Stubble|Mustachio|Nustache/,
+    when: (c) => !/^(?:int|Int32|Int64|long|double|Double|decimal|Decimal|float|Single|short|bool|Boolean|byte|Guid|DateTime|DateTimeOffset|TimeSpan|Enum|Uri|IPAddress|Version|char)\./.test(c.callee) }),
+
+  call({ ...STI, id: 'xss-rust-ssti', langs: ['rust'], what: ssti,
+    callee: /(?:^|[.:])(?:one_off|add_raw_template|add_raw_templates|render_template|register_template_string|render_str|render_template_string)$/,
+    argsFn: (c) => /(?:add_raw_template|register_template_string)$/.test(c.callee) ? [1] : [0] }),
+
+  call({ ...STI, id: 'xss-jvm-modelview', langs: JVM, sev: 'high', args: [0], what: 'is used as the view name, so the template engine (Thymeleaf, FreeMarker, Velocity) resolves, and may evaluate, it', callee: m('ModelAndView|setViewName') }),
+  // Spring MVC: a @Controller method that returns a view name built from input (Thymeleaf evaluates `__${…}__` and fragment expressions in it)
+  custom({ ...STI, id: 'xss-jvm-viewname', langs: JVM, sev: 'high', conf: 'medium', what: 'is returned as the view name',
+    run(flow, emit) {
+      const file = fileText(flow);
+      if (!/@Controller\b/.test(file) || /@RestController/.test(file) || /@ResponseBody/.test(flow.chunk.code)) return;
+      for (const ll of flow.ctx.logical) {
+        const mm = /^\s*return\s+([\s\S]+)$/.exec(ll.text); if (!mm) continue;
+        const lit = ll.lit.slice(ll.lit.length - mm[1].length);
+        if (/^\s*["']\s*(?:redirect|forward):/.test(lit) || /\b(?:ResponseEntity|ModelAndView|RedirectView|Map\.of|List\.of|null)\b/.test(mm[1])) continue;
+        if (!/["']/.test(lit) && !/^[\w.]+$/.test(mm[1].trim())) continue;
+        const st = flow.state(mm[1], lit, ll.line).filter(s => !isCleared(s, 'ssti'));
+        if (st.length) emit(ll.start, { desc: `${st[0].origin || 'Parameter "' + st[0].param + '"'} is used to build the view name this controller returns, so the template engine can resolve or evaluate attacker-chosen template text.`, flowInfo: flowOf(st[0]) });
+      }
+    } }),
+);
 
 // ═══ Open redirect ═══════════════════════════════════════════════════════════
 const REDIR = { cls: 'open redirect', group: 'redirect', sev: 'medium', fix: 'Redirect only to relative paths or to hosts on an explicit allowlist; map user choices to server-side route names, and validate with the framework helper (url_has_allowed_host_and_scheme, LocalRedirect).' };

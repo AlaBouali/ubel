@@ -18,7 +18,7 @@
 // every call site of the function and asking what that call passes.
 
 import {
-  SOURCES, LIT_SOURCES, OUT_SOURCES, SANITIZER_CALLS, SANITIZER_SUFFIX, SANITIZER_CAST, SANITIZER_CAST_GROUP, CALLBACK_WRAPPERS, sourceClears,
+  SOURCES, LIT_SOURCES, OUT_SOURCES, SANITIZER_SUFFIX, SANITIZER_CAST, sanitizerGroups, CALLBACK_MAPPERS, typedAccessorGroups,
   parseParams, goRequestNames, splitTop, isFrameworkParamName,
   LOCAL_ORIGIN, LOCAL_OK_GROUPS, WEB_CONTEXT, NON_WEB_SOURCES, JS_MESSAGE_SOURCE, JS_MESSAGE_CONTEXT,
 } from './syntax.js';
@@ -28,6 +28,8 @@ import { readFileText } from './filetext.js';
 const KEYWORD_LINE = /^\s*(?:if|else|elif|elsif|while|until|switch|case|default|return|throw|raise|yield|assert|echo|print|puts|import|from|package|using|include|require|goto|break|continue|do|try|catch|finally|except|with|unless|when|lock|delete|del|pass|fn|def|function|func|fun|class|struct|enum|interface|impl|trait|namespace|module|use|mod|type)\b/;
 const NOT_VAR = new Set(['_', 'err', 'error', 'ok', 'e', 'ex', 'exc', 'nil', 'null', 'None', 'true', 'false', 'this', 'self', 'cls', 'let', 'var', 'val', 'const', 'final', 'mut', 'auto', 'static', 'new', 'global', 'local', 'my', 'our', 'public', 'private', 'protected', 'readonly', 'String', 'string', 'int', 'long', 'bool', 'boolean', 'float', 'double', 'char', 'byte', 'Object', 'object', 'dynamic', 'List', 'Map', 'Set', 'Optional', 'Future']);
 
+const MUT_NAME = /^(?:append|push|add|extend|put|write|writeln|insert|concat|set|setdefault|update|unshift|addAll|prepend|merge|appendLine|appendFormat|push_str|offer|putAll|Add|Append|AppendLine|AppendFormat|Write|WriteString|WriteLine|Insert|Concat|assign)$/;
+const MUT_CALL = /^(.+)\.(?:append|push|add|extend|put|write|writeln|insert|concat|set|setdefault|update|unshift|addAll|prepend|merge|appendLine|appendFormat|push_str|offer|putAll|Add|Append|AppendLine|AppendFormat|Write|WriteString|WriteLine|Insert|Concat|assign)$/;
 const MUTATORS = /\.\s*(?:append|push|add|extend|put|write|writeln|insert|concat|set|setdefault|update|unshift|addAll|prepend|merge|appendLine|appendFormat|append_str|push_str|offer|putAll|Add|Append|AppendLine|AppendFormat|Write|WriteString|WriteLine|Insert|Concat|assign)\s*\(/;
 
 export const GROUP_ALL = 'all';
@@ -39,20 +41,25 @@ function indentOf(text, ctx, ll) {
 }
 
 // ── helpers over expression text ─────────────────────────────────────────────
-// Which argument (0-based) of the call opened at `open` does offset `pos` fall in?
-function argIndexAt(text, open, pos) {
-  let idx = 0, depth = 0;
-  for (let i = open + 1; i < pos; i++) {
-    const ch = text[i];
-    if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (ch === ',' && depth === 0) idx++;
+// Top-level argument ranges [start, end) of the call whose '(' is at `open`.
+function argRanges(text, open) {
+  const out = [];
+  let depth = 0, s0 = open + 1;
+  for (let k = open + 1; k < text.length; k++) {
+    const c = text[k];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) { out.push([s0, k]); return out; }
+      depth--;
+    } else if (c === ',' && depth === 0) { out.push([s0, k]); s0 = k + 1; }
   }
-  return idx;
+  out.push([s0, text.length]);
+  return out;
 }
 
 function enclosingCallees(text, pos) {
-  // every call whose argument list contains `pos`: { callee path, arg index, offset of its '(' }
+  // every call whose argument list contains `pos`: callee path, the argument position `pos` sits in, and the
+  // ranges of all its arguments (so a sibling argument, e.g. an array_map callback name, can be read)
   const out = [];
   let depth = 0;
   for (let k = pos - 1; k >= 0; k--) {
@@ -63,42 +70,31 @@ function enclosingCallees(text, pos) {
       else {
         const before = text.slice(Math.max(0, k - 80), k);
         const m = /([A-Za-z_$][\w$]*(?:\s*(?:\?\.|\.|::|->)\s*[A-Za-z_$][\w$]*)*)\s*!?\s*$/.exec(before);
-        if (m) out.push({ callee: m[1].replace(/\s+/g, '').replace(/\?\./g, '.').replace(/->/g, '.'), arg: argIndexAt(text, k, pos), open: k });
+        if (m) {
+          const ranges = argRanges(text, k);
+          let arg = ranges.findIndex(([a, b]) => pos >= a && pos < b);
+          if (arg < 0) arg = 0;
+          out.push({ callee: m[1].replace(/\s+/g, '').replace(/\?\./g, '.').replace(/->/g, '.'), arg, ranges });
+        }
       }
     }
   }
   return out;
 }
 
-// Does this sanitizer entry apply to a value sitting in argument `arg` of the call?
-// (`$wpdb->prepare($sql, $value)` binds `$value` but never cleans `$sql`; `wp_kses($html, $allowed)` cleans only `$html`.)
-const argApplies = (s, arg) => (s.minArg === undefined || arg >= s.minArg) && (s.maxArg === undefined || arg <= s.maxArg);
-
-// `array_map('absint', $ids)`, `map(int, xs)`, `map_deep($v, 'sanitize_text_field')`: the callback is a sanitizer, so
-// everything passing through the call is sanitised. The callback name is read from the literal view, where
-// 'absint' still shows (the code view blanks string text).
-function callbackGroups(lit, call) {
-  const w = CALLBACK_WRAPPERS.find(x => x.re.test(call.callee) && (x.data === undefined ? call.arg > x.cb : call.arg === x.data));
-  if (!w || !lit) return null;
-  const segs = splitTop(lit.slice(call.open + 1));
-  const cbText = (segs[w.cb] || '').trim();
-  let name = /^['"]?([\w\\:.$>-]+)['"]?[\s);]*$/.exec(cbText)?.[1];
+// `lit` (optional) is the literal view of `text`, used to read callback names such as array_map('absint', …).
+function clearedBy(text, start, end, family = null, lit = '') {
   const groups = new Set();
-  const tryName = (n) => { for (const s of SANITIZER_CALLS) if (argApplies(s, 0) && s.re.test(n)) s.groups.forEach(g => groups.add(g)); };
-  if (name) tryName(name.replace(/^\\/, '').replace(/->|::/g, '.'));
-  else if (/^(?:static\s+)?(?:fn|function)\b|=>|->/.test(cbText)) {      // closure: sanitisers / casts it applies to its parameter
-    for (const m of cbText.matchAll(/([A-Za-z_][\w$]*(?:\s*(?:\.|::|->)\s*[A-Za-z_$][\w$]*)*)\s*\(/g)) tryName(m[1].replace(/\s+/g, '').replace(/->|::/g, '.'));
-    if (/\(\s*(?:int|integer|float|double|bool|boolean)\s*\)/.test(cbText)) groups.add(SANITIZER_CAST_GROUP);      // fn($v) => (int) $v
-  }
-  return groups.size ? groups : null;
-}
-
-function clearedBy(text, start, end, lit) {
-  const groups = new Set();
-  for (const call of enclosingCallees(text, start)) {
-    for (const s of SANITIZER_CALLS) if (s.re.test(call.callee) && argApplies(s, call.arg)) s.groups.forEach(g => groups.add(g));
-    const cg = lit && lit.length === text.length ? callbackGroups(lit, call) : null;
-    if (cg) cg.forEach(g => groups.add(g));
+  const litAligned = lit && lit.length === text.length;
+  for (const e of enclosingCallees(text, start)) {
+    for (const g of sanitizerGroups(e.callee, e.arg, family)) groups.add(g);
+    // array_map('sanitize_text_field', $_POST['ids']):  the callback named in the literal cleans every element
+    if (litAligned) {
+      const mapper = CALLBACK_MAPPERS.find(c => c.langs.includes(family) && c.re.test(e.callee));
+      const cbRange = mapper && e.arg !== mapper.cb ? e.ranges[mapper.cb] : null;
+      const cbName = cbRange ? /^\s*['"]\\?([A-Za-z_][\w\\]*)['"]\s*$/.exec(lit.slice(cbRange[0], cbRange[1])) : null;
+      if (cbName) for (const g of sanitizerGroups(cbName[1].split('\\').pop(), 0, family)) groups.add(g);
+    }
   }
   if (SANITIZER_CAST.test(text.slice(Math.max(0, start - 40), start))) groups.add(GROUP_ALL);
   // new URL(rel, location.href): the second argument is only the BASE used to resolve `rel`; a base can
@@ -113,6 +109,120 @@ function clearedBy(text, start, end, lit) {
   }
   for (const s of SANITIZER_SUFFIX) if (s.re.test(rest)) s.groups.forEach(g => groups.add(g));
   return groups;
+}
+
+// ── parts of an expression that cannot contribute to its VALUE ─────────────────────────────────────────────
+//   cond ? a : b     `cond` only chooses a branch; only `a` and `b` can end up in the result
+//   a === b          a comparison yields a boolean, whatever its operands were
+// Masking them (offset-preserving) stops `$class = ($name === $_REQUEST['s']) ? ' class="x"' : '';` from being
+// treated as request data.
+const TERNARY_FAMILIES = new Set(['php', 'js', 'java', 'csharp', 'c', 'cpp', 'dart', 'swift', 'ruby']);
+const VALUE_LOGIC_FAMILIES = new Set(['js', 'python', 'ruby']);   // `a && b` / `a || b` evaluate to an operand there, to a boolean elsewhere
+
+function matchingColon(text, from) {
+  let depth = 0, nested = 0;
+  for (let j = from; j < text.length; j++) {
+    const c = text[j];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { if (depth === 0) return -1; depth--; }
+    else if (depth === 0) {
+      if (c === '?') {
+        const nx = text[j + 1] || '', pv = text[j - 1] || '';
+        if (nx === '?' || pv === '?' || nx === ':' || nx === '>' || nx === '[' || nx === '.' || (nx === '-' && text[j + 2] === '>')) continue;
+        nested++;
+      } else if (c === ':') {
+        if (text[j + 1] === ':') { j++; continue; }
+        if (text[j - 1] === ':' || text[j - 1] === '?') continue;
+        if (nested === 0) return j;
+        nested--;
+      } else if (c === ',' || c === ';') return -1;
+    }
+  }
+  return -1;
+}
+
+function nonFlowingRanges(text, family) {
+  const ranges = [];
+  const ternary = TERNARY_FAMILIES.has(family) && text.includes('?');
+  const pyIf = family === 'python' && /\bif\b/.test(text) && /\belse\b/.test(text);
+  const cmp = /[=!<>]=|<>|\binstanceof\b/.test(text);
+  if (!ternary && !pyIf && !cmp) return ranges;
+
+  // 1. conditions of `cond ? a : b` (and Python's `a if cond else b`)
+  if (ternary) {
+    const segStart = [0], colonAt = new Set();
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i], d = segStart.length - 1;
+      if (c === '(' || c === '[' || c === '{') segStart.push(i + 1);
+      else if (c === ')' || c === ']' || c === '}') { if (d > 0) segStart.pop(); }
+      else if (c === ',' || c === ';') segStart[d] = i + 1;
+      else if (c === ':' && colonAt.has(i)) segStart[d] = i + 1;
+      else if (c === '?') {
+        const nx = text[i + 1] || '', pv = text[i - 1] || '';
+        if (nx === '?' || pv === '?' || nx === ':' || nx === '>' || nx === '[' || (nx === '.' && !/\d/.test(text[i + 2] || '')) || (nx === '-' && text[i + 2] === '>')) continue;
+        const colon = matchingColon(text, i + 1);
+        if (colon < 0) continue;
+        if (i > segStart[d]) ranges.push([segStart[d], i]);
+        colonAt.add(colon);
+        segStart[d] = i + 1;
+      }
+    }
+  }
+  if (pyIf) {
+    const depth = new Array(text.length);
+    let d = 0;
+    for (let i = 0; i < text.length; i++) { const c = text[i]; if (c === ')' || c === ']' || c === '}') d--; depth[i] = d; if (c === '(' || c === '[' || c === '{') d++; }
+    const re = /\bif\b/g; let m;
+    while ((m = re.exec(text)) !== null) {
+      const dk = depth[m.index], er = /\belse\b/g; er.lastIndex = m.index + 2; let e;
+      while ((e = er.exec(text)) !== null) {
+        if (depth[e.index] < dk) break;
+        if (depth[e.index] === dk) { ranges.push([m.index + 2, e.index]); break; }
+      }
+    }
+  }
+
+  // 2. boolean-valued sub-expressions: comparisons (and, where `&&`/`||` yield booleans, logical combinations of them)
+  if (cmp) {
+    let t2 = text;
+    for (const [a, b] of ranges) t2 = t2.slice(0, a) + ' '.repeat(b - a) + t2.slice(b);
+    const valueLogic = VALUE_LOGIC_FAMILIES.has(family);
+    const fresh = (s0) => ({ s: s0, cmp: false, logic: false, other: false });
+    const stack = [fresh(0)];
+    const finish = (sg, e) => {
+      if (sg.other || e <= sg.s) return;
+      if (sg.cmp || (sg.logic && !valueLogic)) { if (!(sg.logic && valueLogic)) ranges.push([sg.s, e]); }
+    };
+    for (let i = 0; i < t2.length; i++) {
+      const c = t2[i], sg = stack[stack.length - 1];
+      if (c === '(' || c === '[' || c === '{') stack.push(fresh(i + 1));
+      else if (c === ')' || c === ']' || c === '}') { if (stack.length > 1) finish(stack.pop(), i); }
+      else if (c === ',' || c === ';') { finish(sg, i); Object.assign(sg, fresh(i + 1)); }
+      else {
+        const o3 = t2.substr(i, 3);
+        if (o3 === '===' || o3 === '!==' || o3 === '<=>') { sg.cmp = true; i += 2; }
+        else if (/^(?:==|!=|<=|>=|<>)/.test(o3)) { sg.cmp = true; i += 1; }
+        else if (o3.startsWith('=>')) { sg.other = true; i += 1; }
+        else if (c === '=' && !/[=!<>+\-*/.%&|^?]/.test(t2[i - 1] || '')) sg.other = true;      // assignment inside the segment
+        else if (o3.startsWith('&&') || o3.startsWith('||')) { sg.logic = true; i += 1; }
+        else if (o3.startsWith('??')) { sg.other = true; i += 1; }
+        else if (c === '?' ) sg.other = true;
+        else if (/[A-Za-z_]/.test(c) && !/[\w$]/.test(t2[i - 1] || '')) {
+          const w = /^(?:instanceof|and|or|xor)\b/.exec(t2.slice(i, i + 11));
+          if (w) { if (w[0] === 'instanceof') sg.cmp = true; else sg.logic = true; i += w[0].length - 1; }
+        }
+      }
+    }
+    while (stack.length) finish(stack.pop(), t2.length);
+  }
+  return ranges;
+}
+
+function maskRanges(str, ranges) {
+  if (!ranges.length) return str;
+  const chars = str.split('');
+  for (const [a, b] of ranges) for (let i = a; i < b && i < chars.length; i++) chars[i] = ' ';
+  return chars.join('');
 }
 
 const union = (a, b) => { const o = new Set(a); for (const x of b) o.add(x); return o; };
@@ -187,6 +297,11 @@ class Flow {
 
   // ── expression state ───────────────────────────────────────────────────────
   state(text, lit = '', line = 1) {
+    const dead = nonFlowingRanges(text, this.family);
+    if (dead.length) {
+      if (lit && lit.length === text.length) lit = maskRanges(lit, dead);
+      text = maskRanges(text, dead);
+    }
     const out = [];
     const seen = new Set();
     const add = (c) => { const key = `${c.kind}|${c.origin || c.param}|${[...c.cleared].sort().join(',')}`; if (!seen.has(key)) { seen.add(key); out.push(c); } };
@@ -197,15 +312,14 @@ class Flow {
       while ((m = this.sourceRe.exec(text)) !== null) {
         if (m[0] === '') { this.sourceRe.lastIndex++; continue; }
         const origin = m[0].replace(/\s+/g, '');
-        const endM = m.index + m[0].length;
-        add({ kind: 'src', origin, line, local: LOCAL_ORIGIN.test(origin), cleared: union(clearedBy(text, m.index, endM, lit), sourceClears(origin, text.slice(endM, endM + 200))) });
+        add({ kind: 'src', origin, line, local: LOCAL_ORIGIN.test(origin), cleared: union(clearedBy(text, m.index, m.index + m[0].length, this.family, lit), typedAccessorGroups(origin, this.family)) });
       }
     }
     const lit2 = LIT_SOURCES[this.family];
     if (lit2 && lit) {
       lit2.lastIndex = 0;
       let m;
-      while ((m = lit2.exec(lit)) !== null) add({ kind: 'src', origin: m[0].replace(/\s+/g, ''), line, cleared: clearedBy(text, m.index, m.index + m[0].length) });
+      while ((m = lit2.exec(lit)) !== null) add({ kind: 'src', origin: m[0].replace(/\s+/g, ''), line, cleared: clearedBy(text, m.index, m.index + m[0].length, this.family, lit) });
     }
 
     for (const p of accessPaths(text)) {
@@ -216,18 +330,18 @@ class Flow {
         if (this.vars.has(key)) { hit = this.vars.get(key); used = n; break; }
       }
       if (hit) {
-        const after = clearedBy(text, p.start, p.ends[used - 1] ?? p.end, lit);
+        const after = clearedBy(text, p.start, p.ends[used - 1] ?? p.end, this.family, lit);
         for (const c of hit.contribs) add({ ...c, cleared: union(c.cleared, after) });
         continue;
       }
       if (this.params.has(p.base) && !this.vars.has(p.base) && !isFrameworkParamName(p.base)) {
         const pr = this.params.get(p.base);
-        add({ kind: 'param', param: p.base, index: pr.index, line, cleared: union(new Set(pr.cleared), clearedBy(text, p.start, p.ends[0], lit)) });
+        add({ kind: 'param', param: p.base, index: pr.index, line, cleared: union(new Set(pr.cleared), clearedBy(text, p.start, p.ends[0], this.family, lit)) });
         continue;
       }
       if (p.call) {
         const callee = this.engine.returnTaint(p.path.split('.').pop(), this.chunk);
-        if (callee) add({ kind: 'src', origin: `${p.path}() return value (${callee})`, line, cleared: clearedBy(text, p.start, p.end, lit) });
+        if (callee) add({ kind: 'src', origin: `${p.path}() return value (${callee})`, line, cleared: clearedBy(text, p.start, p.end, this.family, lit) });
       }
     }
     return lit && REDIR_FIXED_ORIGIN.test(lit) ? markRedirectSafe(out) : out;
@@ -294,7 +408,9 @@ class Flow {
         if (MUTATORS.test(text)) {
           for (const call of ctx.calls) {
             if (call.start < ll.start || call.start >= ll.end) continue;
-            const m = /^(.+)\.(?:append|push|add|extend|put|write|writeln|insert|concat|set|setdefault|update|unshift|addAll|prepend|merge|appendLine|appendFormat|push_str|offer|putAll|Add|Append|AppendLine|AppendFormat|Write|WriteString|WriteLine|Insert|Concat|assign)$/.exec(call.callee);
+            // `sb.append(a).append(b)`: the chained call has no receiver of its own, the receiver is the head of the chain
+            const target = !call.callee.includes('.') && call.chain && call.chain.includes('().') && MUT_NAME.test(call.callee) ? call.chain.split('().')[0] : call.callee;
+            const m = MUT_CALL.exec(target);
             if (!m) continue;
             const recv = m[1].replace(/\(\)/g, '');
             const st = this.state(call.args.map(a => a.text).join(', '), call.args.map(a => a.lit).join(', '), ll.line);

@@ -49,13 +49,9 @@ export const SOURCES = {
     String.raw`\b(?:Input|Request)\s*::\s*(?:get|input|query|all|post|only|except|cookie|header|file|json|segment)\w*\s*\(`,
     String.raw`\bfilter_input(?:_array)?\s*\(`,
     String.raw`\bgetallheaders\s*\(|\bapache_request_headers\s*\(`,
-    String.raw`\bget_query_var\s*\(|\bget_query_arg\s*\(`,
-    String.raw`\bwp_get_(?:raw_)?referer\s*\(|\$wp(?:_query)?\s*->\s*query_vars\b|\$wp_query\s*->\s*get\s*\(`,
-    String.raw`\$request\s*\[`,
-    String.raw`\brequest\s*\(\s*\)\s*->\s*\w+|(?<![\w$>:.\\])request\s*\(\s*['"]`,
-    String.raw`\bYii\s*::\s*\$app\s*->\s*request\s*->\s*\w+`,
-    String.raw`\$this\s*->\s*input\s*->\s*(?:get|post|get_post|post_get|cookie|server|raw_input_stream|get_request_header|input_stream)\w*\s*\(`,
-    String.raw`\$this\s*->\s*request\s*->\s*(?:getQuery|getData|getParam|getCookie|getParsedBody|getQueryParams|getUploadedFiles)\w*`,
+    String.raw`\bget_query_var\s*\(|\bget_query_arg\s*\(|\bwp_get_raw_referer\s*\(`,
+    String.raw`\$(?:wp|wp_query)\s*->\s*query_vars\b`,
+    String.raw`\$request\s*\[`,                       // WP_REST_Request / Laravel Request are ArrayAccess
     String.raw`\$(?:argv|argc)\b|\bSTDIN\b|\breadline\s*\(`,
   ),
   ruby: src(
@@ -158,6 +154,14 @@ export const OUT_SOURCES = {
 // survives it. Matching is on the normalised callee path (`a . b` → `a.b`).
 const ALL = ['all'];
 const NUM = ['num'];   // numeric conversion: not injectable, but the magnitude is still attacker-chosen (memory / integer classes)
+const URLG = ['header', 'log', 'html', 'redirect_param'];   // URL-component encoding
+const PHP = ['php'];
+const JVMG = ['java', 'kotlin'];
+//
+// Entry options (all optional):
+//   langs    only for these language families (default: every family)
+//   argFrom  the call cleans a value only when it sits in argument position >= argFrom
+//            ($wpdb->prepare($sql, ...$values): the SQL text in position 0 is NOT cleaned, the bound values are)
 export const SANITIZER_CALLS = [
   // identity / boolean conversions → clean for every class
   { re: /^(?:bool|len|hash|bytes\.fromhex|uuid\.UUID|UUID|ipaddress\.\w+)$/, groups: ALL },
@@ -196,59 +200,92 @@ export const SANITIZER_CALLS = [
   { re: /(?:^|\.)(?:escape_filter_chars|escape_dn_chars|escapeLDAPSearchFilter|escapeLdap|escapeDN|forLDAP|forLdap|forDN|encodeForLDAP|ldap\.escape|ldap3\.utils\.conv\.escape_filter_chars|ldap_escape|XPathVariableResolver|escapeXPath)$/, groups: ['ldap', 'xpath'] },
   // NoSQL operator injection
   { re: /^(?:String|mongoSanitize|mongoSanitize\.sanitize|sanitize|express-mongo-sanitize|bson\.ObjectId|toString|str)$/, groups: ['nosql'] },
-  // ══ WordPress ═══════════════════════════════════════════════════════════════
-  // "Sanitise on input, escape on output": both families are recognised, and each entry clears only the classes its
-  // result is safe for. `minArg` / `maxArg` limit an entry to the arguments the function really cleans.
-  // Tag-stripping sanitisers (sanitize_text_field …) are treated as HTML-safe, like strip_tags above; they do NOT
-  // encode quotes, so output inside an HTML attribute still needs esc_attr().
-  // Fixed-alphabet results ([a-z0-9_-], #hex, true/false): nothing injectable survives.
-  { re: /^(?:sanitize_key|sanitize_html_class|sanitize_hex_color(?:_no_hash)?|tag_escape|wp_parse_slug_list|wp_validate_boolean|rest_sanitize_boolean)$/, groups: ALL },
-  { re: /^sanitize_title(?:_with_dashes|_for_query)?$/, groups: ALL, maxArg: 0 },
-  { re: /^wp_parse_id_list$/, groups: NUM },
-  // file names / MIME types: path separators and shell/SQL/HTML metacharacters are stripped
-  { re: /^sanitize_file_name$/, groups: ['path', 'html', 'shell', 'sql', 'header', 'log', 'ssrf'] },
-  { re: /^sanitize_mime_type$/, groups: ['html', 'sql', 'shell', 'header', 'log', 'ssrf'] },
-  { re: /^wp_basename$/, groups: ['path'] },
-  // predicates / guards: they only inspect the value, nothing derived from it is returned (`isset($_GET['x']) ? … : …`)
-  { re: /^(?:isset|empty|array_key_exists|in_array|is_array|is_string|is_null|is_bool|is_int|is_integer|is_float|is_scalar|is_object|strlen|mb_strlen|count|sizeof|wp_verify_nonce|check_admin_referer|check_ajax_referer|current_user_can|user_can|username_exists|email_exists|term_exists|post_type_exists|taxonomy_exists)$/, groups: ALL },
-  // text sanitisers: tags stripped, line breaks / tabs / %xx octets removed (textarea variant keeps line breaks)
-  { re: /^(?:sanitize_text_field|sanitize_email|sanitize_user)$/, groups: ['html', 'header', 'log'] },
-  { re: /^sanitize_textarea_field$/, groups: ['html'] },
-  // output escaping and HTML filtering
-  { re: /^(?:esc_html|esc_attr|esc_textarea|esc_js|esc_xml|esc_html__|esc_attr__|esc_html_e|esc_attr_e|esc_html_x|esc_attr_x|_wp_specialchars|wp_specialchars|wp_strip_all_tags|wp_filter_nohtml_kses|wp_filter_kses|wp_filter_post_kses|wp_kses_post|wp_kses_post_deep|wp_kses_data)$/, groups: ['html', 'log'] },
-  { re: /^(?:wp_kses|wp_kses_one_attr)$/, groups: ['html', 'log'], maxArg: 0 },          // arg 1 is the allow-list, not the data
-  // URLs: esc_url also encodes quotes/ampersands (safe in an attribute); esc_url_raw is for storing/redirecting and
-  // checks the scheme only, so neither makes a redirect or an outbound request safe
-  { re: /^esc_url$/, groups: ['html', 'log', 'header', 'redirect_param'] },
-  { re: /^(?:esc_url_raw|wp_sanitize_redirect)$/, groups: ['header', 'log'] },
-  { re: /^wp_validate_redirect$/, groups: ['redirect'], maxArg: 0 },                    // arg 1 is the trusted fallback
-  { re: /^wp_http_validate_url$/, groups: ['ssrf'] },
-  // SQL: esc_sql / wpdb::_real_escape are only safe inside a quoted literal (same assumption as mysqli_real_escape_string)
-  { re: /^esc_sql$|(?:^|\.)\$?\w*wpdb\w*\.(?:_real_escape|_escape|escape_by_ref)$/, groups: ['sql'] },
-  // $wpdb->prepare($query, $values…): values after the query are bound; the query string itself is NOT cleaned
-  { re: /(?:^|\.)\$?\w*wpdb\w*\.prepare$/, groups: ['sql'], minArg: 1 },
 
-  // ══ Other frameworks ════════════════════════════════════════════════════════
-  // SQL: bound parameters, driver quoting, identifier quoting (Doctrine/Yii/CodeIgniter/Rails/Django/ESAPI/pq/mysql)
-  { re: /(?:^|[.:])(?:createNamedParameter|createPositionalParameter|quoteValue|quoteColumnName|quoteTableName|quote_name|quote_table_name|quote_column_name|quote_string|quoteInto|escape_str|escape_like_str|escape_identifiers|protect_identifiers|encodeForSQL|QuoteLiteral|QuoteIdentifier)$/, groups: ['sql'] },
-  { re: /^\$[\w.]*(?:pdo|dbh|db|conn|connection|mysqli|link|adapter|driver)\w*\.quote$|(?:^|[.:])connection\.quote$/i, groups: ['sql'] },
-  { re: /(?:^|\.)(?:mysql|SqlString|sqlstring|connection|pool|db|conn)\.format$/, groups: ['sql'], minArg: 1 },
-  // HTML / template output: OWASP Java Encoder + ESAPI, Spring, Laminas Escaper, Handlebars, Django, Rails, Twig/Smarty,
-  // AntiXSS / HtmlSanitizer (.NET), bluemonday (Go), Yii, CodeIgniter, HTMLPurifier
-  { re: /(?:^|[.:])(?:escapeHtmlAttr|escapeCss|escapeUrl|encodeForHTMLAttribute|encodeForXML|encodeForXMLAttribute|encodeForCSS|encodeForJavaScript|forXml|forXmlContent|forXmlAttribute|forXmlComment|forCssString|forCssUrl|forJavaScriptAttribute|forJavaScriptBlock|forJavaScriptSource|forHtmlUnquotedAttribute|htmlEscapeDecimal|htmlEscapeHex|javaScriptEscape|escapeEcmaScript|escapeExpression|escapeXML|encodeHTML|encodeXML|striptags|stripTags|escape_once|html_escape_once|escape_javascript|escapejs|force_escape|conditional_escape|twig_escape_filter|twig_escape|smarty_modifier_escape|HtmlAttributeEncode|JavaScriptStringEncode|JavaScriptEncode|HTMLEscaper|JSEscaper|GetSafeHtmlFragment|Sanitize|SanitizeHtml|SanitizeBytes|SanitizeReader|clean_html|xss_clean|purify|esc)$/, groups: ['html', 'log'] },
-  { re: /(?:^|[.:])(?:Html::(?:encode|encodeAttribute)|(?:HtmlPurifier|Purifier)::(?:process|clean))$/, groups: ['html', 'log'] },
-  { re: /^(?:escape|(?:django\.utils\.html|flask|jinja2|jinja2\.utils)\.escape|(?:_|lodash|validator|he)\.escape)$/, groups: ['html', 'log'] },
-  { re: /(?:^|[.:])(?:html_escape|htmlescape)::\w+$/, groups: ['html', 'log'] },
-  // slugs: [a-z0-9-] only
-  { re: /(?:^|[.:])(?:Str::slug|slugify)$/, groups: ALL },
-  // URL encoding of a component
-  { re: /(?:^|[.:])(?:encode_www_form_component|encode_uri_component|escapeURIComponent|url_encode|forUri|forUriComponent|encodeForURL|encodePathSegment|encodeQueryParam|UrlPathEncode|URLQueryEscaper|percent_encode|utf8_percent_encode|byte_serialize|generateUrl|urlencoding::encode)$|^quote$|^CGI\.escape$/, groups: ['header', 'log', 'html', 'redirect_param'] },
-  // shell / XPath
-  { re: /(?:^|[.:])(?:encodeForOS|shell_escape::(?:unix|windows)::escape|shlex::(?:try_)?quote)$/, groups: ['shell'] },
-  { re: /(?:^|[.:])encodeForXPath$/, groups: ['xpath'] },
-  // typed conversions / validators
-  { re: /(?:^|[.:])(?:NumberUtils\.(?:toInt|toLong|toDouble|toFloat|createInteger|createLong|createDouble)|validator\.(?:toInt|toFloat)|govalidator\.(?:ToInt|ToFloat))$/, groups: NUM },
-  { re: /(?:^|[.:])(?:validator\.toBoolean|Uuid::(?:parse_str|from_str)|Ulid::fromString)$/, groups: ALL },
+  // ── WordPress / WooCommerce ───────────────────────────────────────────────────────────────────
+  // esc_* neutralise a value for the output context they are named after. sanitize_* are input filters: they
+  // remove what they are documented to remove and nothing else. Quotes survive sanitize_text_field /
+  // sanitize_email / sanitize_user, so those never clear `sql` (only esc_sql, $wpdb->prepare placeholders and
+  // numeric casts do).
+  { langs: PHP, re: /^(?:esc_html|esc_attr|esc_textarea|esc_xml|esc_html__|esc_attr__|esc_html_x|esc_attr_x|esc_html_e|esc_attr_e|tag_escape|wp_specialchars|_wp_specialchars|format_to_edit)$/, groups: ['html', 'log'] },
+  { langs: PHP, re: /^esc_js$/, groups: ['html', 'log', 'header'] },
+  { langs: PHP, re: /^esc_url$/, groups: ['html', 'header', 'log'] },
+  { langs: PHP, re: /^(?:esc_url_raw|sanitize_url|wp_sanitize_redirect)$/, groups: ['header', 'log'] },
+  // tag / attribute allow-listing and tag stripping: newlines survive
+  { langs: PHP, re: /^(?:wp_kses|wp_kses_post|wp_kses_data|wp_kses_one_attr|wp_kses_post_deep|wp_filter_kses|wp_filter_post_kses|wp_filter_nohtml_kses|wp_strip_all_tags|wp_trim_words|wp_html_excerpt|sanitize_textarea_field|wc_sanitize_textarea)$/, groups: ['html'] },
+  // single-line text filters: tags and line breaks are removed
+  { langs: PHP, re: /^(?:sanitize_text_field|sanitize_user|sanitize_email|wc_clean)$/, groups: ['html', 'log', 'header'] },
+  { langs: PHP, re: /^sanitize_mime_type$/, groups: ['html', 'sql', 'shell', 'header', 'log'] },
+  // slugs: only [a-z0-9 _-%] survive: no ':' or '/', so the result cannot be a URL either
+  { langs: PHP, re: /^(?:sanitize_title|sanitize_title_for_query|sanitize_title_with_dashes|wc_sanitize_taxonomy_name)$/, groups: ['html', 'sql', 'path', 'shell', 'header', 'log', 'nosql', 'ldap', 'xpath', 'ssrf', 'redirect'] },
+  // directory separators, quotes and shell metacharacters are removed from file names
+  { langs: PHP, re: /^sanitize_file_name$/, groups: ['path', 'html', 'sql', 'shell', 'header', 'log', 'ssrf', 'redirect'] },
+  { langs: PHP, re: /^wp_basename$/, groups: ['path'] },
+  // identifiers / digests: nothing injectable survives
+  { langs: PHP, re: /^(?:sanitize_key|sanitize_html_class|sanitize_hex_color|sanitize_hex_color_no_hash|rest_sanitize_boolean|wp_validate_boolean|wp_generate_uuid4|wp_unique_id|wp_hash|md5|sha1|crc32|hash_hmac|bin2hex|strlen|mb_strlen|count|sizeof|str_word_count)$/, groups: ALL },
+  { langs: PHP, re: /^(?:wp_parse_id_list|number_format|floor|ceil|array_sum|wc_stock_amount|wc_format_decimal)$/, groups: NUM },
+  // SQL: esc_sql / $wpdb->_real_escape escape string content; prepare() binds every argument AFTER the query text
+  { langs: PHP, re: /^esc_sql$|(?:^|[.:])(?:_real_escape|_escape|escape_by_ref)$/, groups: ['sql'] },
+  { langs: PHP, re: /(?:^|[.:])prepare$/, groups: ['sql'], argFrom: 1 },
+  // redirects / outbound requests
+  { langs: PHP, re: /^wp_validate_redirect$/, groups: ['redirect', 'header', 'log'] },
+  { langs: PHP, re: /^wp_http_validate_url$/, groups: ['ssrf', 'redirect', 'header', 'log'] },
+  // URL builders that put the value after a fixed site host: it can change the path / query, not the host
+  { langs: PHP, re: /^(?:admin_url|site_url|home_url|get_home_url|get_site_url|get_admin_url|network_home_url|network_site_url|network_admin_url|content_url|plugins_url|includes_url|rest_url|get_rest_url|get_permalink|get_the_permalink|get_post_permalink|get_page_link|get_edit_post_link|get_term_link|get_author_posts_url|wp_login_url|wp_logout_url|wp_lostpassword_url|wp_registration_url)$/, groups: ['redirect', 'ssrf'] },
+
+  // Lookups and predicates: the request value is only the KEY / operand. What comes back is data fetched by it
+  // (a plugin-API record, a post object, a row) or a boolean / integer, never the key echoed back.
+  { langs: PHP, re: /^(?:plugins_api|themes_api|get_post|get_posts|get_pages|get_page_by_path|get_page_by_title|get_user_by|get_userdata|get_users|get_term|get_term_by|get_terms|get_comment|get_comments|get_category|get_categories|get_tag|get_taxonomy|get_post_type_object|get_post_status|get_post_type|get_blog_details|get_site|get_sites|get_option|get_site_option|get_transient|get_site_transient|get_post_meta|get_user_meta|get_term_meta|get_comment_meta|wp_cache_get|wp_get_current_user|url_to_postid|attachment_url_to_postid|post_exists|term_exists|username_exists|email_exists|wp_get_attachment_image_src)$/, groups: ALL },
+  { langs: PHP, re: /^(?:isset|empty|defined|is_(?!email\b)\w+|in_array|array_key_exists|key_exists|function_exists|class_exists|method_exists|property_exists|file_exists|post_type_exists|taxonomy_exists|current_user_can|user_can|wp_verify_nonce|check_admin_referer|check_ajax_referer|version_compare|hash_equals|password_verify|wp_check_password|preg_match|preg_match_all|strcmp|strcasecmp|strncmp|strncasecmp|substr_count|strpos|stripos|strrpos|mb_strpos)$/, groups: ALL },
+
+  // ── Auto-escaping template renderers ──────────────────────────────────────────────────────────────
+  // The CONTEXT arguments (argFrom: 1) are HTML-escaped by the engine; the template itself (argument 0) is not cleaned,
+  // so a template-injection sink still sees it. Plain Jinja2 `Template(src).render(...)` is not listed: its autoescape is off by default.
+  { langs: ['python'], re: /^(?:render_template|render_template_string|render_to_string|stream_template|stream_template_string|render)$|(?:^|\.)TemplateResponse$/, groups: ['html', 'log'], argFrom: 1 },
+  { langs: ['js'], re: /^(?:ejs|pug|jade|nunjucks|swig|dust|hogan|Hogan|eta|Eta|Mustache|mustache|Handlebars|handlebars)\.(?:render|renderString|renderFile)$/, groups: ['html', 'log'], argFrom: 1 },
+  { langs: PHP, re: /(?:^|[.:])render$|^(?:view|View[.:]+make|View[.:]+first)$/, groups: ['html', 'log'], argFrom: 1 },
+
+  // ── Other PHP frameworks / CMSs ────────────────────────────────────────────────────────────────
+  // Laravel, Symfony / Doctrine, CodeIgniter, Yii, CakePHP, Drupal, Joomla, Magento, Laminas, PrestaShop, Twig
+  { langs: PHP, re: /^Str[.:]+slug$/, groups: ALL },
+  { langs: PHP, re: /(?:^|[.:])quote$|^(?:pSQL|bqSQL|db_escape_table|db_escape_field)$/, groups: ['sql'] },           // PDO::quote, DBAL Connection::quote, Joomla/Cake $db->quote
+  { langs: PHP, re: /^(?:esc|html_escape|form_prep|xss_clean|check_plain|filter_xss|filter_xss_admin|twig_escape_filter)$|(?:^|[.:])(?:xss_clean|sanitizeFor|purify|purifyArray)$/, groups: ['html', 'log'] },
+  { langs: PHP, re: /(?:^|[.:])(?:Html[.:]+(?:encode|escape)|Xss[.:]+(?:filter|filterAdmin)|HtmlPurifier[.:]+process|Tools[.:]+(?:safeOutput|htmlentitiesUTF8|purifyHTML))$/, groups: ['html', 'log'] },
+  { re: /(?:^|[.:])(?:escapeHtmlAttr|escapeHtmlAttribute|escapeJs|escapeJsQuote|escapeCss|escapeUrl|escapeXssInUrl|escapeQuote)$/, groups: ['html', 'log'] },
+  // named-route URL builders: the host comes from the application, the value only fills route parameters
+  { langs: PHP, re: /(?:^|[.:])(?:route|to_route|generateUrl|base_url|route_to|url_to)$|(?:router|urlGenerator|generator)\.generate$|(?:^|[.:])Url[.:]+toRoute$/, groups: ['redirect'] },
+
+  // ── Python (Django / Flask / Jinja2 / stdlib) ─────────────────────────────────────────────────
+  { langs: ['python'], re: /^escape$|(?:^|[.:])(?:html|cgi|saxutils|markupsafe|jinja2|flask)\.escape$|(?:^|[.:])(?:escapejs|quoteattr)$/, groups: ['html', 'log'] },
+  { langs: ['python'], re: /^(?:quote|quote_plus|urlquote|urlquote_plus|iri_to_uri)$/, groups: URLG },
+  { langs: ['python'], re: /^(?:reverse|reverse_lazy|url_for)$/, groups: ['redirect'] },
+  { langs: ['python'], re: /^shlex\.join$/, groups: ['shell'] },
+
+  // ── Ruby (Rails / Rack / CGI) ─────────────────────────────────────────────────────────────────
+  { langs: ['ruby'], re: /(?:^|[.:])(?:quote|quote_string)$/, groups: ['sql'] },
+  { langs: ['ruby'], re: /^(?:CGI\.escape(?:URIComponent)?|URI\.encode_www_form(?:_component)?|ERB::Util\.u(?:rl_encode)?|Rack::Utils\.(?:escape|escape_path|build_query|build_nested_query)|Addressable::URI\.encode_component)$/, groups: URLG },
+  { langs: ['ruby'], re: /^\w+_path$|(?:^|[.:])polymorphic_path$/, groups: ['redirect'] },     // *_path helpers build same-host paths (not *_url / url_for(string))
+
+  // ── Java / Kotlin (OWASP Encoder, ESAPI, Spring, commons-text, commons-lang) ──────────────────────
+  { langs: JVMG, re: /(?:^|[.:])(?:forUri|forUriComponent|forCssString|forCssUrl|forXml|forXmlContent|forXmlAttribute|forXmlComment|forCDATA|forJavaScriptAttribute|forJavaScriptBlock|forJavaScriptSource|forHtmlUnquotedAttribute|javaScriptEscape|escapeEcmaScript|escapeJava|escapeJson|escapeCsv|encodeForJavaScript|encodeForCSS|encodeForURL|encodeForXML|encodeForXMLAttribute|encodeForHTMLAttribute)$/, groups: ['html', 'log'] },
+  { langs: JVMG, re: /(?:^|[.:])UriUtils[.:]+encode\w*$/, groups: URLG },
+  { langs: JVMG, re: /(?:^|[.:])encodeForSQL$/, groups: ['sql'] },
+  { langs: JVMG, re: /(?:^|[.:])encodeForOS$/, groups: ['shell'] },
+  { langs: JVMG, re: /(?:^|[.:])encodeFor(?:XPath|DN)$/, groups: ['ldap', 'xpath'] },
+  { langs: JVMG, re: /(?:^|[.:])(?:NumberUtils[.:]+(?:toInt|toLong|toDouble|toFloat|toShort|toByte|create\w+)|Ints[.:]+tryParse|Longs[.:]+tryParse|Doubles[.:]+tryParse)$/, groups: NUM },
+
+  // ── C# / Go / JavaScript ──────────────────────────────────────────────────────────────────────
+  { langs: ['csharp'], re: /(?:^|[.:])(?:HtmlAttributeEncode|JavaScriptStringEncode|Sanitize)$/, groups: ['html', 'log'] },
+  { langs: ['csharp'], re: /(?:^|[.:])UrlPathEncode$/, groups: URLG },
+  { langs: ['go'], re: /(?:^|[.:])(?:Sanitize|SanitizeBytes|SanitizeReader)$/, groups: ['html', 'log'] },        // bluemonday policies
+  { langs: ['go'], re: /^pq\.Quote(?:Identifier|Literal)$/, groups: ['sql'] },
+  { langs: ['go'], re: /^path\.Base$/, groups: ['path'] },
+  { langs: ['js'], re: /^(?:_|lodash|validator|he)\.escape$/, groups: ['html', 'log'] },
+  { langs: ['js'], re: /^(?:validator\.to(?:Int|Float)|Number\.(?:parseInt|parseFloat))$/, groups: NUM },
+  { langs: ['js'], re: /^validator\.to(?:Boolean|Date)$/, groups: ALL },
+
+  // ── identifier quoting / slugs, any language ─────────────────────────────────────────────────
+  { re: /(?:^|[.:])(?:quote_name|quote_table_name|quote_column_name|quoteName|quoteValue|quoteColumnName|quoteTableName|quoteSimpleColumnName|quoteSimpleTableName|quote_literal)$/, groups: ['sql'] },
+  { re: /(?:^|[.:])(?:slugify|parameterize)$/, groups: ALL },
 ];
 
 // Method/property applied AFTER a tainted value: `x.to_i`, `x.length`.
@@ -259,40 +296,46 @@ export const SANITIZER_SUFFIX = [
   { re: /^\s*\.\s*parse\s*::\s*<\s*bool/, groups: ALL },
   { re: /^\s*\.\s*(?:replace|replaceAll|sub|gsub|translate|strip|rstrip|trim|Replace|ReplaceAll)\w*\s*\([^)]*\\[rn]/, groups: ['header', 'log'] },
   { re: /^\s*\.\s*(?:escapeHtml|escapeHTML|sanitize|encode|htmlEscape)\s*\(/, groups: ['html', 'log'] },
-  // typed accessors on a request/parameter bag: Symfony ParameterBag (`$request->query->getInt('id')`), Flask/werkzeug
-  // (`request.args.get('page', 1, type=int)`)
-  { re: /^\s*(?:\.|->)\s*(?:getInt|integer|float)\s*\(/, groups: NUM },
-  { re: /^\s*(?:\.|->)\s*(?:getBoolean|boolean|getDigits|getAlpha|getAlnum|getEnum|enum|uuid|ulid)\s*\(/, groups: ALL },
-  { re: /^\s*\.\s*(?:get|getlist)\s*\([^()]*\btype\s*=\s*(?:int|float)\b/, groups: NUM },
+  // Symfony ParameterBag / Joomla Input typed getters:  $request->query->getInt('id')  ->getAlnum('k')  ->getBoolean('f')
+  { re: /^\s*(?:->|::)\s*(?:getInt|getUint|getFloat)\b/, groups: NUM },
+  { re: /^\s*(?:->|::)\s*(?:getBoolean|getBool|getDigits|getAlpha|getAlnum|getWord|getCmd)\b/, groups: ALL },
 ];
 
 // A cast directly in front of the value: `(int) x`, `(long)x`.
 export const SANITIZER_CAST_GROUP = 'num';
 export const SANITIZER_CAST = /\(\s*(?:int|long|short|unsigned(?:\s+(?:int|long))?|size_t|ssize_t|double|float|bool|byte|char|Integer|Long|uint\d*|int\d*|u?int(?:8|16|32|64)_t)\s*\)\s*$/;
 
-// Calls that apply a callback to data: `array_map('absint', $ids)`, Python `map(int, xs)`, WordPress `map_deep($v, 'sanitize_text_field')`.
-// When the callback is a sanitizer, the data that passes through is sanitised. `cb` = callback argument;
-// `data` = the one data argument (default: every argument after the callback).
-export const CALLBACK_WRAPPERS = [
-  { re: /^array_map$/, cb: 0 },
-  { re: /^map$/, cb: 0 },
-  { re: /^map_deep$/, cb: 1, data: 0 },
+/**
+ * Groups cleaned by a call to `callee` for a value sitting in argument position `argIndex`.
+ * Honours the `langs` and `argFrom` options of SANITIZER_CALLS entries.
+ */
+export function sanitizerGroups(callee, argIndex = 0, family = null) {
+  const out = [];
+  for (const s of SANITIZER_CALLS) {
+    if (s.langs && !(family && s.langs.includes(family))) continue;
+    if (s.argFrom !== undefined && argIndex < s.argFrom) continue;
+    if (s.re.test(callee)) out.push(...s.groups);
+  }
+  return out;
+}
+
+// Calls that apply a callback, named by a string literal, to every element of the array they are given:
+//   array_map('sanitize_text_field', $_POST['ids'])   map_deep($_POST, 'sanitize_text_field')
+// `cb` is the argument position of the callback name.
+export const CALLBACK_MAPPERS = [
+  { re: /^array_map$/, cb: 0, langs: PHP },
+  { re: /^map_deep$/, cb: 1, langs: PHP },
 ];
 
-// Typed request accessors that return a clean value by themselves (the call, not what follows it):
-// Laravel `$request->integer('id')`, PHP `filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT)`.
-// `origin` is the matched source text with whitespace removed, `tail` the code view right after it.
-const SOURCE_TYPED = [
-  { re: /^(?:\$request|request\(\))->(?:integer|float)$/, groups: NUM },
-  { re: /^(?:\$request|request\(\))->(?:boolean|date|enum|uuid|ulid)$/, groups: ALL },
-  { re: /^filter_input(?:_array)?\($/, tail: /^[^)]*\bFILTER_VALIDATE_(?:INT|FLOAT)\b/, groups: NUM },
-  { re: /^filter_input(?:_array)?\($/, tail: /^[^)]*\bFILTER_SANITIZE_NUMBER_(?:INT|FLOAT)\b/, groups: NUM },
-  { re: /^filter_input(?:_array)?\($/, tail: /^[^)]*\bFILTER_VALIDATE_(?:BOOL(?:EAN)?|IP)\b/, groups: ALL },
-  { re: /^filter_input(?:_array)?\($/, tail: /^[^)]*\bFILTER_SANITIZE_(?:SPECIAL_CHARS|FULL_SPECIAL_CHARS|STRING|ENCODED)\b/, groups: ['html', 'log'] },
+// Request accessors whose NAME already converts the value: Laravel  $request->integer('id')  ->boolean('flag')
+// The accessor is part of the source match, so it is recognised on the source text itself.
+export const TYPED_ACCESSORS = [
+  { re: /(?:->|::)\s*(?:integer|float|getInt|getUint|getFloat)$/, groups: NUM, langs: PHP },
+  { re: /(?:->|::)\s*(?:boolean|getBool|getBoolean|getDigits|getAlpha|getAlnum|getWord|getCmd)$/, groups: ALL, langs: PHP },
 ];
-export function sourceClears(origin, tail = '') {
-  const out = new Set();
-  for (const r of SOURCE_TYPED) if (r.re.test(origin) && (!r.tail || r.tail.test(tail))) r.groups.forEach(g => out.add(g));
+export function typedAccessorGroups(origin, family) {
+  const out = [];
+  for (const t of TYPED_ACCESSORS) if (t.langs.includes(family) && t.re.test(origin)) out.push(...t.groups);
   return out;
 }
 
@@ -461,10 +504,6 @@ export function parseParams(chunk, family) {
           (family !== 'c' && /\b(?:int|long|short|double|float|Integer|Long|Double|BigDecimal|byte|decimal|int\d+|uint\d+|uint|size_t)\s+\w+\s*$/.test(raw.replace(/=[\s\S]*$/, '').trim()))) {
         cleared.push('num');
       }
-      if (family === 'js') {          // NestJS: @Param('id', ParseIntPipe) id
-        if (/\bParse(?:Int|Float)Pipe\b/.test(raw)) cleared.push('num');
-        else if (/\bParse(?:Bool|UUID|Enum|Date)Pipe\b/.test(raw)) cleared.push('all');
-      }
       if (intNames.has(name)) cleared.push('num');
       out.push({ name, index, source, cleared, raw: raw.trim() });
     }
@@ -498,7 +537,7 @@ export const LOCAL_OK_GROUPS = new Set(['shell', 'code', 'sql', 'deser', 'mem', 
 export const WEB_CONTEXT = {
   js: /\b(?:express|fastify|koa|restify|@hapi\/|@nestjs\/|next\/(?:server|router|navigation|headers)|createServer|\.listen\s*\(|[Rr]outer\s*\(|\brouter\.|app\.(?:get|post|put|delete|patch|use|all|route)\s*\(|exports\.handler|aws-lambda|serverless|polka|sails|loopback|feathers|\bhttp2?\b|\bres\.(?:send|json|render|redirect|status|end|write)\b|\bresponse\.(?:send|json|status|end)\b|getServerSideProps|NextApiRequest)/,
   python: /\b(?:flask|django|fastapi|starlette|bottle|tornado|aiohttp|falcon|pyramid|sanic|quart|cherrypy|werkzeug|webapp2|web\.py|HttpRequest|wsgi|asgi|BaseHTTPRequestHandler|http\.server|@app\.route|@router\.|@bp\.|@blueprint\.)\b|@\w+\.(?:route|get|post|put|delete|patch)\(/i,
-  ruby: /\b(?:Rails|ActionController|Sinatra|Rack|Grape|Hanami|Roda|Cuba|Padrino)\b|<\s*ApplicationController|controllers\//,
+  ruby: /\b(?:Rails|ActionController|Sinatra|Rack|Grape|Hanami|Roda|Cuba|Padrino)\b|\brequire\s+['"](?:sinatra|roda|cuba|grape|hanami|padrino|rack)\b|<\s*ApplicationController|controllers\//,
   go: /net\/http|gin-gonic|labstack\/echo|gofiber|go-chi|gorilla\/mux|valyala\/fasthttp|julienschmidt|gobuffalo|kataras\/iris|beego|http\.Handle|http\.ResponseWriter/,
   csharp: /Microsoft\.AspNetCore|System\.Web|\bHttpContext\b|\bController(?:Base)?\b|\bIActionResult\b|\bIHttpContextAccessor\b|\[ApiController\]|Nancy|ServiceStack/,
 };
