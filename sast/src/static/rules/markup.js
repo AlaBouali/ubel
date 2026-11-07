@@ -39,7 +39,7 @@ const TAG = new RegExp([
 
 const RAW_FILTER = /\|\s*(?:safe|raw|noescape|unescape|safeHTML|safeHTMLAttr|safeJS|safeCSS|safeURL|html_safe|htmlSafe)\b|\b(?:mark_safe|Markup|raw|safe_join|html_safe)\s*\(|\.html_safe\b/i;
 const HTML_SAFE = /\|\s*(?:escape|force_escape|e|h|striptags|sanitize|purify|bleach|clean|strip_tags|urlencode|tojson|escapejs|json_script|int|float|length|count|abs|round)\b|\b(?:esc_(?:html|attr|url|js|textarea)\w*|wp_kses\w*|sanitize_\w+|htmlspecialchars|htmlentities|escapeHtml|sanitize|DOMPurify|absint|intval|floatval|number_format|count|esc|e|h)\s*\(|(?:->|::)\s*(?:escape\w*|e|encode)\s*\(|\b(?:Html|HttpUtility|WebUtility|Encoder|AntiXss)\s*\.\s*(?:Html)?Encode\s*\(|\(\s*(?:int|float|bool)\s*\)/i;
-const JS_SAFE = /\|\s*(?:tojson|escapejs|json_script|json_encode|json|to_json|jsonify|js|e\s*\(\s*['"]js['"]\s*\)|escape\s*\(\s*['"]js['"]\s*\))\b|\b(?:JSON\.stringify|json_encode|wp_json_encode|esc_js|escapeJs|js_escape|encodeURIComponent|Json\.Serialize|Json\.Encode|to_json|tojson|escape_javascript|json_escape|Js::from|intval|absint|floatval|j|raw_json)\s*\(|\|\s*(?:dump|int|float|abs|round|length|count|floatformat)\b|\.to_json\b|(?<![\w@.:$])(?:j|escape_javascript|json_escape)\s+[@\w]|\(\s*(?:int|float)\s*\)/i;
+const JS_SAFE = /\|\s*(?:tojson|escapejs|json_script|json_encode|json|to_json|jsonify|js|e\s*\(\s*['"]js['"]\s*\)|escape\s*\(\s*['"]js['"]\s*\))\b|\b(?:JSON\.stringify|json_encode|wp_json_encode|esc_js|escapeJs|js_escape|encodeURIComponent|Json\.Serialize|Json\.Encode|to_json|tojson|escape_javascript|json_escape|Js::from|intval|absint|floatval|j|raw_json)\s*\(|\|\s*(?:dump|int|float|abs|round|length|count|floatformat)\b|\.to_json\b|(?<![\w@.:$])(?:j|escape_javascript|json_escape)\s+[@\w]|\(\s*(?:int|float)\s*\)|\?\s*(?:js_string|json_string|js|json|c|number|int|long|url|url_path)\b|\|\s*@?(?:json_encode|intval|floatval|count|strlen)\b|\|\s*escape\s*:\s*['"](?:javascript|js|url|urlpathinfo)['"]|\b(?:JavaScriptStringEncode|JavaScriptEncode|escapeJavaScript|escapeJson|ToJson)\s*\(|JavaScriptEncoder\b[\w.]*\.Encode\s*\(/i;
 const LITERAL = /^\s*(?:'[^']*'|"[^"]*"|-?\d+(?:\.\d+)?|true|false|null|none)\s*(?:\|[^|]*)*$/i;
 // ── engine profiles ──────────────────────────────────────────────────────────
 // What each engine already does for the value, so a finding is only raised where the engine does NOT protect it.
@@ -64,9 +64,9 @@ const RAW_TRUSTED = /^\s*(?:(?:super|caller|parent|block|include|render_esi|form
 const ERB_TRUSTED = /(?<![\w@.:$])(?:render|yield|content_for|capture|csrf_meta_tags|csp_meta_tag|javascript_include_tag|stylesheet_link_tag|image_tag|link_to|button_to|content_tag|simple_format|sanitize|strip_tags|number_to_\w+|pluralize|t|translate|I18n\.(?:t|translate)|j|h|html_escape|json_escape|escape_javascript|ERB::Util\.\w+)\s*[(\s]/;
 // numbers, encoded or application-built URLs cannot carry a javascript: / data: scheme
 const PHP_TRUSTED = /\b(?:site_url|home_url|admin_url|includes_url|content_url|plugins_url|network_site_url|get_home_url|get_site_url|get_template_directory_uri|get_stylesheet_directory_uri|get_stylesheet_uri|get_theme_file_uri|wp_nonce_field|wp_create_nonce|base_url|asset|route|csrf_field|csrf_token|mix|secure_asset)\s*\(\s*(?:'[^']*'|"[^"$]*")?\s*(?:,\s*(?:'[^']*'|"[^"$]*"|true|false|null)\s*)*\)/;
-const URL_HELPER = /\b(?:url_for|route|static|asset|path|reverse|url|admin_url|home_url|site_url|esc_url|get_permalink|base_url|secure_url|secure_asset|action|mix|vite|asset_path|image_path|stylesheet_path|content_url|plugins_url|includes_url|network_site_url|get_home_url|get_site_url|get_template_directory_uri|get_stylesheet_directory_uri|get_stylesheet_uri|get_theme_file_uri|get_post_permalink|get_term_link|get_author_posts_url|wp_login_url|wp_logout_url|get_edit_post_link|Url\.(?:Action|Content|RouteUrl|Page|Link)|Html\.ActionLink|link_to|url_to|polymorphic_(?:path|url)|resolve_url|reverse_lazy|urlencode|rawurlencode|encodeURIComponent|intval|absint|floatval)\s*\(|\|\s*(?!safe)[a-z_]*url[a-z_]*\b|\|\s*(?:int|float|abs|round|length|count|number_format|floatformat|slugify|date|format_date|filesizeformat)\b|\|\s*(?:e|escape)\s*(?:\(\s*|:\s*)['"]url['"]|\{%\s*url\b|\{%\s*static\b|\bth:href\b|\(\s*(?:int|float)\s*\)/i;
+const URL_HELPER = /\b(?:url_for|route|static|asset|path|reverse|url|admin_url|home_url|site_url|esc_url|get_permalink|base_url|secure_url|secure_asset|action|mix|vite|asset_path|image_path|stylesheet_path|content_url|plugins_url|includes_url|network_site_url|get_home_url|get_site_url|get_template_directory_uri|get_stylesheet_directory_uri|get_stylesheet_uri|get_theme_file_uri|get_post_permalink|get_term_link|get_author_posts_url|wp_login_url|wp_logout_url|get_edit_post_link|Url\.(?:Action|Content|RouteUrl|Page|Link)|Html\.ActionLink|link_to|url_to|polymorphic_(?:path|url)|resolve_url|reverse_lazy|urlencode|rawurlencode|encodeURIComponent|intval|absint|floatval)\s*\(|\|\s*(?!safe)[a-z_]*url[a-z_]*\b|\|\s*(?:int|float|abs|round|length|count|number_format|floatformat|slugify|date|format_date|filesizeformat)\b|\|\s*(?:e|escape)\s*(?:\(\s*|:\s*)['"]url['"]|\?\s*(?:url|url_path|c|number|int|long|js_string|json_string)\b|\bHref\s*\(|\{%\s*url\b|\{%\s*static\b|\bth:href\b|\(\s*(?:int|float)\s*\)/i;
 // application-defined base URL / context path: the scheme is fixed by configuration
-const URL_BASE = /(?:^|[.\s])(?:context_?path|base_?url|base_?path|root_?url|site_?url|static_?url|media_?url|app_?url|public_?(?:url|path)|asset_?(?:url|path|host)|cdn_?url)\s*(?:\(\s*\))?\s*$/i;
+const URL_BASE = /(?:^|[.\s])(?:context_?path|base_?url|base_?path|path_?base|application_?path|root_?url|site_?url|static_?url|media_?url|app_?url|public_?(?:url|path)|asset_?(?:url|path|host)|cdn_?url|ctx|base)\s*(?:\(\s*\))?\s*$/i;
 const URL_PREFIX_OK = String.raw`(?:\/(?!\/)|#|\?|\.{1,2}\/|https?:\/\/|mailto:|tel:)`;
 const URL_PREFIX_CONCAT = new RegExp(String.raw`^\s*\(?\s*(['"])${URL_PREFIX_OK}[^'"]*\1\s*(?:[~+.]|\|\s*(?:append|add)\b|\)?\s*$)|^\s*\x60${URL_PREFIX_OK}[^\x60]*\x60\s*$|\|\s*prepend\s*:\s*['"]${URL_PREFIX_OK}`);
 // an element whose attribute really navigates / loads active content (img src, video poster, <link href> run no script)
@@ -79,6 +79,43 @@ const ENGINE_PY = /\bjinja2?\b|\bflask\b|\bFileSystemLoader\b|\bDictLoader\b|\bP
 const HTML_HINT = /\.(?:html?|xhtml|svg)\b|<\s*(?:html|body|div|p|a|span|table|ul|h[1-6]|form)\b|text\/html|\bHTMLResponse\b|\brender_template\b|\bres\.(?:render|send)\b|\bMarkup\b|\bsend_mail\b|\bhtml_message\b|MIMEText\s*\([^)]*['"]html['"]/i;
 const PLAIN_HINT = /\b(?:text\/plain|\.txt|\.md|\.sql|\.sh|\.ya?ml|\.toml|\.conf|\.ini|\.tf|\.cfg)\b/i;
 const plainOnly = (txt) => PLAIN_HINT.test(txt) && !HTML_HINT.test(txt);
+
+// ── tags of engines with their own syntax ───────────────────────────────────────────────────────────────────────
+// They are only analysed for URL / script / handler contexts, where HTML-encoding does not protect the value. Not added on purpose:
+// Latte (context-aware escaping, like Go), and Dust / Velocity / Svelte / Astro / Pug, whose bare `{x}` / `$x` / `#{x}` cannot be told apart
+// from JavaScript braces and template literals without producing false positives.
+const RAZOR_SKIP = /^(?:if|else|foreach|for|while|do|switch|using|model|inject|section|functions|code|page|layout|inherits|implements|namespace|try|catch|finally|lock|await|typeparam|attribute|rendermode|preservewhitespace|RenderBody|RenderSection|RenderSectionAsync|media|keyframes|font-face|import|charset|supports)\b|^(?:Html|Component|Url|Localizer)\s*[.\[]/;
+const RAZOR_X = /(?<![\w@.\-])@(?:\((?<rxp>(?:[^()\n]|\((?:[^()\n]|\([^()\n]*\))*\))*)\)|(?<rxi>[A-Za-z_]\w*(?:\??\.[A-Za-z_]\w*|\[[^\]\n]*\]|\((?:[^()\n]|\((?:[^()\n]|\([^()\n]*\))*\))*\))*))/g;
+const FM_X = /\$\{(?<fm>[^{}]{1,300})\}/g;
+const SMARTY_X = /\{\$(?<sm>[A-Za-z_][^{}\n]{0,300})\}/g;
+const THY_INLINE = /\[\[\s*(?<thi>\$\{[^\]]{1,300}?\})\s*\]\]/g;
+const THY_ATTR = /\bth:(?:href|src|action|formaction)\s*=\s*(["'])\s*(?<tha>\$\{[^"']{1,300}\})\s*\1/g;
+const THY_EVIDENCE = /\bth:[a-z]+\s*=|xmlns:th\s*=/;
+const mask = (text, re) => text.replace(re, (c) => c.replace(/[^\n]/g, ' '));
+function extraTags(text, ext, goTpl) {
+  const out = [];
+  const scan = (src, re, kind, grp, wrap) => {
+    re.lastIndex = 0; let m;
+    while ((m = re.exec(src)) !== null) {
+      const body = (wrap ? wrap(m) : m.groups[grp] || '').trim();
+      const off = m.index + (m[0].indexOf('${') >= 0 && kind === 'thx' ? m[0].indexOf('${') : 0);
+      if (body) out.push({ kind, body, off, end: m.index + m[0].length });
+    }
+  };
+  if (ext === '.cshtml' || ext === '.razor') {
+    scan(mask(text, /@\*[\s\S]*?\*@/g), RAZOR_X, 'razorx', null, (m) => { const b = (m.groups.rxp ?? m.groups.rxi ?? '').trim(); return RAZOR_SKIP.test(b) ? '' : b; });
+  } else if (ext === '.ftl') {
+    scan(mask(mask(text, /<#--[\s\S]*?-->/g), /<#noparse>[\s\S]*?<\/#noparse>/g), FM_X, 'fmx', 'fm');
+  } else if (ext === '.tpl' && !goTpl) {
+    scan(mask(text, /\{\*[\s\S]*?\*\}/g), SMARTY_X, 'smx', null, (m) => /^smarty\./.test(m.groups.sm) ? '' : '$' + m.groups.sm);
+  }
+  if (THY_EVIDENCE.test(text) && !ext.startsWith('.j') && ext !== '.cshtml') {
+    const src = mask(text, /<!--[\s\S]*?-->/g);
+    scan(src, THY_INLINE, 'thx', 'thi');
+    scan(src, THY_ATTR, 'thx', 'tha');
+  }
+  return out;
+}
 
 function analyze(flow) {
   if (flow._mk) return flow._mk;
@@ -109,12 +146,16 @@ function analyze(flow) {
     const off = m.index;
     tags.push({ kind, body: (body || '').trim(), off, end: off + m[0].length, line: lineOfOffset(starts, off) });
   }
+  for (const x of extraTags(text, ext, goTpl)) tags.push({ ...x, line: lineOfOffset(starts, x.off) });
+  tags.sort((a, b) => a.off - b.off);
   // context of each tag: inside a JavaScript <script>, inside a client-template <script>, an attribute, or plain markup
   for (const t of tags) {
     const blk = blocks.find((b) => t.off >= b.start && t.off < b.end);
     t.script = blk && blk.kind === 'js' ? blk : null;
     t.tmpl = blk && blk.kind === 'template' ? blk : null;
     t.attr = t.script || t.tmpl ? null : attrContext(text, t.off);
+    if (t.attr && /^th:(?:href|src|action|formaction|data)$/.test(t.attr.name)) t.attr.name = t.attr.name.slice(3);     // th:href="${u}" is href="…" after rendering
+    if (t.script && t.kind === 'thx') { const o = text.lastIndexOf('<script', t.off); t.inlineJs = /\bth:inline\s*=\s*["']javascript["']/.test(text.slice(o, text.indexOf('>', o))); }   // Thymeleaf serialises [[${x}]] as a JS literal there
   }
   return (flow._mk = { text, starts, ext, blocks, tags, lodash, ejs, goTpl, ngClient, line: (off) => lineOfOffset(starts, off), raw: text.split('\n') });
 }
@@ -214,6 +255,7 @@ const scriptContext = html({
     if (['.vue', '.svelte', '.astro'].includes(an.ext)) return;
     for (const t of an.tags) {
       if (!t.script || t.kind === 'stmt' || t.kind === 'pctstmt' || !isVar(t.body) || JS_SAFE.test(t.body)) continue;
+      if (t.inlineJs) continue;
       if (an.goTpl && !GO_OPT_OUT.test(t.body)) continue;                       // html/template JSON / JS-string escapes values in a <script>
       if (t.kind === 'phpe' && HTML_SAFE.test(t.body) && /esc_js|json_encode/.test(t.body)) continue;
       const q = jsStringAt(an.text.slice(t.script.start, t.off));          // from the start of the block: template literals span lines
@@ -262,7 +304,7 @@ const urlAttr = html({
   run(flow, emit) {
     const an = analyze(flow);
     for (const t of an.tags) {
-      if (!t.attr || t.script || t.tmpl || !['out', 'tri', 'pcteq', 'pctdash', 'blade', 'phpe'].includes(t.kind) || !isVar(t.body)) continue;
+      if (!t.attr || t.script || t.tmpl || !['out', 'tri', 'pcteq', 'pctdash', 'blade', 'phpe', 'razorx', 'fmx', 'smx', 'thx'].includes(t.kind) || !isVar(t.body)) continue;
       const sinks = URL_SINKS[t.attr.name];
       if (!sinks) continue;                                                   // not a URL attribute that can run script
       const tag = (t.attr.tag || '').toLowerCase();

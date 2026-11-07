@@ -139,6 +139,7 @@ function scanOptionsFor(opts, mode, results) {
     languages:       opts.languages    || null,
     skip_folders:    opts.skipFolders  || null,
     skip_files:      opts.skipFiles    || null,
+    custom_rules_dirs: staticEngine && opts.rulesDir ? [].concat(opts.rulesDir) : null,
     fail_on:         opts.failOn       || 'any',
     // What the run did NOT cover — measured by the chunker, not inferred from flags.
     chunks_found:             coverage ? coverage.chunks_found : null,
@@ -619,6 +620,21 @@ function runAnalyzeCommand(args) {
     if (ignored.length) console.warn(`[ubel-sast] --no-llm: ignoring LLM-only option(s): ${ignored.map(k => '--' + k).join(' ')}`);
   }
 
+  // --rules-dir: Semgrep-syntax rules for the static engine's first pass. Refused (not ignored) without --no-llm, so a run that
+  // looks like it applied the rules never silently did not.
+  if (flags['rules-dir'] !== undefined) {
+    if (!flags['no-llm']) {
+      console.error('Error: --rules-dir requires --no-llm (it loads Semgrep-syntax rules for the built-in rule engine; the LLM passes do not use them).');
+      process.exit(2);
+    }
+    const dirs = flags['rules-dir'] === true ? [] : csvFlag(flags['rules-dir']);
+    if (!dirs.length) {
+      console.error('Error: --rules-dir needs a directory (or rule file): --rules-dir ./semgrep-rules');
+      process.exit(2);
+    }
+    opts.rulesDir = dirs;
+  }
+
   if (flags['provider'])       opts.provider        = String(flags['provider']);
   if (flags['api-key'])        opts.apiKey          = String(flags['api-key']);
   if (flags['api-key-header']) opts.apiKeyHeader     = String(flags['api-key-header']);
@@ -701,6 +717,11 @@ function runMalwareCommand(args) {
 
   if (flags['no-llm']) {
     console.error('Error: --no-llm is only available for the SAST analysis (ubel-sast / analyze). The malware scan has no static engine; run it with an LLM provider.');
+    process.exit(2);
+  }
+
+  if (flags['rules-dir'] !== undefined) {
+    console.error('Error: --rules-dir is only available for the SAST analysis with --no-llm (ubel-sast --no-llm --rules-dir <dir>). The malware scan has no static engine.');
     process.exit(2);
   }
 
@@ -809,6 +830,14 @@ PIPELINE CONTROLS  (analyze, malware)
                                  model, no network, no code leaves the machine, no 3rd-party dependency or binary.
                                  LLM-only options are ignored; --no-verify / --no-taint switch the engine's own static
                                  verification / taint passes. See the README ("--no-llm") for what it can and cannot find.
+  --rules-dir <dir[,dir…]>       analyze with --no-llm only: also run YOUR Semgrep-syntax rules (*.yml / *.yaml with a top-level
+                                 'rules:' list; a single rule file works too) in the first pass, next to the built-in rules.
+                                 Supported: pattern, patterns, pattern-either, pattern-not, pattern-inside, pattern-not-inside,
+                                 pattern-regex, pattern-not-regex, metavariable-regex / -pattern / -comparison, focus-metavariable,
+                                 paths, fix, 'nosem'. Matching is token-based (no AST). Taint mode, join / extract mode, typed
+                                 metavariables and languages ubel-sast does not scan are NOT supported: such a rule is skipped and
+                                 listed with the reason. Findings are rule_id custom.<id>, carry no taint verdict, and gate under
+                                 --fail-on valid|any.
   --no-verify                    Skip Pass 2 (verification) — findings get is_valid: undefined
   --no-taint                     Skip Pass 3 (taint-trace) — analyze only; findings get no taint field
   --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default; ~6x the catalog size)
@@ -905,6 +934,7 @@ export async function main(programmaticOptions) {
 
     if (mode === "malware") {
       if (opts.noLlm) throw new Error('noLlm is only available for mode "analyze"; the malware scan has no static engine.');
+      if (opts.rulesDir) throw new Error('rulesDir is only available for mode "analyze" with noLlm; the malware scan has no static engine.');
       const results = await analyzeMalware([], opts);
       const report  = save_reports ? await writeMalwareReports(results, opts) : {};
       return { mode, results, ...report };

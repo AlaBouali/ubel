@@ -11,6 +11,7 @@ import { verifyChunkFindings, traceChunkFindings } from './workers.js';
 import { resolveGitDiffFiles } from './gitDiff.js';
 import { runScanPass, emptyUsage, usageSink, makeCatalogPackKey, packedMaxTokensWarning } from './scanEngine.js';
 import { runStaticAnalysis, STATIC_ENGINE_VERSION } from '../static/engine.js';
+import { loadCustomRules, summarizeCustomRules } from '../static/custom_rules.js';
 import { discoverMarkupChunks, fileKey } from '../static/markup_files.js';
 import { ALL_RULES, STATIC_UNSUPPORTED_CLASSES } from '../static/rules/index.js';
 
@@ -89,6 +90,9 @@ async function analyzeSast(chunks, opts = {}) {
     //   No provider, API key, model or network is used; `verify` / `taintTrace`
     //   then switch the engine's own static verification / taint passes.
     noLlm           = false,
+    // rulesDir (--no-llm only): directory / directories (or single files) of Semgrep-syntax rules, run in the first pass next to the
+    // built-in rules. A string, a comma-separated string or an array.
+    rulesDir,
     provider        = 'openrouter',
     apiKey,
     apiKeyHeader,
@@ -150,6 +154,11 @@ async function analyzeSast(chunks, opts = {}) {
   }
   const chunkInfo = resolvedChunks.info || null;   // coverage record from the chunker (null when chunks were supplied)
 
+  const rulesDirs = [].concat(rulesDir || []).flatMap(d => String(d).split(',')).map(d => d.trim()).filter(Boolean);
+  if (rulesDirs.length && !noLlm) {
+    throw new Error('rulesDir (--rules-dir) is only available with noLlm (--no-llm): it loads Semgrep-syntax rules for the static engine.');
+  }
+
   if (noLlm) {
     // Scope for the HTML / template files the chunker has no entry for (found by the static engine itself).
     // An untouched `languages` default means "no filter"; a caller-supplied list is honoured (add `html` to keep templates).
@@ -157,7 +166,7 @@ async function analyzeSast(chunks, opts = {}) {
       skipFolders, skipFiles, includeFolders, maxFileSize, skipTests, chunksStart,
       languages: languages === DEFAULT_LANGUAGES ? null : languages,
     };
-    return analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope });
+    return analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope, rulesDirs });
   }
 
   if (!PROVIDERS[provider]) {
@@ -479,7 +488,7 @@ async function analyzeSast(chunks, opts = {}) {
 // report / SARIF / gate / diff code downstream does not know which engine ran.
 // Nothing here touches a provider, an API key or the network.
 
-async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope = {} }) {
+async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope = {}, rulesDirs = [] }) {
   log(`[ubel-sast] Engine      : static rules (--no-llm), engine v${STATIC_ENGINE_VERSION}, ${ALL_RULES.length} rules`);
   log(`[ubel-sast] Privacy     : no model is called and no source code leaves this machine`);
   if (onlyDiff)   log(`[ubel-sast] Diff mode   : enabled (base: ${diffBase})`);
@@ -536,8 +545,21 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   const knownClasses = new Set(ALL_RULES.map(r => r.cls.toLowerCase()));
   const noRules = vulnClasses.filter(v => !knownClasses.has(String(v.name).toLowerCase())).map(v => v.name);
 
+  // user rules (--rules-dir): loaded before the scan so a bad directory fails fast, run in the same first pass as the built-in rules
+  let custom = null;
+  if (rulesDirs.length) {
+    custom = loadCustomRules(rulesDirs, { workingDir: path.resolve(workingDir), log });
+    log(`[ubel-sast] Custom rules: ${custom.rules.length} loaded from ${custom.files} rule file(s) in ${rulesDirs.join(', ')}` +
+      (custom.skipped.length ? `, ${custom.skipped.length} skipped` : '') + (custom.errors.length ? `, ${custom.errors.length} unreadable file(s)` : ''));
+    for (const s of custom.skipped.slice(0, 15)) log(`[ubel-sast]   ⚠ skipped ${s.id} (${s.file}): ${s.reason}`);
+    if (custom.skipped.length > 15) log(`[ubel-sast]   ⚠ … and ${custom.skipped.length - 15} more skipped rule(s), listed in the report`);
+    for (const e of custom.errors.slice(0, 10)) log(`[ubel-sast]   ⚠ ${e.file}: ${e.reason}`);
+    if (!custom.rules.length) log('[ubel-sast]   ⚠ no usable custom rule was loaded; only the built-in rules run');
+  }
+
   const startTime = Date.now();
-  const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log });
+  const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log, customRules: custom ? custom.rules : [] });
+  if (custom) pipeline.custom_rules = summarizeCustomRules(custom);
   pipeline.classes_without_static_rules = noRules;
   pipeline.classes_not_statically_decidable = STATIC_UNSUPPORTED_CLASSES;
   if (markup) {
@@ -564,6 +586,7 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   if (taintTrace && (pipeline.param_flows_unresolved || pipeline.param_flows_cleared)) {
     log(`   Parameter flows : ${pipeline.param_flows_cleared || 0} cleared (all callers pass safe values), ${pipeline.param_flows_unresolved || 0} not reported (reach a parameter whose callers are outside the scanned code)`);
   }
+  if (custom) log(`   Custom rules    : ${custom.rules.length} loaded, ${custom.skipped.length} skipped, ${all.filter(f => f.rule_id && f.rule_id.startsWith('custom.')).length} finding(s)`);
   log(`   Rule errors     : ${pipeline.rules_errored}`);
   log(`   Elapsed         : ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
   log(`   LLM calls       : 0`);

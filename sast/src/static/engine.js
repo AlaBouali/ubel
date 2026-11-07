@@ -220,7 +220,7 @@ const provisional = (f) => (f._cand?.flowInfo?.kind === 'param' ? 1 : 0);
 function dedupe(findings) {
   const best = new Map();
   for (const f of findings) {
-    const key = `${f.vuln_class}|${f.line}`;
+    const key = `${f.vuln_class}|${f.line}${f._cand?.rule?.user ? '|' + f.rule_id : ''}`;     // user rules are distinct rules, not alternatives for one class
     const prev = best.get(key);
     if (!prev || provisional(f) < provisional(prev) ||
         (provisional(f) === provisional(prev) && ((SEV_ORDER[f.severity] || 0) > (SEV_ORDER[prev.severity] || 0) ||
@@ -282,8 +282,10 @@ function taintFinding(f, fe) {
 }
 
 // ── driver ───────────────────────────────────────────────────────────────────
-function rulesFor(family, classSet) {
-  return ALL_RULES.filter(r => r.langs.includes(family) && (!classSet || classSet.has(r.cls.toLowerCase())));
+function rulesFor(family, classSet, customRules = []) {
+  const builtin = ALL_RULES.filter(r => r.langs.includes(family) && (!classSet || classSet.has(r.cls.toLowerCase())));
+  // user rules (--rules-dir) run in the same first pass; the vuln-class selection does not apply to them
+  return customRules.length ? builtin.concat(customRules.filter(r => r.langs.includes(family))) : builtin;
 }
 
 /**
@@ -292,7 +294,7 @@ function rulesFor(family, classSet) {
  * @param {object}   o             { vulnClasses, verify, taintTrace, log }
  * @returns {{ results: object[], pipeline: object }}
  */
-export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify = true, taintTrace = true, log = () => {} } = {}) {
+export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify = true, taintTrace = true, log = () => {}, customRules = [] } = {}) {
   // HTML / template files: one markup chunk (template-engine rules) plus one JavaScript chunk per inline <script> and one for the
   // inline event handlers / javascript: URLs. A file that also maps to a code family (.erb .jsp .cshtml .phtml) keeps that chunk.
   const expand = (list) => {
@@ -317,7 +319,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
   const ruleCache = new Map();
   const results = [];
   const recById = new Map();
-  const pipeline = { engine: 'static', engine_version: STATIC_ENGINE_VERSION, rules_loaded: ALL_RULES.length, rules_errored: 0, chunks_unsupported_language: 0 };
+  const pipeline = { engine: 'static', engine_version: STATIC_ENGINE_VERSION, rules_loaded: ALL_RULES.length + customRules.length, custom_rules_loaded: customRules.length, rules_errored: 0, chunks_unsupported_language: 0 };
   let done = 0;
   const total = toAnalyze.length;
 
@@ -332,7 +334,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
     let findings = [];
     if (!family) { pipeline.chunks_unsupported_language++; }
     else {
-      if (!ruleCache.has(family)) ruleCache.set(family, rulesFor(family, classSet));
+      if (!ruleCache.has(family)) ruleCache.set(family, rulesFor(family, classSet, customRules));
       let flow;
       try { flow = fe.flow(chunk); flow.absLine = (rel, needle) => resolveLine(chunk, rel, needle); }
       catch (e) { rec.error = { stage: 'scan', reason: 'static_analysis_failed', detail: `${e.message}` }; flow = null; }
