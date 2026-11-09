@@ -205,8 +205,9 @@ export function buildSastDiffs(results, meta, previous) {
     ? 'One of the two scans did not cover every chunk (diff-only mode, or chunks beyond the --max-chunks cap), so "new" and "removed" items may reflect scan scope rather than code changes.'
     : null;
 
-  // An older report with no compliance mapping must not read as "everything is new".
-  const hasCompliance = !!(prev.meta && prev.meta.compliance_summary);
+  // An older report with no compliance mapping must not read as "everything is new". Likewise a report from before compliance was limited
+  // to verified findings: comparing its all-candidates mapping with this one would show dismissed findings as "resolved".
+  const hasCompliance = !!(prev.meta && prev.meta.compliance_summary && prev.meta.compliance_summary.scope?.basis === 'verified');
 
   return {
     enabled: true,

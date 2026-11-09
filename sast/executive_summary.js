@@ -40,6 +40,7 @@
 
 import { createHash } from "node:crypto";
 import { evaluateSastGate } from "./sast_gate.js";
+import { getComplianceForSastFinding } from "../sca/compliance_mappings.js";
 
 const LEVEL_RANK  = { critical: 4, high: 3, medium: 2, low: 1 };
 const LEVEL_LABEL = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
@@ -276,7 +277,10 @@ const THEME_OTHER = {
 
 function themeOf(f, mode) {
   if (mode === "malware") return THEME_MALICIOUS;
-  const cats = Array.isArray(f?.compliance?.categories) ? f.compliance.categories : [];
+  // risk categories come from the class name, not from f.compliance: that is attached to verified findings only, and the theme of a
+  // dismissed or unverified finding must not depend on whether it was verified
+  const mapped = f?.compliance || getComplianceForSastFinding(classOf(f));
+  const cats = Array.isArray(mapped?.categories) ? mapped.categories : [];
   const hay = (cats.join(" ") + " " + classOf(f)).toLowerCase().replace(/_/g, " ");
   return THEMES.find((t) => t.re.test(hay)) || THEME_OTHER;
 }
@@ -513,7 +517,7 @@ function buildMethodology(ctx) {
   if (hasCompliance) {
     steps.push({
       step: "Compliance mapping",
-      detail: "Each finding was linked to related controls in common security frameworks using fixed mapping tables, by type of weakness. This is guidance for an audit conversation, not an assessment of compliance.",
+      detail: "Each finding confirmed by verification was linked to related controls in common security frameworks using fixed mapping tables, by type of weakness; findings dismissed as false alarms or not verified are not mapped. This is guidance for an audit conversation, not an assessment of compliance.",
     });
   }
 
@@ -560,7 +564,7 @@ function buildMethodology(ctx) {
     "Severity ratings describe a type of weakness in general, not its effect on your business. The suggested actions are generated from the counts in this report and do not account for what each piece of code does or how important it is.",
   ];
   if (!mal) {
-    limitations.push("Compliance references count every finding mapped to a control and are best-effort guidance, not an audit.");
+    limitations.push("Compliance references count only verified findings, each once per control it maps to, and are best-effort guidance, not an audit.");
   }
   if (opts?.only_diff) {
     limitations.push("Because the scan was limited to changed code, weaknesses in code that was not changed are not covered, and a clean result applies only to the changes. If the change set could not be determined, the scanner scans everything instead; this report does not record which happened.");
@@ -990,13 +994,12 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     "Security team");
 
   // ── Compliance (best-effort, high level) ─────────────────────────────────
-  // Each finding once per framework; findings dismissed as false alarms are
-  // left out. The Compliance tab counts every candidate (including dismissed
-  // ones) by distinct weakness type and chunk, so its figures differ.
+  // Verified findings only (is_valid === true), each once per framework. Findings dismissed as false alarms, or not verified, carry no
+  // compliance mapping. The Compliance tab counts the same findings by distinct weakness type and chunk, so its figures can differ.
   let complianceOverview = null;
   const fwMap = new Map();
   let mapped = 0;
-  const considered = recs.filter((r) => r.state !== "false_positive");
+  const considered = recs.filter((r) => r.f?.is_valid === true);
   considered.forEach((r, i) => {
     const fws = r.f?.compliance?.frameworks;
     if (!Array.isArray(fws) || !fws.length) return;
@@ -1017,9 +1020,9 @@ export function buildSastExecutiveSummary(results, meta = {}) {
       most_affected: top,
       findings_mapped: mapped,
       findings_total: considered.length,
-      statement: `The findings relate to controls in ${count(fwMap.size, "industry framework")}; ${mapped} of ${considered.length} findings map to at least one. ` +
-        "Unresolved findings may need to be explained or remediated in a related audit. " +
-        "These figures leave out findings dismissed as false alarms and count individual findings, each once per framework; the Compliance tab counts every candidate by distinct weakness type, so its figures differ.",
+      statement: `The verified findings relate to controls in ${count(fwMap.size, "industry framework")}; ${mapped} of ${considered.length} verified ${considered.length === 1 ? "finding maps" : "findings map"} to at least one. ` +
+        "Open verified findings may need to be explained or remediated in a related audit. " +
+        "These figures leave out findings dismissed as false alarms and findings that were not verified, and count individual findings, each once per framework; the Compliance tab counts verified findings by distinct weakness type, so its figures can differ.",
       disclaimer: meta?.compliance_summary?.disclaimer || "Compliance mappings are best-effort guidance, not a certified assessment.",
     };
   }

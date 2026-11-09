@@ -200,10 +200,19 @@ export class SastSarifBuilder {
 
     const rulesMap = new Map();
 
+    // Compliance is attached to verified findings only, and a rule is described by the first finding of its class. Take the mapping from
+    // whichever finding of the class has one, so a dismissed finding that happens to come first does not blank the rule's compliance tags.
+    const complianceByRule = new Map();
+    for (const { finding } of this._allFindings()) {
+      const id = ruleIdForClass(finding.vuln_class || 'unknown');
+      if (finding.compliance && !complianceByRule.has(id)) complianceByRule.set(id, finding.compliance);
+    }
+
     for (const { finding } of this._allFindings()) {
       const vc     = finding.vuln_class || 'unknown';
       const ruleId = ruleIdForClass(vc);
       if (rulesMap.has(ruleId)) continue;
+      const compliance = complianceByRule.get(ruleId) || finding.compliance;
 
       const cwes = this._cwesForClass(finding);
       const relationships = cwes.map(c => ({
@@ -250,8 +259,8 @@ export class SastSarifBuilder {
           vuln_class: vc,
           cwes,
           tags: ['security', 'sast', 'ubel'],
-          compliance_categories: finding.compliance?.categories || [],
-          compliance_frameworks: finding.compliance?.frameworks || [],
+          compliance_categories: compliance?.categories || [],
+          compliance_frameworks: compliance?.frameworks || [],
         },
       };
 

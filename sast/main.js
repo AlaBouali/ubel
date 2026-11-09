@@ -110,6 +110,34 @@ function applyScopeFlags(flags, opts, { packing = true } = {}) {
 // was not checked (verification off, diff mode, chunk limits, ...). Built from
 // an explicit whitelist — never spread `opts`, which carries the API key and
 // endpoint.
+// Compliance covers VERIFIED findings only (is_valid === true: verification confirmed a real weakness). Candidates that verification
+// dismissed as false alarms, and ones it could not settle or that were never verified (--no-verify), are left out of the per-finding
+// mapping and of this summary, so a framework count never includes something the tool itself judged not to be a weakness.
+// `scope` records the basis and what was excluded, so the report can say so.
+function complianceSummaryForVerified(results, verifyRan) {
+  const all = results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error));
+  const verified = all.filter(f => f.is_valid === true);
+  const dismissed = all.filter(f => f.is_valid === false).length;
+  const notVerified = all.length - verified.length - dismissed;
+  // one entry per verified finding (null = a verified finding with no mapping), so the coverage figure is relative to verified findings
+  const summary = summarizeCompliance(verified.map(f => f.compliance));
+  summary.scope = {
+    basis: 'verified',
+    verification_ran: verifyRan,
+    findings_total: all.length,
+    findings_verified: verified.length,
+    findings_dismissed: dismissed,
+    findings_not_verified: notVerified,
+  };
+  summary.scope_note = !verifyRan
+    ? 'Verification was switched off, so no finding is verified and none is mapped to a compliance framework.'
+    : `Compliance references cover the ${verified.length} finding${verified.length === 1 ? '' : 's'} confirmed by verification only` +
+      (dismissed || notVerified
+        ? `; ${[dismissed ? `${dismissed} dismissed as false alarm${dismissed === 1 ? '' : 's'}` : '', notVerified ? `${notVerified} not verified` : ''].filter(Boolean).join(' and ')} ${dismissed + notVerified === 1 ? 'is' : 'are'} left out.`
+        : '.');
+  return summary;
+}
+
 function scanOptionsFor(opts, mode, results) {
   const stats    = (results && results.scan_stats) || null;
   const coverage = stats ? stats.coverage : null;
@@ -263,13 +291,12 @@ async function writeAnalyzeReports(results, opts) {
       if (f.verification_reason && !f.reason) {
         f.reason = f.verification_reason;
       }
-      f.compliance = getComplianceForSastFinding(f.vuln_class);
+      // compliance mapping is a claim about a real weakness: only findings confirmed by verification carry it
+      f.compliance = f.is_valid === true ? getComplianceForSastFinding(f.vuln_class) : null;
       f.cwe = getCwesForSastClass(f.vuln_class);
     }
   }
-  meta.compliance_summary = summarizeCompliance(
-    results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
-  );
+  meta.compliance_summary = complianceSummaryForVerified(results, opts.verify !== false);
 
   const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-sast');
   const diffs = buildDiffsSafe(results, meta, zipPath, tag, 'ubel-sast');
@@ -456,13 +483,11 @@ async function writeMalwareReports(results, opts) {
       if (f.verification_reason && !f.reason) {
         f.reason = f.verification_reason;
       }
-      f.compliance = getComplianceForMalwareFinding();
+      f.compliance = f.is_valid === true ? getComplianceForMalwareFinding() : null;     // verified findings only
       f.cwe = getCwesForMalwareClass(f.vuln_class);
     }
   }
-  meta.compliance_summary = summarizeCompliance(
-    results.flatMap(chunk => (chunk.findings || []).filter(f => !f._parse_error).map(f => f.compliance))
-  );
+  meta.compliance_summary = complianceSummaryForVerified(results, opts.verify !== false);
 
   const executiveSummary = buildExecutiveSummarySafe(results, meta, 'ubel-malware');
   const diffs = buildDiffsSafe(results, meta, zipPath, tag, 'ubel-malware');

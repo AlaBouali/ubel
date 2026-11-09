@@ -1186,7 +1186,7 @@ function complianceCountsHtml(stats, primaryClass) {
 function renderCompliance() {
   const cs = reportData.meta && reportData.meta.compliance_summary;
   const disclaimerEl = document.getElementById('compliance-disclaimer');
-  if (disclaimerEl) disclaimerEl.textContent = (cs && cs.disclaimer) || '';
+  if (disclaimerEl) disclaimerEl.textContent = [cs && cs.scope_note, cs && cs.disclaimer].filter(Boolean).join(' ');
 
   const coverageEl = document.getElementById('compliance-coverage');
   const coverageValueEl = document.getElementById('compliance-coverage-value');
@@ -1224,7 +1224,9 @@ function renderCompliance() {
 
   const grid = document.getElementById('compliance-frameworks-grid');
   if (!cs || !cs.frameworks || !cs.frameworks.length) {
-    document.getElementById('compliance-empty').classList.remove('hidden');
+    const emptyEl = document.getElementById('compliance-empty');
+    if (cs && cs.scope && cs.scope.basis === 'verified') emptyEl.textContent = 'No verified finding is mapped to a compliance framework.';
+    emptyEl.classList.remove('hidden');
     grid.innerHTML = '';
     return;
   }
