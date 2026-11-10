@@ -144,8 +144,8 @@ function activate(context) {
     let SCA_scan, PolicyViolationError;
 
     try {
-      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
-      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot,"sca", "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "sca", "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
       return;
@@ -207,8 +207,8 @@ function activate(context) {
     let SCA_scan, PolicyViolationError;
 
     try {
-      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
-      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot,"sca", "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "sca",  "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
       return;
@@ -269,8 +269,8 @@ function activate(context) {
     let SCA_scan, PolicyViolationError;
 
     try {
-      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
-      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "sca", "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "sca", "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
       return;
@@ -330,8 +330,8 @@ function activate(context) {
     let SCA_scan, PolicyViolationError;
 
     try {
-      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
-      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "sca", "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "sca", "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
       return;
@@ -395,8 +395,8 @@ function activate(context) {
     let SCA_scan, PolicyViolationError;
 
     try {
-      ({ SCA_scan }                 = require(path.join(ubelRoot, "main.js")));
-      ({ PolicyViolationError } = require(path.join(ubelRoot, "engine.js")));
+      ({ SCA_scan }                 = require(path.join(ubelRoot, "sca", "main.js")));
+      ({ PolicyViolationError } = require(path.join(ubelRoot, "sca", "engine.js")));
     } catch (err) {
       vscode.window.showErrorMessage(`❌ UBEL failed to load: ${err.message}`);
       return;
@@ -447,7 +447,51 @@ function activate(context) {
     }
   });
 
-  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd, scanSecretsCmd, scanLicensesCmd);
+  const scanSASTCmd = vscode.commands.registerCommand("ubel.scanSAST", async () => {
+    if (scanningInProgress) {
+      vscode.window.showWarningMessage("UBEL: A scan is already in progress. Please wait.");
+      return;
+    }
+    
+    let SAST_scan;
+    ({ SAST_scan } = require(path.join(ubelRoot, "sast", "main.js")));
+
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0) {
+      vscode.window.showErrorMessage("UBEL: No workspace folder open.");
+      return;
+    }
+    
+    const projectRoot = folders[0].uri.fsPath;
+
+    const reportUri = vscode.Uri.file(
+      path.join(projectRoot, ".ubel", "reports", "latest.sast.html")
+    );
+    
+    // Detect editor so the report can surface it as the host environment.
+    const editor = detectEditor();
+    try {
+      scanningInProgress = true;
+      await runsastScan({
+        main: SAST_scan,
+        scanOptions: {
+          projectRoot,
+          mode: 'analyze', noLlm: true,
+          maxChunks:100000,
+          maxChunkSize:100000,
+          skipFolders: ['.ubel', 'node_modules', '.git', 'dist', 'build', 'out', ".gradle", '.next', 'public', "tests", "venv", ".venv", '.cache', '.parcel-cache', '.turbo', '.vercel', '.serverless', '.firebase', '.aws-sam', '.heroku', '.netlify'],
+          skipTests: true,
+          onlyDiff: false,
+          //rulesDir: path.join(projectRoot, '.ubel', 'sast_rules'),
+        },
+        reportUri,
+        title: "UBEL: Scanning project for SAST vulnerabilities…",
+      });
+    } finally {
+      scanningInProgress = false;
+    }
+  });
+  context.subscriptions.push(scanWorkspaceCmd, scanExtensionsCmd, scanPlatformCmd, scanSecretsCmd, scanLicensesCmd, scanSASTCmd);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -458,6 +502,35 @@ function activate(context) {
  * Calls SCA_scan() with a pre-built options object and handles all three outcome
  * states: clean, PolicyViolationError, and unexpected error.
  */
+
+async function runsastScan({ main: SAST_scan, scanOptions, reportUri, title }) {
+  await vscode.window.withProgress(
+    {
+      location   : vscode.ProgressLocation.Notification,
+      title,
+      cancellable: false,
+    },
+    async () => {
+      try {
+        const result = await SAST_scan(scanOptions);
+
+
+        const choice = await vscode.window.showInformationMessage(
+          "UBEL SAST scan complete.",
+          "Open Report"
+        );
+
+        if (choice === "Open Report") {
+          await vscode.env.openExternal(reportUri);
+        }
+
+      } catch (err) {
+        vscode.window.showErrorMessage(`❌ UBEL SAST scan error: ${err.message}`);
+      }
+    }
+  );
+}
+
 async function runScan({ main: SCA_scan, PolicyViolationError, scanOptions, reportUri, title }) {
   await vscode.window.withProgress(
     {

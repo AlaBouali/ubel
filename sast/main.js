@@ -997,4 +997,4 @@ export async function main(programmaticOptions) {
   runAnalyzeCommand(rawArgs);
 }
 
-export { runChunkCommand, runAnalyzeCommand, runMalwareCommand };
+export { runChunkCommand, runAnalyzeCommand, runMalwareCommand, main as SAST_scan };
