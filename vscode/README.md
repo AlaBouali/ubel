@@ -1,7 +1,7 @@
 # UBEL — Supply-Chain & Secrets Scanner for VS Code
 
-**Multi-ecosystem dependency and secrets scanner for the developer's machine and tools.**  
-Covers source repos, developer machines, and exposed secrets — runs entirely locally. The only network calls are to osv.dev and the NVD API for vulnerability data (both mirror-configurable), plus best-effort lookups to the CISA KEV catalog and the FIRST EPSS API for exploit intelligence.
+**Multi-ecosystem dependency and secrets scanner for the developer's machine and tools — plus an offline, rule-based SAST scan of your own source code.**  
+Covers source repos, developer machines, exposed secrets, and insecure code patterns in first-party source — runs entirely locally. The only network calls are to osv.dev and the NVD API for vulnerability data (both mirror-configurable), plus best-effort lookups to the CISA KEV catalog and the FIRST EPSS API for exploit intelligence. The SAST scan is fully offline: it makes no network calls and uses no LLM.
 
 [![Publisher](https://img.shields.io/badge/publisher-Arcane--Spark-blue)](https://github.com/AlaBouali)
 [![VS Code](https://img.shields.io/badge/vscode-%5E1.85.0-007ACC)](https://marketplace.visualstudio.com/items?itemName=Arcane-Spark.ubel)
@@ -15,7 +15,7 @@ UBEL is a **software composition analysis (SCA)** tool, **secrets detector**, an
 
 As a project, UBEL spans the entire delivery chain: from the moment a developer adds a dependency, through CI validation, to what is running on a deployment server or inside an AI agent's runtime environment.
 
-**This specific extension** covers the editor-side slice of that: dependency vulnerability scanning (SCA) enriched with exploit intelligence (CISA KEV + EPSS), secrets detection, license compliance, and host/editor-extension auditing, all in `health` (report-only) mode. It is built directly on the SCA engine of the `@arcane-spark/ubel-node` package, so findings, policy, and reports are identical to what the CLI's `health` mode produces (see [Extension vs. CLI](#extension-vs-cli)). It does **not** include the install-time firewall (the scan-before-you-install gate that blocks a malicious package before it ever reaches `node_modules`), AI-powered SAST/malicious-code scanning, or CI/CD wiring — those live in the `@arcane-spark/ubel-node` CLI package ([npm](https://www.npmjs.com/package/@arcane-spark/ubel-node), [docs](https://github.com/AlaBouali/ubel/blob/main/README.md)) and the [official GitHub Action](https://github.com/AlaBouali/ubel), which this extension is a companion to rather than a replacement for.
+**This specific extension** covers the editor-side slice of that: dependency vulnerability scanning (SCA) enriched with exploit intelligence (CISA KEV + EPSS), secrets detection, license compliance, host/editor-extension auditing, and offline static application security testing (SAST) of your own source code, all report-only. The SCA-based scans are built directly on the SCA engine of the `@arcane-spark/ubel-node` package and run in `health` (report-only) mode, so findings, policy, and reports are identical to what the CLI's `health` mode produces; the SAST scan runs that package's SAST engine in its offline, no-LLM form (see [Scan for SAST](#scan-for-sast-ctrlalta) and [Extension vs. CLI](#extension-vs-cli)). It does **not** include the install-time firewall (the scan-before-you-install gate that blocks a malicious package before it ever reaches `node_modules`), the LLM-powered mode of SAST, the malicious-code scanner (`ubel-mal`), or CI/CD wiring — those live in the `@arcane-spark/ubel-node` CLI package ([npm](https://www.npmjs.com/package/@arcane-spark/ubel-node), [docs](https://github.com/AlaBouali/ubel/blob/main/README.md)) and the [official GitHub Action](https://github.com/AlaBouali/ubel), which this extension is a companion to rather than a replacement for.
 
 ---
 
@@ -30,8 +30,9 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - Malicious package (infection) detection — always blocked regardless of policy
 - **Secrets detection** — Trivy's ported, Apache-2.0-attributed ruleset, extended with UBEL's own rules for vendors Trivy's current upstream doesn't cover (HashiCorp Vault, GCP API keys/OAuth tokens, Anthropic, OpenRouter, live Stripe restricted keys, URL-embedded git credentials, database connection strings with embedded passwords, and more). Findings can be suppressed with a `.ubelignore` file or inline `ubel:ignore` markers (see [Suppressing findings](#suppressing-findings)). Included by default in every project scan, or standalone via its own command. Match previews in every report are redacted.
 - **License compliance** — every package's declared license is normalized (SPDX expressions, free text, npm's `UNLICENSED` proprietary marker vs. the SPDX `Unlicense` public-domain license, missing/`unknown` values) and checked against the OSI-approved license list, with a derived risk rating. Included by default in every project scan, or standalone via its own command (no vulnerability lookups, no secrets scan).
+- **SAST, offline (no LLM)** — static application security testing of your own first-party source code with a built-in deterministic rule engine: 295 rules, its own lexer, taint analysis and cross-file call-graph tracing across all 15 supported language families (JS/TS, Python, PHP, Ruby, Go, Rust, Java, Kotlin, C#, C/C++, Dart/Flutter, Swift, plus Docker, Kubernetes, IaC and HTML/template files). It never calls an LLM: no model, no API key, no network, and your source code never leaves the machine. Each run writes JSON, HTML and SARIF reports (`latest.sast.*`) with an executive summary, compliance mapping and a diff against the previous SAST report. A standalone command — it is not part of **UBEL: Scan Project** (see [Scan for SAST](#scan-for-sast-ctrlalta))
 - Dependency graph with introduced-by and parent tracking (Swift and Flutter/Dart lockfiles don't record a dependency graph, so those packages have no edges)
-- Automatic report generation: **JSON** + **HTML** per scan, plus a **SBOM** (CycloneDX) and **SARIF** where the scan type supports them, named `<file_name>.<tag>.<ext>` — the tag (`sca`, `os_sca`, `secrets` or `licenses`) says which command produced the file (e.g. `latest.sca.json`, `latest.os_sca.html`, `latest.secrets.html`), plus `latest.<tag>.*` convenience copies. Project and extension scans (`sca`) write all four formats; the host-platform scan on Windows/Linux (`os_sca`) writes JSON, HTML and SBOM but no SARIF; the secrets and license scans write JSON and HTML only (see [Reports](#reports)) For historic tracking, a zipped snapshot of each scan's reports is saved too, and the newest zip of each tag is also kept at a fixed path in a separate `latest_reports` folder. Every report file is written atomically, so a script or CI step reading a `latest.*` file mid-scan never sees a half-written one
+- Automatic report generation: **JSON** + **HTML** per scan, plus a **SBOM** (CycloneDX) and **SARIF** where the scan type supports them, named `<file_name>.<tag>.<ext>` — the tag (`sca`, `os_sca`, `secrets`, `licenses` or `sast`) says which command produced the file (e.g. `latest.sca.json`, `latest.os_sca.html`, `latest.secrets.html`, `latest.sast.sarif.json`), plus `latest.<tag>.*` convenience copies. Project and extension scans (`sca`) write all four formats; the host-platform scan on Windows/Linux (`os_sca`) writes JSON, HTML and SBOM but no SARIF; the secrets and license scans write JSON and HTML only; the SAST scan (`sast`) writes JSON, HTML and SARIF but no SBOM (see [Reports](#reports)) For historic tracking, a zipped snapshot of each scan's reports is saved too, and the newest zip of each tag is also kept at a fixed path in a separate `latest_reports` folder. Every report file is written atomically, so a script or CI step reading a `latest.*` file mid-scan never sees a half-written one
 - Zero external runtime dependencies (Node.js stdlib only)
 - Complete compliant, and enriched SBOM Cyclonedx V1.6 files with full dependencies and vulnerabilities data in VEX
 - Complete compliant, and enriched SARIF v2.1.0 files
@@ -39,7 +40,7 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 - **Executive summary** — every JSON and HTML report opens with a plain-language overview for non-technical readers: overall risk rating, policy verdict, key numbers, key findings (including weaknesses already exploited in real attacks), the components to fix first, and prioritized recommended actions (see [Executive Summary](#executive-summary))
 - **Recommended package-level fixes** — for every package, UBEL works out which versions to upgrade to, grouped per version range (stay on your current minor line, or move to a newer one/major), picking the fewest and highest versions that clear the most vulnerabilities, and lists whatever has no fix at all (see [Recommended Package Fixes](#recommended-package-fixes))
 - **OS package release matching** — advisories for the host's OS packages (`deb` / `rpm` / `apk`) are verified against the distro release the package is installed on, so an AlmaLinux 8 package is not flagged for AlmaLinux 9 or 10 errata; every OS-package vulnerability and suggested fix carries a `high` / `medium` / `low` release-confidence level (see [OS Package Release Matching](#os-package-release-matching))
-- **Compliance framework mapping** — every vulnerability and secrets finding is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
+- **Compliance framework mapping** — every vulnerability and secrets finding (and every verified SAST finding) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary. Included by default in every scan, across the JSON, HTML, and SARIF reports (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - **Diffs between scans** — the HTML and JSON reports compare dependencies, vulnerabilities, secrets and per-compliance-framework findings with the previous report of the same asset and scan type: what is new, what is unchanged and what was removed or fixed (see [Diffs Against the Previous Report](#diffs-against-the-previous-report))
 
 ---
@@ -53,8 +54,9 @@ As a project, UBEL spans the entire delivery chain: from the moment a developer 
 | **UBEL: Scan Host Platform** | `Ctrl+Alt+P` | `Cmd+Alt+P` | System software installed on this machine |
 | **UBEL: Scan project for Exposed Secrets** | `Ctrl+Alt+S` | `Cmd+Alt+S` | Secrets-only pass over the open workspace folder — no dependency resolution |
 | **UBEL: Scan project for License Compliance** | `Ctrl+Alt+L` | `Cmd+Alt+L` | License-only pass over the open workspace folder — full dependency resolution, no vulnerability lookups, no secrets scan |
+| **UBEL: Scan project for SAST (Static Application Security Testing)** | `Ctrl+Alt+A` | `Cmd+Alt+A` | Offline, rule-based static analysis of the open workspace folder's own source code (no AI/LLM calls) — no dependency resolution, no vulnerability lookups, no secrets-pass of its own |
 
-All five commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
+All six commands are also accessible via the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) — search **UBEL**.
 
 **What each command runs**
 
@@ -65,6 +67,9 @@ All five commands are also accessible via the Command Palette (`Ctrl+Shift+P` / 
 | Scan Host Platform | ❌ | ✅ | ✅ (CPE / NVD) | ✅ | ❌ | ✅ |
 | Scan project for Exposed Secrets | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
 | Scan project for License Compliance | ✅ every ecosystem | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Scan project for SAST (offline, no LLM) | ❌ | ❌ | ❌ | ❌ | ❌ (see note) | ❌ |
+
+The SAST command is a different kind of scan: it analyses your own source files with a separate engine rather than the packages you depend on, so the dependency-oriented columns don't apply to it. Hardcoded secrets are one of the weakness classes the SAST engine reports (it reuses the same Trivy-derived secrets ruleset), but that is part of the SAST findings, not the secrets pass above. See [Scan for SAST](#scan-for-sast-ctrlalta).
 
 Only one scan runs at a time — starting a second while one is in progress shows a warning and does nothing.
 
@@ -279,9 +284,79 @@ See [License Compliance](#license-compliance) below for how licenses are normali
 
 ---
 
+## Scan for SAST (`Ctrl+Alt+A`)
+
+Runs static application security testing (SAST) over the open workspace folder. Where **UBEL: Scan Project** looks at the packages you *depend on*, this command analyses the code you *wrote*: injection flaws, path traversal, XSS, SSRF, unsafe deserialization, weak cryptography, hardcoded secrets, insecure Docker/Kubernetes/IaC configuration and similar weakness classes. It reads your source files only — no dependency resolution, no OSV/NVD or KEV/EPSS lookups, no license classification.
+
+### No LLM — fully offline
+
+The SAST scan does not use an AI model. Instead of the three-pass LLM pipeline (scan → verify → taint trace) that the `@arcane-spark/ubel-node` CLI can run, the extension analyses your code with UBEL's built-in, deterministic rule engine. There is nothing to configure — no provider, API key or model setting. In practice:
+
+- **No LLM and no network.** No model is called, no API key or account is needed, and no source code is sent to any LLM provider or anywhere else. The scan costs zero tokens and runs fully offline.
+- **No third-party tooling.** The engine is plain Node.js (stdlib only): its own comment/string-aware lexer for every supported language, a minimal YAML/HCL structure parser, a taint engine and a call-graph tracer. It never spawns a process and needs no Semgrep, CodeQL or tree-sitter.
+- **Reproducible.** The same code produces the same findings every time, so a diff between two scans reflects changes in your code rather than model variance.
+- **Same output as the CLI's LLM mode.** The same findings schema, CWE mapping, JSON/HTML/SARIF reports, executive summary, compliance mapping and diffs — everything downstream of the scan is unchanged.
+
+**How the three passes map**
+
+| Pass | LLM pipeline (CLI only) | Offline rule engine (what the extension runs) |
+|---|---|---|
+| 1 · Scan | A model proposes candidate findings per code chunk | 295 rules (call/assignment sinks, patterns, configuration and structure checks) run over each chunk. Comments and string text are masked by the lexer, so a word inside a comment or string is never mistaken for code |
+| 2 · Verify | A model re-reads each candidate | Fixed false-positive checks: placeholder/example secrets, non-security hash use (checksums, cache keys, ETags), constant arguments, a fixed destination host, a hardened XML parser elsewhere in the file, guarded merges, and similar. Dismissed findings stay in the report with `is_valid: false` and a `verification_reason` |
+| 3 · Taint trace | A model traces callers | Static data-flow inside the function (assignments, concatenation, interpolation, destructuring, loops), recognition of sanitizers per weakness class (parameterized queries, `shlex.quote`, `htmlspecialchars`, `basename`, numeric casts, …), then call-graph tracing across files (depth ≤ 6). Sets `reachable` / `sanitized` / `exploitable` / `flow_path` / `reasoning` |
+
+Verification and taint tracing are both active. Each finding carries an exact `line` (verified against the file), a `rule_id`, and `detection: "static"`.
+
+**Precision.** Input sources are context-aware: request objects (`req.query`, `request.args`, `params`, …) only count in files that show a web context, and command-line arguments, stdin or environment are treated as local sources. If the dangerous value is a function parameter, the engine follows every caller and reports the finding only when a call chain actually brings attacker data to it — flows where every caller passes safe values, or that end at a library API boundary, are not listed (their counts are recorded in the report).
+
+**What it covers**
+
+| Family | Main coverage |
+|---|---|
+| JS/TS · Python · PHP · Ruby · Go · Rust · Java · Kotlin · C# | SQL/NoSQL/LDAP/XPath/command/code injection, path traversal, XSS and template injection, SSRF, open redirect, XXE, unsafe deserialization, header/log injection, prototype pollution (JS), file upload, GraphQL, JWT, cookies, CORS, CSRF, debug mode, security headers, weak crypto and TLS settings, TOCTOU, ReDoS, hardcoded secrets |
+| C / C++ | Unsafe string and memory APIs, format string, integer overflow in allocation size, attacker-controlled copy lengths and indexes, use-after-free, double free, command injection |
+| Dart/Flutter · Swift | Insecure local storage, TLS/certificate validation, cleartext endpoints, WebView/JS bridge, deep-link input reaching sensitive sinks, biometric-only gates |
+| Docker / Compose · Kubernetes | Root and privileged containers, host namespaces and mounts, secrets in `ENV`/`ARG`, unpinned images, `curl \| sh`, pod security context, public exposure, RBAC wildcards, allow-all network policy |
+| IaC (Terraform · CloudFormation · Ansible) | Public buckets/databases/security groups, open SSH/RDP/DB ports, disabled encryption, wildcard IAM, unprotected state, `validate_certs: false` |
+| HTML / template files | Unescaped output, server values inside `<script>` or event handlers, raw-HTML directives, client-side template injection. Covered by the offline engine only — the CLI's LLM mode does not scan these files |
+
+**Not covered.** Some weakness classes need an understanding of intent or whole-program state and have no static rules: missing authentication checks, broken access control / privilege escalation, insecure direct object references (IDOR), business-logic flaws, null/nil dereference, uninitialized variables, and missing rate limiting. They are listed in the report's limitations. Expect lower recall than an LLM scan on flaws that depend on custom helper functions, unmodelled frameworks or dynamic dispatch; run an LLM scan with the CLI (or a manual review) for those.
+
+### How the extension runs it
+
+| Setting | Value | Effect |
+|---|---|---|
+| Analysis | analysis and reporting only | The project's code is never modified |
+| LLM | never used | Built-in rule engine only — see above |
+| Scope | whole workspace tree | Every scannable file under the open workspace folder, not just changed files |
+| Test files | skipped | Test folders and test-named files are left out (the CLI scans them by default) |
+| Extra skipped folders | `.ubel`, `node_modules`, `.git`, `dist`, `build`, `out`, `.gradle`, `.next`, `public`, `tests`, `venv`, `.venv`, `.cache`, `.parcel-cache`, `.turbo`, `.vercel`, `.serverless`, `.firebase`, `.aws-sam`, `.heroku`, `.netlify` | Added on top of the engine's built-in ignore set (which already skips dependency/build folders and every dot-directory) |
+| Size limits | up to 100,000 chunks, 100,000 characters per chunk | Raised from the CLI defaults (1,000 chunks; 12,000 characters per chunk) so a large project isn't cut short |
+| File size guard | 512,000 characters per file | Larger files are skipped and listed in the report as not scanned |
+
+These settings are fixed; the extension exposes no options for the SAST scan. Not available in the extension: custom (Semgrep-syntax) rules, scanning only the files changed in a git diff, a pass/fail exit-code gate, and the LLM provider options — those are CLI features.
+
+### Results
+
+When the scan finishes you get **UBEL SAST scan complete.** with an **Open Report** button; if it fails, an **❌ UBEL SAST scan error** message carries the details. Unlike the SCA-based scans, the extension does not evaluate the security [Policy](#policy) for SAST, so there is no pass/fail verdict or policy-violation warning — open the report to see what was found. Treat the findings as rule-based results to review rather than as AI-triaged, confirmed vulnerabilities.
+
+The report states that it was produced by the static engine (`llm: false`), and its executive summary and methodology describe a rule-based scan — nothing in it claims code was sent to an AI. The HTML report has a Dashboard, an **Executive Summary** tab, a searchable findings table with per-finding detail (code snippet, CWE, fix suggestion, taint flow path where applicable, compliance frameworks), a **Compliance** tab and a **Diffs** tab comparing this scan with the previous SAST report of the same asset.
+
+**Report location**
+
+```
+<project-root>/.ubel/reports/latest.sast.json
+<project-root>/.ubel/reports/latest.sast.html
+<project-root>/.ubel/reports/latest.sast.sarif.json
+```
+
+> **UBEL: Scan Project** writes `latest.sca.*`, the secrets command `latest.secrets.*`, the license command `latest.licenses.*` and this command `latest.sast.*` — they never overwrite each other. Each run's timestamped zip goes to `~/.ubel/history/<asset_id>/<timestamp>.sast.zip` (see [Reports](#reports)).
+
+---
+
 ## Files UBEL Writes to Your Workspace
 
-Besides the reports under `.ubel/` (see [Reports](#reports)), the **Scan Project**, **Scan Code Editor's Extensions**, **Scan project for Exposed Secrets** and **Scan project for License Compliance** commands make sure the scanned directory's `.gitignore` **and** `.dockerignore` ignore both `.ubel/` and `.ubelignore`, creating either file if it doesn't exist. **Scan Host Platform** does not touch them.
+Besides the reports under `.ubel/` (see [Reports](#reports)), the **Scan Project**, **Scan Code Editor's Extensions**, **Scan project for Exposed Secrets**, **Scan project for License Compliance** and **Scan project for SAST** commands make sure the scanned directory's `.gitignore` **and** `.dockerignore` ignore both `.ubel/` and `.ubelignore`, creating either file if it doesn't exist. **Scan Host Platform** does not touch them.
 
 - **Idempotent.** An entry counts as covered if any equivalent pattern is already present (`.ubel`, `/.ubel/`, `.ubel/*`, `.ubel*`, …), so a hand-written entry is never duplicated.
 - **Append-only.** Existing content, ordering and line endings (LF/CRLF) are preserved; new entries go under a `# ubel:` comment.
@@ -307,11 +382,13 @@ KEV/EPSS lookups are the exception: they only add risk signal, so if either feed
 
 Every notification includes an **Open Report** button that opens the full interactive HTML report in your browser.
 
+The SAST scan is the exception to the table above: it only reports that it completed (**UBEL SAST scan complete.**) or failed (**❌ UBEL SAST scan error**), with an **Open Report** button and no policy verdict — see [Scan for SAST](#scan-for-sast-ctrlalta).
+
 ---
 
 ## The HTML Report
 
-Each scan produces a self-contained HTML file that works fully offline. It contains ten tabs:
+Each SCA-based scan produces a self-contained HTML file that works fully offline. It contains ten tabs. (The SAST report has its own layout — see [Scan for SAST](#scan-for-sast-ctrlalta).)
 
 | Tab | Contents |
 |---|---|
@@ -370,6 +447,8 @@ A **Print / save as PDF** button at the top of the tab prints the summary only (
 | Not assessed | the scan skipped vulnerability lookups (e.g. **UBEL: Scan project for License Compliance**) and nothing else raised the rating — shown instead of "Minimal" so an unchecked scan is never read as a clean one |
 
 The rating and the policy verdict are independent: the rating discounts findings that reachability analysis confirmed are unused, while the verdict counts every finding at or above the blocking thresholds (and any exposed secret), so a report can be rated Medium yet still be blocked. Reachability is a heuristic; a finding with no reachability result is treated as potentially reachable.
+
+(The SAST report's executive summary follows the same structure but has its own rating rules, based on verified and exploitable code findings and on how much of the code was actually analysed.)
 
 **Exploit intelligence in the summary.** The summary uses the same two signals the policy blocks on, so a report is never rated "Low" while the policy blocks it for an actively exploited vulnerability:
 
@@ -746,7 +825,7 @@ The SBOM and SARIF outputs below are produced by regular project and extension s
 
 ## Compliance Framework Mapping
 
-Every dependency vulnerability and secrets-in-source finding is mapped onto industry compliance/security frameworks by default — no separate flag or mode needed, and included in every report format. This is distinct from [License Compliance](#license-compliance) above, which is about license-obligation risk on installed software; this is about mapping *security* findings onto the frameworks an org is typically audited against.
+Every dependency vulnerability and secrets-in-source finding is mapped onto industry compliance/security frameworks by default — no separate flag or mode needed, and included in every report format. Every *verified* SAST finding is mapped the same way in the SAST report (JSON, HTML and SARIF). This is distinct from [License Compliance](#license-compliance) above, which is about license-obligation risk on installed software; this is about mapping *security* findings onto the frameworks an org is typically audited against.
 
 Each finding is first assigned one or more internal risk categories — for a dependency vulnerability, derived from its advisory's CWE(s); for a secrets finding, always `secrets_management` (e.g. `injection`, `secrets_management`, `vulnerable_components` — the latter always applied to a dependency finding as a baseline, since every SCA finding is a known-vulnerable-component finding by definition), and each category carries a fixed list of framework control references, so two findings with the same underlying risk always map identically.
 
@@ -815,7 +894,7 @@ The top-level `compliance_summary` field aggregates every vulnerability and secr
 
 ## Diffs Against the Previous Report
 
-Project, extension and host-platform scans carry a `diffs` block in the JSON report, shown as the **Diffs** tab of the HTML report (between **Compliance** and **System Info**). It says what changed since the previous report of the same asset **and** the same scan type: a `sca` scan is compared only with an earlier `sca` scan, an `os_sca` scan only with an earlier `os_sca` scan, and so on for each editor's `<editor>_sca` scan. The previous report is read from the newest earlier zip of that type in the asset's history folder (`~/.ubel/history/<asset_id>/`, see [Reports](#reports)); a zip that can't be read is skipped in favour of the next older one.
+Project, extension and host-platform scans carry a `diffs` block in the JSON report, shown as the **Diffs** tab of the HTML report (between **Compliance** and **System Info**). It says what changed since the previous report of the same asset **and** the same scan type: a `sca` scan is compared only with an earlier `sca` scan, an `os_sca` scan only with an earlier `os_sca` scan, and so on for each editor's `<editor>_sca` scan. The previous report is read from the newest earlier zip of that type in the asset's history folder (`~/.ubel/history/<asset_id>/`, see [Reports](#reports)); a zip that can't be read is skipped in favour of the next older one. The SAST report carries its own `diffs` block, comparing code units, findings and per-framework findings with the previous `sast` report of the same asset.
 
 | What | Matched by | Lists |
 |---|---|---|
@@ -836,7 +915,7 @@ In the HTML report each count is a button that opens the list behind it. The com
 
 ## Policy
 
-All ecosystems share the same policy engine. Policy is stored as JSON at `.ubel/local/policy/config.json`, relative to the scan root — `<project-root>` for project, secrets, and license scans, the editor's extensions directory for the extensions scan, and `~` for the host-platform scan. The file is created with defaults on the first scan.
+All ecosystems share the same policy engine. Policy is stored as JSON at `.ubel/local/policy/config.json`, relative to the scan root — `<project-root>` for project, secrets, and license scans, the editor's extensions directory for the extensions scan, and `~` for the host-platform scan. The file is created with defaults on the first scan. The policy applies to the SCA-based scans; the SAST scan does not evaluate it.
 
 The extension has no `threshold` / `block-unknown` / per-run-flag commands (those belong to the CLI) — to change policy, edit `config.json` directly. Default policy:
 
@@ -865,7 +944,7 @@ The extension has no `threshold` / `block-unknown` / per-run-flag commands (thos
 | `reachable_only` | `true` `false` | `false` | Apply the severity / unknown-severity / KEV / EPSS rules to **reachable vulnerabilities only**. One the [reachability analysis](#reachability-analysis) confirms is unreachable is still listed in the report but marked `allow` (`policy_exempt: "unreachable"`) and never blocks; one with no reachability result is not exempted. By default reachability is informational and does not change the verdict |
 | Infections (`MAL-*`) | — | always blocked | Cannot be toggled; unconditionally blocked |
 
-The severity threshold is inclusive — `high` blocks both `high` and `critical`. KEV and EPSS blocking apply on top of it: a Low-severity vulnerability that is known to be exploited, or whose EPSS score is at or above the threshold, still blocks. Both rules need data from an external feed; if it couldn't be fetched, that rule can't fire for the run (see [Exploit Intelligence](#exploit-intelligence-kev--epss)), and a passing verdict says so. Policy files created before these fields existed pick up the defaults automatically. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every extension scan runs in `health` mode, where these two gates are active.
+The severity threshold is inclusive — `high` blocks both `high` and `critical`. KEV and EPSS blocking apply on top of it: a Low-severity vulnerability that is known to be exploited, or whose EPSS score is at or above the threshold, still blocks. Both rules need data from an external feed; if it couldn't be fetched, that rule can't fire for the run (see [Exploit Intelligence](#exploit-intelligence-kev--epss)), and a passing verdict says so. Policy files created before these fields existed pick up the defaults automatically. Setting `none` disables severity blocking but infections are still blocked. `license_risk_threshold`/`block_unknown_license_risk` are opt-in (both default off) since license-risk tolerance varies by org and license detection has real gaps (free-text licenses, missing metadata); every SCA-based extension scan runs in `health` mode, where these two gates are active.
 
 ---
 
@@ -875,6 +954,7 @@ The severity threshold is inclusive — `high` blocks both `high` and `critical`
 |---|
 | Source repos & monorepos |
 | Exposed secrets in source |
+| Insecure code patterns in first-party source (offline rule-based SAST, no LLM) |
 | Developer machines (Windows / Linux) |
 | VS Code extension |
 
@@ -883,6 +963,10 @@ The severity threshold is inclusive — `high` blocks both `high` and `critical`
 ### Repos and Monorepos
 
 UBEL walks the entire directory tree and detects all supported ecosystems in a single pass — no per-language configuration needed. Monorepos with mixed stacks (e.g. a Node.js frontend, Python backend, and Rust service in the same repo) are fully covered in one invocation.
+
+### Your Own Source Code (SAST)
+
+Dependency scans only cover code you didn't write. **UBEL: Scan project for SAST** (`Ctrl+Alt+A`) covers the code you did: an offline, deterministic rule engine (no LLM, no network) that looks for injection flaws, unsafe deserialization, weak crypto, hardcoded secrets, insecure container/Kubernetes/IaC configuration and more across all 15 supported language families. See [Scan for SAST](#scan-for-sast-ctrlalta).
 
 ### Developer Machines
 
@@ -959,6 +1043,7 @@ Every scan writes a self-contained interactive **HTML** report plus a machine-re
 | Scan Host Platform (Windows / Linux) | `os_sca` | ✅ | ✅ | ✅ | ❌ |
 | Scan project for Exposed Secrets | `secrets` | ✅ | ✅ | ❌ | ❌ |
 | Scan project for License Compliance | `licenses` | ✅ | ✅ | ❌ | ❌ |
+| Scan project for SAST (offline, no LLM) | `sast` | ✅ | ✅ | ❌ | ✅ |
 
 On a platform other than Windows or Linux, Scan Host Platform falls back to the `sca` tag.
 
@@ -969,13 +1054,14 @@ On a platform other than Windows or Linux, Scan Host Platform falls back to the 
 | `latest.sca.cdx.json` | CycloneDX v1.6 SBOM | Components, dependency graph, and vulnerabilities as VEX; secrets, license, KEV/EPSS, and suggested-fix data in `properties` |
 | `latest.sca.sarif.json` | SARIF 2.1.0 | Separate runs for dependency vulnerabilities, secrets, and license compliance |
 
-For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html`, `latest.licenses.json`, and so on (only the formats marked ✅ above exist for that tag). **Open Report** in each notification opens that command's `latest.<tag>.html`.
+For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html`, `latest.licenses.json`, `latest.sast.sarif.json`, and so on (only the formats marked ✅ above exist for that tag). **Open Report** in each notification opens that command's `latest.<tag>.html`.
 
 | Scan target | Report path |
 |---|---|
 | Workspace | `<project-root>/.ubel/reports/latest.sca.*` |
 | Secrets-only scan | `<project-root>/.ubel/reports/latest.secrets.*` |
 | License-only scan | `<project-root>/.ubel/reports/latest.licenses.*` |
+| SAST scan (offline, no LLM) | `<project-root>/.ubel/reports/latest.sast.*` (`.json`, `.html`, `.sarif.json`) |
 | VS Code / VS Codium / Cursor extensions | `~/.vscode/extensions/.ubel/reports/latest.vscode_sca.*` or `~/.vscode-oss/extensions/.ubel/reports/latest.vscodium_sca.*` or `~/.cursor/extensions/.ubel/reports/latest.cursor_sca.*` |
 | Host platform | `~/.ubel/reports/latest.os_sca.*` on Windows / Linux, `latest.sca.*` elsewhere (every report also carries the machine id from `~/.ubel/ubel_machine.json`) |
 
@@ -983,15 +1069,15 @@ For the other commands, swap the tag: `latest.os_sca.html`, `latest.secrets.html
 
 Previous scans are retained as timestamped zipped snapshots (`<timestamp>.<tag>.zip`, where `<timestamp>` is `YYYY_MM_DD__HH_MM_SS` in UTC, e.g. `2026_10_10__12_30_05.sca.zip`). Inside each zip the files are always named `report` — `report.<tag>.json`, `report.<tag>.html`, and, where the scan type produces them, `report.<tag>.cdx.json` and `report.<tag>.sarif.json`. Zips are stored in `~/.ubel/history/<mode>/`:
 
-Every command files its zip in the same place — `~/.ubel/history/<asset_id>/`. There is no per-command folder; the tag in the file name tells them apart: `sca` (Scan Project), `<editor>_sca` (Scan VS Code Extensions), `os_sca` on Windows / Linux (Scan Host Platform), `secrets` (Scan project for Exposed Secrets) and `licenses` (Scan project for License Compliance).
+Every command files its zip in the same place — `~/.ubel/history/<asset_id>/`. There is no per-command folder; the tag in the file name tells them apart: `sca` (Scan Project), `<editor>_sca` (Scan VS Code Extensions), `os_sca` on Windows / Linux (Scan Host Platform), `secrets` (Scan project for Exposed Secrets), `licenses` (Scan project for License Compliance) and `sast` (Scan project for SAST).
 
-All projects and commands share this one folder, but each asset's zips live in a sub-folder named after its asset id — `~/.ubel/history/<asset_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/3f6c2a9e1b7d4c589a426e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_asset.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_asset.json` for the workspace, secrets and license commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
+All projects and commands share this one folder, but each asset's zips live in a sub-folder named after its asset id — `~/.ubel/history/<asset_id>/<timestamp>.<tag>.zip`, e.g. `~/.ubel/history/3f6c2a9e1b7d4c589a426e0d8b5f7a13/2026_10_10__12_30_05.sca.zip`. The id comes from `ubel_asset.json` in the `.ubel` folder of whatever was scanned — `<project-root>/.ubel/ubel_asset.json` for the workspace, secrets, license and SAST commands, and the `.ubel` folder inside the extensions directory for **Scan VS Code Extensions**. The first scan in a folder creates it; the id never changes afterwards:
 
 ```json
 { "asset_id": "3f6c2a9e1b7d4c589a426e0d8b5f7a13", "asset_name": "shop", "created_at": "2026-10-10T12:30:05.000Z" }
 ```
 
-`asset_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Asset** and **Asset ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from. Each report also carries an **`asset_type`** (shown as **Asset type**), which depends on the command: *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* are `codebase`, *Scan VS Code Extensions* is `editor` (and gets one asset id per editor), and *Scan Host Platform* is `machine` — see [Asset types](../sca/README.md#asset-types-asset_type) in the CLI docs. The type is not stored in `ubel_asset.json`; it is set per scan. Every report also has its own **`report_id`**, `UBEL-<tag>-<asset_id>-<uuid>` (for example `UBEL-sca-…` for *Scan Project*), the same in the report's JSON, HTML, SBOM and SARIF — see [Report ID](../sca/README.md#report-id-report_id).
+`asset_name` is a readable label — the git repository name when the workspace is a checkout, otherwise the folder name — and you can edit it. The id and name are also written into each report and shown as **Asset** and **Asset ID** in the HTML report's Scan Info panel, so a zip that has been moved or renamed still says where it came from. Each report also carries an **`asset_type`** (shown as **Asset type**), which depends on the command: *Scan Project*, *Scan project for Exposed Secrets*, *Scan project for License Compliance* and *Scan project for SAST* are `codebase`, *Scan VS Code Extensions* is `editor` (and gets one asset id per editor), and *Scan Host Platform* is `machine` — see [Asset types](../sca/README.md#asset-types-asset_type) in the CLI docs. The type is not stored in `ubel_asset.json`; it is set per scan. Every report also has its own **`report_id`**, `UBEL-<tag>-<asset_id>-<uuid>` (for example `UBEL-sca-…` for *Scan Project*), the same in the report's JSON, HTML, SBOM and SARIF — see [Report ID](../sca/README.md#report-id-report_id).
 
 **Scan Host Platform** scans your home directory, so its asset id is the one in `~/.ubel/ubel_asset.json`. Separately, **every** report carries a `machine_id` (shown as **Machine ID** in the HTML) from `~/.ubel/ubel_machine.json` — the id of this machine, an id only, no name; the CLI's `ubel-apt` / `ubel-dnf` / `ubel-yum` use it as their asset id. If a `ubel_asset.json` can't be written, the scan still runs and its zip is written straight into `~/.ubel/history/` and the latest zip into `~/.ubel/latest_reports/`. Zips from earlier versions stay where they are (`~/.ubel/history/<mode>/<asset_id>/`). If two scans of the same folder finish in the same second, the later zip gets a `_2` suffix instead of overwriting the first.
 
@@ -1016,8 +1102,10 @@ It is a copy of the zip the scan just wrote and has the same contents (`report.<
 
 ## Extension vs. CLI
 
-The extension runs the same engine as the CLI's `health` mode. These parts of the [`@arcane-spark/ubel-node`](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) package are **not** in the extension:
+The extension runs the same SCA engine as the CLI's `health` mode, and the CLI's SAST engine in its offline, no-LLM form. These parts of the [`@arcane-spark/ubel-node`](https://github.com/AlaBouali/ubel/blob/main/sca/README.md) package are **not** in the extension:
 
+- LLM-assisted SAST — the extension's SAST scan never uses an LLM, so the three-pass AI pipeline (scan → verify → taint trace), the LLM provider options, and the weakness classes that only an LLM can judge stay in the CLI. Also not in the extension: custom Semgrep-syntax SAST rules, diff-only SAST scanning, and the SAST pass/fail exit-code gate
+- The malicious-code / backdoor scanner (`ubel-mal`)
 - The install-time firewall (`check` / `install` modes) for npm, pnpm, bun, composer, pip, uv, pipx, poetry, conda, cargo, apt, dnf, and yum, including lockfile backup/revert and TOCTOU integrity protection (always with install scripts blocked)
 - `ubel-docker` container-image scanning
 - Fixed-configuration CLIs for AI-agent sandboxes and CI/CD (`ubel-agent`, `ubel-cicd`)
@@ -1031,7 +1119,7 @@ The extension runs the same engine as the CLI's `health` mode. These parts of th
 
 - Node.js `>=18.0.0`
 - VS Code `^1.85.0` (extension only)
-- Network access to osv.dev and the NVD API (or your configured mirrors) for vulnerability lookups; KEV/EPSS lookups are best-effort
+- Network access to osv.dev and the NVD API (or your configured mirrors) for vulnerability lookups; KEV/EPSS lookups are best-effort. The SAST scan needs no network access and no API key
 
 ---
 
@@ -1046,7 +1134,7 @@ UBEL is fully local. The external calls it makes are:
 | [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) (`www.cisa.gov`) | Known-exploited flag | Best-effort — scan completes, KEV fields are `null` |
 | [FIRST EPSS API](https://www.first.org/epss/) (`api.first.org`) | Exploit-likelihood score, queried by CVE id | Best-effort — scan completes, EPSS fields are `null` |
 
-No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. UBEL does not look up your public IP address, and reports do not record your local IP addresses or ports. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If an OSV or NVD lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
+No file contents, no dependency graphs, no machine identifiers, and no telemetry are sent anywhere. The SAST scan never calls an LLM, so none of your source code is sent to an LLM provider, and it makes none of the calls in the table above. UBEL does not look up your public IP address, and reports do not record your local IP addresses or ports. Secrets findings never leave the machine at all — match previews shown in reports are redacted before being written to disk. If an OSV or NVD lookup can't be completed, the scan ends with an error message rather than reporting a clean result.
 
 The OSV and NVD endpoints can be redirected to an internal mirror by setting `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` in the environment the editor was launched from (e.g. via VS Code's own `terminal.integrated.env.*` settings, or the OS environment) — useful for air-gapped or regulated environments where those calls need to stay on an internal network. A mirror must expose the same path shape as the public API, and the "view online" reference links in reports still point at the public sites. There is currently no endpoint override for KEV/EPSS: in a fully air-gapped setup the scan runs without that data and says so. See [sca/README.md](https://github.com/AlaBouali/ubel/blob/main/sca/README.md#environment-variables) for details; this extension reads the same engine, so the same variables apply.
 
