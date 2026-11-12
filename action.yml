@@ -1,8 +1,8 @@
 name: 'UBEL Security Scan and dependencies firewall'
-description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app, native binary and dependency-release scanning via UBEL'
+description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app, native binary, dependency-release and MCP server / client scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -179,6 +179,35 @@ runs:
     # Never build `args` from anything less trusted than the workflow's own hardcoded config
     # (a PR title, an issue body, another job's output).
     #
+    # `mcp-client` (`ubel-mcp-client`) is a STATIC, OFFLINE scan of how MCP clients are set up
+    # on the runner: the user-level configuration files (Claude Desktop / Code, Cursor, VS Code,
+    # Windsurf, Cline / Roo, Zed, Gemini CLI, Codex, Amazon Q, LM Studio) and the checked-out
+    # project's own files (`.mcp.json`, `.cursor/`, `.vscode/` ...). On a fresh GitHub-hosted runner
+    # only the project files exist, so `args` is usually just flags, e.g. `--fail-on high`; add
+    # `--project <dir>` for another directory, `--config <file>` for a file elsewhere, or
+    # `--source <dir>` for an app that embeds an MCP client. It reads files only: nothing is
+    # contacted and nothing is started. No toolchain is needed.
+    #
+    # `mcp-server` (`ubel-mcp-server`) needs a target in `args`: an endpoint URL, `--from-config`,
+    # `--discover`, `--source <dir>` or `--package npm:<name>[@<version>]` / `pypi:<name>[==<version>]`,
+    # followed by any flags, e.g. `https://mcp.example.com/mcp --fail-on high`. It probes running
+    # HTTP / SSE servers with `initialize` and the list methods only (it never calls a tool and never
+    # starts a server), downloads and READS the packages a launcher would fetch (nothing is installed
+    # or run), and needs no toolchain; the runner needs network access to the endpoints, the package
+    # registries and OSV.dev / NVD (mirrorable through UBEL_OSV_ENDPOINT / UBEL_NVD_ENDPOINT). Process
+    # observation (`/proc`) works on Linux runners only. Credentials are sent only if `args` carries
+    # `--token` / `--header` (or `--use-config-headers`), and only to that server's own URL: pass them
+    # from a secret, never inline. A project file that declares a loopback / private URL is not probed
+    # unless `--trust-project` is given, so a checked-out repository cannot aim the runner at internal
+    # hosts. Like `url` and `package`, `mcp-server` acts on caller-influenced targets: never build
+    # `args` from anything less trusted than the workflow's own hardcoded config (a PR title, an
+    # issue body, another job's output).
+    # Both exit codes follow `mobile` / `binary` / `package`: 2 = the gate tripped (or bad
+    # arguments), 3 = nothing tripped it but part of the analysis could not be done (an unparseable
+    # config, an unreachable `--url` target, a failed registry or advisory lookup), which fails the
+    # step on purpose; add `--allow-partial` to `args` to accept it. `mcp-client` / `mcp-server` exist
+    # only in releases that ship the `ubel-mcp-client` / `ubel-mcp-server` binaries: pin `version` to one.
+    #
     - shell: bash
       env:
         UBEL_ACTION_COMMAND: ${{ inputs.command }}
@@ -186,10 +215,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|package|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|package|mcp-client|mcp-server|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
             exit 1
             ;;
         esac
