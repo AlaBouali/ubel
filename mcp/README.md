@@ -104,7 +104,9 @@ Tool, resource and prompt definitions and the `instructions` of the initialize r
 - **Poisoning** — wording addressed to the model rather than describing the tool: override-instructions, concealment from the user, pseudo-system tags, references to credential files, secrecy wording, data sent to a URL, markdown images to a URL, redirection of other tools, hidden HTML comments, whitespace padding, encoded blobs. A single strong signal is a finding; weak ones alone are not.
 - **Invisible characters** — zero-width, bidirectional controls, control characters and Unicode tag characters; tag characters are decoded so the hidden text is shown.
 - **Names** — non-ASCII or look-alike tool names, names outside the specification, duplicates, and the same name offered by more than one server in the scan.
-- **Capabilities** — tools that run commands (always reported), and tools that write files, run SQL, read secrets, fetch URLs or send messages (reported when the endpoint is unauthenticated); annotations such as `readOnlyHint` that contradict the tool; free-form `command` / `path` / `url` / `query` string parameters; resources that point at credential or system files.
+- **Capabilities** — tools that run commands (always reported), and tools that write files, run SQL, read secrets, fetch URLs, send messages or read files through a free-form `path` (reported when the endpoint is unauthenticated); annotations such as `readOnlyHint` that contradict the tool; free-form `command` / `path` / `url` / `query` string parameters.
+- **Impersonation parameters** — a parameter that names the user to act as (`on_behalf_of`, `impersonate`, `as_user`, `run_as`, `act_as`, `login_as` …). The server has to check that the caller may act for that user; one that is not described in the schema is also invisible to the person reviewing the tool (`mcp.tool.identity_override_param`).
+- **Resources** — a resource that points at credential or system files, or whose address or name says it is a secret (`internal://credentials`): a client can read a resource without being asked, and its content goes into the model's context.
 - **Rug pulls** — each tool's definition is hashed. When `.ubel/reports/latest.mcp_server.json` from the previous scan has the same server, a changed description or schema (`mcp.tool.changed`, high) or a new tool (`mcp.tool.added`) is reported. A server that changes its definitions between two scans is only visible this way; scan on a schedule.
 
 Hostile input is bounded: responses are capped at 1 MB, whitespace runs are collapsed before the pattern checks, a very long string is read at its head and tail, and one scan has a total character budget (reported as a gap when exceeded).
@@ -121,13 +123,16 @@ A server declared by a **project** file (a repository you may not have written) 
 
 ### Local server source (`--source`, and declared scripts)
 
-The behaviour analyser and the secrets engine of `ubel-package` / `ubel-secrets`, plus MCP-specific reading:
+The behaviour analyser and the secrets engine of `ubel-package` / `ubel-secrets`, plus MCP-specific reading of Python, JavaScript / TypeScript and Go: every **tool, resource and prompt** the code registers (`@mcp.tool()` / `@mcp.resource()` / `@mcp.prompt()`, `server.tool` / `registerTool` / `addTool` / `resource`, Go `NewTool`) with its **description**, its **parameters** and its **handler**.
 
-- the tools the code registers (`server.tool`, `registerTool`, `addTool`, Python `@mcp.tool()` decorators, Go `NewTool`);
-- tool handlers that run a shell command or evaluate code, build SQL, use a file path or request a URL that is not a literal;
-- binding to `0.0.0.0`, wildcard CORS, and an HTTP transport with no Origin / Host validation.
+- **Descriptions are analysed like a live server's.** The docstring of a Python tool (or its `description=`), the `description:` field or second argument of a JavaScript one, parameter descriptions from `Args:` sections and `.describe()`, and the server `instructions` go through the same definition analysis as a running server's definitions: poisoning, invisible characters, look-alike names, command-running tools, impersonation parameters. A poisoned tool is therefore found from `--source` alone, without starting the server.
+- **Handler sinks** — a shell command, `eval` / `exec`, an SQL string, a file path or a URL that is not a literal. The handler's parameters are followed through its own assignments (`cmd = f"ping {host}"` → `run(cmd)`), and through **helper functions of the same file**: a handler that calls `_run_shell(cmd)` is a shell sink when `_run_shell` passes its argument to `subprocess.run(..., shell=True)` (two hops). A parameter that reaches the call is reported with medium confidence; a non-literal that merely appears there, with low confidence, which lowers the severity one level.
+- **Secrets in what a handler returns** (`mcp.source.tool_secret_exposure`) — a secret-named value interpolated into the returned text or placed in a returned structure, the whole process environment, a module-level credential. Whatever a tool or resource returns goes into the model's context.
+- **JWT handling** (`mcp.source.jwt_weak`) — signature verification switched off, the `none` algorithm, ignored expiry, `jwt.decode` without `jwt.verify`, and a signing secret that is a literal shorter than 32 characters.
+- **Binding and transport** — binding to `0.0.0.0`, wildcard CORS, and an HTTP transport with no Origin / Host validation.
+- **Findings are per file**, so a tree of servers is not reported as one issue; one rule lists at most 40 files and summarises the rest.
 
-**These are text-level heuristics, not data-flow analysis.** They look at the lines after a tool registration, carry low confidence (which lowers the severity one level) and point at where to read; they do not prove an injection. Symlinks are never followed and a file is read up to 768 KB.
+**These are text-level heuristics, not a data-flow engine.** Python is read by indentation, JavaScript by balanced brackets, Go by a window of lines; helper following stays inside one file; taint follows assignments, not calls into other modules, containers or classes. A finding points at where to read; it does not prove an injection. Symlinks are never followed and a file is read up to 768 KB.
 
 ### Running servers (Linux `/proc`)
 
@@ -181,7 +186,8 @@ Exit codes: `0` passed and complete · `1` scan failed · `2` the gate tripped, 
 
 - **Client file locations** are from the clients' documentation and from memory of their behaviour; they change between versions. `--config` covers anything that differs.
 - **stdio servers are not interrogated live.** That needs a process of its own, which these scanners do not start. A running stdio server gets process observation and static analysis only; a server that builds its tool list at run time, or changes it after approval, is visible only through the rug-pull diff of an HTTP / SSE server.
-- **Source checks are heuristics** (see above). Tool extraction is regex-based.
+- **Source checks are heuristics** (see above). Tool extraction is text-based.
+- **Behaviour that only exists at run time is out of reach.** The scanners never call a tool, so they cannot see prompt injection through what a tool returns, instructions planted in data a tool reads, a tool that changes after a number of calls (a rug pull triggered by use; only a change between two scans is visible), or authorization and supply-chain logic (IDOR, publisher trust, registry fallback). Source analysis can point at the code behind some of these (secrets returned, weak tokens, impersonation parameters), not prove them. A scan that calls tools with payloads is a different, side-effecting kind of tool.
 - **Process observation is Linux-only.** Windows and macOS get `--discover` by port, no process attribution.
 - **Container images and native binaries** a server runs are not analysed here (see `ubel-docker`, `ubel-binary`).
 - An unauthenticated probe says what an anonymous client can do. What a server exposes to an authenticated client needs credentials.
@@ -251,6 +257,7 @@ The default severity is shown; some findings are rated by context (for example `
 | `mcp.tool.dangerous_capability` | medium | Server exposes tools that execute commands or change the system |
 | `mcp.tool.annotation_mismatch` | medium | Tool annotations contradict what the tool does |
 | `mcp.tool.unconstrained_sink` | low | Tool takes a command, path, URL or query as a free-form string |
+| `mcp.tool.identity_override_param` | medium | Tool takes a parameter that lets the caller act as another user |
 | `mcp.tool.long_description` | low | Definition text is unusually long |
 | `mcp.resource.sensitive` | medium | Server offers resources that point at credential or system files |
 
@@ -264,6 +271,8 @@ The default severity is shown; some findings are rated by context (for example `
 | `mcp.source.tool_sql_injection` | high | Tool handler builds an SQL statement by string concatenation |
 | `mcp.source.tool_path_traversal` | medium | Tool handler uses a file path from its arguments without a containment check |
 | `mcp.source.tool_ssrf` | medium | Tool handler requests a URL from its arguments without an allow-list |
+| `mcp.source.tool_secret_exposure` | high | Tool handler puts secrets into what it returns |
+| `mcp.source.jwt_weak` | high | Token verification is weak or the signing secret is short |
 | `mcp.source.bind_all` | medium | Server source binds to all network interfaces |
 | `mcp.source.dns_rebinding` | medium | HTTP transport without Origin / Host validation |
 | `mcp.source.cors_wildcard` | medium | Server source allows cross-origin requests from any origin |

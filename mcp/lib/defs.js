@@ -108,9 +108,12 @@ export function classify(tool) {
   for (const [id, , re] of CAPS) if (re.test(text) || (id === 'exec' && /\b(?:command|cmd|script|shell)\b/.test(props) && /\b(?:run|exec|execute)\b/i.test(name))) caps.push(id);
   return caps;
 }
+const IDENTITY_PARAM = /^(?:on_?behalf_?of|impersonat\w*|as_?user|run_?as(?:_\w+)?|act_?as|sudo(?:_user)?|su_?to|switch_?user|override_?user|effective_?user|proxy_?user|delegate(?:_to)?|masquerade\w*|login_?as|spoof\w*)$/i;
+const PATH_PARAM = /^(?:path|file|filename|filepath|file_path|dir|directory|folder)$/i;
 const SINK_PARAM = /^(?:command|cmd|script|code|shell|sql|query|expression|eval|path|file|filename|filepath|file_path|dir|directory|url|uri|endpoint|host)$/i;
 const DANGEROUS_PARAM = /^(?:command|cmd|script|code|shell|sql|expression|eval)$/i;
 const SENSITIVE_URI = /(?:\/\.(?:ssh|aws|gnupg|kube|docker|config)\b|\/etc\/(?:passwd|shadow|sudoers)|\bid_(?:rsa|ed25519)\b|\.env(?:\.|$)|\/proc\/|credentials?\b|\.pem$|\.key$)/i;
+const SENSITIVE_NAME = /(?:credential|secret|passw(?:or)?d|private[_ -]?key|api[_ -]?key|access[_ -]?token|auth[_ -]?token|\btokens?\b)/i;   // a resource of any scheme whose address or name says it is a secret
 
 /**
  * @param {object} d  {server, tools, resources, resourceTemplates, prompts, instructions, exposure, unauthenticated, previous}
@@ -189,7 +192,7 @@ export function analyzeDefinitions(d, ctx) {
 
   // 3. capabilities, annotations, free-form parameters
   const capTools = new Map();
-  const annot = [], sinks = [];
+  const annot = [], sinks = [], identity = [];
   for (const t of d.tools || []) {
     if (!t || typeof t !== 'object') continue;
     const caps = classify(t);
@@ -200,32 +203,39 @@ export function analyzeDefinitions(d, ctx) {
     if (a.readOnlyHint === true && caps.some(c => ['exec', 'file_write', 'sql', 'messaging', 'secrets'].includes(c))) annot.push(`${t.name}: readOnlyHint=true but the tool can ${caps.filter(c => ['exec', 'file_write', 'sql', 'messaging', 'secrets'].includes(c)).map(c => CAPS.find(x => x[0] === c)[1]).join(' and ')}`);
     if (a.destructiveHint === false && /\b(?:delete|remove|drop|truncate|wipe|destroy|purge|erase)\b/i.test(String(t.name || '').replace(/[_-]/g, ' '))) annot.push(`${t.name}: destructiveHint=false on a tool named like a deletion`);
     for (const [pn, ps] of Object.entries(t.inputSchema?.properties || {})) {
+      if (IDENTITY_PARAM.test(pn)) identity.push({ tool: String(t.name), param: pn, documented: !!(ps && typeof ps === 'object' && ps.description) });
       if (SINK_PARAM.test(pn) && ps && (ps.type === 'string' || ps.type === undefined) && !ps.enum && !ps.pattern && !ps.maxLength && !ps.const) sinks.push({ tool: t.name, param: pn, danger: DANGEROUS_PARAM.test(pn) });
     }
   }
   if (annot.length) add('mcp.tool.annotation_mismatch', { artifact: 'tools', key: 'annotations', description: `${annot.length} tool(s) carry annotations that contradict what they do. Clients use these hints to decide whether to ask before calling.`, evidence: annot.slice(0, 8) });
-  const DANGER = ['exec', 'file_write', 'sql', 'secrets', 'network', 'messaging'];
+  if (identity.length) add('mcp.tool.identity_override_param', {
+    artifact: 'tools', key: 'identity', severity: identity.some(i => !i.documented) ? 'high' : 'medium',
+    description: `${identity.length} parameter(s) let the caller name the user to act as (${identity.slice(0, 4).map(i => `${i.tool}.${i.param}`).join(', ')}). The server has to check that the caller may act for that user; if it trusts the session's identity instead, passing another one reads or changes that user's data.${identity.some(i => !i.documented) ? ' At least one of them has no description in the schema, so it is not shown to the person reviewing the tool.' : ''}`,
+    evidence: identity.slice(0, 10).map(i => `${i.tool}(${i.param})${i.documented ? '' : ' — not described in the schema'}`),
+  });
+  const DANGER = ['exec', 'file_write', 'sql', 'secrets', 'network', 'messaging', 'file_read'];
   for (const c of DANGER) {
-    const names = capTools.get(c);
+    let names = capTools.get(c);
+    if (c === 'file_read' && names) names = names.filter(n => sinks.some(s => s.tool === n && PATH_PARAM.test(s.param)));      // reading files is reported when the path is free-form
     if (!names?.length) continue;
     if (c !== 'exec' && !exposedUnauth) continue;                      // only command execution is reported on its own; the rest matter when anyone can call them
     const sev = exposedUnauth ? (reachable === 'public' ? 'critical' : reachable === 'private' ? 'high' : 'medium') : 'medium';
     add('mcp.tool.dangerous_capability', {
       artifact: `tools (${c})`, key: `cap:${c}`, severity: c === 'exec' || exposedUnauth ? sev : 'low',
       title: `Server exposes tools that ${CAPS.find(x => x[0] === c)[1]}`,
-      description: `${names.length} tool(s) ${CAPS.find(x => x[0] === c)[1]}: ${names.slice(0, 6).join(', ')}${names.length > 6 ? ', …' : ''}.${exposedUnauth ? ` The endpoint does not authenticate and is ${d.exposure === 'public' ? 'on a public address' : d.exposure === 'private' ? 'on the local network' : 'on this machine'}, so whoever can reach it can use them.` : ' Anything that can steer the model (a web page it read, a poisoned tool description) can reach them, so the client should ask before each call.'}`,
+      description: `${names.length} tool(s) ${CAPS.find(x => x[0] === c)[1]}: ${names.slice(0, 6).join(', ')}${names.length > 6 ? ', …' : ''}.${c === 'file_read' ? ' The path is a free-form string in the schema, so nothing visible restricts them to a directory: they can read any file the server process can read (keys, tokens, configuration).' : ''}${exposedUnauth ? ` The endpoint does not authenticate and is ${d.exposure === 'public' ? 'on a public address' : d.exposure === 'private' ? 'on the local network' : 'on this machine'}, so whoever can reach it can use them.` : ' Anything that can steer the model (a web page it read, a poisoned tool description) can reach them, so the client should ask before each call.'}`,
       evidence: names.slice(0, 12).map(String),
     });
   }
-  if (sinks.length) add('mcp.tool.unconstrained_sink', {
+  if (sinks.length && !d.static) add('mcp.tool.unconstrained_sink', {
     artifact: 'tools', key: 'sinks', severity: sinks.some(s => s.danger) ? 'medium' : 'low',
     description: `${sinks.length} parameter(s) are free-form strings named like a command, path, URL or query. Whether they are validated cannot be seen from the schema; they are where injection happens.`,
     evidence: sinks.slice(0, 10).map(s => `${s.tool}(${s.param}: string)`),
   });
 
   // 4. resources
-  const sens = (d.resources || []).filter(r => r && typeof r.uri === 'string' && /^file:/i.test(r.uri) && SENSITIVE_URI.test(r.uri));
-  if (sens.length) add('mcp.resource.sensitive', { artifact: 'resources', key: 'sensitive', severity: exposedUnauth ? 'high' : 'medium', description: `${sens.length} resource(s) point at credential or system files.`, evidence: sens.slice(0, 8).map(r => snip(r.uri, 120)) });
+  const sens = (d.resources || []).filter(r => r && typeof r.uri === 'string' && (/^file:/i.test(r.uri) ? SENSITIVE_URI.test(r.uri) : SENSITIVE_NAME.test(`${r.uri} ${r.name ?? ''}`)));
+  if (sens.length) add('mcp.resource.sensitive', { artifact: 'resources', key: 'sensitive', severity: exposedUnauth ? 'high' : 'medium', description: `${sens.length} resource(s) point at credential or system files, or are named like a secret. A client can read a resource without being asked, and its content goes into the model's context.`, evidence: sens.slice(0, 8).map(r => snip(r.uri, 120)) });
 
   // 5. changes since the previous scan (rug pull)
   const prev = d.previous;
