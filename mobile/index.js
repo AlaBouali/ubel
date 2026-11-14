@@ -279,6 +279,7 @@ function previousIssues(report) {
  */
 export function reportIdentity(report) {
   const apps = report?.apps || [];
+  if (apps.some(a => a.platform === 'mcp')) return `mcp:${report?.tool || ''}:${report?.target?.identity || ''}`;       // one identity per scanner and scan scope, so a rescan diffs against the last of the same kind
   const pkg = apps.find(a => a.platform === 'package');
   if (pkg) return `package:${pkg.ecosystem || ''}:${pkg.name}`;                    // one identity for every version of a package, so a rescan of another version diffs against the last
   const ids = apps.map(a => a.package || a.bundle_id || a.name).sort().join(',');

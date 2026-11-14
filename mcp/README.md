@@ -172,7 +172,15 @@ Shared by both binaries:
 | `--allow-partial` | exit 0 even when part of the analysis could not be done |
 | `--quiet` / `--verbose` | |
 
-Reports: `report.mcp_client.json` / `.html` and `report.mcp_server.json` / `.html`, copied to `.ubel/reports/latest.mcp_*.{json,html}` and bundled in the history zip like every other UBEL report; schema `ubel-mcp/1`. The HTML report escapes everything a server or configuration said and carries a content-security policy that forbids scripts and remote content; console output strips control characters.
+Reports: `report.mcp_client.json` / `.html` and `report.mcp_server.json` / `.html`, copied to `.ubel/reports/latest.mcp_client.*` / `latest.mcp_server.*` and bundled in the history zip like every other UBEL report.
+
+The HTML report is the **same template as `ubel-mobile`, `ubel-binary` and `ubel-package`**: a dashboard, an executive summary, the servers (one row each, with a detail view of its launch command, source, live probe result, tools and running processes), vulnerabilities, secrets and misconfigurations, detailed stats, a **compliance** mapping (findings with a CWE are mapped to OWASP Top 10, PCI DSS, NIST SP 800-53, SOC 2, ISO/IEC 27001, CIS Controls, HIPAA and GDPR references — guidance, not an audit), a **diff** against the previous scan of the same kind, and scan info. The JSON is the same payload (schema `ubel-mcp/2`: `vulnerabilities`, `secrets`, `misconfigurations`, `summary`, `stats`, `compliance_summary`, `executive_summary`, `diffs`), with one entry of `apps` per server (`platform: "mcp"`).
+
+Where findings land: configuration, launch, remote-server and process findings are *misconfigurations*; plain-text credentials in a configuration or in source are *secrets*; what a server tells the model, unsafe tool handlers and launcher-package advisories are *vulnerabilities*. Their area (`MCP-CONFIG`, `MCP-LAUNCH`, `MCP-REMOTE`, `MCP-TOOLS`, `MCP-SOURCE`, `MCP-PROCESS`) takes the place of a MASVS category.
+
+**The diff** compares with the previous report in the history of the same kind (`mcp_client` or `mcp_server`) and the same scope: the client scan is one per machine or project, and a server scan is told apart by what it was pointed at (its URLs, `--source` and `--package` targets, `--from-config`, `--discover`). It lists new, unchanged and fixed findings, so a tool definition that changed between two scans appears as new `mcp.tool.changed` findings.
+
+Everything a server or a configuration said is attacker-controlled text; the template escapes every value it renders, and console output strips control characters.
 
 Exit codes: `0` passed and complete · `1` scan failed · `2` the gate tripped, or bad arguments · `3` nothing tripped the gate but part of the analysis could not be done (an unparseable config, an unreachable `--url` target, a package that could not be fetched, a failed advisory lookup, a truncated source tree). A clean result over partial coverage is not a pass. A *declared* server that is simply not running is a note, not a gap.
 

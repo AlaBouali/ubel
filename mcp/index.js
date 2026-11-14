@@ -9,6 +9,7 @@
 // Reuses UBEL's rule table, findings, --fail-on gate, report id, asset identity and history zip.
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
@@ -29,7 +30,8 @@ import { analysePackages, adopt } from './lib/packages.js';
 import { hostExposure } from './lib/net.js';
 import { allProcesses, candidateEndpoints, describeProcess, matchProcesses, procSupported, DEFAULT_PORTS } from './lib/observe.js';
 import { listeners } from './lib/procfs.js';
-import { loadBaseline, buildPayload, writeReports } from './lib/report.js';
+import { loadBaseline, writeReports } from './lib/report.js';
+import { flattenFindings } from '../mobile/lib/report.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version;
@@ -371,20 +373,27 @@ export async function runCli(mode) {
   const everything = scan.findings.list.slice();
   const shown = everything.filter(f => (SEVERITY_RANK[f.severity] ?? 4) <= rank);
   const gate = evaluateGate({ failOn: args.failOnParsed, findings: everything, dependencies: [], gaps: scan.notes.gaps || [], allowPartial: args.allowPartial });
-  const payload = writeReports({
-    tag: M.tag,
-    payloadMeta: { schema: 'ubel-mcp/1', tool: M.tool, generated_at: new Date().toISOString(), tool_version: TOOL_VERSION, min_severity: args.minSeverity, hidden_by_filter: everything.length - shown.length, gate },
-    build: meta => buildPayload({ meta, servers: scan.servers, findings: shown, notes: scan.notes, files: scan.files, scanned: scan.scanned }),
-    workingDir, quiet: args.quiet,
+  scan.findings.list = shown;                                                  // the report shows what --min-severity leaves; the gate saw everything
+  // What this report is about, for deciding which earlier report it may be diffed against: the client scan is one per machine / project; a server
+  // scan is told apart by what it was pointed at.
+  const identity = mode === 'client' ? '' : crypto.createHash('sha256').update(JSON.stringify({
+    urls: [...args.urls].sort(), sources: args.sources.map(x => path.resolve(x)).sort(), packages: [...args.packageSpecs].sort(),
+    configs: args.fromConfig || args.configs.length > 0 || args.projects.length > 0, discover: args.discover,
+  })).digest('hex').slice(0, 12);
+  const payload = await writeReports({
+    tag: M.tag, tool: M.tool,
+    meta: { generated_at: new Date().toISOString(), tool_version: TOOL_VERSION, min_severity: args.minSeverity, hidden_by_filter: everything.length - shown.length, gate },
+    scan, identity, workingDir, quiet: args.quiet,
   });
 
   if (!args.quiet) {
-    const c = payload.summary.counts;
-    console.log(`\n=== MCP ${mode} security scan: ${payload.summary.servers} entr${payload.summary.servers === 1 ? 'y' : 'ies'}${payload.target.clients.length ? ` · ${payload.target.clients.join(', ')}` : ''} ===`);
+    const c = payload.summary.counts, m = payload.target.mcp;
+    console.log(`\n=== MCP ${mode} security scan: ${payload.apps.length} entr${payload.apps.length === 1 ? 'y' : 'ies'}${m.clients.length ? ` · ${m.clients.join(', ')}` : ''} ===`);
     console.log(`Issues: ${payload.summary.total}  (critical ${c.critical}, high ${c.high}, medium ${c.medium}, low ${c.low}, info ${c.info})`);
-    if (!mode.startsWith('c')) console.log(`Probed live: ${payload.summary.servers_probed} (${payload.summary.servers_unauthenticated} without authentication) · tools read: ${payload.summary.tools} · packages analysed: ${payload.summary.packages_analysed} · running processes matched: ${payload.summary.processes_observed}`);
-    for (const f of payload.findings.filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${clean(f.title)} -- ${clean(f.artifact)}`);
+    if (mode === 'server') console.log(`Probed live: ${m.probed} (${m.unauthenticated} without authentication) · tools read: ${m.tools} · packages analysed: ${m.packages} · running processes matched: ${m.processes}`);
+    for (const f of flattenFindings(payload).filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${clean(f.title)} -- ${clean(f.artifact)}`);
     for (const n of payload.analysis_notes) console.log(`  note: ${clean(n)}`);
+    if (payload.diffs) console.log(`  diff vs previous scan: ${payload.diffs.summary ? JSON.stringify(payload.diffs.summary) : 'see the Diffs tab'}`);
   }
   if (gate.exit_code === 2) console.error(`[${M.tool}] gate FAILED: ${gate.hits} issue(s) at or above ${args.failOnParsed.severity}${gate.tolerated ? ` (${gate.tolerated} tolerated)` : ''} (--fail-on ${gate.fail_on}).`);
   else if (gate.exit_code === 3) console.error(`[${M.tool}] gate INCOMPLETE: nothing tripped --fail-on ${gate.fail_on}, but ${gate.gaps} part(s) could not be analysed, so a clean result is not proof that everything is clean (exit 3; --allow-partial accepts this).`);
