@@ -1,5 +1,5 @@
 'use strict';
-import { azureListAll } from './client.js';
+import { azureListAll, azureRequest } from './client.js';
 
 const API_VERSION = '2023-01-01';
 
@@ -13,7 +13,24 @@ async function listStorageAccounts(subscriptionId, accessToken) {
     allowBlobPublicAccess: a.properties?.allowBlobPublicAccess !== false, // Azure default is true
     supportsHttpsTrafficOnly: Boolean(a.properties?.supportsHttpsTrafficOnly),
     minimumTlsVersion: a.properties?.minimumTlsVersion || 'TLS1_0',
+    // Azure's default network rule is Allow (reachable from every network).
+    networkDefaultAction: a.properties?.networkAcls?.defaultAction || 'Allow',
+    publicNetworkAccess: a.properties?.publicNetworkAccess || 'Enabled',
+    // Shared Key (account key) auth is allowed unless explicitly turned off.
+    allowSharedKeyAccess: a.properties?.allowSharedKeyAccess !== false,
   }));
+}
+
+/** Blob service settings: whether deleted blobs can be recovered (soft delete). */
+async function getBlobServiceProperties(storageAccountId, accessToken) {
+  const data = await azureRequest(
+    `https://management.azure.com${storageAccountId}/blobServices/default?api-version=${API_VERSION}`,
+    accessToken
+  );
+  return {
+    blobSoftDeleteEnabled: Boolean(data.properties?.deleteRetentionPolicy?.enabled),
+    containerSoftDeleteEnabled: Boolean(data.properties?.containerDeleteRetentionPolicy?.enabled),
+  };
 }
 
 /**
@@ -32,4 +49,4 @@ async function listContainers(storageAccountId, accessToken) {
   }));
 }
 
-export { listStorageAccounts, listContainers };
+export { listStorageAccounts, listContainers, getBlobServiceProperties };

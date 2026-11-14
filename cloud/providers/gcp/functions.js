@@ -22,6 +22,7 @@ async function listFunctions(project, accessToken) {
     name: f.name, // full resource name: projects/P/locations/L/functions/F
     displayName: (f.name || '').split('/').pop(),
     location: (f.name || '').split('/')[3],
+    serviceAccount: f.serviceConfig?.serviceAccountEmail || '',
   }));
 }
 

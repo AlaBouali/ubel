@@ -8,6 +8,7 @@ import * as cloudrun from '../providers/gcp/run.js';
 import * as cloudfunctions from '../providers/gcp/functions.js';
 import * as gke from '../providers/gcp/gke.js';
 import { mapLimit } from '../lib/concurrency.js';
+import { runGcpExtendedChecks } from './gcp-extended-checks.js';
 
 const SENSITIVE_PORTS = {
   22: 'SSH',
@@ -27,6 +28,12 @@ const CONCURRENCY = 8;
 // radius for the same rule, worth a severity notch down rather than
 // treating them identically.
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+
+/** True when a Cloud Run / Functions service account is unset (-> default compute SA)
+ * or is explicitly the Compute Engine default service account. */
+function isDefaultComputeServiceAccount(email) {
+  return !email || email.endsWith('-compute@developer.gserviceaccount.com');
+}
 
 function portInRange(portsSpec, port) {
   // portsSpec entries look like "22" or "20-8080"; empty ports array on a
@@ -97,6 +104,20 @@ async function runStorageChecks(project, accessToken, reporter, log) {
           region: bucket.location,
           description: `publicAccessPrevention is "${bucket.publicAccessPrevention || 'inherited'}", not "enforced" — a public IAM binding or ACL added to this bucket (now or by mistake in the future) would not be blocked outright.`,
           remediation: `gcloud storage buckets update gs://${bucket.name} --public-access-prevention`,
+        });
+      }
+      if (!bucket.versioningEnabled) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'storage',
+          check: 'gcs-bucket-versioning-disabled',
+          severity: 'low',
+          action: 'gcs-enable-versioning',
+          title: 'GCS bucket has object versioning disabled',
+          resource: bucket.name,
+          region: bucket.location,
+          description: 'Without versioning, an object that is overwritten or deleted (by mistake, by a compromised credential, or by ransomware) cannot be recovered.',
+          remediation: `gcloud storage buckets update gs://${bucket.name} --versioning`,
         });
       }
       if (!bucket.uniformBucketLevelAccess) {
@@ -253,6 +274,50 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
         sa.email.includes('-compute@developer.gserviceaccount.com') &&
         sa.scopes.includes('https://www.googleapis.com/auth/cloud-platform')
     );
+    if (!inst.isGkeNode) {
+      if (inst.serialPortEnabled) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'compute',
+          check: 'gcp-instance-serial-port-enabled',
+          severity: 'medium',
+          action: 'gcp-instance-disable-serial-port',
+          title: 'Instance has interactive serial-port access enabled',
+          resource: inst.name,
+          region: inst.zone,
+          description: `Instance "${inst.name}" has serial-port-enable=true. The serial console is reachable with IAM alone and bypasses firewall rules and network-level restrictions.`,
+          remediation: `gcloud compute instances add-metadata ${inst.name} --zone=${inst.zone} --metadata=serial-port-enable=false`,
+        });
+      }
+      if (!inst.blockProjectSshKeys) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'compute',
+          check: 'gcp-instance-project-ssh-keys-allowed',
+          severity: 'low',
+          action: 'gcp-instance-block-project-ssh-keys',
+          title: 'Instance accepts project-wide SSH keys',
+          resource: inst.name,
+          region: inst.zone,
+          description: `Instance "${inst.name}" does not set block-project-ssh-keys=true, so any SSH key added to project metadata (including a stale or leaked one) also logs in to this machine.`,
+          remediation: `gcloud compute instances add-metadata ${inst.name} --zone=${inst.zone} --metadata=block-project-ssh-keys=true (or enable OS Login and stop using metadata keys)`,
+        });
+      }
+      if (inst.canIpForward) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'compute',
+          check: 'gcp-instance-ip-forwarding-enabled',
+          severity: 'medium',
+          action: 'gcp-instance-disable-ip-forwarding',
+          title: 'Instance has IP forwarding enabled',
+          resource: inst.name,
+          region: inst.zone,
+          description: `Instance "${inst.name}" has canIpForward=true, so it can send and receive packets for addresses that aren't its own and can be used to bypass network controls or as an unintended router. It is only needed for appliances such as NAT or firewall VMs.`,
+          remediation: 'canIpForward can only be set at creation: recreate the instance without --can-ip-forward unless it is a deliberate router/appliance.',
+        });
+      }
+    }
     if (inst.hasExternalIp && defaultSaFullAccess) {
       reporter.add({
         provider: 'gcp',
@@ -308,6 +373,66 @@ async function runCloudSqlChecks(project, accessToken, reporter, log) {
         region: inst.region,
         description: `Instance "${inst.name}" has a public IPv4 address configured. Combined with a permissive authorized-networks list this becomes internet-exposed.`,
         remediation: `gcloud sql instances patch ${inst.name} --no-assign-ip (use Private IP / a Cloud SQL Auth Proxy instead)`,
+      });
+    }
+    if (inst.instanceType !== 'READ_REPLICA_INSTANCE' && !inst.backupsEnabled) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'sql',
+        check: 'cloudsql-backups-disabled',
+        severity: 'medium',
+        action: 'cloudsql-enable-backups',
+        title: 'Cloud SQL instance has automated backups disabled',
+        resource: inst.name,
+        region: inst.region,
+        description: `Instance "${inst.name}" has no automated backup configuration, so there is nothing to restore from after corruption, deletion or ransomware.`,
+        remediation: `gcloud sql instances patch ${inst.name} --backup-start-time=03:00 --enable-point-in-time-recovery`,
+      });
+    }
+    if (!inst.deletionProtection) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'sql',
+        check: 'cloudsql-deletion-protection-disabled',
+        severity: 'low',
+        action: 'cloudsql-enable-deletion-protection',
+        title: 'Cloud SQL instance does not have deletion protection',
+        resource: inst.name,
+        region: inst.region,
+        description: `Instance "${inst.name}" can be deleted with a single API call or a mistaken IaC change.`,
+        remediation: `gcloud sql instances patch ${inst.name} --deletion-protection`,
+      });
+    }
+    if ((inst.databaseVersion || '').startsWith('POSTGRES')) {
+      // Both default to off on Cloud SQL for PostgreSQL, so an absent flag counts as off.
+      const missing = ['log_connections', 'log_disconnections'].filter((f) => inst.databaseFlags[f] !== 'on');
+      if (missing.length > 0) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'sql',
+          check: 'cloudsql-postgres-connection-logging-off',
+          severity: 'low',
+          action: 'cloudsql-enable-connection-logging',
+          title: 'Cloud SQL for PostgreSQL does not log connections/disconnections',
+          resource: inst.name,
+          region: inst.region,
+          description: `Instance "${inst.name}" does not have the database flag(s) ${missing.join(', ')} set to "on", so there is no record of who connected to the database and when.`,
+          remediation: `gcloud sql instances patch ${inst.name} --database-flags=log_connections=on,log_disconnections=on (this replaces the whole flag list -- include any existing flags)`,
+        });
+      }
+    }
+    if ((inst.databaseVersion || '').startsWith('MYSQL') && (inst.databaseFlags.local_infile || '').toLowerCase() === 'on') {
+      reporter.add({
+        provider: 'gcp',
+        service: 'sql',
+        check: 'cloudsql-mysql-local-infile-on',
+        severity: 'medium',
+        action: 'cloudsql-disable-local-infile',
+        title: 'Cloud SQL for MySQL has local_infile enabled',
+        resource: inst.name,
+        region: inst.region,
+        description: `Instance "${inst.name}" has the local_infile flag on, which lets a client make the server read files it chooses (LOAD DATA LOCAL) and is a known data-exfiltration and SQL-injection amplifier.`,
+        remediation: `gcloud sql instances patch ${inst.name} --database-flags=local_infile=off (this replaces the whole flag list -- include any existing flags)`,
       });
     }
     if (!inst.requireSsl) {
@@ -374,6 +499,20 @@ async function runCloudRunChecks(project, accessToken, reporter, log) {
   log(`  [gcp:run] ${services.length} Cloud Run service(s) found`);
 
   await mapLimit(services, CONCURRENCY, async (svc) => {
+    if (isDefaultComputeServiceAccount(svc.serviceAccount)) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'run',
+        check: 'cloudrun-default-service-account',
+        severity: 'medium',
+        action: 'cloudrun-use-dedicated-service-account',
+        title: 'Cloud Run service runs as the Compute Engine default service account',
+        resource: svc.displayName,
+        region: svc.location,
+        description: `Service "${svc.displayName}" ${svc.serviceAccount ? `runs as ${svc.serviceAccount}` : 'has no service account set and so runs as the default one'}, which commonly holds the broad Editor role: a bug in this service becomes project-wide access.`,
+        remediation: `gcloud run services update ${svc.displayName} --region=${svc.location} --service-account=<dedicated-sa>@<project-id>.iam.gserviceaccount.com`,
+      });
+    }
     try {
       const bindings = await cloudrun.getServiceIamPolicy(svc.name, accessToken);
       for (const b of bindings) {
@@ -416,6 +555,20 @@ async function runCloudFunctionsChecks(project, accessToken, reporter, log) {
   log(`  [gcp:functions] ${fns.length} Cloud Function(s) found`);
 
   await mapLimit(fns, CONCURRENCY, async (fn) => {
+    if (isDefaultComputeServiceAccount(fn.serviceAccount)) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'functions',
+        check: 'cloudfunctions-default-service-account',
+        severity: 'medium',
+        action: 'cloudfunctions-use-dedicated-service-account',
+        title: 'Cloud Function runs as the Compute Engine default service account',
+        resource: fn.displayName,
+        region: fn.location,
+        description: `Function "${fn.displayName}" ${fn.serviceAccount ? `runs as ${fn.serviceAccount}` : 'has no service account set and so runs as the default one'}, which commonly holds the broad Editor role: a bug in this function becomes project-wide access.`,
+        remediation: `gcloud functions deploy ${fn.displayName} --region=${fn.location} --run-service-account=<dedicated-sa>@<project-id>.iam.gserviceaccount.com`,
+      });
+    }
     try {
       const bindings = await cloudfunctions.getFunctionIamPolicy(fn.name, accessToken);
       for (const b of bindings) {
@@ -488,6 +641,109 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --no-enable-legacy-authorization`,
       });
     }
+    if (!cluster.autopilot) {
+      if (!cluster.networkPolicyEnforced) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'gke',
+          check: 'gke-network-policy-disabled',
+          severity: 'low',
+          action: 'gke-enable-network-policy',
+          title: 'GKE cluster does not enforce Kubernetes network policies',
+          resource: cluster.name,
+          region: cluster.location,
+          description: `Cluster "${cluster.name}" has neither network policy enforcement nor Dataplane V2, so every pod can talk to every other pod and NetworkPolicy objects have no effect.`,
+          remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --update-addons=NetworkPolicy=ENABLED, then --enable-network-policy (or create the cluster with --enable-dataplane-v2, which can only be chosen at creation).`,
+        });
+      }
+      if (!cluster.privateNodes) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'gke',
+          check: 'gke-private-nodes-disabled',
+          severity: 'medium',
+          action: 'gke-enable-private-nodes',
+          title: 'GKE cluster nodes have public IP addresses',
+          resource: cluster.name,
+          region: cluster.location,
+          description: `Cluster "${cluster.name}" does not use private nodes, so its worker nodes are given external IPs and are directly reachable from the internet wherever firewall rules allow.`,
+          remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --enable-private-nodes (older clusters may need to be recreated as private clusters).`,
+        });
+      }
+      if (!cluster.shieldedNodesEnabled) {
+        reporter.add({
+          provider: 'gcp',
+          service: 'gke',
+          check: 'gke-shielded-nodes-disabled',
+          severity: 'low',
+          action: 'gke-enable-shielded-nodes',
+          title: 'GKE cluster does not use Shielded GKE Nodes',
+          resource: cluster.name,
+          region: cluster.location,
+          description: `Cluster "${cluster.name}" has Shielded Nodes off, so node identity and boot integrity are not cryptographically verified and a node's credentials are easier to impersonate from elsewhere.`,
+          remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --enable-shielded-nodes`,
+        });
+      }
+      for (const pool of cluster.nodePools) {
+        if (pool.usesDefaultServiceAccount) {
+          reporter.add({
+            provider: 'gcp',
+            service: 'gke',
+            check: 'gke-node-default-service-account',
+            severity: 'medium',
+            action: 'gke-use-dedicated-node-service-account',
+            title: 'GKE node pool runs as the Compute Engine default service account',
+            resource: `${cluster.name} / ${pool.name}`,
+            region: cluster.location,
+            description: `Node pool "${pool.name}" of cluster "${cluster.name}" uses the default Compute Engine service account, which commonly holds the broad Editor role; any pod that can reach the metadata server inherits it.`,
+            remediation: 'Create a minimally-privileged service account (logging/monitoring writer, artifact reader) and a new node pool with --service-account=<sa>, then migrate workloads and delete the old pool (the node service account cannot be changed in place).',
+          });
+        }
+        if (!pool.autoUpgrade || !pool.autoRepair) {
+          const off = [!pool.autoUpgrade && 'auto-upgrade', !pool.autoRepair && 'auto-repair'].filter(Boolean).join(' and ');
+          reporter.add({
+            provider: 'gcp',
+            service: 'gke',
+            check: 'gke-node-auto-management-disabled',
+            severity: 'low',
+            action: 'gke-enable-node-auto-management',
+            title: 'GKE node pool has automatic node upgrades or repair turned off',
+            resource: `${cluster.name} / ${pool.name}`,
+            region: cluster.location,
+            description: `Node pool "${pool.name}" of cluster "${cluster.name}" has ${off} disabled, so nodes fall behind on Kubernetes and OS security patches until someone upgrades them by hand.`,
+            remediation: `gcloud container node-pools update ${pool.name} --cluster=${cluster.name} --location=${cluster.location} --enable-autoupgrade --enable-autorepair`,
+          });
+        }
+      }
+    }
+    if (!cluster.workloadIdentityEnabled) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'gke',
+        check: 'gke-workload-identity-disabled',
+        severity: 'low',
+        action: 'gke-enable-workload-identity',
+        title: 'GKE cluster does not use Workload Identity',
+        resource: cluster.name,
+        region: cluster.location,
+        description: `Cluster "${cluster.name}" has no workload pool, so pods that need Google APIs must use the node's service account or exported keys instead of a per-workload identity.`,
+        remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --workload-pool=<project-id>.svc.id.goog`,
+      });
+    }
+    if (cluster.loggingDisabled) {
+      reporter.add({
+        provider: 'gcp',
+        service: 'gke',
+        check: 'gke-logging-disabled',
+        severity: 'medium',
+        action: 'gke-enable-logging',
+        title: 'GKE cluster has Cloud Logging disabled',
+        resource: cluster.name,
+        region: cluster.location,
+        description: `Cluster "${cluster.name}" has its logging service set to none, so there is no audit trail of workload or control-plane activity.`,
+        remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --logging=SYSTEM,WORKLOAD`,
+      });
+    }
     if (cluster.basicAuthConfigured) {
       reporter.add({
         provider: 'gcp',
@@ -515,6 +771,9 @@ async function runGcpChecks({ project, accessToken }, reporter, log = () => {}) 
   await runCloudRunChecks(project, accessToken, reporter, log);
   await runCloudFunctionsChecks(project, accessToken, reporter, log);
   await runGkeChecks(project, accessToken, reporter, log);
+  // Networks, project-level IAM/audit settings, service-account keys, log export,
+  // Cloud DNS and Pub/Sub.
+  await runGcpExtendedChecks({ project, accessToken }, reporter, log);
 }
 
 export { runGcpChecks };

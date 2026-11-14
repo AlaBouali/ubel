@@ -18,6 +18,11 @@ async function listClusters(subscriptionId, accessToken) {
     rbacEnabled: c.properties?.enableRBAC !== false,
     privateCluster: Boolean(c.properties?.apiServerAccessProfile?.enablePrivateCluster),
     authorizedIpRanges: c.properties?.apiServerAccessProfile?.authorizedIPRanges || [],
+    networkPolicy: c.properties?.networkProfile?.networkPolicy || '',
+    // Any aadProfile (managed Entra ID integration or legacy) means directory sign-in is wired up.
+    aadIntegrated: Boolean(c.properties?.aadProfile),
+    monitoringEnabled:
+      Boolean(c.properties?.addonProfiles?.omsagent?.enabled) || Boolean(c.properties?.azureMonitorProfile?.metrics?.enabled),
   }));
 }
 

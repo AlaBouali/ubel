@@ -71,6 +71,42 @@ async function describeSecurityGroups(region, creds) {
   }));
 }
 
+/**
+ * EBS snapshots owned by this account that are restorable by "all" -- i.e.
+ * shared publicly. `Owner=self` + `RestorableBy=all` is how EC2 expresses
+ * "my snapshots that anyone can copy"; without the Owner filter the call would
+ * try to enumerate every public snapshot in AWS.
+ */
+async function describePublicSnapshots(region, creds) {
+  const snaps = await ec2Paginate(
+    'DescribeSnapshots',
+    { 'Owner.1': 'self', 'RestorableBy.1': 'all' },
+    region,
+    creds,
+    'DescribeSnapshotsResponse',
+    (resp) => asArray(resp?.snapshotSet?.item)
+  );
+  return snaps.map((s) => ({
+    snapshotId: s.snapshotId,
+    volumeId: s.volumeId,
+    size: Number(s.volumeSize || 0),
+    encrypted: s.encrypted === 'true',
+  }));
+}
+
+/** AMIs owned by this account that are public (launchable by any AWS account). */
+async function describePublicImages(region, creds) {
+  const images = await ec2Paginate(
+    'DescribeImages',
+    { 'Owner.1': 'self', 'Filter.1.Name': 'is-public', 'Filter.1.Value.1': 'true' },
+    region,
+    creds,
+    'DescribeImagesResponse',
+    (resp) => asArray(resp?.imagesSet?.item)
+  );
+  return images.map((i) => ({ imageId: i.imageId, name: i.name || null }));
+}
+
 function parsePermission(p) {
   return {
     protocol: p.ipProtocol,
@@ -122,6 +158,12 @@ async function describeInstances(region, creds) {
         vpcId: inst.vpcId,
         subnetId: inst.subnetId,
         securityGroupIds: asArray(inst.groupSet?.item).map((g) => g.groupId).filter(Boolean),
+        // IMDSv2-only is enforced by httpTokens=required. With the endpoint
+        // disabled outright there is no metadata service to attack, so that
+        // case is not "IMDSv1 allowed".
+        imdsV1Allowed:
+          inst.metadataOptions?.httpTokens === 'optional' && inst.metadataOptions?.httpEndpoint !== 'disabled',
+        hasInstanceProfile: Boolean(inst.iamInstanceProfile?.arn),
       });
     }
   }
@@ -194,4 +236,6 @@ export {
   describeFlowLogs,
   getEbsEncryptionByDefault,
   describeVolumes,
+  describePublicSnapshots,
+  describePublicImages,
 };

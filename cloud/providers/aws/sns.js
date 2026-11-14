@@ -51,4 +51,25 @@ async function getTopicPolicy(topicArn, region, creds) {
   }
 }
 
-export { listTopics, getTopicPolicy };
+/**
+ * Policy and encryption state from a single GetTopicAttributes call (the same
+ * call getTopicPolicy makes), so the checks don't have to fetch a topic twice.
+ * A topic is server-side encrypted when KmsMasterKeyId is set.
+ */
+async function getTopicDetails(topicArn, region, creds) {
+  const res = await snsCall('GetTopicAttributes', { TopicArn: topicArn }, region, creds);
+  const entries = asArray(res.xml.GetTopicAttributesResponse?.GetTopicAttributesResult?.Attributes?.entry);
+  const attrs = {};
+  for (const e of entries) if (e.key) attrs[e.key] = e.value;
+  let policy = null;
+  if (attrs.Policy) {
+    try {
+      policy = JSON.parse(attrs.Policy);
+    } catch {
+      policy = null;
+    }
+  }
+  return { policy, encrypted: Boolean(attrs.KmsMasterKeyId) };
+}
+
+export { listTopics, getTopicPolicy, getTopicDetails };

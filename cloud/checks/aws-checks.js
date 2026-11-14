@@ -8,6 +8,15 @@ import * as guardduty from '../providers/aws/guardduty.js';
 import * as sns from '../providers/aws/sns.js';
 import * as sqs from '../providers/aws/sqs.js';
 import { mapLimit } from '../lib/concurrency.js';
+import { runAwsExtendedChecks } from './aws-extended-checks.js';
+import {
+  toArray,
+  isConditionSafelyRestrictive,
+  worstConditionMatch,
+  principalIsWildcard,
+  findPublicPrincipalStatements,
+  addPublicResourcePolicyFinding,
+} from '../lib/aws_policy.js';
 
 const SENSITIVE_PORTS = {
   22: 'SSH',
@@ -24,6 +33,8 @@ const SENSITIVE_PORTS = {
   5984: 'CouchDB',
 };
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+const UNUSED_KEY_DAYS = 45; // CIS AWS Foundations 1.12: credentials unused for 45 days or greater
+const UNUSED_KEY_MS = UNUSED_KEY_DAYS * 24 * 60 * 60 * 1000;
 
 // item 10: bound how many buckets/users/regions we work on concurrently
 // so a large account gets parallelism without turning into a thundering
@@ -31,85 +42,11 @@ const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 // on top of this).
 const CONCURRENCY = 8;
 
-function toArray(v) {
-  if (v === undefined || v === null) return [];
-  return Array.isArray(v) ? v : [v];
-}
-
 function portRangeIncludesAny(fromPort, toPort, ports) {
   if (fromPort === null || toPort === null) return null; // all-ports permission
   return Object.keys(ports)
     .map(Number)
     .filter((p) => p >= fromPort && p <= toPort);
-}
-
-// ─── shared: Condition-aware "is this really public/full-admin?" logic ──
-// (item 6 of the review: a blanket "any Condition key downgrades this"
-// rule has a false-negative problem -- aws:RequestedRegion or an
-// unevaluated aws:PrincipalTag barely restrict anything in practice, so a
-// genuinely dangerous policy with *some* condition on it would get filed
-// as medium and could slip past a --min-severity/--fail-on high scan.
-// Downgrading is now conditioned on the statement's Condition using
-// *only* keys from a small allowlist of ones actually understood to
-// meaningfully constrain access; any other condition key set (known-weak
-// like aws:RequestedRegion, or simply not evaluated, like
-// aws:PrincipalTag/*) keeps the finding at its unconditional severity,
-// just with a note that it's worth a human look. This logic is shared
-// between the IAM identity-policy full-admin check below and the new
-// SNS/SQS resource-policy public-principal checks, since both are
-// "Allow statement + a Condition of unknown strength" problems.
-const SAFE_CONDITION_KEYS = new Set([
-  'aws:sourceip',
-  'aws:sourcevpc',
-  'aws:sourcevpce',
-  'aws:principalarn',
-  'aws:principalorgid',
-  'aws:principalaccount',
-  'aws:multifactorauthpresent',
-]);
-
-function conditionKeys(condition) {
-  const keys = [];
-  for (const operatorBlock of Object.values(condition || {})) {
-    if (operatorBlock && typeof operatorBlock === 'object') keys.push(...Object.keys(operatorBlock));
-  }
-  return keys;
-}
-
-/** True only if EVERY key used across every operator in the Condition
- * block is in the known-restrictive allowlist -- one unknown/weak key
- * alongside a safe one is enough to withhold the downgrade, since we
- * can't tell whether the statement's operators are AND'd or effectively
- * OR'd without a real policy simulator. */
-function isConditionSafelyRestrictive(condition) {
-  const keys = conditionKeys(condition);
-  if (keys.length === 0) return false;
-  return keys.every((k) => SAFE_CONDITION_KEYS.has(k.toLowerCase()));
-}
-
-/** Rank used to pick the single "worst" statement match to report per
- * policy: unconditional (0) is worse than an unrecognized/weak condition
- * (1), which is worse than a safely-restrictive one (2). */
-function conditionMatchRank(m) {
-  if (!m.hasCondition) return 0;
-  if (!m.conditionIsSafeAllowlisted) return 1;
-  return 2;
-}
-
-function worstConditionMatch(matches) {
-  return matches.reduce((best, m) => (conditionMatchRank(m) < conditionMatchRank(best) ? m : best), matches[0]);
-}
-
-/** Whether an IAM Principal element (identity-policy trust doc OR a
- * resource-based policy like an SNS/SQS Policy attribute) is a bare
- * wildcard -- Principal:"*" or Principal:{"AWS":"*"}. */
-function principalIsWildcard(principal) {
-  if (principal === '*') return true;
-  if (principal && typeof principal === 'object') {
-    const awsPrincipals = toArray(principal.AWS).map(String);
-    if (awsPrincipals.includes('*')) return true;
-  }
-  return false;
 }
 
 // ─── S3 ─────────────────────────────────────────────────────────────────
@@ -345,8 +282,9 @@ function checkSecurityGroupPermissions(sg, region, reporter) {
 }
 
 async function runEc2ChecksForRegion(region, creds, reporter, log) {
+  let groups = [];
   try {
-    const groups = await ec2.describeSecurityGroups(region, creds);
+    groups = await ec2.describeSecurityGroups(region, creds);
     log(`  [ec2:${region}] ${groups.length} security group(s) found`);
     for (const sg of groups) checkSecurityGroupPermissions(sg, region, reporter);
   } catch (err) {
@@ -359,6 +297,49 @@ async function runEc2ChecksForRegion(region, creds, reporter, log) {
     const instances = await ec2.describeInstances(region, creds);
     const publicInstances = instances.filter((i) => i.publicIp);
     log(`  [ec2:${region}] ${instances.length} instance(s) found (${publicInstances.length} with a public IP)`);
+
+    // IMDSv1 (httpTokens=optional) lets any request-forgery bug in the workload read
+    // the instance role's credentials -- the classic cloud credential-theft path.
+    for (const inst of instances) {
+      if (!inst.imdsV1Allowed) continue;
+      const exposed = Boolean(inst.publicIp) && inst.hasInstanceProfile;
+      reporter.add({
+        provider: 'aws',
+        service: 'ec2',
+        check: 'ec2-instance-imdsv1-allowed',
+        severity: exposed ? 'high' : 'medium',
+        action: 'ec2-require-imdsv2',
+        title: 'EC2 instance still allows IMDSv1 (instance metadata without a session token)',
+        resource: inst.instanceId,
+        region,
+        description: `Instance "${inst.instanceId}" (state: ${inst.state}) has HttpTokens=optional, so the metadata service answers plain GET requests.${inst.hasInstanceProfile ? ' It has an instance profile, so those requests can return role credentials.' : ''}${inst.publicIp ? ` It also has a public IP (${inst.publicIp}).` : ''}`,
+        remediation: `aws ec2 modify-instance-metadata-options --instance-id ${inst.instanceId} --http-tokens required --http-endpoint enabled --region ${region}`,
+      });
+    }
+
+    // The default security group is meant to be left empty; one that instances
+    // actually sit in is a group whose rules nobody owns.
+    const defaultGroupIds = new Set(groups.filter((g) => g.groupName === 'default').map((g) => g.groupId));
+    const usersOfDefault = new Map();
+    for (const inst of instances) {
+      for (const gid of inst.securityGroupIds) {
+        if (defaultGroupIds.has(gid)) usersOfDefault.set(gid, [...(usersOfDefault.get(gid) || []), inst.instanceId]);
+      }
+    }
+    for (const [gid, ids] of usersOfDefault) {
+      reporter.add({
+        provider: 'aws',
+        service: 'ec2',
+        check: 'sg-default-in-use',
+        severity: 'low',
+        action: 'sg-use-dedicated-group',
+        title: 'Instances are using the VPC default security group',
+        resource: `${gid} (default)`,
+        region,
+        description: `The default security group ${gid} is attached to ${ids.length} instance(s) (${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ', ...' : ''}). Its rules apply to everything that ever lands in it, including instances launched later without choosing a group.`,
+        remediation: `Give each workload its own purpose-built security group, then remove all rules from ${gid}: aws ec2 modify-instance-attribute --instance-id <id> --groups <sg-id>`,
+      });
+    }
     for (const inst of publicInstances) {
       reporter.add({
         provider: 'aws',
@@ -543,9 +524,12 @@ function hasWildcardTrustPrincipal(trustPolicy) {
   return false;
 }
 
+/** Returns how many inline policies the principal has (0 if they couldn't be read). */
 async function reviewPrincipalPolicies(kind, principalName, resourceLabel, creds, reporter, log) {
+  let count = 0;
   try {
     const inlineDocs = await iam.listInlinePolicyDocuments(kind, principalName, creds);
+    count = inlineDocs.length;
     for (const { policyName, document } of inlineDocs) {
       const matches = findFullAdminStatements(document);
       if (matches.length === 0) continue;
@@ -562,11 +546,15 @@ async function reviewPrincipalPolicies(kind, principalName, resourceLabel, creds
   } catch (err) {
     log(`  [iam] ${kind} ${principalName}: inline policy review failed: ${err.message}`);
   }
+  return count;
 }
 
+/** Returns how many managed policies are attached directly (0 if they couldn't be read). */
 async function reviewAttachedPolicies(kind, principalName, resourceLabel, creds, reporter, log) {
+  let count = 0;
   try {
     const attached = await iam.listAttachedPolicies(kind, principalName, creds);
+    count = attached.length;
     for (const p of attached) {
       // AWS-managed policies (arn:aws:iam::aws:policy/...) can't have
       // their document fetched the same way as customer-managed ones
@@ -584,13 +572,75 @@ async function reviewAttachedPolicies(kind, principalName, resourceLabel, creds,
           action: 'iam-restrict-policy',
           title: 'AWS-managed AdministratorAccess policy is attached',
           resource: `${resourceLabel} (attached: ${p.policyName})`,
-          description: `${kind === 'group' ? 'Group' : 'Role'} "${principalName}" has the AWS-managed "AdministratorAccess" policy attached, granting Action:"*" on Resource:"*".`,
+          description: `${kind === 'group' ? 'Group' : kind === 'user' ? 'User' : 'Role'} "${principalName}" has the AWS-managed "AdministratorAccess" policy attached, granting Action:"*" on Resource:"*".`,
           remediation: `Detach it if full admin isn't actually required: aws iam detach-${kind}-policy --${kind}-name ${principalName} --policy-arn ${p.arn}`,
         });
       }
     }
   } catch (err) {
     log(`  [iam] ${kind} ${principalName}: attached policy review failed: ${err.message}`);
+  }
+  return count;
+}
+
+/** What's weak about an existing IAM password policy (the raw GetAccountPasswordPolicy
+ * object -- every value is a string). Empty array = nothing to report. */
+function passwordPolicyWeaknesses(policy) {
+  const weaknesses = [];
+  const minLength = Number(policy.MinimumPasswordLength || 0);
+  if (minLength < 14) weaknesses.push(`requires only ${minLength || 'an unset number of'} characters (14 or more recommended)`);
+  const reuse = Number(policy.PasswordReusePrevention || 0);
+  if (reuse < 24) weaknesses.push(reuse ? `remembers only the last ${reuse} passwords (24 recommended)` : 'does not prevent password reuse');
+  const missing = [
+    ['RequireSymbols', 'symbols'],
+    ['RequireNumbers', 'numbers'],
+    ['RequireUppercaseCharacters', 'uppercase letters'],
+    ['RequireLowercaseCharacters', 'lowercase letters'],
+  ]
+    .filter(([key]) => policy[key] !== 'true')
+    .map(([, label]) => label);
+  if (missing.length > 0) weaknesses.push(`does not require ${missing.join(', ')}`);
+  return weaknesses;
+}
+
+/**
+ * Root-user posture. No per-user IAM call ever looks at the account's root user,
+ * but GetAccountSummary reports whether it has MFA and whether it has access keys.
+ * Both are critical: the root user can't be restricted by IAM policy.
+ */
+async function runIamAccountChecks(creds, reporter, log) {
+  let summary;
+  try {
+    summary = await iam.getAccountSummary(creds);
+  } catch (err) {
+    log(`  [iam] GetAccountSummary failed: ${err.message}`);
+    return;
+  }
+  if (summary.AccountMFAEnabled === 0) {
+    reporter.add({
+      provider: 'aws',
+      service: 'iam',
+      check: 'iam-root-mfa-disabled',
+      severity: 'critical',
+      action: 'iam-enable-root-mfa',
+      title: 'The AWS root user does not have MFA enabled',
+      resource: 'account (root)',
+      description: 'The root user can do everything in the account and cannot be limited by IAM policy; with only a password protecting it, one phished or reused password is a full account takeover.',
+      remediation: 'Sign in as the root user and enable MFA (a hardware key or authenticator app): IAM console → Security credentials → Multi-factor authentication.',
+    });
+  }
+  if (summary.AccountAccessKeysPresent > 0) {
+    reporter.add({
+      provider: 'aws',
+      service: 'iam',
+      check: 'iam-root-access-key-present',
+      severity: 'critical',
+      action: 'iam-delete-root-access-key',
+      title: 'The AWS root user has an access key',
+      resource: 'account (root)',
+      description: `The root user has ${summary.AccountAccessKeysPresent} access key(s). A root access key gives unrestricted programmatic control of the whole account and is the most damaging credential that can leak.`,
+      remediation: 'Sign in as the root user and delete the key(s): IAM console → Security credentials → Access keys. Use IAM roles or Identity Center for anything that needs API access.',
+    });
   }
 }
 
@@ -626,6 +676,51 @@ async function runIamChecks(creds, reporter, log) {
         });
       }
 
+      const activeKeys = keys.filter((k) => k.status === 'Active');
+      if (activeKeys.length > 1) {
+        reporter.add({
+          provider: 'aws',
+          service: 'iam',
+          check: 'iam-user-multiple-active-keys',
+          severity: 'low',
+          action: 'iam-remove-extra-access-key',
+          title: 'IAM user has more than one active access key',
+          resource: user.userName,
+          description: `User "${user.userName}" has ${activeKeys.length} active access keys (${activeKeys.map((k) => k.accessKeyId).join(', ')}). Every extra live key is another credential that can leak, and it usually means a rotation was started and never finished.`,
+          remediation: `Keep one key and deactivate the other: aws iam update-access-key --user-name ${user.userName} --access-key-id <old-key-id> --status Inactive (then delete it once nothing uses it).`,
+        });
+      }
+
+      // Unused keys: a key that hasn't been used for 45+ days (or has never been
+      // used since it was created that long ago) is a standing credential with no
+      // owner paying attention to it.
+      for (const key of activeKeys) {
+        try {
+          const { lastUsedDate } = await iam.getAccessKeyLastUsed(key.accessKeyId, creds);
+          const reference = lastUsedDate || key.createDate;
+          if (!reference) continue;
+          const idleMs = Date.now() - new Date(reference).getTime();
+          if (idleMs > UNUSED_KEY_MS) {
+            const idleDays = Math.floor(idleMs / (24 * 3600 * 1000));
+            reporter.add({
+              provider: 'aws',
+              service: 'iam',
+              check: 'iam-access-key-unused',
+              severity: 'low',
+              action: 'iam-disable-unused-access-key',
+              title: `IAM access key has been unused for over ${UNUSED_KEY_DAYS} days`,
+              resource: `${user.userName} / ${key.accessKeyId}`,
+              description: lastUsedDate
+                ? `Active access key last used on ${lastUsedDate} (${idleDays} days ago).`
+                : `Active access key created on ${key.createDate} (${idleDays} days ago) and never used.`,
+              remediation: `Deactivate it, and delete it if nothing breaks: aws iam update-access-key --user-name ${user.userName} --access-key-id ${key.accessKeyId} --status Inactive`,
+            });
+          }
+        } catch (err) {
+          log(`  [iam] ${user.userName}: GetAccessKeyLastUsed(${key.accessKeyId}) failed: ${err.message}`);
+        }
+      }
+
       for (const key of keys) {
         if (key.status !== 'Active' || !key.createDate) continue;
         const ageMs = Date.now() - new Date(key.createDate).getTime();
@@ -648,7 +743,23 @@ async function runIamChecks(creds, reporter, log) {
     }
 
     // item 2: inline policies on users weren't checked at all before.
-    await reviewPrincipalPolicies('user', user.userName, user.userName, creds, reporter, log);
+    const inlineCount = await reviewPrincipalPolicies('user', user.userName, user.userName, creds, reporter, log);
+    // Directly attached managed policies (and AdministratorAccess among them) were
+    // only ever checked for groups and roles.
+    const attachedCount = await reviewAttachedPolicies('user', user.userName, user.userName, creds, reporter, log);
+    if (inlineCount + attachedCount > 0) {
+      reporter.add({
+        provider: 'aws',
+        service: 'iam',
+        check: 'iam-user-direct-policies',
+        severity: 'low',
+        action: 'iam-move-permissions-to-group',
+        title: 'IAM user receives permissions directly instead of through a group',
+        resource: user.userName,
+        description: `User "${user.userName}" has ${inlineCount} inline polic${inlineCount === 1 ? 'y' : 'ies'} and ${attachedCount} directly attached managed polic${attachedCount === 1 ? 'y' : 'ies'}. Per-user grants are hard to review and easy to forget when someone changes role or leaves.`,
+        remediation: `Put the permissions in a group or role and add the user to it: aws iam add-user-to-group --user-name ${user.userName} --group-name <group>, then detach/delete the per-user policies.`,
+      });
+    }
   });
 
   try {
@@ -665,6 +776,22 @@ async function runIamChecks(creds, reporter, log) {
         description: 'The AWS account has no custom IAM password policy, so the (weak) AWS default applies.',
         remediation: 'aws iam update-account-password-policy --minimum-password-length 14 --require-symbols --require-numbers --require-uppercase-characters --require-lowercase-characters',
       });
+    } else {
+      // A policy exists -- but a policy can be set and still be weak.
+      const weaknesses = passwordPolicyWeaknesses(policy);
+      if (weaknesses.length > 0) {
+        reporter.add({
+          provider: 'aws',
+          service: 'iam',
+          check: 'iam-password-policy-weak',
+          severity: 'low',
+          action: 'iam-set-password-policy',
+          title: 'Account password policy is weaker than recommended',
+          resource: 'account',
+          description: `The IAM password policy ${weaknesses.join('; ')}.`,
+          remediation: 'aws iam update-account-password-policy --minimum-password-length 14 --password-reuse-prevention 24 --require-symbols --require-numbers --require-uppercase-characters --require-lowercase-characters',
+        });
+      }
     }
   } catch (err) {
     log(`  [iam] GetAccountPasswordPolicy failed: ${err.message}`);
@@ -765,6 +892,49 @@ async function runRdsChecksForRegion(region, creds, reporter, log) {
           region,
           description: `${inst.engine} instance "${inst.id}" has StorageEncrypted=false. This cannot be changed in place — a snapshot/restore-to-encrypted-copy is required.`,
           remediation: 'Snapshot the instance, copy the snapshot with encryption enabled, then restore from the encrypted copy.',
+        });
+      }
+      const clusterManaged = Boolean(inst.clusterId);
+      if (!clusterManaged && !inst.isReadReplica && inst.backupRetentionPeriod === 0) {
+        reporter.add({
+          provider: 'aws',
+          service: 'rds',
+          check: 'rds-backup-retention-disabled',
+          severity: 'medium',
+          action: 'rds-enable-automated-backups',
+          title: 'RDS instance has automated backups turned off',
+          resource: inst.id,
+          region,
+          description: `${inst.engine} instance "${inst.id}" has BackupRetentionPeriod=0, so there are no automated backups and no point-in-time recovery.`,
+          remediation: `aws rds modify-db-instance --db-instance-identifier ${inst.id} --backup-retention-period 7 --apply-immediately`,
+        });
+      }
+      if (!inst.deletionProtection) {
+        reporter.add({
+          provider: 'aws',
+          service: 'rds',
+          check: 'rds-deletion-protection-disabled',
+          severity: 'low',
+          action: 'rds-enable-deletion-protection',
+          title: 'RDS instance does not have deletion protection',
+          resource: inst.id,
+          region,
+          description: `${inst.engine} instance "${inst.id}" has DeletionProtection=false, so a single API call (or a mistaken IaC change) can delete the database.`,
+          remediation: `aws rds modify-db-instance --db-instance-identifier ${inst.id} --deletion-protection --apply-immediately`,
+        });
+      }
+      if (!inst.autoMinorVersionUpgrade) {
+        reporter.add({
+          provider: 'aws',
+          service: 'rds',
+          check: 'rds-auto-minor-upgrade-disabled',
+          severity: 'low',
+          action: 'rds-enable-auto-minor-upgrade',
+          title: 'RDS instance does not apply minor engine upgrades automatically',
+          resource: inst.id,
+          region,
+          description: `${inst.engine} instance "${inst.id}" has AutoMinorVersionUpgrade=false, so security patches released as minor versions are only applied if someone remembers to.`,
+          remediation: `aws rds modify-db-instance --db-instance-identifier ${inst.id} --auto-minor-version-upgrade --apply-immediately`,
         });
       }
     }
@@ -883,6 +1053,20 @@ async function runCloudTrailChecks(regions, creds, reporter, log) {
         remediation: `aws cloudtrail update-trail --name ${trail.name} --kms-key-id <kms-key-arn> --region ${trail.homeRegion}`,
       });
     }
+    if (!trail.cloudWatchLogsLogGroupArn) {
+      reporter.add({
+        provider: 'aws',
+        service: 'cloudtrail',
+        check: 'cloudtrail-no-cloudwatch-logs',
+        severity: 'low',
+        action: 'cloudtrail-send-to-cloudwatch',
+        title: 'CloudTrail trail is not sent to CloudWatch Logs',
+        resource: trail.arn,
+        region: trail.homeRegion,
+        description: `Trail "${trail.name}" has no CloudWatch Logs log group, so nothing can alarm on suspicious API activity (root use, console logins without MFA, IAM or security-group changes) as it happens.`,
+        remediation: `aws cloudtrail update-trail --name ${trail.name} --cloud-watch-logs-log-group-arn <log-group-arn> --cloud-watch-logs-role-arn <role-arn> --region ${trail.homeRegion}`,
+      });
+    }
     if (!trail.logFileValidationEnabled) {
       reporter.add({
         provider: 'aws',
@@ -983,53 +1167,6 @@ async function runGuardDutyChecks(regions, creds, reporter, log) {
 
 // ─── SNS / SQS resource policies ───────────────────────────────────────
 
-/** Allow statements in a resource-based policy (SNS topic policy, SQS
- * queue policy, ...) whose Principal is a bare wildcard -- the
- * resource-policy analog of findFullAdminStatements above, sharing the
- * same condition-safety logic (item 3 of the review: "SNS/SQS resource
- * policies granting public access, parallel to the S3 policy check"). */
-function findPublicPrincipalStatements(doc) {
-  const statements = toArray(doc?.Statement);
-  const matches = [];
-  for (const stmt of statements) {
-    if (stmt.Effect !== 'Allow') continue;
-    if (!principalIsWildcard(stmt.Principal)) continue;
-    const hasCondition = Boolean(stmt.Condition && Object.keys(stmt.Condition).length > 0);
-    matches.push({
-      hasCondition,
-      conditionIsSafeAllowlisted: hasCondition && isConditionSafelyRestrictive(stmt.Condition),
-      actions: toArray(stmt.Action).map(String),
-    });
-  }
-  return matches;
-}
-
-function addPublicResourcePolicyFinding(reporter, { service, check, resource, region, resourceLabel, remediation, match }) {
-  let severity;
-  let note = '';
-  if (!match.hasCondition) {
-    severity = 'high';
-  } else if (match.conditionIsSafeAllowlisted) {
-    severity = 'medium';
-    note = ' A Condition key restricted to keys known to meaningfully constrain access (source IP/VPC, principal ARN/org/account, MFA) is present, which narrows this grant.';
-  } else {
-    severity = 'high';
-    note = " A Condition key is present, but it isn't built entirely from keys known to meaningfully restrict access — treat this as effectively public until the condition is reviewed by hand.";
-  }
-  reporter.add({
-    provider: 'aws',
-    service,
-    check,
-    severity,
-    action: `${service}-restrict-resource-policy`,
-    title: `${resourceLabel} resource policy grants access to anyone (Principal: "*")`,
-    resource,
-    region,
-    description: `The resource policy has an Allow statement with Principal "*" for action(s): ${match.actions.join(', ') || '(none listed)'}.${note}`,
-    remediation,
-  });
-}
-
 async function runSnsChecks(regions, creds, reporter, log) {
   await mapLimit(regions, CONCURRENCY, async (region) => {
     let topicArns;
@@ -1042,7 +1179,21 @@ async function runSnsChecks(regions, creds, reporter, log) {
     log(`  [sns:${region}] ${topicArns.length} topic(s) found`);
     await mapLimit(topicArns, CONCURRENCY, async (arn) => {
       try {
-        const policy = await sns.getTopicPolicy(arn, region, creds);
+        const { policy, encrypted } = await sns.getTopicDetails(arn, region, creds);
+        if (!encrypted) {
+          reporter.add({
+            provider: 'aws',
+            service: 'sns',
+            check: 'sns-topic-not-encrypted',
+            severity: 'low',
+            action: 'sns-enable-encryption',
+            title: 'SNS topic is not encrypted at rest',
+            resource: arn,
+            region,
+            description: 'The topic has no KmsMasterKeyId, so messages are stored unencrypted while they wait for delivery.',
+            remediation: `aws sns set-topic-attributes --topic-arn ${arn} --attribute-name KmsMasterKeyId --attribute-value alias/aws/sns --region ${region}`,
+          });
+        }
         if (!policy) return;
         const matches = findPublicPrincipalStatements(policy);
         if (matches.length === 0) return;
@@ -1074,7 +1225,21 @@ async function runSqsChecks(regions, creds, reporter, log) {
     log(`  [sqs:${region}] ${queueUrls.length} queue(s) found`);
     await mapLimit(queueUrls, CONCURRENCY, async (url) => {
       try {
-        const { policy, arn } = await sqs.getQueuePolicy(url, region, creds);
+        const { policy, arn, encrypted } = await sqs.getQueuePolicy(url, region, creds);
+        if (!encrypted) {
+          reporter.add({
+            provider: 'aws',
+            service: 'sqs',
+            check: 'sqs-queue-not-encrypted',
+            severity: 'low',
+            action: 'sqs-enable-encryption',
+            title: 'SQS queue is not encrypted at rest',
+            resource: arn || url,
+            region,
+            description: 'The queue has neither a KMS key nor SQS-managed encryption (SqsManagedSseEnabled) turned on, so messages are stored unencrypted.',
+            remediation: `aws sqs set-queue-attributes --queue-url ${url} --attributes SqsManagedSseEnabled=true --region ${region}`,
+          });
+        }
         if (!policy) return;
         const matches = findPublicPrincipalStatements(policy);
         if (matches.length === 0) return;
@@ -1097,12 +1262,16 @@ async function runSqsChecks(regions, creds, reporter, log) {
 async function runAwsChecks({ creds, regions }, reporter, log = () => {}) {
   await runS3Checks(creds, reporter, log);
   await runEc2Checks(regions, creds, reporter, log);
+  await runIamAccountChecks(creds, reporter, log);
   await runIamChecks(creds, reporter, log);
   await runRdsChecks(regions, creds, reporter, log);
   await runCloudTrailChecks(regions, creds, reporter, log);
   await runGuardDutyChecks(regions, creds, reporter, log);
   await runSnsChecks(regions, creds, reporter, log);
   await runSqsChecks(regions, creds, reporter, log);
+  // Services and account-level settings the checks above don't cover (Lambda, KMS,
+  // Config, load balancers, EFS, Redshift, public snapshots/AMIs, S3 account settings).
+  await runAwsExtendedChecks({ creds, regions }, reporter, log);
 }
 
 export { runAwsChecks };

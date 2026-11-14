@@ -6,7 +6,9 @@ import * as keyvaultApi from '../providers/azure/keyvault.js';
 import * as appServiceApi from '../providers/azure/appservice.js';
 import * as acrApi from '../providers/azure/acr.js';
 import * as aksApi from '../providers/azure/aks.js';
+import * as monitorApi from '../providers/azure/monitor.js';
 import { mapLimit } from '../lib/concurrency.js';
+import { runAzureExtendedChecks } from './azure-extended-checks.js';
 
 const SENSITIVE_PORTS = {
   22: 'SSH',
@@ -82,6 +84,40 @@ async function runStorageChecks(subscriptionId, accessToken, reporter, log) {
         description: 'SupportsHttpsTrafficOnly is disabled, so data in transit is not guaranteed to be encrypted.',
         remediation: `az storage account update --name ${acc.name} --https-only true`,
       });
+    }
+    if (acc.networkDefaultAction === 'Allow' && acc.publicNetworkAccess !== 'Disabled') {
+      reporter.add({
+        provider: 'azure',
+        service: 'storage',
+        check: 'azure-storage-network-default-allow',
+        severity: 'medium',
+        action: 'azure-storage-default-deny-network',
+        title: 'Storage account accepts connections from all networks',
+        resource: acc.name,
+        region: acc.location,
+        description: 'The storage firewall default action is Allow, so the account endpoint answers requests from any network on the internet (authentication is still required unless a container is public, but nothing limits where requests come from).',
+        remediation: `az storage account update --name ${acc.name} --default-action Deny, then add the networks that need access: az storage account network-rule add ...`,
+      });
+    }
+    try {
+      const blob = await storageApi.getBlobServiceProperties(acc.id, accessToken);
+      const missing = [!blob.blobSoftDeleteEnabled && 'blobs', !blob.containerSoftDeleteEnabled && 'containers'].filter(Boolean);
+      if (missing.length > 0) {
+        reporter.add({
+          provider: 'azure',
+          service: 'storage',
+          check: 'azure-storage-soft-delete-disabled',
+          severity: 'low',
+          action: 'azure-storage-enable-soft-delete',
+          title: `Storage account has soft delete turned off for ${missing.join(' and ')}`,
+          resource: acc.name,
+          region: acc.location,
+          description: `Without soft delete for ${missing.join(' and ')}, a deleted or overwritten item (by mistake or by an attacker) is gone immediately and cannot be recovered.`,
+          remediation: `az storage account blob-service-properties update --account-name ${acc.name} --enable-delete-retention true --delete-retention-days 7 --enable-container-delete-retention true --container-delete-retention-days 7`,
+        });
+      }
+    } catch (err) {
+      log(`  [azure:storage] ${acc.name}: blob service properties failed: ${err.message}`);
     }
     if (acc.minimumTlsVersion !== 'TLS1_2') {
       reporter.add({
@@ -232,6 +268,58 @@ async function runSqlChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:sql] ${servers.length} SQL server(s) found`);
 
   await mapLimit(servers, CONCURRENCY, async (server) => {
+    if (server.minimalTlsVersion === '' || server.minimalTlsVersion === '1.0' || server.minimalTlsVersion === '1.1') {
+      reporter.add({
+        provider: 'azure',
+        service: 'sql',
+        check: 'azure-sql-outdated-tls',
+        severity: 'medium',
+        action: 'azure-sql-upgrade-tls',
+        title: `SQL server accepts outdated TLS (minimum: ${server.minimalTlsVersion || 'not set'})`,
+        resource: server.name,
+        region: server.location,
+        description: 'The server does not require TLS 1.2 or newer, so clients can still negotiate TLS 1.0/1.1, which have known weaknesses.',
+        remediation: `az sql server update --name ${server.name} --resource-group <rg> --minimal-tls-version 1.2`,
+      });
+    }
+    try {
+      const auditing = await sqlApi.getAuditingState(server.id, accessToken);
+      if (auditing !== 'Enabled') {
+        reporter.add({
+          provider: 'azure',
+          service: 'sql',
+          check: 'azure-sql-auditing-disabled',
+          severity: 'medium',
+          action: 'azure-sql-enable-auditing',
+          title: 'SQL server auditing is turned off',
+          resource: server.name,
+          region: server.location,
+          description: `Auditing on server "${server.name}" is "${auditing}", so database events (logins, queries that change data, permission changes) are not being recorded anywhere.`,
+          remediation: `az sql server audit-policy update --name ${server.name} --resource-group <rg> --state Enabled --blob-storage-target-state Enabled --storage-account <account>`,
+        });
+      }
+    } catch (err) {
+      log(`  [azure:sql] ${server.name}: auditing settings failed: ${err.message}`);
+    }
+    try {
+      const atp = await sqlApi.getThreatProtectionState(server.id, accessToken);
+      if (atp !== 'Enabled') {
+        reporter.add({
+          provider: 'azure',
+          service: 'sql',
+          check: 'azure-sql-threat-protection-disabled',
+          severity: 'medium',
+          action: 'azure-sql-enable-threat-protection',
+          title: 'SQL server does not have Microsoft Defender for SQL (threat protection) enabled',
+          resource: server.name,
+          region: server.location,
+          description: `Server "${server.name}" has its security alert policy in state "${atp}", so SQL injection attempts, anomalous logins and unusual data access are not detected or alerted on.`,
+          remediation: `az sql server advanced-threat-protection-setting update --resource-group <rg> --server ${server.name} --state Enabled`,
+        });
+      }
+    } catch (err) {
+      log(`  [azure:sql] ${server.name}: threat protection policy failed: ${err.message}`);
+    }
     try {
       const rules = await sqlApi.listFirewallRules(server.id, accessToken);
       for (const rule of rules) {
@@ -309,6 +397,39 @@ async function runKeyVaultChecks(subscriptionId, accessToken, reporter, log) {
         remediation: `az keyvault update --name ${vault.name} --public-network-access Disabled (or az keyvault network-rule add ... plus --default-action Deny to allow specific networks only)`,
       });
     }
+    if (!vault.rbacAuthorization) {
+      reporter.add({
+        provider: 'azure',
+        service: 'keyvault',
+        check: 'azure-keyvault-rbac-disabled',
+        severity: 'low',
+        action: 'azure-keyvault-enable-rbac',
+        title: 'Key Vault uses legacy access policies instead of Azure RBAC',
+        resource: vault.name,
+        region: vault.location,
+        description: `Vault "${vault.name}" authorizes with vault access policies, which are managed separately from the rest of Azure access control, can't be scoped to individual secrets, and don't support Privileged Identity Management or conditional access.`,
+        remediation: `az keyvault update --name ${vault.name} --enable-rbac-authorization true (first recreate the needed access as role assignments so nothing loses access)`,
+      });
+    }
+    try {
+      const diag = await monitorApi.listDiagnosticSettings(vault.id, accessToken);
+      if (diag.length === 0) {
+        reporter.add({
+          provider: 'azure',
+          service: 'keyvault',
+          check: 'azure-keyvault-no-diagnostic-logging',
+          severity: 'low',
+          action: 'azure-keyvault-enable-diagnostic-logging',
+          title: 'Key Vault has no diagnostic logging',
+          resource: vault.name,
+          region: vault.location,
+          description: `Vault "${vault.name}" has no diagnostic setting, so there is no record of who read, changed or deleted its secrets, keys and certificates.`,
+          remediation: `az monitor diagnostic-settings create --name kv-audit --resource ${vault.id} --logs '[{"category":"AuditEvent","enabled":true}]' --workspace <log-analytics-workspace-id>`,
+        });
+      }
+    } catch (err) {
+      log(`  [azure:keyvault] ${vault.name}: diagnostic settings failed: ${err.message}`);
+    }
     if (!vault.purgeProtectionEnabled) {
       reporter.add({
         provider: 'azure',
@@ -338,6 +459,56 @@ async function runAppServiceChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:appservice] ${sites.length} site(s) found`);
 
   for (const site of sites) {
+    try {
+      const cfg = await appServiceApi.getSiteConfig(site.id, accessToken);
+      const isFn = site.kind.includes('functionapp');
+      const label = isFn ? 'Function App' : 'App Service';
+      const cliGroup = isFn ? 'functionapp' : 'webapp';
+      if (cfg.minTlsVersion === '1.0' || cfg.minTlsVersion === '1.1') {
+        reporter.add({
+          provider: 'azure',
+          service: 'appservice',
+          check: 'azure-appservice-outdated-tls',
+          severity: 'medium',
+          action: 'azure-appservice-upgrade-tls',
+          title: `${label} accepts outdated TLS (minimum: ${cfg.minTlsVersion})`,
+          resource: site.name,
+          region: site.location,
+          description: `Site "${site.name}" allows clients to negotiate TLS ${cfg.minTlsVersion}, which has known weaknesses.`,
+          remediation: `az ${cliGroup} config set --name ${site.name} --resource-group <rg> --min-tls-version 1.2`,
+        });
+      }
+      if (cfg.ftpsState === 'AllAllowed') {
+        reporter.add({
+          provider: 'azure',
+          service: 'appservice',
+          check: 'azure-appservice-ftp-allowed',
+          severity: 'medium',
+          action: 'azure-appservice-require-ftps',
+          title: `${label} accepts unencrypted FTP deployments`,
+          resource: site.name,
+          region: site.location,
+          description: `Site "${site.name}" has FTPS state "AllAllowed", so deployment credentials and site content can cross the network in clear text over plain FTP.`,
+          remediation: `az ${cliGroup} config set --name ${site.name} --resource-group <rg> --ftps-state FtpsOnly (or Disabled if FTP isn't used)`,
+        });
+      }
+      if (cfg.remoteDebuggingEnabled) {
+        reporter.add({
+          provider: 'azure',
+          service: 'appservice',
+          check: 'azure-appservice-remote-debugging-enabled',
+          severity: 'medium',
+          action: 'azure-appservice-disable-remote-debugging',
+          title: `${label} has remote debugging enabled`,
+          resource: site.name,
+          region: site.location,
+          description: `Site "${site.name}" has remote debugging switched on, which opens extra inbound ports on the app and lets anyone with deployment credentials attach a debugger to production code.`,
+          remediation: `az ${cliGroup} config set --name ${site.name} --resource-group <rg> --remote-debugging-enabled false`,
+        });
+      }
+    } catch (err) {
+      log(`  [azure:appservice] ${site.name}: site config failed: ${err.message}`);
+    }
     if (!site.httpsOnly) {
       const isFunctionApp = site.kind.includes('functionapp');
       reporter.add({
@@ -383,6 +554,20 @@ async function runAcrChecks(subscriptionId, accessToken, reporter, log) {
         remediation: `az acr update --name ${reg.name} --admin-enabled false`,
       });
     }
+    if (reg.anonymousPullEnabled) {
+      reporter.add({
+        provider: 'azure',
+        service: 'acr',
+        check: 'azure-acr-anonymous-pull',
+        severity: 'high',
+        action: 'azure-acr-disable-anonymous-pull',
+        title: 'Container Registry allows anonymous image pulls',
+        resource: reg.name,
+        region: reg.location,
+        description: `Registry "${reg.name}" has anonymousPullEnabled=true, so anyone who can reach it can pull every image in it without credentials -- including application code and anything baked into the images.`,
+        remediation: `az acr update --name ${reg.name} --anonymous-pull-enabled false`,
+      });
+    }
     if (reg.publicNetworkAccess !== 'Disabled') {
       reporter.add({
         provider: 'azure',
@@ -426,6 +611,48 @@ async function runAksChecks(subscriptionId, accessToken, reporter, log) {
         remediation: 'RBAC cannot be toggled on an existing AKS cluster — recreate it with --enable-rbac (the default for new clusters).',
       });
     }
+    if (!cluster.networkPolicy) {
+      reporter.add({
+        provider: 'azure',
+        service: 'aks',
+        check: 'azure-aks-network-policy-missing',
+        severity: 'low',
+        action: 'azure-aks-enable-network-policy',
+        title: 'AKS cluster has no network policy engine',
+        resource: cluster.name,
+        region: cluster.location,
+        description: `Cluster "${cluster.name}" has no networkPolicy (Azure, Calico or Cilium), so every pod can reach every other pod and Kubernetes NetworkPolicy objects are not enforced.`,
+        remediation: 'The network policy engine is chosen at cluster creation (--network-policy azure|calico|cilium); recreate or migrate the cluster to enable it.',
+      });
+    }
+    if (!cluster.aadIntegrated) {
+      reporter.add({
+        provider: 'azure',
+        service: 'aks',
+        check: 'azure-aks-aad-not-integrated',
+        severity: 'medium',
+        action: 'azure-aks-enable-aad',
+        title: 'AKS cluster is not integrated with Microsoft Entra ID',
+        resource: cluster.name,
+        region: cluster.location,
+        description: `Cluster "${cluster.name}" has no Entra ID integration, so users authenticate to the Kubernetes API with static certificate credentials instead of their directory identity (no MFA, no central offboarding, weak audit trail).`,
+        remediation: `az aks update --name ${cluster.name} --resource-group <rg> --enable-aad --aad-admin-group-object-ids <group-id>`,
+      });
+    }
+    if (!cluster.monitoringEnabled) {
+      reporter.add({
+        provider: 'azure',
+        service: 'aks',
+        check: 'azure-aks-monitoring-disabled',
+        severity: 'low',
+        action: 'azure-aks-enable-monitoring',
+        title: 'AKS cluster has no Azure Monitor (Container insights) enabled',
+        resource: cluster.name,
+        region: cluster.location,
+        description: `Cluster "${cluster.name}" has neither the monitoring add-on nor managed Prometheus enabled, so node and container health and logs are not collected for investigation.`,
+        remediation: `az aks enable-addons --name ${cluster.name} --resource-group <rg> --addons monitoring`,
+      });
+    }
     if (!cluster.localAccountsDisabled) {
       reporter.add({
         provider: 'azure',
@@ -465,6 +692,9 @@ async function runAzureChecks({ subscriptionId, accessToken }, reporter, log = (
   await runAppServiceChecks(subscriptionId, accessToken, reporter, log);
   await runAcrChecks(subscriptionId, accessToken, reporter, log);
   await runAksChecks(subscriptionId, accessToken, reporter, log);
+  // Subscription-level settings (Defender plans, Activity Log, RBAC), managed disks,
+  // PostgreSQL/MySQL flexible servers, Cosmos DB and Redis.
+  await runAzureExtendedChecks({ subscriptionId, accessToken }, reporter, log);
 }
 
 export { runAzureChecks };

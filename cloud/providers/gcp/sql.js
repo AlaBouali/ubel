@@ -26,6 +26,11 @@ async function listInstances(project, accessToken) {
       region: i.region,
       publicIpEnabled: Boolean(ipConfig.ipv4Enabled),
       requireSsl: Boolean(ipConfig.requireSsl) || ipConfig.sslMode === 'TRUSTED_CLIENT_CERTIFICATE_REQUIRED' || ipConfig.sslMode === 'ENCRYPTED_ONLY',
+      instanceType: i.instanceType, // CLOUD_SQL_INSTANCE | READ_REPLICA_INSTANCE | ...
+      backupsEnabled: Boolean(i.settings?.backupConfiguration?.enabled),
+      deletionProtection: Boolean(i.settings?.deletionProtectionEnabled),
+      // flag name -> value, e.g. { log_connections: 'on' }
+      databaseFlags: Object.fromEntries((i.settings?.databaseFlags || []).map((f) => [f.name, String(f.value ?? '')])),
       authorizedNetworks,
       hasOpenAuthorizedNetwork: authorizedNetworks.includes('0.0.0.0/0'),
     };

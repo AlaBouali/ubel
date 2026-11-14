@@ -18,6 +18,7 @@ async function listRegistries(subscriptionId, accessToken) {
     location: r.location,
     adminUserEnabled: Boolean(r.properties?.adminUserEnabled),
     publicNetworkAccess: r.properties?.publicNetworkAccess || 'Enabled',
+    anonymousPullEnabled: Boolean(r.properties?.anonymousPullEnabled),
   }));
 }
 

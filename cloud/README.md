@@ -21,7 +21,7 @@ Written against **Node.js's standard library only** — no AWS SDK, no
 ## Features
 
 - Live AWS/GCP/Azure account scanning via each provider's own read-only API — actual account state, not a static IaC/manifest scan
-- 69 checks across three providers covering public storage/database/network exposure, IAM posture, missing encryption, and disabled audit logging (see [What it checks](#what-it-checks))
+- 166 checks across three providers covering public storage/database/network exposure, IAM posture, missing encryption, and disabled audit logging (see [What it checks](#what-it-checks))
 - Condition-aware severity on wildcard IAM/SNS/SQS policy findings — a matching statement is only downgraded from `high` when its `Condition` block is built entirely from keys that meaningfully restrict access, not just any `Condition` at all
 - Fully paginated AWS list calls (security groups, instances, volumes, DB instances/snapshots) — accounts past one page of resources are scanned completely, not silently truncated
 - Bounded concurrency for per-bucket/per-user/per-region work (see `lib/concurrency.js`) instead of serial, one-item-at-a-time scanning
@@ -72,7 +72,7 @@ XML dependency.
 
 ## What it checks
 
-**AWS** (S3, EC2, IAM, RDS, CloudTrail, GuardDuty, SNS, SQS):
+**AWS** (S3, EC2, IAM, RDS, CloudTrail, GuardDuty, SNS, SQS, KMS, Lambda, Config, ELBv2, EFS, Redshift):
 - S3 buckets: public ACL grants, public bucket policy (via
   `GetBucketPolicyStatus`), Block Public Access not fully enabled, default
   encryption disabled, versioning disabled, access logging disabled, and a
@@ -97,21 +97,54 @@ XML dependency.
   high with a "review the condition" note, since we can't evaluate
   arbitrary condition logic), IAM roles whose trust policy allows
   `Principal: "*"`
+- IAM (additional): root account without MFA or with an active access key;
+  a weak account password policy (reported with the specific gaps — minimum
+  length, missing character classes, reuse prevention, max age); users with
+  more than one active access key, access keys unused for 45+ days (or
+  never used), and policies attached directly to a user instead of via
+  a group/role
+- EC2 (additional): instances that still allow IMDSv1 (higher severity when
+  the instance also has a public IP or an instance profile), and the
+  `default` security group still attached to resources
 - RDS: publicly accessible instances, unencrypted storage, publicly shared
-  manual snapshots, unencrypted snapshots (fully paginated)
+  manual snapshots, unencrypted snapshots, backups disabled (retention 0),
+  deletion protection off, automatic minor version upgrades off (Aurora
+  members and read replicas are not flagged for backups; fully paginated)
 - CloudTrail: no active multi-region trail, logging stopped, missing KMS
-  encryption, log file validation disabled
+  encryption, log file validation disabled, trail not delivering to
+  CloudWatch Logs
+- S3 (account level): the account-wide Block Public Access setting not fully
+  enabled (S3 Control API)
+- EBS snapshots / AMIs owned by the account that are shared publicly
+- KMS: customer-managed symmetric keys with automatic rotation disabled, and
+  key policies granting `Principal: "*"` (the standard `kms:CallerAccount` /
+  `kms:ViaService` pattern AWS writes for service-integrated keys is not
+  reported; AWS-managed keys are out of scope)
+- Lambda: functions on a deprecated runtime (a point-in-time list limited to
+  long-deprecated runtimes — newer deprecations are not in it), environment
+  variables whose *names* look like secrets or whose values match a known
+  credential format (only the variable names are ever written to a finding,
+  never the values), resource policies with `Principal: "*"`, and function
+  URLs with `AuthType: NONE`
+- AWS Config: configuration recorder stopped, or no recorder in any queried
+  region (the "not enabled" finding is withheld if no region could be
+  queried, so a permissions problem is not reported as a missing control)
+- ELBv2 (ALB/NLB): HTTP listeners that don't redirect to HTTPS, listeners on
+  a weak/legacy TLS security policy, access logs disabled
+- EFS file systems without encryption at rest
+- Redshift: publicly accessible clusters, unencrypted clusters
 - GuardDuty: no enabled detector in any scanned region; a detector that
   exists but is administratively disabled
 - SNS/SQS: topic/queue resource policies with `Principal: "*"` (same
-  condition-aware severity logic as the IAM full-admin check above)
+  condition-aware severity logic as the IAM full-admin check above); topics
+  and queues without server-side encryption
 
 **GCP** (Storage, Compute, IAM, Cloud SQL, BigQuery, Cloud Run, Cloud
-Functions, GKE):
+Functions, GKE, Logging, DNS, Pub/Sub):
 - Storage buckets: IAM bindings granting `allUsers`/`allAuthenticatedUsers`
   (the finding notes whether Public Access Prevention would already block
   it), fine-grained ACLs instead of uniform bucket-level access, Public
-  Access Prevention not set to `enforced`
+  Access Prevention not set to `enforced`, object versioning disabled
 - Firewall rules: ingress from `0.0.0.0/0` **or `::/0`** on all protocols,
   on a protocol with no port restriction, on sensitive ports, or on any
   other port (a rule scoped to `targetTags` is downgraded one severity
@@ -121,22 +154,43 @@ Functions, GKE):
 - Project IAM policy: primitive roles (`roles/owner`/`roles/editor`) or any
   other role bound to `allUsers`/`allAuthenticatedUsers`
 - Compute instances: public IP + default service account with
-  `cloud-platform` (full API access) scope
+  `cloud-platform` (full API access) scope; serial port access enabled,
+  project-wide SSH keys allowed, IP forwarding enabled
 - Cloud SQL: instances open to `0.0.0.0/0`, public IP enabled, SSL not
-  required
+  required, automated backups disabled, deletion protection off,
+  PostgreSQL connection/disconnection logging flags off, MySQL
+  `local_infile` on
 - BigQuery: datasets granting access to `allUsers`/`allAuthenticatedUsers`
 - Cloud Run / Cloud Functions: `allUsers`/`allAuthenticatedUsers` bound in
   IAM (a plain invoker-only role is flagged at medium, since
   unauthenticated invocation is often an intentional public
   endpoint/webhook; a broader role bound publicly is flagged higher)
 - GKE: public control plane with no `masterAuthorizedNetworks` restriction,
-  legacy ABAC enabled, legacy static/basic-auth credentials configured
+  legacy ABAC enabled, legacy static/basic-auth credentials configured;
+  network policy not enforced, nodes with public IPs (private nodes off),
+  Shielded Nodes off, node pools using the default Compute service account,
+  node auto-upgrade/auto-repair off, Workload Identity off, Cloud Logging
+  off
+- Cloud Run / Cloud Functions (additional): workloads running as the default
+  Compute Engine service account
+- Networking: the `default` and legacy-mode networks still present, subnets
+  without VPC flow logs
+- Project settings: OS Login not enabled, project-wide serial port access,
+  audit logging (Data Access) not configured for all services, no log sink
+  exporting logs
+- Service accounts: user-managed keys present or not rotated, service accounts
+  holding admin roles (`*Admin`, owner/editor) or broad impersonation roles
+- Cloud DNS: public managed zones without DNSSEC
+- Pub/Sub: topics and subscriptions with IAM bound to
+  `allUsers`/`allAuthenticatedUsers`
 
 **Azure** (Storage, Network, SQL, Key Vault, App Service, Container
-Registry, AKS):
+Registry, AKS, Defender for Cloud, Monitor, RBAC, Compute, PostgreSQL/MySQL
+Flexible Server, Cosmos DB, Redis):
 - Storage accounts: public blob access allowed at the account level *and*
   per-container `publicAccess != None`, HTTP traffic allowed, outdated
-  minimum TLS version
+  minimum TLS version, network ACL default action `Allow`, blob soft delete
+  disabled
 - NSGs: inbound `Allow` rules from a public source on all ports, on
   sensitive ports, or on any other port — skipped (and instead reported as
   a single low-severity housekeeping note) when the NSG isn't associated
@@ -146,12 +200,28 @@ Registry, AKS):
   range can be a legitimate corporate VPN block — the standard "Allow
   Azure services" `0.0.0.0`-`0.0.0.0` marker rule is still recognized and
   skipped)
+  SQL servers (additional): minimum TLS version below 1.2, auditing
+  disabled, Advanced Threat Protection disabled
 - Key Vault: public network access not restricted, purge protection
-  disabled
-- App Service / Function App: `httpsOnly` disabled
-- Container Registry: admin user enabled, public network access allowed
+  disabled, access-policy permission model instead of RBAC, no diagnostic
+  logging
+- App Service / Function App: `httpsOnly` disabled, outdated minimum TLS,
+  FTP/FTPS allowed, remote debugging enabled
+- Container Registry: admin user enabled, public network access allowed,
+  anonymous pull enabled
 - AKS: Kubernetes RBAC disabled, local (non-Azure AD) accounts allowed,
-  public API server with no authorized IP ranges configured
+  public API server with no authorized IP ranges configured, no network
+  policy, Azure AD integration off, monitoring add-on disabled
+- Microsoft Defender for Cloud: plans not on the Standard tier for Servers,
+  App Service, SQL servers, SQL on VMs, Storage, Containers, Key Vault and
+  Resource Manager; no security contact configured
+- Subscription / RBAC: no activity-log diagnostic setting, more than three
+  Owner assignments, custom roles with wildcard actions
+- Compute: unattached managed disks
+- PostgreSQL / MySQL Flexible Server: public servers with a firewall rule
+  spanning the whole IPv4 space, `require_secure_transport` off
+- Cosmos DB: public network access open, local (key-based) auth enabled
+- Redis Cache: non-TLS port enabled, minimum TLS version below 1.2
 
 Every finding includes a severity, a machine-readable `action` code (for
 tooling/auto-remediation integrations), the affected resource, a
@@ -228,8 +298,20 @@ regions aren't given explicitly — see below), `iam:ListUsers`,
 `rds:DescribeDBSnapshots`, `rds:DescribeDBSnapshotAttributes`,
 `cloudtrail:DescribeTrails`, `cloudtrail:GetTrailStatus`,
 `guardduty:ListDetectors`, `guardduty:GetDetector`, `sns:ListTopics`,
-`sns:GetTopicAttributes`, `sqs:ListQueues`, `sqs:GetQueueAttributes`. The
-AWS-managed `ReadOnlyAccess` / `SecurityAudit` policies both cover this. If
+`sns:GetTopicAttributes`, `sqs:ListQueues`, `sqs:GetQueueAttributes`, `iam:GetAccountSummary`,
+`iam:GetAccessKeyLastUsed`, `iam:ListAttachedUserPolicies`,
+`ec2:DescribeImages`, `ec2:DescribeSnapshots`,
+`s3:GetAccountPublicAccessBlock`, `sts:GetCallerIdentity`,
+`kms:ListKeys`, `kms:DescribeKey`, `kms:GetKeyRotationStatus`,
+`kms:GetKeyPolicy`, `lambda:ListFunctions`, `lambda:GetPolicy`,
+`lambda:ListFunctionUrlConfigs`, `config:DescribeConfigurationRecorderStatus`,
+`elasticloadbalancing:DescribeLoadBalancers`,
+`elasticloadbalancing:DescribeListeners`,
+`elasticloadbalancing:DescribeLoadBalancerAttributes`,
+`elasticfilesystem:DescribeFileSystems`, `redshift:DescribeClusters`. The
+AWS-managed `ReadOnlyAccess` / `SecurityAudit` policies are the usual starting
+point; if a call is denied, only that check is skipped and the scan carries
+on. If
 a chained profile is used, the target role's trust policy must also allow
 the base credentials to assume it.
 
@@ -283,7 +365,14 @@ The service account (or attached workload identity) needs (read-only):
 `cloudsql.instances.list`, `bigquery.datasets.get`,
 `bigquery.datasets.getIamPolicy`, `run.services.list`,
 `run.services.getIamPolicy`, `cloudfunctions.functions.list`,
-`cloudfunctions.functions.getIamPolicy`, `container.clusters.list`.
+`cloudfunctions.functions.getIamPolicy`, `container.clusters.list`,
+`compute.networks.list`, `compute.subnetworks.list`, `compute.projects.get`,
+`iam.serviceAccounts.list`, `iam.serviceAccountKeys.list`,
+`logging.sinks.list`, `dns.managedZones.list`, `pubsub.topics.list`,
+`pubsub.topics.getIamPolicy`, `pubsub.subscriptions.list`,
+`pubsub.subscriptions.getIamPolicy`. Add `roles/logging.viewer`,
+`roles/dns.reader` and `roles/pubsub.viewer` if you grant predefined roles
+rather than individual permissions.
 
 ### Azure credentials
 
@@ -296,6 +385,9 @@ export AZURE_SUBSCRIPTION_ID=...
 
 Create a service principal with the built-in `Reader` role on the
 subscription: `az ad sp create-for-rbac --role Reader --scopes /subscriptions/<sub-id>`.
+`Reader` covers every read the scanner makes (including Defender for Cloud
+pricings and security contacts, diagnostic settings, role assignments and
+role definitions). A call that is denied only skips that check.
 
 `AZURE_SUBSCRIPTION_ID` is always required. If `AZURE_TENANT_ID` /
 `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` aren't all set, a managed
@@ -534,19 +626,28 @@ up in a CI job or container layer.
   first page, so it's no longer biased toward whichever prefix happens
   to sort first — but it's still a spot-check, not a guarantee, for any
   bucket bigger than the sample budget.
-- GCP KMS key rotation and default Compute Engine disk encryption checks
-  are not implemented. Both would need per-location API fan-out (Cloud
+- GCP Cloud KMS key rotation and default Compute Engine disk encryption
+  checks are not implemented. Both would need per-location API fan-out (Cloud
   KMS keys and, less usefully, disks are already encrypted by default —
   the interesting signal is customer-managed key usage) that didn't seem
   worth the added scan time/noise relative to the checks that are in
   (Cloud SQL, BigQuery, Cloud Run/Functions, GKE) — worth revisiting if
   CMEK usage becomes a requirement to track.
-- A handful of other checks were deliberately left out as lower-signal or
-  higher-effort than what's already covered, rather than missed: AWS
-  Config recorder status, Security Hub enabled, Lambda resource-policy
-  `Principal: "*"` (the SNS/SQS equivalent exists; Lambda uses a REST API
-  shape that would need its own client wrapper), and KMS key rotation.
-  Worth adding if a specific audit needs them.
+- A handful of other checks were deliberately left out as lower-signal,
+  noisy or not yet verifiable without a live account, rather than missed:
+  AWS Security Hub enabled, OpenSearch domain policies, network ACLs, and a
+  per-region report of every default security group (replaced by the
+  narrower "default security group in use" check). Worth adding if a
+  specific audit needs them.
+- The extended checks (Lambda, KMS, Config, ELBv2, EFS, Redshift, the GCP and
+  Azure additions) are covered by mock-based tests that replay API response
+  shapes; they have not been validated against live cloud accounts. The AWS
+  Lambda deprecated-runtime list is point-in-time and will lag newer AWS
+  deprecations.
+- CIS Benchmark control numbers are attached only where the mapping was
+  verified against the published benchmark (AWS v1.5.0, Azure v2.0.0, GCP
+  v1.3.0); other new checks carry the category-level framework mappings
+  without a benchmark number rather than a guessed one.
 - S3 bucket names containing dots use virtual-hosted-style addressing
   (`bucket.name.s3.region.amazonaws.com`), which can hit TLS SNI mismatches
   for such buckets. Fall back to path-style addressing for those.

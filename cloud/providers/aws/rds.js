@@ -50,6 +50,13 @@ async function describeDBInstances(region, creds) {
     engine: i.Engine,
     publiclyAccessible: i.PubliclyAccessible === 'true',
     storageEncrypted: i.StorageEncrypted === 'true',
+    backupRetentionPeriod: Number(i.BackupRetentionPeriod || 0),
+    deletionProtection: i.DeletionProtection === 'true',
+    autoMinorVersionUpgrade: i.AutoMinorVersionUpgrade === 'true',
+    // Aurora members take their backup/deletion settings from the cluster, and
+    // a read replica legitimately has no backups of its own -- the checks skip both.
+    clusterId: i.DBClusterIdentifier || null,
+    isReadReplica: Boolean(i.ReadReplicaSourceDBInstanceIdentifier),
   }));
 }
 

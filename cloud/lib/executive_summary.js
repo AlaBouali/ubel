@@ -411,9 +411,9 @@ function overallRisk(m) {
 // corresponding stage actually ran, so the text never claims work that wasn't
 // done.
 const SERVICES_COVERED = {
-  aws: "storage (S3), servers, networks and disks (EC2), identities and permissions (IAM), databases (RDS), audit logging (CloudTrail), threat detection (GuardDuty), and messaging topics and queues (SNS, SQS)",
-  gcp: "storage buckets, firewall rules, project-level permissions, virtual machines, Cloud SQL databases, BigQuery datasets, Cloud Run and Cloud Functions, and Kubernetes clusters (GKE)",
-  azure: "storage accounts, network security groups, SQL servers, Key Vault, App Service and Function Apps, Container Registry, and Kubernetes clusters (AKS)",
+  aws: "storage (S3), servers, networks and disks (EC2), identities and permissions (IAM, including the root user), databases (RDS, Redshift), file storage (EFS), audit logging and configuration history (CloudTrail, AWS Config), threat detection (GuardDuty), encryption keys (KMS), serverless functions (Lambda), load balancers, and messaging topics and queues (SNS, SQS)",
+  gcp: "storage buckets, networks, firewall rules and DNS, project-level permissions, audit logging and log export, service accounts and their keys, virtual machines, Cloud SQL databases, BigQuery datasets, Cloud Run and Cloud Functions, Pub/Sub, and Kubernetes clusters (GKE)",
+  azure: "storage accounts, network security groups, SQL servers, PostgreSQL and MySQL servers, Cosmos DB, Redis, Key Vault, App Service and Function Apps, Container Registry, Kubernetes clusters (AKS), managed disks, and subscription-level settings (Defender for Cloud, Activity Log, role assignments)",
 };
 
 function buildMethodology(report, ctx) {

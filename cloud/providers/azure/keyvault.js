@@ -19,6 +19,7 @@ async function listVaults(subscriptionId, accessToken) {
     publicNetworkAccess: v.properties?.publicNetworkAccess || 'Enabled',
     networkAclsDefaultAction: v.properties?.networkAcls?.defaultAction || 'Allow',
     purgeProtectionEnabled: Boolean(v.properties?.enablePurgeProtection),
+    rbacAuthorization: Boolean(v.properties?.enableRbacAuthorization),
   }));
 }
 

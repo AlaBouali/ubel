@@ -49,8 +49,70 @@ async function listInstances(project, accessToken) {
     zone: (i.zone || '').split('/').pop(),
     hasExternalIp: (i.networkInterfaces || []).some((ni) => (ni.accessConfigs || []).length > 0),
     shieldedVmEnabled: Boolean(i.shieldedInstanceConfig?.enableSecureBoot),
+    // Instance metadata flags (CIS GCP 4.3 / 4.5 / 4.6). GKE node VMs are managed
+    // by GKE and excluded from these checks by the benchmark itself.
+    serialPortEnabled: metadataFlag(i.metadata, 'serial-port-enable'),
+    blockProjectSshKeys: metadataFlag(i.metadata, 'block-project-ssh-keys'),
+    canIpForward: Boolean(i.canIpForward),
+    isGkeNode: Boolean(i.labels?.['goog-gke-node']) || String(i.name || '').startsWith('gke-'),
     serviceAccounts: (i.serviceAccounts || []).map((sa) => ({ email: sa.email, scopes: sa.scopes || [] })),
   }));
 }
 
-export { listFirewalls, listInstances };
+function metadataFlag(metadata, key) {
+  const item = (metadata?.items || []).find((m) => m.key === key);
+  return item ? String(item.value).trim().toLowerCase() === 'true' : false;
+}
+
+/** Project-wide (common instance) metadata: OS Login and serial-port defaults. */
+async function getProjectMetadata(project, accessToken) {
+  const data = await gcpRequest(`https://compute.googleapis.com/compute/v1/projects/${project}`, { accessToken });
+  const md = data.commonInstanceMetadata;
+  return {
+    osLoginEnabled: metadataFlag(md, 'enable-oslogin'),
+    serialPortEnabled: metadataFlag(md, 'serial-port-enable'),
+  };
+}
+
+/** VPC networks. `IPv4Range` is only present on legacy-mode networks. */
+async function listNetworks(project, accessToken) {
+  const nets = [];
+  let pageToken;
+  do {
+    const url = new URL(`https://compute.googleapis.com/compute/v1/projects/${project}/global/networks`);
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await gcpRequest(url.toString(), { accessToken });
+    nets.push(...(data.items || []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return nets.map((n) => ({
+    name: n.name,
+    autoCreateSubnetworks: Boolean(n.autoCreateSubnetworks),
+    isLegacy: Boolean(n.IPv4Range),
+  }));
+}
+
+/** Subnets across every region in one aggregated call. */
+async function listSubnetworks(project, accessToken) {
+  const subnets = [];
+  let pageToken;
+  do {
+    const url = new URL(`https://compute.googleapis.com/compute/v1/projects/${project}/aggregated/subnetworks`);
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await gcpRequest(url.toString(), { accessToken });
+    for (const scoped of Object.values(data.items || {})) {
+      for (const s of scoped.subnetworks || []) subnets.push(s);
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return subnets.map((s) => ({
+    name: s.name,
+    region: (s.region || '').split('/').pop(),
+    network: (s.network || '').split('/').pop(),
+    // Proxy-only / PSC / load-balancer subnets have a non-PRIVATE purpose and no flow logs.
+    purpose: s.purpose || 'PRIVATE',
+    flowLogsEnabled: Boolean(s.logConfig?.enable) || Boolean(s.enableFlowLogs),
+  }));
+}
+
+export { listFirewalls, listInstances, getProjectMetadata, listNetworks, listSubnetworks };

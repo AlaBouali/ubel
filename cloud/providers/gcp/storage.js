@@ -17,6 +17,7 @@ async function listBuckets(project, accessToken) {
     location: b.location,
     publicAccessPrevention: b.iamConfiguration?.publicAccessPrevention,
     uniformBucketLevelAccess: Boolean(b.iamConfiguration?.uniformBucketLevelAccess?.enabled),
+    versioningEnabled: Boolean(b.versioning?.enabled),
   }));
 }
 

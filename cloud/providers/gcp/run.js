@@ -25,6 +25,8 @@ async function listServices(project, accessToken) {
     displayName: (s.name || '').split('/').pop(),
     location: (s.name || '').split('/')[3],
     ingress: s.ingress,
+    // Empty means the revision runs as the Compute Engine default service account.
+    serviceAccount: s.template?.serviceAccount || '',
   }));
 }
 

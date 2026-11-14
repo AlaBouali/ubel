@@ -41,7 +41,13 @@ async function listQueueUrls(region, creds) {
 async function getQueuePolicy(queueUrl, region, creds) {
   const res = await sqsCall(
     'GetQueueAttributes',
-    { QueueUrl: queueUrl, 'AttributeName.1': 'Policy', 'AttributeName.2': 'QueueArn' },
+    {
+      QueueUrl: queueUrl,
+      'AttributeName.1': 'Policy',
+      'AttributeName.2': 'QueueArn',
+      'AttributeName.3': 'KmsMasterKeyId',
+      'AttributeName.4': 'SqsManagedSseEnabled',
+    },
     region,
     creds
   );
@@ -56,7 +62,12 @@ async function getQueuePolicy(queueUrl, region, creds) {
       policy = null;
     }
   }
-  return { policy, arn: arnEntry?.Value || null };
+  // Encrypted either with a KMS key (SSE-KMS) or with SQS-managed keys (SSE-SQS,
+  // on by default for queues created since 2022).
+  const kmsEntry = entries.find((e) => e.Name === 'KmsMasterKeyId');
+  const sseEntry = entries.find((e) => e.Name === 'SqsManagedSseEnabled');
+  const encrypted = Boolean(kmsEntry?.Value) || sseEntry?.Value === 'true';
+  return { policy, arn: arnEntry?.Value || null, encrypted };
 }
 
 export { listQueueUrls, getQueuePolicy };

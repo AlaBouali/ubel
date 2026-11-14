@@ -68,6 +68,28 @@ async function hasConsoleAccess(userName, creds) {
   }
 }
 
+/**
+ * GetAccountSummary -- the account-level counters IAM keeps, flattened from its
+ * <entry><key>/<value> map into { AccountMFAEnabled: 1, AccountAccessKeysPresent: 0, ... }.
+ * AccountMFAEnabled / AccountAccessKeysPresent describe the *root* user, which
+ * no per-user IAM call ever reports on.
+ */
+async function getAccountSummary(creds) {
+  const res = await iamCall('GetAccountSummary', {}, creds);
+  const entries = asArray(res.xml.GetAccountSummaryResponse?.GetAccountSummaryResult?.SummaryMap?.entry);
+  const map = {};
+  for (const e of entries) if (e.key) map[e.key] = Number(e.value);
+  return map;
+}
+
+/** When (if ever) an access key was last used. A key that has never been used
+ * has no LastUsedDate at all, so `lastUsedDate` is null in that case. */
+async function getAccessKeyLastUsed(accessKeyId, creds) {
+  const res = await iamCall('GetAccessKeyLastUsed', { AccessKeyId: accessKeyId }, creds);
+  const r = res.xml.GetAccessKeyLastUsedResponse?.GetAccessKeyLastUsedResult?.AccessKeyLastUsed;
+  return { lastUsedDate: r?.LastUsedDate || null, serviceName: r?.ServiceName || null };
+}
+
 async function getAccountPasswordPolicy(creds) {
   try {
     const res = await iamCall('GetAccountPasswordPolicy', {}, creds);
@@ -197,12 +219,12 @@ async function listInlinePolicyDocuments(kind, principalName, creds) {
 }
 
 /** Managed policies (customer- or AWS-managed) attached directly to a
- * group or role — used so a dangerous *AWS-managed* policy attached to a
+ * user, group or role — used so a dangerous *AWS-managed* policy attached to a
  * role doesn't slip past just because listCustomerManagedPolicies() only
  * looks at policies this account authored itself. */
 async function listAttachedPolicies(kind, principalName, creds) {
-  const action = kind === 'group' ? 'ListAttachedGroupPolicies' : 'ListAttachedRolePolicies';
-  const principalParam = kind === 'group' ? 'GroupName' : 'RoleName';
+  const action = kind === 'group' ? 'ListAttachedGroupPolicies' : kind === 'user' ? 'ListAttachedUserPolicies' : 'ListAttachedRolePolicies';
+  const principalParam = kind === 'group' ? 'GroupName' : kind === 'user' ? 'UserName' : 'RoleName';
   const items = await paginate(
     action,
     { [principalParam]: principalName },
@@ -221,6 +243,8 @@ export {
   listAccessKeys,
   listMfaDevices,
   hasConsoleAccess,
+  getAccountSummary,
+  getAccessKeyLastUsed,
   getAccountPasswordPolicy,
   listCustomerManagedPolicies,
   getPolicyDocument,

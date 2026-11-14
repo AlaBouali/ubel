@@ -23,6 +23,23 @@ async function listClusters(project, accessToken) {
     // credential -- non-empty means it's still configured and usable
     // alongside (or instead of) normal IAM/OIDC auth.
     basicAuthConfigured: Boolean(c.masterAuth?.username),
+    // Autopilot clusters manage nodes, network policy enforcement and shielded
+    // nodes themselves, so the per-node / hardening checks skip them.
+    autopilot: Boolean(c.autopilot?.enabled),
+    // Dataplane V2 (ADVANCED_DATAPATH) enforces NetworkPolicy natively.
+    networkPolicyEnforced: Boolean(c.networkPolicy?.enabled) || c.networkConfig?.datapathProvider === 'ADVANCED_DATAPATH',
+    privateNodes: Boolean(c.privateClusterConfig?.enablePrivateNodes),
+    workloadIdentityEnabled: Boolean(c.workloadIdentityConfig?.workloadPool),
+    shieldedNodesEnabled: Boolean(c.shieldedNodes?.enabled),
+    loggingDisabled: c.loggingService === 'none',
+    nodePools: (c.nodePools || []).map((p) => ({
+      name: p.name,
+      // An unset (or literal "default") node service account means the Compute
+      // Engine default service account, which is typically roles/editor.
+      usesDefaultServiceAccount: !p.config?.serviceAccount || p.config.serviceAccount === 'default',
+      autoUpgrade: Boolean(p.management?.autoUpgrade),
+      autoRepair: Boolean(p.management?.autoRepair),
+    })),
   }));
 }
 

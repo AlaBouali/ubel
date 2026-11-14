@@ -39,6 +39,7 @@ async function describeTrails(region, creds) {
     includesGlobalServiceEvents: Boolean(t.IncludeGlobalServiceEvents),
     logFileValidationEnabled: Boolean(t.LogFileValidationEnabled),
     kmsKeyId: t.KmsKeyId || null,
+    cloudWatchLogsLogGroupArn: t.CloudWatchLogsLogGroupArn || null,
     s3BucketName: t.S3BucketName,
   }));
 }
