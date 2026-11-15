@@ -1,8 +1,8 @@
 name: 'UBEL Security Scan and dependencies firewall'
-description: 'Supply-chain, secrets, SAST, cloud misconfiguration, mobile app, native binary, dependency-release and MCP server / client scanning via UBEL'
+description: 'Supply-chain, secrets, SAST, cloud misconfiguration, VM hardening, Kubernetes, mobile app, native binary, dependency-release and MCP server / client scanning via UBEL'
 inputs:
   command:
-    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
+    description: 'Which UBEL bin to run: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, vm, k8s, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom'
     required: true
   version:
     description: 'Pinned @arcane-spark/ubel-node version'
@@ -103,6 +103,15 @@ runs:
     #          in the job — never commit the key itself)
     #   Azure: AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET, plus
     #          AZURE_SUBSCRIPTION_ID (always required regardless of provider)
+    #
+    # `vm` (`ubel-vm`) audits the machine it runs on — files, /proc and /sys only, no commands — or a mounted disk
+    # image given as `args: --root <dir>`. A GitHub-hosted runner is a throw-away VM, so it is mostly useful on
+    # self-hosted runners; run it with root privileges (sudo) for a complete result. `k8s` (`ubel-k8s`) needs a
+    # cluster connection: set KUBECONFIG (or KUBE_TOKEN + a kubeconfig without exec plugins) as env vars on this
+    # step, using READ-ONLY credentials, or pass `args: --manifests <path>` to audit manifest files in the checkout
+    # with no credentials at all. Both exit 0 only when the `--fail-on` gate passed AND every applicable check was
+    # evaluated: exit 2 = the gate tripped (or bad arguments), exit 3 = part of the baseline could not be evaluated
+    # (permission denied, a forbidden Kubernetes list ...); add `--allow-partial` to `args` to accept it.
     #
     # `mobile` (`ubel-mobile`) and `binary` (`ubel-binary`) scan a BUILT ARTIFACT, not
     # the checked-out project: `args` is the path of the file, e.g. `app-release.apk` /
@@ -215,10 +224,10 @@ runs:
         UBEL_ACTION_ARGS:    ${{ inputs.args }}
       run: |
         case "$UBEL_ACTION_COMMAND" in
-          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|mobile|binary|package|mcp-client|mcp-server|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
+          sast|mal|chunk|cicd|agent|platform|secrets|license|cloud|vm|k8s|mobile|binary|package|mcp-client|mcp-server|url|domain|host|easm|npm|pnpm|bun|yarn|docker|pip|pipx|uv|conda|poetry|cargo|bundle|go|dotnet|dart|flutter|swift|composer|apt|dnf|yum|resbom|sbom)
             ;;
           *)
-            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
+            echo "::error::Unknown command '$UBEL_ACTION_COMMAND' — must be one of: sast, mal, chunk, cicd, agent, platform, secrets, license, cloud, vm, k8s, mobile, binary, package, mcp-client, mcp-server, url, domain, host, easm, npm, pnpm, bun, yarn, docker, pip, pipx, uv, conda, poetry, cargo, bundle, go, dotnet, dart, flutter, swift, composer, apt, dnf, yum, resbom, sbom"
             exit 1
             ;;
         esac

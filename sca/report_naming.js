@@ -24,6 +24,7 @@
 //     sast                .sast             (malware scanner: .malware)
 //     easm / domain / url / host   .easm  .domain  .url  .host
 //     cloud               .cloud
+//     vm / k8s            .vm  .k8s         (ubel-vm host / virtual-machine hardening, ubel-k8s Kubernetes)
 //
 // Compound extensions keep their own suffix after the tag:
 //     latest.sca.json   latest.sca.html   latest.sca.cdx.json   latest.sca.sarif.json
@@ -32,7 +33,7 @@
 // kept in one place — $HOME/.ubel/history/<asset_id>/ — no mode folder, the tag in the
 // file name says what produced it. <mode> (used by latest_reports/ and asset_type) is
 //
-//     sca  firewall  os  licenses  secrets  sast  malware  cloud  easm  host  domain  url
+//     sca  firewall  os  licenses  secrets  sast  malware  cloud  vm  k8s  easm  host  domain  url
 //
 // ("firewall" = check/install for npm/pnpm/bun/yarn/composer/pip/pipx/uv/conda/
 // cargo; "os" = check/install for apt/dnf/yum). The "latest" copies stay
@@ -72,7 +73,7 @@
 // report, SBOM, SARIF and the history zip all carry the id you passed.
 //
 // Asset type: the history mode the scan files under (see above) — sca, firewall,
-// os, licenses, secrets, sast, malware, cloud, easm, host, domain, url.
+// os, licenses, secrets, sast, malware, cloud, vm, k8s, easm, host, domain, url.
 //
 // Where the tag is used:
 //   • "latest" copies   .ubel/reports/latest.<tag>.<ext>
@@ -86,7 +87,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { execFileSync } from "child_process";
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -287,6 +287,45 @@ export function machineUbelDir() {
 const EDITOR_DOT_DIRS = { ".vscode": "vscode", ".cursor": "cursor", ".vscode-oss": "vscodium" };
 
 /**
+ * URL of the `origin` remote of the git checkout that contains `dir`, read straight from the repository's config file
+ * (no `git` process is started, so this works where git is not installed and keeps the scanners free of subprocesses).
+ * Handles a plain .git directory and the `gitdir:` pointer file used by worktrees and submodules. null when not found.
+ */
+function readGitOriginUrl(dir) {
+  for (let d = path.resolve(dir), guard = 0; guard < 64; guard++) {
+    const dotGit = path.join(d, ".git");
+    let st = null;
+    try { st = fs.statSync(dotGit); } catch { st = null; }
+    if (st) {
+      let gitDir = dotGit;
+      if (st.isFile()) {
+        const m = fs.readFileSync(dotGit, "utf-8").match(/^gitdir:\s*(.+)$/m);
+        if (!m) return null;
+        gitDir = path.resolve(d, m[1].trim());
+      }
+      const configs = [path.join(gitDir, "config")];
+      try { configs.push(path.join(path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf-8").trim()), "config")); } catch { /* not a linked worktree */ }
+      for (const cfg of configs) {
+        let text;
+        try { text = fs.readFileSync(cfg, "utf-8"); } catch { continue; }
+        let inOrigin = false;
+        for (const line of text.split(/\r?\n/)) {
+          const sec = line.match(/^\s*\[(.+?)\]\s*$/);
+          if (sec) { inOrigin = /^remote\s+"origin"$/i.test(sec[1]); continue; }
+          const kv = inOrigin && line.match(/^\s*url\s*=\s*(.+?)\s*$/i);
+          if (kv) return kv[1];
+        }
+      }
+      return null;
+    }
+    const parent = path.dirname(d);
+    if (parent === d) return null;
+    d = parent;
+  }
+  return null;
+}
+
+/**
  * Readable name for an asset, used only when ubel_asset.json is first
  * written (or backfilled): the repository name from `origin` when the folder
  * is a git checkout (credentials in the URL are never read — only the last path
@@ -302,12 +341,10 @@ function deriveAssetName(ubelDir) {
     if (editor) return `${editor}_extensions`;
   }
   try {
-    const url = execFileSync("git", ["-C", dir, "remote", "get-url", "origin"], {
-      stdio: ["ignore", "pipe", "ignore"], timeout: 3000, encoding: "utf-8",
-    }).trim();
-    const repo = url.replace(/[\\/]+$/, "").split(/[\\/:]/).pop().replace(/\.git$/i, "");
+    const url = readGitOriginUrl(dir);
+    const repo = url ? url.replace(/[\\/]+$/, "").split(/[\\/:]/).pop().replace(/\.git$/i, "") : "";
     if (repo) return repo.slice(0, 200);
-  } catch { /* not a git checkout, no origin, or git missing */ }
+  } catch { /* not a git checkout, or no origin */ }
   return path.basename(dir) || os.hostname();
 }
 
@@ -627,7 +664,7 @@ export function getRuntimeAssetId() {
 //   UBEL-<tag>-<asset_id>-<report_uuid>
 //
 //   <tag>          the report's file tag (sca, npm_firewall, licenses, secrets, sast,
-//                  malware, cloud, url, domain, host, easm) — see reportFileName()
+//                  malware, cloud, vm, k8s, url, domain, host, easm) — see reportFileName()
 //   <asset_id>     the scan's asset id, embedded whole (32 hex, no hyphens); 32 zeros
 //                  when the scan has no asset id
 //   <report_uuid>  a fresh random UUID v4 without hyphens (32 hex), unique to this report
@@ -667,7 +704,7 @@ export function parseReportId(id) {
 }
 
 /** The only values `asset_type` can take. */
-export const ASSET_TYPES = Object.freeze(["codebase", "cloud", "easm", "machine", "agent", "editor", "docker", "mobile"]);
+export const ASSET_TYPES = Object.freeze(["codebase", "cloud", "easm", "machine", "agent", "editor", "docker", "mobile", "vm", "k8s"]);
 
 // scan_scope values that are about a machine rather than a repository.
 const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine"]);
@@ -681,6 +718,8 @@ const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine
  *   scan_scope developer_platform / cli_tool /
  *              linux_machine, or mode "os"              → machine
  *   mode cloud                                          → cloud
+ *   mode vm (ubel-vm)                                   → vm
+ *   mode k8s (ubel-k8s)                                 → k8s
  *   mode mobile (ubel-mobile)                           → mobile
  *   mode easm (and the EASM modes host / domain / url)  → easm
  *   everything else: modes sca, firewall, sast, malware
@@ -691,7 +730,7 @@ const MACHINE_SCOPES = new Set(["developer_platform", "cli_tool", "linux_machine
  *
  * @param {string} mode         history mode (see historyZipPath)
  * @param {string} [scanScope]  scan_scope of an SCA run, when there is one
- * @returns {"codebase"|"cloud"|"easm"|"machine"|"agent"|"editor"|"docker"|"mobile"}
+ * @returns {"codebase"|"cloud"|"easm"|"machine"|"agent"|"editor"|"docker"|"mobile"|"vm"|"k8s"}
  */
 export function assetTypeFor(mode, scanScope) {
   if (scanScope === "agent") return "agent";
@@ -701,6 +740,8 @@ export function assetTypeFor(mode, scanScope) {
   switch (sanitizeReportTag(mode)) {
     case "os":                                      return "machine";
     case "cloud":                                   return "cloud";
+    case "vm":                                      return "vm";
+    case "k8s":                                     return "k8s";
     case "mobile":                                  return "mobile";
     case "easm": case "host": case "domain": case "url": return "easm";
     default:                                        return "codebase";

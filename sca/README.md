@@ -1896,6 +1896,8 @@ Every report, SBOM and SARIF carries an **`asset_type`**: what *kind* of thing t
 |---|---|---|---|
 | `codebase` | A source repository or project folder: dependencies, source code, malicious code | **`sca`, `firewall`, `sast`, `malware`** — and, because they scan the same folder with the same engine, `licenses` and `secrets` | SCA `health` and firewall `check` / `install` for `ubel-npm` / `-pnpm` / `-bun` / `-yarn` / `-pip` / `-pipx` / `-uv` / `-conda` / `-cargo` / `-composer`; `ubel-sast`; `ubel-mal`; `ubel-license`; `ubel-secrets`; `ubel-cicd`; and the VS Code extension's *Scan Project*, *Scan project for Exposed Secrets* and *Scan project for License Compliance* |
 | `cloud` | A cloud account's configuration (AWS / GCP / Azure) | **`cloud`** | `ubel-cloud` |
+| `vm` | A Linux virtual machine / server (or a mounted disk image) audited against a hardening baseline | **`vm`** | `ubel-vm` |
+| `k8s` | A Kubernetes cluster, or a set of manifest files | **`k8s`** | `ubel-k8s` |
 | `easm` | Externally exposed infrastructure: URLs, domains, IPs and hosts | **`easm`** — the EASM module's other modes `url`, `domain` and `host` too | `ubel-easm`, `ubel-url`, `ubel-domain`, `ubel-host` |
 | `mobile` | A mobile app package (Android `.apk` / iOS `.ipa`) | **`mobile`** | `ubel-mobile` |
 | `machine` | A host machine: its OS packages and installed developer tools and runtimes | `os` (and `sca` health scans with scope `developer_platform`) | `ubel-apt`, `ubel-dnf`, `ubel-yum`, `ubel-platform`, and the VS Code extension's *Scan Host Platform* |

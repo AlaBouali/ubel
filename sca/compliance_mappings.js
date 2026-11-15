@@ -3,7 +3,8 @@
 //
 // Single source of truth for mapping a finding (SCA vulnerability, SAST
 // finding, malicious-code finding, secrets-in-source finding, cloud
-// misconfiguration, or EASM web misconfiguration) onto industry
+// misconfiguration, EASM web misconfiguration, VM hardening check, or Kubernetes
+// check) onto industry
 // compliance/security frameworks, so the SCA, SAST, cloud, and EASM
 // (ubel-url/ubel-domain) modules all attach the same shape of `compliance`
 // data to their findings and every report format (JSON, HTML, SARIF —
@@ -76,6 +77,8 @@ const FRAMEWORKS = {
   cis_aws_foundations:    { name: 'CIS Amazon Web Services Foundations Benchmark', version: 'v1.5.0' },
   cis_azure_foundations:  { name: 'CIS Microsoft Azure Foundations Benchmark',     version: 'v2.0.0' },
   cis_gcp_foundations:    { name: 'CIS Google Cloud Platform Foundation Benchmark', version: 'v1.3.0' },
+  cis_kubernetes_benchmark: { name: 'CIS Kubernetes Benchmark',               version: 'v1.8.0' },
+  k8s_pod_security_standards: { name: 'Kubernetes Pod Security Standards',     version: 'K8s 1.25+' },
 };
 
 // ── Category → framework control references ────────────────────────────────
@@ -227,6 +230,25 @@ const CATEGORY_CONTROLS = {
     { framework: 'iso_27001_2022', control: 'A.8.13', title: 'Information backup' },
     { framework: 'gdpr', control: 'Art. 32(1)(c)', title: 'Ability to restore availability and access to data in a timely manner' },
     { framework: 'cis_controls_v8', control: 'CIS 11', title: 'Data Recovery' },
+  ],
+  // Container / workload settings that let a process escape its isolation or hold more privilege than it needs
+  // (privileged containers, host namespaces, host-path mounts, dangerous capabilities, running as root).
+  privileged_workload: [
+    { framework: 'owasp_top10_2021', control: 'A05:2021', title: 'Security Misconfiguration' },
+    { framework: 'pci_dss_4_0', control: 'Req. 2.2 / Req. 7', title: 'Secure configuration of system components; restrict access by need-to-know' },
+    { framework: 'nist_800_53_r5', control: 'AC-6 / CM-7 / SC-39', title: 'Least Privilege; Least Functionality; Process Isolation' },
+    { framework: 'soc2', control: 'CC6.1 / CC6.3', title: 'Logical access controls; role-based access and least privilege' },
+    { framework: 'iso_27001_2022', control: 'A.8.2 / A.8.9', title: 'Privileged access rights; Configuration management' },
+    { framework: 'cis_controls_v8', control: 'CIS 4 / CIS 6', title: 'Secure Configuration; Access Control Management' },
+  ],
+  // Missing or permissive network segmentation between workloads / namespaces.
+  network_segmentation: [
+    { framework: 'owasp_top10_2021', control: 'A05:2021', title: 'Security Misconfiguration' },
+    { framework: 'pci_dss_4_0', control: 'Req. 1', title: 'Install and maintain network security controls' },
+    { framework: 'nist_800_53_r5', control: 'SC-7 / AC-4', title: 'Boundary Protection; Information Flow Enforcement' },
+    { framework: 'soc2', control: 'CC6.6', title: 'Logical access — boundary protection against external threats' },
+    { framework: 'iso_27001_2022', control: 'A.8.22', title: 'Segregation of networks' },
+    { framework: 'cis_controls_v8', control: 'CIS 12 / CIS 13', title: 'Network Infrastructure Management; Network Monitoring and Defense' },
   ],
 };
 
@@ -778,6 +800,204 @@ const WEB_MISCONFIG_CATEGORY_FALLBACK = {
   'WordPress': ['sensitive_data_exposure'],
 };
 
+// ── VM hardening checks (vm/checks/*.js): check id → categories ─────────────
+// ubel-vm's own rule-id namespace. Every rule id must be listed here (vm.test.js enforces it); an id that is
+// missing still falls back to security_misconfiguration rather than going unmapped.
+const VM_CHECK_CATEGORY = {
+  'vm-os-end-of-life': ['vulnerable_components'],
+  'vm-pkg-repo-integrity': ['malicious_code_supply_chain'],
+  'vm-os-auto-updates': ['vulnerable_components'],
+  'vm-os-reboot-required': ['vulnerable_components'],
+  'vm-ssh-root-login': ['iam_misconfiguration'],
+  'vm-ssh-empty-passwords': ['iam_misconfiguration'],
+  'vm-ssh-protocol-1': ['cryptography'],
+  'vm-ssh-password-auth': ['iam_misconfiguration'],
+  'vm-ssh-x11-forwarding': ['security_misconfiguration'],
+  'vm-ssh-max-auth-tries': ['iam_misconfiguration'],
+  'vm-ssh-permit-user-environment': ['security_misconfiguration'],
+  'vm-ssh-hostbased-auth': ['iam_misconfiguration'],
+  'vm-ssh-ignore-rhosts': ['iam_misconfiguration'],
+  'vm-ssh-gateway-ports': ['security_misconfiguration'],
+  'vm-ssh-no-idle-timeout': ['session_management'],
+  'vm-ssh-no-access-restriction': ['broken_access_control'],
+  'vm-ssh-loglevel': ['logging_monitoring'],
+  'vm-ssh-weak-crypto': ['cryptography'],
+  'vm-ssh-config-permissions': ['broken_access_control'],
+  'vm-ssh-host-key-permissions': ['secrets_management'],
+  'vm-ssh-dsa-host-key': ['cryptography'],
+  'vm-ssh-root-authorized-keys': ['iam_misconfiguration'],
+  'vm-ssh-authorized-keys-permissions': ['broken_access_control'],
+  'vm-account-empty-password': ['iam_misconfiguration'],
+  'vm-account-uid0-nonroot': ['iam_misconfiguration'],
+  'vm-account-passwd-hash': ['secrets_management'],
+  'vm-account-weak-hash': ['cryptography'],
+  'vm-account-system-shell': ['iam_misconfiguration'],
+  'vm-account-duplicate-uid': ['iam_misconfiguration'],
+  'vm-account-password-aging': ['iam_misconfiguration'],
+  'vm-account-encrypt-method': ['cryptography'],
+  'vm-account-umask': ['security_misconfiguration'],
+  'vm-account-home-permissions': ['broken_access_control'],
+  'vm-account-trust-files': ['iam_misconfiguration'],
+  'vm-sudo-nopasswd': ['iam_misconfiguration', 'broken_access_control'],
+  'vm-pam-nullok': ['iam_misconfiguration'],
+  'vm-pam-password-quality': ['iam_misconfiguration'],
+  'vm-pam-lockout': ['iam_misconfiguration'],
+  'vm-fs-critical-permissions': ['broken_access_control'],
+  'vm-fs-world-writable-files': ['broken_access_control'],
+  'vm-fs-world-writable-dirs': ['broken_access_control'],
+  'vm-fs-suid-risky': ['broken_access_control'],
+  'vm-fs-suid-unexpected': ['broken_access_control'],
+  'vm-fs-tmp-mount-options': ['security_misconfiguration'],
+  'vm-fs-ld-so-preload': ['security_misconfiguration'],
+  'vm-cron-writable': ['broken_access_control'],
+  'vm-systemd-unit-writable': ['broken_access_control'],
+  'vm-sysctl-kernel-randomize-va-space': ['memory_safety'],
+  'vm-sysctl-kernel-kptr-restrict': ['memory_safety'],
+  'vm-sysctl-kernel-dmesg-restrict': ['memory_safety'],
+  'vm-sysctl-kernel-yama-ptrace-scope': ['memory_safety'],
+  'vm-sysctl-kernel-sysrq': ['security_misconfiguration'],
+  'vm-sysctl-kernel-unprivileged-bpf': ['memory_safety'],
+  'vm-sysctl-kernel-kexec-load': ['memory_safety'],
+  'vm-sysctl-kernel-perf-event-paranoid': ['memory_safety'],
+  'vm-sysctl-fs-protected-links': ['security_misconfiguration'],
+  'vm-sysctl-fs-protected-fifos-regular': ['security_misconfiguration'],
+  'vm-sysctl-fs-suid-dumpable': ['security_misconfiguration'],
+  'vm-sysctl-vm-mmap-min-addr': ['memory_safety'],
+  'vm-sysctl-net-ipv4-source-route': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-accept-redirects': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-secure-redirects': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-send-redirects': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-log-martians': ['logging_monitoring'],
+  'vm-sysctl-net-ipv4-rp-filter': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-icmp-broadcast': ['availability_dos'],
+  'vm-sysctl-net-ipv4-icmp-bogus': ['security_misconfiguration'],
+  'vm-sysctl-net-ipv4-tcp-syncookies': ['availability_dos'],
+  'vm-sysctl-net-ipv6-redirects-source-route': ['security_misconfiguration'],
+  'vm-sysctl-net-ip-forward': ['security_misconfiguration'],
+  'vm-cpu-vulnerabilities': ['vulnerable_components', 'memory_safety'],
+  'vm-kernel-unneeded-modules': ['security_misconfiguration'],
+  'vm-mac-not-enforcing': ['broken_access_control', 'security_misconfiguration'],
+  'vm-net-risky-listeners': ['public_exposure'],
+  'vm-net-no-firewall': ['public_exposure'],
+  'vm-net-promiscuous-interface': ['security_misconfiguration'],
+  'vm-svc-legacy-enabled': ['security_misconfiguration'],
+  'vm-pkg-legacy-installed': ['security_misconfiguration'],
+  'vm-docker-exposure': ['public_exposure', 'broken_access_control'],
+  'vm-log-auditd': ['logging_monitoring'],
+  'vm-log-audit-rules': ['logging_monitoring'],
+  'vm-log-syslog': ['logging_monitoring'],
+  'vm-time-sync': ['logging_monitoring'],
+  'vm-secrets-ssh-private-keys': ['secrets_management'],
+  'vm-secrets-credential-files': ['secrets_management'],
+  'vm-boot-grub-password': ['broken_access_control'],
+};
+
+// ── Kubernetes checks (k8s/checks/*.js): check id → categories ──────────────
+// Control titles: CIS Kubernetes Benchmark v1.8.0 (numbering can differ between benchmark versions — verify against the
+// version you audit to) and the Kubernetes Pod Security Standards (baseline / restricted profile controls).
+const CIS_K8S_TITLES = {
+  '1.2.1': 'Ensure that the --anonymous-auth argument is set to false (API server)',
+  '1.2.2': 'Ensure that the --token-auth-file parameter is not set',
+  '1.2.6': 'Ensure that the --authorization-mode argument is not set to AlwaysAllow',
+  '1.2.8': 'Ensure that the --authorization-mode argument includes RBAC',
+  '4.2.1': 'Ensure that the --anonymous-auth argument is set to false (kubelet)',
+  '4.2.2': 'Ensure that the --authorization-mode argument is not set to AlwaysAllow (kubelet)',
+  '4.2.4': 'Ensure that the --read-only-port argument is set to 0',
+  '5.1.1': 'Ensure that the cluster-admin role is only used where required',
+  '5.1.2': 'Minimize access to secrets',
+  '5.1.3': 'Minimize wildcard use in Roles and ClusterRoles',
+  '5.1.4': 'Minimize access to create pods',
+  '5.1.5': 'Ensure that default service accounts are not actively used',
+  '5.1.6': 'Ensure that Service Account Tokens are only mounted where necessary',
+  '5.1.8': 'Limit use of the Bind, Impersonate and Escalate permissions in the Kubernetes cluster',
+  '5.2.1': 'Ensure that the cluster has at least one active policy control mechanism in place',
+  '5.2.2': 'Minimize the admission of privileged containers',
+  '5.2.3': 'Minimize the admission of containers wishing to share the host process ID namespace',
+  '5.2.4': 'Minimize the admission of containers wishing to share the host IPC namespace',
+  '5.2.5': 'Minimize the admission of containers wishing to share the host network namespace',
+  '5.2.6': 'Minimize the admission of containers with allowPrivilegeEscalation',
+  '5.2.7': 'Minimize the admission of root containers',
+  '5.2.8': 'Minimize the admission of containers with the NET_RAW capability',
+  '5.2.9': 'Minimize the admission of containers with added capabilities',
+  '5.2.12': 'Minimize the admission of HostPath volumes',
+  '5.2.13': 'Minimize the admission of containers which use HostPorts',
+  '5.3.2': 'Ensure that all Namespaces have Network Policies defined',
+  '5.4.1': 'Prefer using secrets as files over secrets as environment variables',
+  '5.7.2': 'Ensure that the seccomp profile is set to RuntimeDefault in the pod definitions',
+  '5.7.4': 'The default namespace should not be used',
+};
+const PSS_TITLES = {
+  'Baseline: Privileged Containers': 'Privileged Pods disable most security mechanisms and must be disallowed',
+  'Baseline: Host Namespaces': 'Sharing the host namespaces must be disallowed',
+  'Baseline: HostPath Volumes': 'HostPath volumes must be forbidden',
+  'Baseline: Host Ports': 'HostPorts should be disallowed, or restricted to a known list',
+  'Baseline: Capabilities': 'Adding additional capabilities beyond the default set must be disallowed',
+  'Baseline: AppArmor': 'The AppArmor profile must not be overridden to an unconfined one',
+  'Baseline: SELinux': 'Setting the SELinux type is restricted, and setting a custom SELinux user or role is forbidden',
+  'Baseline: /proc Mount Type': 'The default /proc masks must be set to reduce the attack surface',
+  'Baseline: Seccomp': 'The Unconfined seccomp profile must be forbidden',
+  'Baseline: Sysctls': 'Sysctls outside the allowed safe set must be disallowed',
+  'Restricted: Privilege Escalation': 'Privilege escalation (such as via set-user-ID or set-group-ID file mode) should not be allowed',
+  'Restricted: Running as Non-root': 'Containers must be required to run as non-root users',
+  'Restricted: Capabilities': 'Containers must drop ALL capabilities, and are only permitted to add back NET_BIND_SERVICE',
+  'Restricted: Seccomp': 'Seccomp profile must be explicitly set to one of the allowed values',
+};
+
+// check id → { categories, cis: [control…], pss: [control…] }
+const K8S_CHECK_MAP = {
+  'k8s-workload-privileged':            { categories: ['privileged_workload'], cis: ['5.2.2'], pss: ['Baseline: Privileged Containers'] },
+  'k8s-workload-host-pid':              { categories: ['privileged_workload'], cis: ['5.2.3'], pss: ['Baseline: Host Namespaces'] },
+  'k8s-workload-host-ipc':              { categories: ['privileged_workload'], cis: ['5.2.4'], pss: ['Baseline: Host Namespaces'] },
+  'k8s-workload-host-network':          { categories: ['privileged_workload', 'network_segmentation'], cis: ['5.2.5'], pss: ['Baseline: Host Namespaces'] },
+  'k8s-workload-host-path':             { categories: ['privileged_workload'], cis: ['5.2.12'], pss: ['Baseline: HostPath Volumes'] },
+  'k8s-workload-host-port':             { categories: ['privileged_workload', 'network_segmentation'], cis: ['5.2.13'], pss: ['Baseline: Host Ports'] },
+  'k8s-workload-privilege-escalation':  { categories: ['privileged_workload'], cis: ['5.2.6'], pss: ['Restricted: Privilege Escalation'] },
+  'k8s-workload-run-as-root':           { categories: ['privileged_workload'], cis: ['5.2.7'], pss: ['Restricted: Running as Non-root'] },
+  'k8s-workload-capabilities':          { categories: ['privileged_workload'], cis: ['5.2.9'], pss: ['Baseline: Capabilities'] },
+  'k8s-workload-net-raw':               { categories: ['privileged_workload'], cis: ['5.2.8'], pss: ['Restricted: Capabilities'] },
+  'k8s-workload-readonly-rootfs':       { categories: ['security_misconfiguration'], cis: [], pss: [] },
+  'k8s-workload-seccomp':               { categories: ['privileged_workload'], cis: ['5.7.2'], pss: ['Baseline: Seccomp', 'Restricted: Seccomp'] },
+  'k8s-workload-baseline-settings':     { categories: ['privileged_workload'], cis: [], pss: ['Baseline: AppArmor', 'Baseline: SELinux', 'Baseline: /proc Mount Type', 'Baseline: Sysctls'] },
+  'k8s-workload-resource-limits':       { categories: ['availability_dos'], cis: [], pss: [] },
+  'k8s-workload-image-tag':             { categories: ['malicious_code_supply_chain'], cis: [], pss: [] },
+  'k8s-workload-image-registry':        { categories: ['malicious_code_supply_chain'], cis: [], pss: [] },
+  'k8s-workload-secret-in-env':         { categories: ['secrets_management'], cis: ['5.4.1'], pss: [] },
+  'k8s-workload-secret-env-ref':        { categories: ['secrets_management'], cis: ['5.4.1'], pss: [] },
+  'k8s-workload-default-service-account': { categories: ['iam_misconfiguration', 'privileged_workload'], cis: ['5.1.5', '5.1.6'], pss: [] },
+  'k8s-workload-default-namespace':     { categories: ['security_misconfiguration'], cis: ['5.7.4'], pss: [] },
+  'k8s-rbac-cluster-admin-binding':     { categories: ['iam_misconfiguration', 'privileged_workload'], cis: ['5.1.1'], pss: [] },
+  'k8s-rbac-anonymous-binding':         { categories: ['iam_misconfiguration', 'public_exposure'], cis: [], pss: [] },
+  'k8s-rbac-system-masters':            { categories: ['iam_misconfiguration', 'privileged_workload'], cis: [], pss: [] },
+  'k8s-rbac-wildcard-role':             { categories: ['iam_misconfiguration', 'privileged_workload'], cis: ['5.1.3'], pss: [] },
+  'k8s-rbac-secrets-access':            { categories: ['iam_misconfiguration', 'secrets_management'], cis: ['5.1.2'], pss: [] },
+  'k8s-rbac-escalation-verbs':          { categories: ['iam_misconfiguration', 'privileged_workload'], cis: ['5.1.8'], pss: [] },
+  'k8s-rbac-pod-access':                { categories: ['iam_misconfiguration', 'privileged_workload'], cis: ['5.1.4'], pss: [] },
+  'k8s-rbac-dangerous-permissions':     { categories: ['iam_misconfiguration', 'privileged_workload'], cis: [], pss: [] },
+  'k8s-sa-default-bound':               { categories: ['iam_misconfiguration'], cis: ['5.1.5'], pss: [] },
+  'k8s-sa-default-automount':           { categories: ['iam_misconfiguration'], cis: ['5.1.6'], pss: [] },
+  'k8s-sa-legacy-token-secret':         { categories: ['secrets_management', 'iam_misconfiguration'], cis: [], pss: [] },
+  'k8s-net-no-networkpolicy':           { categories: ['network_segmentation'], cis: ['5.3.2'], pss: [] },
+  'k8s-net-no-default-deny':            { categories: ['network_segmentation'], cis: ['5.3.2'], pss: [] },
+  'k8s-net-allow-all-policy':           { categories: ['network_segmentation'], cis: [], pss: [] },
+  'k8s-svc-loadbalancer-exposed':       { categories: ['public_exposure'], cis: [], pss: [] },
+  'k8s-svc-nodeport':                   { categories: ['public_exposure'], cis: [], pss: [] },
+  'k8s-svc-external-ips':               { categories: ['public_exposure', 'network_segmentation'], cis: [], pss: [] },
+  'k8s-ingress-no-tls':                 { categories: ['cryptography', 'data_protection_resilience'], cis: [], pss: [] },
+  'k8s-ingress-snippet-annotations':    { categories: ['security_misconfiguration'], cis: [], pss: [] },
+  'k8s-ns-no-pod-security':             { categories: ['privileged_workload'], cis: ['5.2.1'], pss: [] },
+  'k8s-ns-psa-privileged':              { categories: ['privileged_workload'], cis: [], pss: [] },
+  'k8s-ns-no-quota':                    { categories: ['availability_dos'], cis: [], pss: [] },
+  'k8s-api-anonymous-access':           { categories: ['iam_misconfiguration', 'public_exposure'], cis: ['1.2.1'], pss: [] },
+  'k8s-cluster-version-eol':            { categories: ['vulnerable_components'], cis: [], pss: [] },
+  'k8s-apiserver-flags':                { categories: ['security_misconfiguration', 'iam_misconfiguration'], cis: ['1.2.1', '1.2.2', '1.2.6', '1.2.8'], pss: [] },
+  'k8s-etcd-flags':                     { categories: ['security_misconfiguration', 'cryptography'], cis: [], pss: [] },
+  'k8s-controlplane-flags':             { categories: ['security_misconfiguration'], cis: [], pss: [] },
+  'k8s-kubelet-config':                 { categories: ['security_misconfiguration', 'iam_misconfiguration'], cis: ['4.2.1', '4.2.2', '4.2.4'], pss: [] },
+  'k8s-node-version-skew':              { categories: ['vulnerable_components'], cis: [], pss: [] },
+  'k8s-node-os-eol':                    { categories: ['vulnerable_components'], cis: [], pss: [] },
+  'k8s-node-external-ip':               { categories: ['public_exposure'], cis: [], pss: [] },
+};
+
 // ── Core builder ─────────────────────────────────────────────────────────────
 
 /**
@@ -939,6 +1159,41 @@ function getComplianceForCloudCheck(checkId) {
   return benchmarkEntry ? addBenchmarkControl(compliance, benchmarkEntry) : compliance;
 }
 
+// ── Public API: VM (ubel-vm) ────────────────────────────────────────────────
+
+/** Compliance mapping for a ubel-vm finding, looked up by its `check` id. */
+function getComplianceForVmCheck(checkId) {
+  return buildCompliance(VM_CHECK_CATEGORY[checkId] || ['security_misconfiguration']);
+}
+
+/** Framework ids a ubel-vm check maps to (for the per-framework check posture). */
+function getFrameworkIdsForVmCheck(checkId) {
+  const c = getComplianceForVmCheck(checkId);
+  return c ? c.frameworks.map((f) => f.id) : [];
+}
+
+// ── Public API: Kubernetes (ubel-k8s) ───────────────────────────────────────
+
+/**
+ * Compliance mapping for a ubel-k8s finding, looked up by its `check` id: category-based controls plus the matching
+ * CIS Kubernetes Benchmark recommendation(s) and Pod Security Standards control(s) where the check has one.
+ */
+function getComplianceForK8sCheck(checkId) {
+  const m = K8S_CHECK_MAP[checkId];
+  let compliance = buildCompliance(m ? m.categories : ['security_misconfiguration']);
+  if (m) {
+    for (const c of m.cis) compliance = addBenchmarkControl(compliance, { framework: 'cis_kubernetes_benchmark', control: c, title: CIS_K8S_TITLES[c] });
+    for (const c of m.pss) compliance = addBenchmarkControl(compliance, { framework: 'k8s_pod_security_standards', control: c, title: PSS_TITLES[c] });
+  }
+  return compliance;
+}
+
+/** Framework ids a ubel-k8s check maps to (for the per-framework check posture). */
+function getFrameworkIdsForK8sCheck(checkId) {
+  const c = getComplianceForK8sCheck(checkId);
+  return c ? c.frameworks.map((f) => f.id) : [];
+}
+
 // ── Public API: EASM (ubel-url / ubel-domain) ────────────────────────────────
 
 /**
@@ -1059,6 +1314,12 @@ export {
   getComplianceForMalwareFinding,
   getCwesForMalwareClass,
   getComplianceForCloudCheck,
+  getComplianceForVmCheck,
+  getFrameworkIdsForVmCheck,
+  VM_CHECK_CATEGORY,
+  getComplianceForK8sCheck,
+  getFrameworkIdsForK8sCheck,
+  K8S_CHECK_MAP,
   getComplianceForMisconfig,
   WEB_MISCONFIG_CATEGORY,
   WEB_MISCONFIG_CATEGORY_FALLBACK,
