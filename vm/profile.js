@@ -11,20 +11,20 @@ export const VM_PROFILE = {
   scope_label: 'Scope',
   scopes_label: 'Scopes',
   statement: 'Produced by a read-only review of the machine\'s own configuration files, kernel settings and listening sockets, by a process running on (or pointed at the disk image of) that machine. It reflects the state of the machine at the time of the scan.',
-  scope_description: 'ubel-vm audits a Linux virtual machine or server against a hardening baseline: operating-system support status, SSH, accounts and authentication, file permissions, kernel parameters, network exposure, services, logging and credentials stored on disk. It reads files and /proc and /sys only; it does not run any command, install anything or change the machine.',
+  scope_description: 'ubel-vm audits a Linux virtual machine or server against a hardening baseline: SSH, accounts and authentication, file permissions, kernel parameters, network exposure, services, logging and credentials stored on disk — and, when the machine is a Kubernetes node, the node-level Kubernetes hardening checks (control-plane and kubelet files, etcd data directory, kubelet configuration). It reads files and /proc and /sys only; it does not run any command, install anything or change the machine.',
   discovery: 'The machine is either the host the tool runs on, or a mounted disk image / extracted root filesystem passed with --root. Checks that need a running kernel (live sysctl values, listening sockets, CPU mitigations) are marked not applicable for an offline root.',
   method_steps: [
     { step: 'Read the configuration', detail: 'Operating-system release, SSH, PAM, sudo, account databases, systemd units, cron, mounts and sysctl settings are read directly from files. On a live host the running kernel parameters, listening sockets and CPU-vulnerability status are read from /proc and /sys.' },
     { step: 'Evaluate each check', detail: 'Every check in the baseline reports one of four outcomes: passed, failed, not applicable (the feature is not installed or needs a live host) or not assessed (it applies but could not be evaluated, for example permission denied).' },
+    { step: 'Look up installed packages', detail: 'The package database (dpkg, apk, rpm) is read from disk and every package is checked against OSV.dev for its operating-system release, the way ubel-docker checks an image; advisories for other releases or already fixed in the installed build are dropped, and CISA KEV / FIRST EPSS data is attached. A lookup that cannot be completed is reported as not assessed.' },
     { step: 'Walk the filesystem once', detail: 'A single pass over the filesystem collects world-writable files and directories and set-uid / set-gid programs. Virtual and network filesystems are skipped.' },
     { step: 'Map to compliance frameworks', detail: 'Each check is mapped to controls of NIST SP 800-53, PCI DSS, ISO/IEC 27001, SOC 2, CIS Controls and others; findings inherit the mapping of their check.' },
     { step: 'Compare with the previous scan', detail: 'The Diffs tab lists findings that are new, still present or fixed since the previous report of the same machine, ignoring checks that were not evaluated both times.' },
   ],
   limitations: [
     'Only Linux machines are audited. Windows and macOS guests are not covered; a Linux image can be audited from any operating system with --root.',
-    'The tool reads configuration; it does not test whether a service is exploitable and does not scan installed packages for known vulnerabilities.',
+    'The tool reads configuration and matches installed packages against OSV.dev advisories; it does not test whether a service is exploitable, and software that was not installed through the package manager is not seen by the package check.',
     'Without root privileges some files (/etc/shadow, /etc/sudoers, other users\' homes) cannot be read; the checks that need them are reported as not assessed.',
-    'The operating-system support dates are an embedded table and age; a release that is not in the table is not judged.',
     'Listening-port findings describe the host\'s own sockets; whether a port is reachable from the internet also depends on firewalls and security groups outside the machine.',
   ],
   glossary: [
@@ -42,6 +42,8 @@ export const VM_PROFILE = {
     services: { label: 'Services & software', plain: 'Obsolete or unnecessary services and the exposure of the container runtime.', owner: 'Infrastructure / platform team' },
     logging: { label: 'Logging & time', plain: 'Whether security-relevant events are recorded and clocks are synchronised.', owner: 'Security operations' },
     secrets: { label: 'Stored credentials', plain: 'Private keys and access tokens left in plain text on disk.', owner: 'Application owners / security team' },
+    kubernetes: { label: 'Kubernetes node', plain: 'When the machine is a Kubernetes node: permissions of the cluster\'s files and keys, the etcd data directory and the kubelet\'s own configuration (node-level Kubernetes hardening).', owner: 'Platform / cluster operators' },
+    packages: { label: 'Installed packages', plain: 'Known vulnerabilities (OSV.dev) in the software packages installed on the machine, for its operating-system release.', owner: 'Infrastructure / platform team' },
     boot: { label: 'Boot loader', plain: 'Protection of the boot process against tampering from the console.', owner: 'Infrastructure / platform team' },
   },
 };

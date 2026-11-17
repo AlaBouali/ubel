@@ -34,10 +34,13 @@ class VmContext {
    * @param {{root?:string, skipFsWalk?:boolean, fsMaxEntries?:number, fsTimeoutMs?:number, now?:Date}} [opts]
    */
   constructor(opts = {}) {
-    this.fs = new FsView(opts.root || '/');
-    this.live = this.fs.live;
+    // hostProc: the target is a host whose root filesystem is mounted at `root` (a pod with hostPID / hostNetwork), while /proc
+    // and /sys of THIS process already describe that host's kernel — so they are read directly and the scan counts as "live".
+    this.hostProc = !!opts.hostProc && process.platform === 'linux';
+    this.fs = new FsView(opts.root || '/', this.hostProc ? { passthrough: ['/proc', '/sys'] } : {});
+    this.live = this.fs.live || this.hostProc;
     this.root = this.fs.root;
-    this.opts = { skipFsWalk: false, fsMaxEntries: 3_000_000, fsTimeoutMs: 90_000, ...opts };
+    this.opts = { skipFsWalk: false, skipPackages: false, threatIntel: true, fsMaxEntries: 3_000_000, fsTimeoutMs: 90_000, ...opts };
     this.now = opts.now || new Date();
     this.notes = [];              // coverage caveats collected while scanning (truncated walks, …)
     this._m = new Map();
@@ -46,6 +49,27 @@ class VmContext {
   _memo(key, fn) {
     if (!this._m.has(key)) this._m.set(key, fn());
     return this._m.get(key);
+  }
+
+  // ── installed-package vulnerabilities (OSV) ────────────────────────────────
+  /**
+   * Result of the package vulnerability scan (see pkgvulns.js), shared by every rule that needs it. null when the scan was
+   * not requested (--skip-packages); a PackageScanUnsupported instance when no supported package database exists; throws
+   * when a lookup could not be completed (→ the rule is "not assessed").
+   */
+  packageScan() {
+    return this._memo('pkgscan', async () => {
+      if (this.opts.skipPackages) return null;
+      const { scanInstalledPackages, PackageScanUnsupported } = await import('./pkgvulns.js');
+      try {
+        const r = await scanInstalledPackages({ root: this.hostProc ? this.root : (this.live ? '/' : this.root), threatIntel: this.opts.threatIntel });
+        if (typeof this.opts.onPackageScan === 'function') this.opts.onPackageScan(r);
+        return r;
+      } catch (e) {
+        if (e instanceof PackageScanUnsupported) return e;
+        throw e;
+      }
+    });
   }
 
   // ── identity ───────────────────────────────────────────────────────────────
@@ -80,7 +104,7 @@ class VmContext {
 
   get hostname() {
     return this._memo('host', () => {
-      const t = (this.live ? this.fs.read('/proc/sys/kernel/hostname') : null) ?? this.fs.read('/etc/hostname');
+      const t = (this.live && !this.hostProc ? this.fs.read('/proc/sys/kernel/hostname') : null) ?? this.fs.read('/etc/hostname') ?? (this.hostProc ? this.fs.read('/proc/sys/kernel/hostname') : null);
       return t ? t.trim() : null;
     });
   }
@@ -88,7 +112,7 @@ class VmContext {
   get environment() {
     return this._memo('env', () => {
       const dmi = (n) => { try { const t = this.fs.read('/sys/class/dmi/id/' + n); return t ? t.trim() : null; } catch { return null; } };
-      const out = { hostname: this.hostname, os: this.osRelease ? this.osRelease.prettyName : null, mode: this.live ? 'live' : 'offline-root', root: this.root };
+      const out = { hostname: this.hostname, os: this.osRelease ? this.osRelease.prettyName : null, mode: this.hostProc ? 'live-host-mount' : (this.live ? 'live' : 'offline-root'), root: this.root };
       if (this.live) {
         const k = this.fs.read('/proc/sys/kernel/osrelease');
         out.kernel = k ? k.trim() : null;
@@ -120,7 +144,7 @@ class VmContext {
 
   get inContainer() {
     return this._memo('incont', () => {
-      if (!this.live) return false;
+      if (!this.live || this.hostProc) return false;       // host-proc: the target IS the host, not the container the scanner runs in
       if (this.fs.exists('/.dockerenv') || this.fs.exists('/run/.containerenv')) return true;
       const cg = this.fs.read('/proc/1/cgroup') || '';
       return /(docker|kubepods|containerd|lxc)/.test(cg);
@@ -339,7 +363,7 @@ class VmContext {
   mounts() {
     return this._memo('mounts', () => {
       const out = [];
-      const src = this.live ? this.fs.read('/proc/self/mounts') : this.fs.read('/etc/fstab');
+      const src = this.live ? ((this.hostProc ? this.fs.read('/proc/1/mounts') : null) ?? this.fs.read('/proc/self/mounts')) : this.fs.read('/etc/fstab');
       for (const l of (src || '').split(/\r?\n/)) {
         if (!l.trim() || l.trim().startsWith('#')) continue;
         const f = l.trim().split(/\s+/);

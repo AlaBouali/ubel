@@ -27,9 +27,15 @@ function posixParts(p) {
 }
 
 class FsView {
-  /** @param {string} [root='/'] directory that stands for "/" of the scanned system */
-  constructor(root = '/') {
+  /**
+   * @param {string} [root='/'] directory that stands for "/" of the scanned system
+   * @param {{passthrough?: string[]}} [opts] top-level paths (["/proc", "/sys"]) that are NOT looked up under `root` but in the
+   *   scanner's own filesystem. That is the host view of a node audited from inside a pod: files come from the mounted host
+   *   root, while /proc and /sys show the host's kernel (the pod shares its PID and network namespaces).
+   */
+  constructor(root = '/', opts = {}) {
     this.root = path.resolve(root);
+    this.passthrough = (opts.passthrough || []).map((p) => p.replace(/\/+$/, ''));
     this.live = this.root === path.resolve('/') && process.platform === 'linux';
     this.denied = new Set();            // paths that could not be read (permission), for the coverage note
   }
@@ -37,12 +43,13 @@ class FsView {
   /** Maps a rooted path to a path on the scanner's filesystem, resolving symlinks inside the root. */
   host(p, followFinal = true) {
     let queue = posixParts(p);
+    const base = this.passthrough.length && queue.length && this.passthrough.includes('/' + queue[0]) ? path.resolve('/') : this.root;
     let cur = [];
     let links = 0;
     while (queue.length) {
       const comp = queue.shift();
       if (comp === '..') { cur.pop(); continue; }
-      const candidate = path.join(this.root, ...cur, comp);
+      const candidate = path.join(base, ...cur, comp);
       let st = null;
       try { st = fs.lstatSync(candidate); } catch { st = null; }
       if (st && st.isSymbolicLink() && (queue.length > 0 || followFinal)) {
@@ -55,7 +62,7 @@ class FsView {
       }
       cur.push(comp);
     }
-    return path.join(this.root, ...cur);
+    return path.join(base, ...cur);
   }
 
   _guard(e, p) {

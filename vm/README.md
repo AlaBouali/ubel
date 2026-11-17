@@ -25,6 +25,9 @@ ubel-vm --list-checks                          # print the catalogue
 | Option | Meaning |
 |---|---|
 | `--root <dir>` | Audit a mounted image / extracted root filesystem instead of the running host |
+| `--host-proc` | With `--root`: the root is a **host filesystem mounted into this process** (a pod with `hostPID` / `hostNetwork`), so `/proc` and `/sys` are read from the process's own view — the host's kernel — and the live checks (sysctl, listening ports, kubelet flags) work. See *Auditing every node from inside the cluster* |
+| `--skip-packages` | Do not look up the installed packages in OSV.dev (the package check becomes *not applicable*) |
+| `--no-threat-intel` | Do not fetch CISA KEV / FIRST EPSS data for the vulnerabilities found |
 | `--skip-fs-walk` | Skip the one-pass filesystem walk (world-writable files / dirs, set-uid programs) |
 | `--fs-max-entries <n>` | Stop the filesystem walk after `n` entries (default 3,000,000) |
 | `--fs-timeout <seconds>` | Stop the filesystem walk after this long (default 90); a truncated walk is noted in the report |
@@ -59,13 +62,36 @@ the same tabs as the cloud report:
 The JSON is the exact object the HTML renders from: `findings[]`, `checks[]` (one entry per check with its outcome),
 `coverage`, `stats`, `compliance_summary`, `compliance_posture`, `diffs`, `executive_summary`, `target`, `scan_options`.
 
+## Installed-package vulnerabilities (OSV)
+
+`vm-pkg-vulnerabilities` runs the same package scan as **`ubel-docker`**, pointed at the machine (or at the `--root` image) instead of an extracted container image:
+
+1. the package database is **read from disk** (dpkg `status`, apk `installed`, the rpm database) — no `dpkg`, `apk` or `rpm` is run — and every package is tagged with its release (`debian-12`, `ubuntu-22.04`, …);
+2. OSV.dev is queried for every package URL with that distro qualifier (batched and paginated);
+3. each advisory is fetched, and **advisories written for another release or already fixed in the installed build are dropped**; fixed versions and the confidence of the release match are attached;
+4. duplicates by alias are merged and **CISA KEV / FIRST EPSS** data is attached (an actively exploited vulnerability is never rated below *high*; a failure of this enrichment only loses that extra data).
+
+It reuses `sca/linux_runner.js` (`LinuxHostScanner`) and the OSV functions of `sca/engine.js`, loaded lazily when the check runs. Those modules also contain the package-manager firewall, which does start `apt` / `dnf`; **none of that code is used here**, and `tests/vm.test.js` proves it by making every process-spawning API throw and running complete scans.
+
+- It needs network access to `api.osv.dev` (and, for the enrichment, CISA and FIRST). Set `UBEL_OSV_ENDPOINT` to use an internal OSV mirror; use `--skip-packages` (or `--skip vm-pkg-vulnerabilities`) when the machine has no egress.
+- A lookup that cannot be completed (OSV unreachable, an advisory not fetchable) makes the check **not assessed** — never a clean result — and the run exits `3` unless `--allow-partial`.
+- Supported package databases are the ones `ubel-docker` supports (Debian / Ubuntu, Alpine, RHEL-family images). A machine without a readable database gets *not applicable*.
+- The report's *Scan Info → Target* lists the package summary (installed, advisories, vulnerable packages, actively exploited, advisories for other releases dropped).
+
+## Auditing a Kubernetes node
+
+Run `ubel-vm` **on the node** (as root): its *Kubernetes node* area then covers the node-level hardening that the API cannot show (control-plane and kubelet file permissions, the etcd data directory, the effective kubelet configuration), together with everything else in this report.
+
+`--host-proc` is for the case where the node's filesystem is mounted into the process that runs the scan (for example `ubel-vm --root /host --host-proc`): files are then read from the mounted root, while `/proc` and `/sys` are read from the process's own view, which must be the node's kernel (the process has to share the node's PID and network namespaces). A note in the coverage section appears when it is not. How you start `ubel-vm` on the nodes is up to you; nothing in this repository deploys it.
+
 ## Compliance mapping
 
 Every check maps to controls of OWASP Top 10, PCI DSS 4.0, NIST SP 800-53 r5, ISO/IEC 27001:2022, SOC 2, CIS Controls v8 and others
-(`sca/compliance_mappings.js`, `VM_CHECK_CATEGORY`). Best-effort guidance, not a compliance assessment. The CIS *Linux* Benchmarks
-are not mapped control-by-control because their numbering differs per distribution and version.
+(`sca/compliance_mappings.js`, `VM_CHECK_CATEGORY`). Best-effort guidance, not a compliance assessment. Benchmark-specific control numbers (the CIS Benchmarks) are deliberately not mapped: their numbering differs per distribution and version.
 
 ## What it checks
+
+The checks below run on any Linux machine. The **Kubernetes node** area is the node-level hardening of a cluster node: permissions and ownership of the control-plane manifests, kubeconfigs and PKI, the etcd data directory, CNI files and the kubelet's service / kubeconfig / configuration files, plus the **effective kubelet configuration** (command-line flags override the config file; an unset authentication / authorization section is judged by the kubelet's own insecure defaults). Run `ubel-vm` on each node (as root) for that view — `ubel-k8s` sees the cluster through the API but not a node's disk. On a machine that is not a Kubernetes node every one of these checks is reported as *not applicable*.
 
 ### Operating system (`os`)
 
@@ -73,7 +99,6 @@ Whether the operating-system release is still supported and updates and package 
 
 | Check | Severity | What it detects |
 |---|---|---|
-| `vm-os-end-of-life` | high | Operating system release is past (or near) the end of vendor support |
 | `vm-pkg-repo-integrity` | high | Package signature verification is disabled |
 | `vm-os-auto-updates` | low | Automatic security updates are not configured |
 | `vm-os-reboot-required` | low | A reboot is pending to apply updates |
@@ -215,6 +240,32 @@ Private keys and access tokens left in plain text on disk.
 | `vm-secrets-ssh-private-keys` | medium | SSH private key stored without a passphrase, or readable by others |
 | `vm-secrets-credential-files` | medium | Credentials are stored in plain text in a user's home directory |
 
+### Kubernetes node (`kubernetes`)
+
+When the machine is a Kubernetes node: permissions of the cluster's files and keys, the etcd data directory and the kubelet's own configuration (node-level Kubernetes hardening).
+
+| Check | Severity | What it detects |
+|---|---|---|
+| `vm-k8s-controlplane-manifests` | high | Control-plane static-pod manifest is accessible by other users |
+| `vm-k8s-controlplane-kubeconfigs` | high | Control-plane kubeconfig is accessible by other users |
+| `vm-k8s-pki-permissions` | high | Kubernetes PKI directory or file is accessible by other users |
+| `vm-k8s-kubelet-service-file` | high | Kubelet service file is accessible by other users |
+| `vm-k8s-kubelet-kubeconfig` | high | Kubelet kubeconfig is accessible by other users |
+| `vm-k8s-kube-proxy-kubeconfig` | high | kube-proxy kubeconfig is accessible by other users |
+| `vm-k8s-client-ca-file` | high | Kubelet client CA file is accessible by other users |
+| `vm-k8s-kubelet-config-file` | high | Kubelet configuration file is accessible by other users |
+| `vm-k8s-etcd-data-dir` | high | etcd data directory is not locked down |
+| `vm-k8s-cni-file-permissions` | high | CNI configuration file is accessible by other users |
+| `vm-k8s-kubelet-config` | high | Kubelet is configured insecurely |
+
+### Installed packages (`packages`)
+
+Known vulnerabilities (OSV.dev) in the software packages installed on the machine, for its operating-system release.
+
+| Check | Severity | What it detects |
+|---|---|---|
+| `vm-pkg-vulnerabilities` | high | Installed package has a known vulnerability |
+
 ### Boot loader (`boot`)
 
 Protection of the boot process against tampering from the console.
@@ -226,12 +277,11 @@ Protection of the boot process against tampering from the console.
 ## Limits worth knowing
 
 - **Linux only.** Windows and macOS guests are not audited (a Linux image can be audited from any OS with `--root`).
-- **Configuration, not exploitation.** It does not test whether a service is exploitable and does not scan installed packages
-  for known CVEs (use the SCA OS-package scans, `ubel-apt` / `ubel-dnf` / `ubel-yum`, for that).
+- **Configuration and known vulnerabilities, not exploitation.** It does not test whether a service is exploitable. Installed packages are matched against OSV.dev advisories (see above); a vulnerability in software that was not installed through the package manager is not seen.
+- **Kubernetes nodes:** the node checks read the kubelet's flags from the running process (live) or the service files (offline root) and its configuration from the usual paths (`/var/lib/kubelet/config.yaml`, `/etc/kubernetes/kubelet/kubelet-config.json`, …); a node whose kubelet configuration lives elsewhere is reported as *not applicable* for that check.
 - **No root, no full picture.** `/etc/shadow`, `/etc/sudoers*` and other users' homes need root; the affected checks are *not assessed*.
 - **Reachability is not tested.** A listening port is a fact about the host; whether it is reachable from the internet also depends on
   firewalls / security groups outside the machine.
-- **Embedded dates age.** The OS end-of-support table (`vm/lib/eol.js`) is part of the tool version; a release that is not listed is not judged.
 - **sshd is read, not run.** The effective `sshd_config` is reconstructed (first value wins, `Include` expanded, global section only); it does not
   evaluate `Match` blocks and cannot know the compiled-in defaults of your OpenSSH version, so only explicit settings (and defaults that were
   never safe) are judged.

@@ -1,7 +1,7 @@
 # ubel-k8s — Kubernetes security audit
 
 `ubel-k8s` audits a **live cluster** or a set of **manifest files** and writes a JSON and an HTML report with **diffs against the
-previous scan, compliance mapping (CIS Kubernetes Benchmark, Pod Security Standards, NIST, PCI DSS, ISO 27001 …) and detailed stats** —
+previous scan, compliance mapping (Pod Security Standards, NIST, PCI DSS, ISO 27001 …) and detailed stats** —
 the same report model as `ubel-cloud` and `ubel-vm`.
 
 - **Zero third-party dependencies, no subprocesses.** Node.js built-ins only: the API is spoken with `node:https`, kubeconfig and
@@ -24,8 +24,27 @@ ubel-k8s --list-checks
 
 Order: `--kubeconfig`, `$KUBECONFIG`, `~/.kube/config`, then the in-cluster service account. Supported credentials: client certificate +
 key, bearer token (inline, `tokenFile`, `--token-file`, `$KUBE_TOKEN`) and the OIDC token a kubeconfig already contains.
-**`exec` credential plugins** (`aws eks get-token`, `gke-gcloud-auth-plugin`, `kubelogin`) **are refused** with an explanation, because they work
-by running another program: hand the scanner a token of a read-only service account instead.
+
+### EKS, GKE and AKS — without running their CLIs
+
+Kubeconfigs of managed clusters usually hold no credential: they name a helper program that prints a short-lived token. `ubel-k8s` starts **no**
+other program, so it does what those helpers do itself, in-process, and refreshes the token when it expires (or after a `401`):
+
+| Cluster | Helper in the kubeconfig | What `ubel-k8s` does instead | Credentials it reads |
+|---|---|---|---|
+| **EKS** | `aws eks get-token`, `aws-iam-authenticator token` | builds the same presigned STS `GetCallerIdentity` token (`k8s-aws-v1.…`; byte-identical to botocore's for the same inputs), optionally after assuming `--role-arn` | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or a static `~/.aws` profile (including `role_arn` + `source_profile`); the `--region`, `--cluster-name`, `--profile`, `--role-arn` of the helper are honoured |
+| **GKE** | `gke-gcloud-auth-plugin` (and the legacy `gcp` auth-provider) | obtains an OAuth2 access token from Application Default Credentials | `GOOGLE_APPLICATION_CREDENTIALS` (service-account key), the ADC file written by `gcloud auth application-default login`, or the metadata server on GCE/GKE |
+| **AKS** | `kubelogin get-token --login spn\|msi\|workloadidentity` (and the legacy `azure` auth-provider) | requests an Entra ID token for the AKS server application | `AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`, a managed identity, or workload identity (`AZURE_FEDERATED_TOKEN_FILE`) |
+
+Helpers that need a browser, a prompt or a cloud CLI — AWS IAM Identity Center (SSO) profiles, `gcloud` itself, `kubelogin --login devicecode|interactive|azurecli`, or any
+other exec plugin — **cannot** be reproduced without a subprocess and are refused with an explanation; hand the scanner a bearer token instead (`--token-file`, `$KUBE_TOKEN`) or export temporary credentials as environment variables.
+
+### Managed control planes
+
+On a managed cluster there is no kube-apiserver / etcd static pod to inspect, so those checks are *not applicable* — and instead the **provider's own description of the cluster** is read through its REST API with the same credentials
+(`eks:DescribeCluster`, `container.clusters.get`, `Microsoft.ContainerService/managedClusters/read`) and assessed: endpoint exposure and authorized networks, audit logging, secrets encryption, legacy authentication (GKE ABAC / basic auth / client certificates),
+network-policy enforcement, Workload Identity, RBAC and Entra ID integration (AKS). The cluster is identified from the kubeconfig (EKS ARN / endpoint, `gke_<project>_<location>_<cluster>`, AKS cluster name + `AZURE_SUBSCRIPTION_ID`); pass `--managed-cluster`
+(`<region>/<name>`, `<project>/<location>/<name>`, `<subscription>/<resourceGroup>/<name>`) when it cannot be derived, or `--no-managed-api` to skip the provider calls. If the credentials may not describe the cluster, those checks are reported as *not assessed* with the reason.
 
 Minimal read-only access (the built-in `view` role does not include nodes, RBAC objects or secret metadata):
 
@@ -51,6 +70,8 @@ rules:
 |---|---|
 | `--kubeconfig <file>` / `--context <name>` | Which kubeconfig and context to use |
 | `--token-file <file>` | Bearer token file (overrides the kubeconfig credentials; `$KUBE_TOKEN` also works) |
+| `--managed-cluster <id>` | Cluster identity for the provider API when it cannot be derived (EKS `<region>/<name>`, GKE `<project>/<location>/<name>`, AKS `<subscription>/<resourceGroup>/<name>`) |
+| `--no-managed-api` | Do not call the cloud provider's API (the managed control-plane checks become not applicable) |
 | `--insecure-skip-tls-verify` | Do not verify the API server certificate (recorded as a coverage note) |
 | `--namespace <a,b>` / `--exclude-namespace <a,b>` | Restrict / exclude namespaces (named namespaces are read one by one, so no cluster-wide list permission is needed) |
 | `--manifests <paths>` | Audit YAML / JSON files or directories instead of a cluster (Helm templates must be rendered first: `helm template … > out.yaml`) |
@@ -77,9 +98,8 @@ container settings are merged with pod-level settings the way Kubernetes does. F
 ## Compliance mapping
 
 Category-based controls (OWASP, PCI DSS, NIST SP 800-53, ISO 27001, SOC 2, CIS Controls v8) plus, where a check has one, the matching
-**CIS Kubernetes Benchmark v1.8.0** recommendation (for example `5.2.2` privileged containers, `5.1.1` cluster-admin, `5.3.2` network policies)
-and **Pod Security Standards** control (baseline / restricted). Benchmark numbering can differ between benchmark versions; verify against the one you audit
-to. Best-effort guidance, not a compliance assessment.
+**Kubernetes Pod Security Standards** control (baseline / restricted profile). Benchmark-specific control numbers (the CIS Kubernetes Benchmark) are
+deliberately not mapped: their numbering differs between benchmark versions. Best-effort guidance, not a compliance assessment.
 
 ## What it checks
 
@@ -160,10 +180,23 @@ API server, etcd and cluster-wide settings and version support.
 | Check | Severity | What it detects |
 |---|---|---|
 | `k8s-api-anonymous-access` | critical | The API server answers unauthenticated requests |
-| `k8s-cluster-version-eol` | medium | Kubernetes version is out of upstream support |
 | `k8s-apiserver-flags` | high | API server is started with an insecure option |
 | `k8s-etcd-flags` | high | etcd is started with an insecure option |
 | `k8s-controlplane-flags` | low | Controller manager or scheduler is started with a weak option |
+| `k8s-eks-endpoint-exposure` | high | EKS API endpoint is reachable from the internet |
+| `k8s-eks-audit-logging` | medium | EKS control-plane audit logging is not enabled |
+| `k8s-eks-secrets-encryption` | medium | EKS does not envelope-encrypt Kubernetes Secrets |
+| `k8s-gke-endpoint-exposure` | high | GKE control plane is reachable from the internet without authorized networks |
+| `k8s-gke-legacy-auth` | high | GKE legacy authentication is enabled |
+| `k8s-gke-network-policy` | medium | GKE does not enforce NetworkPolicy |
+| `k8s-gke-workload-identity` | low | GKE Workload Identity is not enabled |
+| `k8s-gke-logging` | medium | GKE cluster logging is disabled |
+| `k8s-gke-shielded-nodes` | low | GKE shielded nodes are not enabled |
+| `k8s-aks-endpoint-exposure` | high | AKS API server is reachable from the internet |
+| `k8s-aks-rbac` | critical | AKS Kubernetes RBAC is disabled |
+| `k8s-aks-identity` | medium | AKS is not integrated with Entra ID, or local accounts are enabled |
+| `k8s-aks-network-policy` | medium | AKS has no network policy engine |
+| `k8s-aks-monitoring` | low | AKS monitoring is not enabled |
 
 ### Nodes (`node`)
 
@@ -173,7 +206,6 @@ The machines that run workloads: kubelet settings, versions and operating-system
 |---|---|---|
 | `k8s-kubelet-config` | high | Kubelet is configured insecurely |
 | `k8s-node-version-skew` | medium | Kubelet version is outside the supported skew |
-| `k8s-node-os-eol` | high | Node operating system is past the end of vendor support |
 | `k8s-node-external-ip` | low | Node has a public IP address |
 
 ## Limits worth knowing
@@ -182,6 +214,7 @@ The machines that run workloads: kubelet settings, versions and operating-system
 - **Policy engines are not evaluated.** Kyverno, OPA Gatekeeper, ValidatingAdmissionPolicy and CNI-level policies (Cilium, Calico) may compensate for a missing
   Kubernetes object; the *Pod Security Admission* and *NetworkPolicy* findings say so.
 - **Manifest mode is a partial view.** Checks that conclude from the *absence* of objects (no NetworkPolicy, no quota, API server version, anonymous access) are *not applicable*.
-- **Control-plane flag checks need static pods** in `kube-system` (kubeadm-style). Managed services (EKS, GKE, AKS) do not expose them, so those checks are *not applicable*.
+- **Control-plane flag checks need static pods** in `kube-system` (kubeadm-style). Managed services (EKS, GKE, AKS) do not expose them, so those checks are *not applicable*; their control plane is assessed through the provider API instead (needs read permission on the cluster resource).
+- **Node-level checks** (file permissions, etcd data directory, kubelet configuration files) cannot be seen through the API: run `ubel-vm` on the nodes — its *Kubernetes node* area covers the node-level hardening checks.
 - **Embedded dates age.** The Kubernetes minor-version support table and the node-OS table are part of the tool version; a version that is not listed is not judged.
 - The report engine is shared with `ubel-vm` and lives in `vm/lib/`.

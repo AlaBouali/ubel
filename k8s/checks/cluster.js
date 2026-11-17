@@ -1,13 +1,9 @@
 'use strict';
 import { rule, arr, obj, T, F, num } from './util.js';
 import { na, unassessed } from '../../vm/lib/engine.js';
-import { eolFor, parseOsImage } from '../../vm/lib/eol.js';
-
-// Upstream Kubernetes: end of the ~14-month patch-support window of each minor release. A minor that is not listed is not judged.
-const K8S_EOL = { '1.20': '2022-02-28', '1.21': '2022-06-28', '1.22': '2022-10-28', '1.23': '2023-02-28', '1.24': '2023-07-28', '1.25': '2023-10-27', '1.26': '2024-02-28', '1.27': '2024-07-24', '1.28': '2024-10-28', '1.29': '2025-02-28', '1.30': '2025-06-28', '1.31': '2025-10-28', '1.32': '2026-02-28', '1.33': '2026-06-28', '1.34': '2026-10-27' };
 
 const minorOf = (v) => { const m = String(v || '').match(/v?(\d+)\.(\d+)/); return m ? { major: Number(m[1]), minor: Number(m[2]), key: `${m[1]}.${m[2]}` } : null; };
-const NOTCP = 'control-plane static pods are not visible (managed service such as EKS/GKE/AKS, or a cluster not built with kubeadm)';
+const NOTCP = 'control-plane static pods are not visible (a managed service such as EKS/GKE/AKS — see the k8s-eks-*, k8s-gke-* and k8s-aks-* checks — or a cluster not built with kubeadm)';
 
 export default [
   rule({
@@ -19,22 +15,6 @@ export default [
       const { status, error } = inv.anonymousProbe;
       if (!status) return unassessed(`the unauthenticated probe could not complete (${error || 'no response'})`);
       return status >= 200 && status < 300 ? [{ resource: 'api-server', detail: `GET /api/v1/namespaces without credentials returned HTTP ${status}.` }] : [];
-    },
-  }),
-  rule({
-    id: 'k8s-cluster-version-eol', area: 'cluster', severity: 'medium', title: 'Kubernetes version is out of upstream support',
-    description: 'Upstream Kubernetes patches only the three most recent minor releases (about 14 months). Older versions receive no security fixes unless the vendor of a managed service offers extended support. The dates come from an embedded table that ages.',
-    remediation: 'Upgrade the control plane and nodes to a supported minor version, one minor at a time.',
-    evaluate(inv) {
-      if (!inv.fullView) return na('only applicable to a live cluster');
-      const v = minorOf(inv.version && inv.version.gitVersion);
-      if (!v) return unassessed('the cluster version could not be read (/version)');
-      const end = K8S_EOL[v.key];
-      if (!end) return [];
-      const days = Math.floor((Date.parse(end + 'T23:59:59Z') - inv.now.getTime()) / 86400000);
-      if (days < 0) return [{ resource: `cluster:${v.key}`, detail: `Kubernetes ${v.key} reached end of upstream support on ${end} (${-days} days ago). Managed-service vendors may offer extended support.` }];
-      if (days <= 60) return [{ resource: `cluster:${v.key}`, severity: 'low', detail: `Kubernetes ${v.key} reaches end of upstream support on ${end} (in ${days} days).` }];
-      return [];
     },
   }),
   rule({
@@ -106,10 +86,10 @@ export default [
         if (c.__error) continue;
         ok++;
         const auth = obj(c.authentication), authz = obj(c.authorization);
-        if (T(obj(auth.anonymous).enabled)) d.push({ resource: `Node/${node}`, severity: 'high', detail: 'authentication.anonymous.enabled is true.' });
-        if (authz.mode === 'AlwaysAllow') d.push({ resource: `Node/${node}`, severity: 'critical', detail: 'authorization.mode is AlwaysAllow.' });
-        if (num(c.readOnlyPort) > 0) d.push({ resource: `Node/${node}`, severity: 'medium', detail: `readOnlyPort is ${c.readOnlyPort} (unauthenticated).` });
-        if (F(obj(auth.webhook).enabled)) d.push({ resource: `Node/${node}`, severity: 'medium', detail: 'authentication.webhook.enabled is false.' });
+        if (T(obj(auth.anonymous).enabled)) d.push({ resource: `Node/${node}:authentication.anonymous`, severity: 'high', detail: 'authentication.anonymous.enabled is true.' });
+        if (authz.mode === 'AlwaysAllow') d.push({ resource: `Node/${node}:authorization.mode`, severity: 'critical', detail: 'authorization.mode is AlwaysAllow.' });
+        if (num(c.readOnlyPort) > 0) d.push({ resource: `Node/${node}:readOnlyPort`, severity: 'medium', detail: `readOnlyPort is ${c.readOnlyPort} (unauthenticated).` });
+        if (F(obj(auth.webhook).enabled)) d.push({ resource: `Node/${node}:authentication.webhook`, severity: 'medium', detail: 'authentication.webhook.enabled is false.' });
       }
       if (!ok) return unassessed(`kubelet configuration could not be read from any node (${[...inv.kubeletConfigs.values()][0].__error})`);
       return d;
@@ -129,23 +109,6 @@ export default [
         if (!k) continue;
         if (k.minor > api.minor) d.push({ resource: `Node/${n.metadata.name}`, detail: `kubelet ${k.key} is newer than the API server ${api.key}.` });
         else if (api.minor - k.minor > 3) d.push({ resource: `Node/${n.metadata.name}`, detail: `kubelet ${k.key} is ${api.minor - k.minor} minor versions behind the API server ${api.key}.` });
-      }
-      return d;
-    },
-  }),
-  rule({
-    id: 'k8s-node-os-eol', area: 'node', severity: 'high', title: 'Node operating system is past the end of vendor support',
-    description: 'A node whose OS no longer receives security updates exposes every workload scheduled on it. Dates come from a table embedded in this tool.',
-    remediation: 'Replace the node image with a supported OS release (rotate the node group / machine image).',
-    evaluate(inv) {
-      const d = [];
-      for (const n of inv.list('Node')) {
-        const img = obj(obj(n.status).nodeInfo).osImage;
-        const rel = parseOsImage(img);
-        const e = rel && eolFor(rel, inv.now);
-        if (!e) continue;
-        if (e.ended) d.push({ resource: `Node/${n.metadata.name}`, detail: `${img}: ${e.product} ${e.version} reached end of standard support on ${e.end}.${e.extended ? ' ' + e.extended + '.' : ''}` });
-        else if (e.daysLeft <= 90) d.push({ resource: `Node/${n.metadata.name}`, severity: 'low', detail: `${img}: end of standard support on ${e.end} (in ${e.daysLeft} days).` });
       }
       return d;
     },

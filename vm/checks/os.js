@@ -1,7 +1,6 @@
 'use strict';
 import { rule } from './util.js';
 import { na } from '../lib/engine.js';
-import { eolFor } from '../lib/eol.js';
 
 function aptSources(ctx) {
   const files = ['/etc/apt/sources.list', ...ctx.fs.glob('/etc/apt/sources.list.d/*.list'), ...ctx.fs.glob('/etc/apt/sources.list.d/*.sources')];
@@ -9,22 +8,6 @@ function aptSources(ctx) {
 }
 
 export default [
-  rule({
-    id: 'vm-os-end-of-life', area: 'os', severity: 'high', title: 'Operating system release is past (or near) the end of vendor support',
-    description: 'A release that no longer receives security updates accumulates unpatched vulnerabilities. The date comes from a table embedded in this tool version and covers the vendor\'s standard support only.',
-    remediation: 'Upgrade to a supported release (or move the workload to a new image); where a paid extended-support programme is in place, record that decision.',
-    evaluate(ctx) {
-      const o = ctx.osRelease;
-      if (!o) return na('no /etc/os-release');
-      const e = eolFor({ id: o.id, versionId: o.versionId, name: o.name }, ctx.now);
-      if (!e) return na(`${o.prettyName || o.id} is not in the embedded support-date table`);
-      const label = `${e.product} ${e.version}`;
-      if (e.ended) return [{ resource: `os:${o.id}-${o.versionId}`, detail: `${label} reached end of standard support on ${e.end} (${-e.daysLeft} days ago).${e.extended ? ' Note: ' + e.extended + '.' : ''}` }];
-      if (e.daysLeft <= 90) return [{ resource: `os:${o.id}-${o.versionId}`, severity: 'low', detail: `${label} reaches end of standard support on ${e.end} (in ${e.daysLeft} days).` }];
-      return [];
-    },
-  }),
-
   rule({
     id: 'vm-pkg-repo-integrity', area: 'os', severity: 'high', title: 'Package signature verification is disabled',
     description: 'The package manager is configured to install software without verifying its signature (gpgcheck=0, [trusted=yes], AllowUnauthenticated). A tampered mirror or on-path attacker can then supply malicious packages.',
