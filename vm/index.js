@@ -2,7 +2,7 @@
 // ubel-vm — stdlib-only hardening audit of a Linux virtual machine / server.
 //
 // Reads configuration files, /proc and /sys of the machine it runs on (or of a mounted disk image given with
-// --root) and evaluates a baseline of checks: OS support status, SSH, accounts, PAM / sudo, file permissions,
+// --root) and evaluates a baseline of checks: SSH, accounts, PAM / sudo, file permissions,
 // kernel parameters, network exposure, services, logging and stored credentials. Node.js built-ins only: no
 // third-party packages and no external programs are executed.
 
