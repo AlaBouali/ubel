@@ -15,6 +15,7 @@ import { runAwsChecks } from './checks/aws-checks.js';
 import { runGcpChecks } from './checks/gcp-checks.js';
 import { runAzureChecks } from './checks/azure-checks.js';
 
+import { writeCanonical } from '../canonical/index.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version;
 
@@ -271,6 +272,7 @@ async function writeCloudReports(reporter, meta, opts) {
     console.warn(`[ubel-cloud] HTML report failed: ${e.message}`);
   }
 
+  bundleEntries.push(...await writeCanonical({ payload: reportPayload, tag, cli: 'ubel-cloud', cwd: workingDir, latestDir, fail_on: opts.failOn, atomicWrite: atomicWriteFile }));
   atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 

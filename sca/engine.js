@@ -68,6 +68,7 @@ const OSV_VULN_BASE  = `${OSV_API_BASE}/v1/vulns`;
 // isn't available at module level — we use Node's built-in synchronously:
 import { time } from "console";
 
+import { writeCanonical } from "../canonical/index.js";
 function safeJsonString(data, maxSizeMb = 100) {
   const json = JSON.stringify(data, null);
   if (json.length > maxSizeMb * 1024 * 1024) {
@@ -5293,6 +5294,8 @@ export class UbelEngineInstance {
 
       // ── Build final JSON ───────────────────────────────────────────────────
       const findingsSummary = summarizeVulnerabilities(vulnerabilities, inventory);
+      // kept aside for the canonical report (findings there carry affected_dependency_sequences)
+      const sequencesByComponent = new Map(inventory.filter((i) => i.dependency_sequences?.length).map((i) => [i.id, i.dependency_sequences]));
       for (const item of inventory) {
         if (item.dependency_sequences) {
           delete item.dependency_sequences;
@@ -5575,11 +5578,14 @@ export class UbelEngineInstance {
       // copies above are intentionally left as plain files, unzipped.
       // Filed under the asset: history/<asset_id>/<timestamp>.<tag>.zip
       // (asset and historyMode were resolved above, before the report was built).
+      // Canonical report (schema 0.1.0): translation of the payload above — written beside the other reports, silent on stdout.
+      const canonicalEntries = await writeCanonical({ payload: JSON.parse(jsonReportString), tag: reportTag, cli: (this.engine && this.engine !== TOOL_NAME) ? `ubel-${this.engine}` : `ubel-${String(reportTag).replace(/^licenses$/, "license")}`, cwd: projectRoot, latestDir, atomicWrite: atomicWriteFile, log: () => {}, sequences: sequencesByComponent });
       atomicWriteFile(zipPath, buildZip([
         { name: reportFileName("report", reportTag, "json"),       data: jsonReportString },
         { name: reportFileName("report", reportTag, "html"),       data: htmlReport },
         ...(writeSbom  ? [{ name: reportFileName("report", reportTag, "cdx.json"),   data: sbomString  }] : []),
         ...(writeSarif ? [{ name: reportFileName("report", reportTag, "sarif.json"), data: sarifString }] : []),
+        ...canonicalEntries,
       ]));
       // latest_reports/<asset_id>/latest.<tag>.zip always mirrors the newest zip.
       const latestZipPath = updateLatestReportZip(zipPath, reportTag);

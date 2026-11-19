@@ -17,6 +17,7 @@ import { getOSMetadata } from "../../sca/os_metadata.js";
 import { extractCveIds } from "../../sca/engine.js";
 import { computeEasmDiffs } from "./diffs.js";
 
+import { writeCanonical } from "../../canonical/index.js";
 export const SEVERITY_RANK = { infection: -1, critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
 export const VALID_SEVERITIES = new Set(["critical", "high", "medium", "low", "unknown"]);
 
@@ -217,6 +218,7 @@ export async function writeEasmReports(reportPayload, opts, { reportType, cliLab
     console.warn(`${cliLabel} HTML report failed: ${e.message}`);
   }
 
+  bundleEntries.push(...await writeCanonical({ payload: reportPayload, tag, cli: String(cliLabel).replace(/[\[\]\s]/g, ""), cwd: workingDir, latestDir, atomicWrite: atomicWriteFile }));
   atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 

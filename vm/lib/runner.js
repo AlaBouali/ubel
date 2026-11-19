@@ -17,6 +17,7 @@ import { loadPreviousReport } from '../../cloud/lib/previous_report.js';
 import { Reporter, runRules, SEVERITY_RANK } from './engine.js';
 import { generateHtmlReport, buildReportPayload } from './html_report.js';
 
+import { writeCanonical } from '../../canonical/index.js';
 const VALID_SEVERITIES = new Set(Object.keys(SEVERITY_RANK));
 
 class UsageError extends Error {}
@@ -218,6 +219,7 @@ async function writeReports(spec, reporter, meta, args, sameTarget) {
   } catch (e) {
     console.warn(`[${spec.cli}] HTML report failed: ${e.message}`);
   }
+  entries.push(...await writeCanonical({ payload, tag, cli: spec.cli, cwd: workingDir, latestDir, fail_on: args.failOn, atomicWrite: atomicWriteFile }));
   atomicWriteFile(zipPath, buildZip(entries));
   updateLatestReportZip(zipPath, tag);
   console.log(`\n[${spec.cli}] Timestamped bundle : ${zipPath}`);

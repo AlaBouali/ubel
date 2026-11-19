@@ -30,6 +30,7 @@ import { loadPreviousReport } from '../cloud/lib/previous_report.js';
 import { buildZip } from '../sca/zip_writer.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
 
+import { writeCanonical } from '../canonical/index.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOOL_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version;
 const TAG = 'mobile';
@@ -430,7 +431,8 @@ async function writeReports(meta, scan, notes, args) {
   const latestHtml = path.join(latestDir, reportFileName('latest', TAG, 'html'));
   atomicWriteFile(latestJson, json);
   atomicWriteFile(latestHtml, html);
-  atomicWriteFile(zipPath, buildZip([{ name: jsonName, data: json }, { name: htmlName, data: html }]));
+  const canonical = await writeCanonical({ payload, tag: TAG, cli: 'ubel-mobile', cwd: workingDir, latestDir, atomicWrite: atomicWriteFile });
+  atomicWriteFile(zipPath, buildZip([{ name: jsonName, data: json }, { name: htmlName, data: html }, ...canonical]));
   updateLatestReportZip(zipPath, TAG);
   console.log(`\n[ubel-mobile] JSON report : ${latestJson}`);
   console.log(`[ubel-mobile] HTML report : ${latestHtml}`);

@@ -18,6 +18,7 @@ import { TOOL_VERSION }           from '../sca/info.js';
 import { buildZip }               from '../sca/zip_writer.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId, provisionAssetAt } from '../sca/report_naming.js';
 import { ensureUbelIgnoreEntries } from '../sca/ignore_files.js';
+import { writeCanonical } from '../canonical/index.js';
 import {
   getComplianceForSastFinding,
   getComplianceForMalwareFinding,
@@ -412,6 +413,7 @@ async function writeAnalyzeReports(results, opts) {
     console.warn(`[ubel-sast] SARIF report failed: ${e.message}`);
   }
 
+  bundleEntries.push(...await writeCanonical({ payload: JSON.parse(jsonPayload), tag, cli: 'ubel-sast', cwd: workingDir, latestDir, atomicWrite: atomicWriteFile }));
   atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 
@@ -527,6 +529,7 @@ async function writeMalwareReports(results, opts) {
     console.warn(`[ubel-malware] SARIF report failed: ${e.message}`);
   }
 
+  bundleEntries.push(...await writeCanonical({ payload: JSON.parse(jsonPayload), tag, cli: 'ubel-mal', cwd: workingDir, latestDir, atomicWrite: atomicWriteFile }));
   atomicWriteFile(zipPath, buildZip(bundleEntries));
   updateLatestReportZip(zipPath, tag);
 

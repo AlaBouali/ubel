@@ -15,6 +15,7 @@ import { diffReports, reportIdentity } from '../../mobile/index.js';
 import { loadPreviousReport } from '../../cloud/lib/previous_report.js';
 import { reportTimestamp, reportFileName, historyZipPath, updateLatestReportZip, atomicWriteFile, assetFor, generateReportId } from '../../sca/report_naming.js';
 
+import { writeCanonical } from '../../canonical/index.js';
 /** Tool-definition hashes of the previous scan, by server key, for rug-pull detection. */
 export function loadBaseline(workingDir, tag) {
   const map = new Map();
@@ -58,7 +59,8 @@ export async function writeReports({ tag, tool, meta, scan, identity, workingDir
   const latestHtml = path.join(latestDir, reportFileName('latest', tag, 'html'));
   atomicWriteFile(latestJson, json);
   atomicWriteFile(latestHtml, html);
-  atomicWriteFile(zipPath, buildZip([{ name: jsonName, data: json }, { name: htmlName, data: html }]));
+  const canonical = await writeCanonical({ payload, tag, cli: tool, cwd: workingDir, latestDir, atomicWrite: atomicWriteFile, log: quiet ? () => {} : console.log });
+  atomicWriteFile(zipPath, buildZip([{ name: jsonName, data: json }, { name: htmlName, data: html }, ...canonical]));
   updateLatestReportZip(zipPath, tag);
   if (!quiet) {
     console.log(`\n[${tool}] JSON report : ${latestJson}`);
