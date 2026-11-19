@@ -72,6 +72,8 @@ Exit codes: 0 ok, 2 a --fail-on finding exists (or bad usage), 3 incomplete asse
  * @param {Record<string,{key:string,value:boolean,list?:boolean}>} spec.flags  tool-specific flags
  * @param {(args:object, log:Function)=>Promise<{ctx:object, rules:object[], target:object, notes?:()=>string[], options?:object, sameTarget:(prev:object)=>boolean, deps:object, close?:Function}>} spec.prepare
  * @param {string} spec.heading    console summary heading
+ * @param {{generateHtmlReport:Function, buildReportPayload:Function}} [spec.report]  replaces the default (vm) report renderer
+ *        — ubel-runtime adds tabs of its own. prepared.meta?.() may return extra top-level payload fields (e.g. { runtime }).
  */
 async function runCli(spec, argv = process.argv.slice(2)) {
   let args;
@@ -120,6 +122,7 @@ async function runCli(spec, argv = process.argv.slice(2)) {
   await writeReports(spec, reporter, {
     profile: spec.profile, target: prepared.target, notes, options, min_severity: args.minSeverity, hidden_by_filter: hidden,
     generated_at: new Date().toISOString(), tool_version: TOOL_VERSION,
+    ...(prepared.meta ? await prepared.meta() : {}),
   }, args, prepared.sameTarget);
 
   // exit code
@@ -193,7 +196,9 @@ async function writeReports(spec, reporter, meta, args, sameTarget) {
   // The asset folder can hold reports of several targets (hosts, clusters): only a report of the SAME target is a baseline.
   const prev = loadPreviousReport(zipPath, tag, reportFileName('report', tag, 'json'), (r) => (sameTarget ? sameTarget(r) : true));
 
-  const payload = buildReportPayload(reporter, {
+  const build = (spec.report && spec.report.buildReportPayload) || buildReportPayload;
+  const render = (spec.report && spec.report.generateHtmlReport) || generateHtmlReport;
+  const payload = build(reporter, {
     ...meta,
     report_id: generateReportId(tag, asset.asset_id),
     asset_id: asset.asset_id, asset_name: asset.asset_name, asset_type: asset.asset_type, machine_id: asset.machine_id,
@@ -206,7 +211,7 @@ async function writeReports(spec, reporter, meta, args, sameTarget) {
   entries.push({ name: reportFileName('report', tag, 'json'), data: json });
   console.log(`\n[${spec.cli}] JSON  report : ${latestJson}`);
   try {
-    const html = await generateHtmlReport(payload);
+    const html = await render(payload);
     atomicWriteFile(latestHtml, html);
     entries.push({ name: reportFileName('report', tag, 'html'), data: html });
     console.log(`[${spec.cli}] HTML  report : ${latestHtml}`);

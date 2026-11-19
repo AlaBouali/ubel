@@ -1152,6 +1152,47 @@ function getComplianceForCloudCheck(checkId) {
   return benchmarkEntry ? addBenchmarkControl(compliance, benchmarkEntry) : compliance;
 }
 
+// ── Runtime checks (runtime/checks/*.js): check id → categories ─────────────
+// ubel-runtime's own rule-id namespace. Every rule id must be listed here (runtime.test.js enforces it); an id that is
+// missing still falls back to security_misconfiguration rather than going unmapped.
+const RUNTIME_CHECK_CATEGORY = {
+  'rt-proc-deleted-exe': ['malicious_code_supply_chain'],
+  'rt-proc-memfd-exec': ['malicious_code_supply_chain'],
+  'rt-proc-code-in-temp': ['malicious_code_supply_chain'],
+  'rt-proc-root-network-service': ['privileged_workload'],
+  'rt-proc-excess-capabilities': ['privileged_workload'],
+  'rt-proc-traced': ['malicious_code_supply_chain'],
+  'rt-proc-debug-interface-exposed': ['broken_access_control', 'public_exposure'],
+  'rt-proc-no-sandbox': ['security_misconfiguration'],
+  'rt-net-risky-service': ['public_exposure'],
+  'rt-net-wildcard-bind': ['network_segmentation'],
+  'rt-net-probe-exposed': ['sensitive_data_exposure', 'public_exposure'],
+  'rt-lib-stale-mapped': ['vulnerable_components'],
+  'rt-lib-from-temp': ['malicious_code_supply_chain'],
+  'rt-lib-preload-hijack': ['malicious_code_supply_chain'],
+  'rt-lib-vulnerable': ['vulnerable_components'],
+  'rt-comp-vulnerable-package': ['vulnerable_components'],
+  'rt-comp-node-runtime-vulnerable': ['vulnerable_components'],
+  'rt-comp-node-eol': ['vulnerable_components'],
+  'rt-secret-env': ['secrets_management'],
+  'rt-secret-cmdline': ['secrets_management'],
+  'rt-ctr-privileged': ['privileged_workload'],
+  'rt-ctr-host-namespaces': ['privileged_workload', 'network_segmentation'],
+  'rt-ctr-sensitive-mounts': ['privileged_workload'],
+  'rt-ctr-dangerous-capabilities': ['privileged_workload'],
+  'rt-ctr-confinement-disabled': ['privileged_workload'],
+  'rt-ctr-env-secrets': ['secrets_management'],
+  'rt-ctr-published-ports': ['public_exposure'],
+  'rt-ctr-run-as-root': ['privileged_workload'],
+  'rt-ctr-no-resource-limits': ['availability_dos'],
+  'rt-ctr-mutable-image': ['malicious_code_supply_chain'],
+  'rt-ctr-packages-vulnerable': ['vulnerable_components'],
+  'rt-insp-coverage': ['logging_monitoring'],
+  'rt-insp-left-open': ['broken_access_control'],
+  'rt-insp-code-from-temp': ['malicious_code_supply_chain'],
+  'rt-insp-stale-code': ['vulnerable_components'],
+};
+
 // ── Public API: VM (ubel-vm) ────────────────────────────────────────────────
 
 /** Compliance mapping for a ubel-vm finding, looked up by its `check` id. */
@@ -1162,6 +1203,19 @@ function getComplianceForVmCheck(checkId) {
 /** Framework ids a ubel-vm check maps to (for the per-framework check posture). */
 function getFrameworkIdsForVmCheck(checkId) {
   const c = getComplianceForVmCheck(checkId);
+  return c ? c.frameworks.map((f) => f.id) : [];
+}
+
+// ── Public API: running applications (ubel-runtime) ─────────────────────────
+
+/** Compliance mapping for a ubel-runtime finding, looked up by its `check` id. */
+function getComplianceForRuntimeCheck(checkId) {
+  return buildCompliance(RUNTIME_CHECK_CATEGORY[checkId] || ['security_misconfiguration']);
+}
+
+/** Framework ids a ubel-runtime check maps to (for the per-framework check posture). */
+function getFrameworkIdsForRuntimeCheck(checkId) {
+  const c = getComplianceForRuntimeCheck(checkId);
   return c ? c.frameworks.map((f) => f.id) : [];
 }
 
@@ -1309,6 +1363,9 @@ export {
   getComplianceForVmCheck,
   getFrameworkIdsForVmCheck,
   VM_CHECK_CATEGORY,
+  getComplianceForRuntimeCheck,
+  getFrameworkIdsForRuntimeCheck,
+  RUNTIME_CHECK_CATEGORY,
   getComplianceForK8sCheck,
   getFrameworkIdsForK8sCheck,
   K8S_CHECK_MAP,
