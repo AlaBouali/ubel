@@ -39,17 +39,12 @@ export function translate(p, opts, H) {
   }
 
   for (const g of arr(p.misconfigurations)) {
-    const occ = arr(g.occurrences);
-    const targets = uniq([...occ.map((o) => o.target), ...arr(g.targets)]);
-    for (const t of (targets.length ? targets : [null])) {
-      const mine = occ.filter((o) => (o.target || null) === t);
-      out.findings.push(mkFinding({
-        rule_id: g.id, title: g.title, component_id: t, component_name: t, component_type: 'url',
-        severity: mine.length ? mine.reduce((a, o) => (a && (['critical', 'high', 'medium', 'low'].indexOf(a) <= ['critical', 'high', 'medium', 'low'].indexOf(o.severity)) ? a : o.severity), null) : g.severity,
-        confidence: null, violate_policy: null, type: 'misconfiguration',
-        details: R.deep({ ...g, target: t, occurrences: mine.length ? mine : occ }),
-      }));
-    }
+    const targets = uniq([...arr(g.occurrences).map((o) => o.target), ...arr(g.targets)]);
+    const t = targets[0] ?? null;               // a group can span several targets: it is one finding, anchored on the first
+    out.findings.push(mkFinding({
+      rule_id: g.id, title: g.title, component_id: t, component_name: t, component_type: 'url',
+      severity: g.severity, confidence: null, violate_policy: null, type: 'misconfiguration', details: R.deep(g),
+    }));
   }
 
   for (const s of arr(p.secrets)) {

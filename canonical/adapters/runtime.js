@@ -50,9 +50,7 @@ export function translate(p, opts, H) {
         const pk = splitPkg(m[1]);
         const eco = /^Node\.js/i.test(pk.name) ? 'Node.js runtime' : (/@/.test(m[1]) ? 'npm' : null);
         cid = m[1]; cname = depName(pk.name, eco, pk.version); ctype = 'dependency'; rule = m[2];
-        details = { ...f, advisory: m[2], affected_dependency: pk.name, affected_dependency_version: pk.version, ecosystem: eco, application: m[3] ?? null };
       }
-      details.check = f.check;
     } else if (type === 'secret') {
       ctype = 'application';
     }
@@ -105,10 +103,10 @@ export function translate(p, opts, H) {
   });
   return {
     metadata: meta,
-    policy: { flags: p.scan_options ?? {}, gate: opts.fail_on != null ? { fail_on: opts.fail_on } : null, checks: p.checks ?? [] },
+    policy: { profile: p.profile ?? null, flags: p.scan_options ?? {}, gate: opts.fail_on != null ? { fail_on: opts.fail_on } : null, checks: p.checks ?? [] },
     ...out,
-    stats_extra: { source: p.stats ?? null, coverage: p.coverage ?? null, runtime_summary: rt.summary ?? null, diffs: p.diffs ?? null },
-    compliance_summary: { ...(p.compliance_summary || {}), posture: p.compliance_posture ?? null },
+    stats_extra: { source: p.stats ?? null, coverage: p.coverage ?? null, compliance_posture: p.compliance_posture ?? null, runtime_summary: rt.summary ?? null, diffs: p.diffs ?? null },
+    compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };
 }

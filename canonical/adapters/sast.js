@@ -75,16 +75,15 @@ export function translate(p, opts, H) {
         confidence: f.confidence,
         violate_policy: violates(f),
         type: isSecret ? 'secret' : 'code',
-        details: R.deep({ ...f, file, chunk_id: cid, chunk_type: r.type, startLine: r.startLine, endLine: r.endLine, language: r.language, scan_mode: malware ? 'malware' : 'analyze' }),
+        details: R.deep(f),
       }));
     }
-    const { findings: _drop, ...chunk } = r;
     const status = r.error ? 'error' : (fl.length ? (fl.some((x) => x.is_valid === false) && fl.every((x) => x.is_valid === false) ? 'dismissed' : 'vulnerable') : 'clean');
     out.inventory.push(mkInventory({
       component_id: cid, component_name: label, status,
       violate_policy: fl.length ? fl.some((x) => violates(x)) : false,
       type: 'code',
-      details: R.deep({ ...chunk, findings_count: fl.length }),
+      details: R.deep({ ...r, id: cid, file }),
     }));
   }
 

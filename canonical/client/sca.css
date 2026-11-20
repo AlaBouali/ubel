@@ -1,0 +1,61 @@
+
+        :root { --bg: #0a0a0a; --card: #141414; --border: #262626; --accent: #ef4444; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #e5e5e5; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glass { background: rgba(20,20,20,0.8); backdrop-filter: blur(12px); border: 1px solid var(--border); }
+        .severity-high { color: #f87171; border-color: #f87171; }
+        .severity-medium { color: #fb923c; border-color: #fb923c; }
+        .severity-low { color: #60a5fa; border-color: #60a5fa; }
+        .severity-critical { color: #ef4444; border-color: #ef4444; font-weight: bold; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        .tab-active { border-bottom: 2px solid var(--accent); color: white; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 50; backdrop-filter: blur(4px); }
+        .modal-content { max-height: 90vh; overflow-y: auto; }
+            /* Executive summary: print / save-as-PDF. Prints the summary only, on white;
+               page 1 is the one-page summary, details and appendix start on new pages. */
+            details > summary { list-style: none; }
+            details > summary::-webkit-details-marker { display: none; }
+            details > summary::before { content: "+"; display: inline-block; width: 1.2em; color: #737373; }
+            details[open] > summary::before { content: "-"; }
+            @media print {
+              @page { size: A4; margin: 12mm; }
+              html, body { background: #fff !important; color: #111 !important; font-size: 11px; }
+              header, nav, footer, .no-print, .modal-overlay { display: none !important; }
+              main { padding: 0 !important; max-width: none !important; }
+              main > section { display: none !important; }
+              main > #section-executive { display: block !important; }
+              #section-executive, #section-executive * { -webkit-print-color-adjust: exact; print-color-adjust: exact; box-shadow: none !important; backdrop-filter: none !important; }
+              #section-executive > div, #section-executive #executive-content > * { margin-top: 0; }
+              #executive-content { display: block !important; }
+              #executive-content > * + * { margin-top: 12px !important; }
+              #section-executive .glass { background: #fff !important; border-color: #d1d5db; break-inside: avoid; padding: 8px 12px !important; border-radius: 6px !important; }
+              #section-executive .glass[style*="border-left"] { border-top-color: #d1d5db; border-right-color: #d1d5db; border-bottom-color: #d1d5db; }
+              #section-executive [class*="text-neutral"], #section-executive [class*="text-white"] { color: #374151 !important; }
+              #section-executive .exec-headline, #section-executive h2, #section-executive h4 { color: #111 !important; }
+              #section-executive [class*="bg-neutral"] { background: #f3f4f6 !important; }
+              #section-executive [class*="border-neutral"] { border-color: #d1d5db !important; }
+              #section-executive [class*="divide-neutral"] > * { border-color: #e5e7eb !important; }
+              #section-executive .exec-page-break { break-before: page; }
+              #section-executive .exec-cols-2 { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+              #section-executive .exec-figs > *, #section-executive .exec-glance > *, #section-executive .exec-cols-2 > * { min-width: 0; overflow-wrap: anywhere; }
+              #section-executive .exec-figs { display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 8px !important; }
+              #section-executive .exec-glance { display: grid !important; grid-template-columns: repeat(3, 1fr) !important; gap: 8px !important; }
+              #section-executive h2 { font-size: 18px !important; margin-bottom: 4px !important; }
+              #section-executive h3 { font-size: 10px !important; margin-bottom: 6px !important; break-after: avoid; }
+              #section-executive h4 { font-size: 11px !important; }
+              #section-executive .text-4xl { font-size: 28px !important; line-height: 1.1 !important; }
+              #section-executive .text-3xl { font-size: 20px !important; line-height: 1.1 !important; }
+              #section-executive .text-lg { font-size: 12.5px !important; line-height: 1.4 !important; }
+              #section-executive .text-sm { font-size: 10.5px !important; line-height: 1.4 !important; }
+              #section-executive .text-xs, #section-executive [class*="text-[11px]"] { font-size: 9px !important; line-height: 1.35 !important; }
+              #section-executive .space-y-3 > * + * { margin-top: 6px !important; }
+              #section-executive .space-y-8 > * + * { margin-top: 12px !important; }
+              #section-executive table { font-size: 9.5px; }
+              #section-executive td, #section-executive th { padding-top: 5px !important; padding-bottom: 5px !important; }
+              #section-executive tr { break-inside: avoid; }
+              #section-executive .exec-appendix { break-inside: auto; }
+              #section-executive .exec-appendix > summary::before { content: ""; }
+            }
+    

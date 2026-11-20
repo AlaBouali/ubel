@@ -66,7 +66,7 @@ export function translate(p, opts, H) {
         confidence: d.confidence ?? null,
         violate_policy: v.is_policy_violation ?? violates(v.severity),
         type: v.is_infection ? 'dependency_infection' : 'dependency_vulnerability',
-        details: R.deep({ ...v, dependency: { name: d.name, version: d.version, ecosystem: d.ecosystem, purl: d.purl ?? null, platform: d.platform ?? null, source: d.source ?? null } }),
+        details: R.deep(v),
       }));
     }
   }
@@ -74,7 +74,7 @@ export function translate(p, opts, H) {
   applyFindingStatus(out.inventory, out.findings);
 
   const t = p.target || {};
-  out.scopes.push({ type: t.kind === 'mcp-client' || t.kind === 'mcp-server' ? 'mcp' : 'artifact', name: R.text(t.file ?? ''), kind: t.kind ?? null, size_bytes: t.size_bytes ?? null, sha256: t.sha256 ?? null, identity: t.identity ?? null, mcp: t.mcp ?? null });
+  out.scopes.push({ type: t.kind === 'mcp-client' || t.kind === 'mcp-server' ? 'mcp' : 'artifact', ...R.deep(t), name: R.text(t.file ?? '') });
   for (const c of arr(t.config_files)) out.scopes.push({ type: 'filesystem', name: R.rel(c.file), path: R.rel(c.file), client: c.client ?? null, scope: c.scope ?? null, servers: c.servers ?? null });
 
   const meta = H.buildMetadata({
@@ -93,5 +93,26 @@ export function translate(p, opts, H) {
     stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: p.diffs ?? null, notes: p.analysis_notes ?? null },
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
+  };
+}
+
+// The module's own payload, rebuilt from a canonical report. Only used to call the module's server-side renderer
+// (mobile/lib/report.js buildHtml) for the executive-summary section, which that template renders on the server.
+export function restore(c) {
+  const si = c.metadata?.scan_info || {}, st = c.stats || {}, src = st.source || {}, pol = c.policy || {};
+  const own = (f) => f.type !== 'dependency_vulnerability' && f.type !== 'dependency_infection';
+  const cat = (k) => arr(c.findings).filter((f) => own(f) && f.details?.category === k).map((f) => f.details);
+  const t0 = arr(c.scopes).find((s) => s.type === 'artifact' || s.type === 'mcp') || {};
+  const { type: _t, name, ...target } = t0;
+  return {
+    schema: `ubel-${si.scan_type}/1`, tool: c.metadata?.tool_info?.tool_cli ?? `ubel-${si.scan_type}`, tool_version: c.metadata?.tool_info?.tool_version,
+    generated_at: si.generated_at, report_id: si.report_id, asset_id: si.asset_id, asset_name: si.asset_name, asset_type: si.asset_type, machine_id: si.machine_id,
+    target: { file: name, ...target },
+    apps: arr(c.inventory).filter((i) => i.type === 'application').map((i) => i.details),
+    dependencies: arr(c.inventory).filter((i) => i.type === 'dependency').map((i) => i.details),
+    vulnerabilities: cat('vulnerability'), secrets: cat('secret'), misconfigurations: cat('misconfiguration'),
+    summary: src.summary, stats: src.stats, dependency_summary: src.dependency_summary, analysis_notes: st.notes,
+    limits: pol.limits, analysis: pol.analysis, gate: pol.gate, min_severity: pol.flags?.min_severity, hidden_by_filter: pol.flags?.hidden_by_filter,
+    compliance_summary: c.compliance_summary, executive_summary: c.executive_summary, diffs: st.diffs,
   };
 }

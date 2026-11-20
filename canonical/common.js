@@ -65,6 +65,18 @@ export function makeRel(root) {
   return { rel, text, deep, usable };
 }
 
+// `reachable` (root of every finding): true when the original says the finding is reachable or exploitable
+// (SCA/EASM `reachability.reachable`, SAST `taint.reachable` / `taint.exploitable`), false when it says it is not,
+// null when the original has no such assessment.
+export function reachableOf(d) {
+  if (!isObj(d)) return null;
+  const r = isObj(d.reachability) ? d.reachability.reachable : undefined;
+  const t = isObj(d.taint) ? d.taint : null;
+  if (r === true || (t && (t.exploitable === true || t.reachable === true))) return true;
+  if (r === false || (t && (t.reachable === false || t.exploitable === false))) return false;
+  return null;
+}
+
 // ── finding / inventory builders ────────────────────────────────────────────
 // finding_id is NOT part of the canonical finding by default; only SAST supplies one (see adapters/sast.js).
 export function mkFinding(o) {
@@ -78,6 +90,7 @@ export function mkFinding(o) {
   f.severity = sev(o.severity);
   f.confidence = o.confidence == null ? null : String(o.confidence).toLowerCase();
   f.violate_policy = o.violate_policy === undefined ? null : (o.violate_policy === null ? null : !!o.violate_policy);
+  f.reachable = o.reachable !== undefined ? o.reachable : reachableOf(o.details);
   f.type = o.type;
   f.details = o.details ?? {};
   return f;
