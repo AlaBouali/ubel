@@ -205,7 +205,7 @@ export function applyFindingStatus(inventory, findings, { vulnerable = 'vulnerab
   for (const c of inventory) {
     const fs_ = by.get(c.component_id);
     if (!fs_ || !fs_.length) { if (c.status === 'unknown' || c.status === undefined) c.status = clean; continue; }
-    c.status = fs_.some((f) => f.type === 'dependency_infection') ? infected : vulnerable;
+    c.status = fs_.some((f) => f.type === 'sc_infection') ? infected : vulnerable;
     c.violate_policy = fs_.some((f) => f.violate_policy === true) ? true : (fs_.every((f) => f.violate_policy === false) ? false : c.violate_policy);
   }
   return inventory;

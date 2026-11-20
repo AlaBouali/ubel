@@ -48,14 +48,14 @@
 
   // ── FINDING MODALS, one layout per finding type ──────────────────────────
   var FIND = {
-    dependency_vulnerability: function (f, d) {
+    sc_vulnerability: function (f, d) {
       return kv([['Advisory', f.rule_id], ['Aliases', d.aliases], ['CVSS score', d.severity_score], ['CVSS vector', d.severity_vector], ['Published', d.published], ['Modified', d.modified], ['Source', d.source], ['CWEs', d.cwes], ['Release confidence', d.release_confidence && (d.release_confidence.level || d.release_confidence)]])
         + section('Summary', para(d.summary || d.details || d.description))
         + section('Fix', kv([['Fixed versions', d.fixed_versions], ['Suggested fixes', (d.fixes || []).map(function (x) { return typeof x === 'string' ? x : JSON.stringify(x); })]]))
         + section('References', (d.references || []).length ? '<ul class="text-xs space-y-1">' + d.references.slice(0, 15).map(function (r) { return '<li>' + link(typeof r === 'string' ? r : (r.url || '')) + '</li>'; }).join('') + '</ul>' : (d.url ? link(d.url) : ''));
     },
-    dependency_infection: function (f, d) {
-      return '<div class="mb-4 p-3 rounded-lg border border-purple-500/40 text-sm" style="color:#c084fc">This package is flagged as malicious / compromised (supply-chain infection), not as an ordinary vulnerability.</div>' + FIND.dependency_vulnerability(f, d);
+    sc_infection: function (f, d) {
+      return '<div class="mb-4 p-3 rounded-lg border border-purple-500/40 text-sm" style="color:#c084fc">This package is flagged as malicious / compromised (supply-chain infection), not as an ordinary vulnerability.</div>' + FIND.sc_vulnerability(f, d);
     },
     code: function (f, d) {
       var loc = (d.file || d.artifact || '') + (d.line != null ? ':' + d.line : '') + (d.startLine != null && d.line == null ? ':' + d.startLine : '');
@@ -123,7 +123,7 @@
       + '<p class="text-xs text-neutral-500 mono mb-5">' + esc(f.rule_id) + (f.finding_id ? ' · ' + esc(f.finding_id) : '') + '</p>'
       + kv([['Component', f.affected_component_name], ['Component id', f.affected_component_id], ['Component type', f.affected_component_type], ['Confidence', f.confidence]])
       + '<div class="mt-5">' + body + '</div>' + complianceBlock(d.compliance) + raw(d)
-      + ((f.type === 'dependency_vulnerability' || f.type === 'dependency_infection' || 'affected_dependency_sequences' in d) ? seqBox(d.affected_dependency_sequences) : ''));
+      + ((f.type === 'sc_vulnerability' || f.type === 'sc_infection' || 'affected_dependency_sequences' in d) ? seqBox(d.affected_dependency_sequences) : ''));
   }
 
   // ── INVENTORY MODALS, one layout per component type ──────────────────────

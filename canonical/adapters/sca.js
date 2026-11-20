@@ -31,9 +31,9 @@ export function translate(p, opts, H) {
       component_name: depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version),
       component_type: 'dependency',
       severity: v.severity,
-      confidence: first(v.release_confidence?.level, v.release_confidence, null),
+      confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
-      type: v.is_infection ? 'dependency_infection' : 'dependency_vulnerability',
+      type: v.is_infection ? 'sc_infection' : 'sc_vulnerability',
       details: R.deep({ ...v, affected_dependency_sequences: seqFor(v, cid) }),
     }));
   }

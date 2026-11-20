@@ -65,7 +65,7 @@ export function translate(p, opts, H) {
         severity: v.severity,
         confidence: d.confidence ?? null,
         violate_policy: v.is_policy_violation ?? violates(v.severity),
-        type: v.is_infection ? 'dependency_infection' : 'dependency_vulnerability',
+        type: v.is_infection ? 'sc_infection' : 'sc_vulnerability',
         details: R.deep(v),
       }));
     }
@@ -100,7 +100,7 @@ export function translate(p, opts, H) {
 // (mobile/lib/report.js buildHtml) for the executive-summary section, which that template renders on the server.
 export function restore(c) {
   const si = c.metadata?.scan_info || {}, st = c.stats || {}, src = st.source || {}, pol = c.policy || {};
-  const own = (f) => f.type !== 'dependency_vulnerability' && f.type !== 'dependency_infection';
+  const own = (f) => f.type !== 'sc_vulnerability' && f.type !== 'sc_infection';
   const cat = (k) => arr(c.findings).filter((f) => own(f) && f.details?.category === k).map((f) => f.details);
   const t0 = arr(c.scopes).find((s) => s.type === 'artifact' || s.type === 'mcp') || {};
   const { type: _t, name, ...target } = t0;

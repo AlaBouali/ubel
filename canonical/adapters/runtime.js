@@ -4,7 +4,7 @@
 // containers, inspections, summary}. The original has no scanned directory: processes, libraries and containers belong to a
 // machine, so paths are kept as they are (nothing is made relative).
 //
-// finding.type by check:  *-vulnerable*            → dependency_vulnerability (rule_id = the advisory id, check kept in details.check)
+// finding.type by check:  *-vulnerable*            → sc_vulnerability (rule_id = the advisory id, check kept in details.check)
 //                         rt-secret-*              → secret
 //                         deleted exe / memfd / code or library from temp / traced / preload hijack → behaviour
 //                         containers, network exposure → misconfiguration
@@ -21,7 +21,7 @@ const VULN_RESOURCE = /^(.*?): ((?:CVE|GHSA|OSV|MAL|PYSEC|RUSTSEC|GO)-[A-Za-z0-9
 
 function typeOf(f) {
   const c = String(f.check || '');
-  if (/vulnerable/.test(c)) return 'dependency_vulnerability';
+  if (/vulnerable/.test(c)) return 'sc_vulnerability';
   if (/^rt-secret|secret/.test(c) || f.area === 'secrets') return 'secret';
   if (BEHAVIOUR.test(c)) return 'behaviour';
   if (f.area === 'containers' || f.area === 'exposure' || /^rt-net-/.test(c)) return 'misconfiguration';
@@ -44,7 +44,7 @@ export function translate(p, opts, H) {
   for (const f of arr(p.findings)) {
     const type = typeOf(f);
     let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
-    if (type === 'dependency_vulnerability') {
+    if (type === 'sc_vulnerability') {
       const m = VULN_RESOURCE.exec(String(f.resource ?? ''));
       if (m) {
         const pk = splitPkg(m[1]);
@@ -58,7 +58,7 @@ export function translate(p, opts, H) {
       rule_id: rule, title: f.title, component_id: cid, component_name: cname, component_type: ctype,
       severity: f.severity, confidence: null, violate_policy: violates(f.severity), type, details,
     }));
-    if (cid && type !== 'dependency_vulnerability') derived.push(mkInventory({ component_id: cid, component_name: cname, status: 'running', type: 'application', details: { resource: f.resource, scope: f.scope ?? null, area: f.area ?? null } }));
+    if (cid && type !== 'sc_vulnerability') derived.push(mkInventory({ component_id: cid, component_name: cname, status: 'running', type: 'application', details: { resource: f.resource, scope: f.scope ?? null, area: f.area ?? null } }));
   }
 
   for (const pr of arr(rt.processes)) {

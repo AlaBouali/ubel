@@ -34,7 +34,7 @@ export function translate(p, opts, H) {
       rule_id: v.id, title: first(v.summary, v.id), component_id: cid, component_name: cname, component_type: 'application',
       severity: v.severity, confidence: v.release_confidence?.level ?? null,
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
-      type: v.is_infection ? 'dependency_infection' : 'dependency_vulnerability', details: R.deep(v),
+      type: v.is_infection ? 'sc_infection' : 'sc_vulnerability', details: R.deep(v),
     }));
   }
 

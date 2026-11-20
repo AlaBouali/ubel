@@ -8,7 +8,7 @@
 
 const reportData = (function (C) {
   const st = C.stats || {};
-  const isVuln = function (f) { return f.type === 'dependency_vulnerability' || f.type === 'dependency_infection'; };
+  const isVuln = function (f) { return f.type === 'sc_vulnerability' || f.type === 'sc_infection'; };
   return {
     inventory: C.inventory.filter(function (c) { return c.type === 'application'; }).map(function (c) { return c.details; }),
     vulnerabilities: C.findings.filter(isVuln).map(function (f) { return f.details; }),
@@ -1280,7 +1280,7 @@ function openModal(html) {
 const FAMILY = {
   openFinding: function (i) {
     const f = CANON.findings[i], d = f.details;
-    if (f.type === 'dependency_vulnerability' || f.type === 'dependency_infection') { openVulnModal(vulnKey(d)); return true; }
+    if (f.type === 'sc_vulnerability' || f.type === 'sc_infection') { openVulnModal(vulnKey(d)); return true; }
     if (f.type === 'misconfiguration') { openMisconfigModal(d.id); return true; }
     if (f.type === 'secret') { openSecretModal(secretKey(d)); return true; }
     return false;

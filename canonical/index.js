@@ -66,10 +66,10 @@ export function toCanonical(payload, opts = {}) {
   return canon;
 }
 
-export function canonicalFileName(base) { return String(base).replace(/\.json$/, '') + '.canonical.json'; }
+export function canonicalFileName(base) { return String(base).replace(/\.json$/, '') + '.json'; }
 
 /**
- * Translate + render + write latest.<tag>.canonical.{json,html}; returns the bundle entries to add to the history zip.
+ * Translate + render + write latest.<tag>.{json,html}; returns the bundle entries to add to the history zip.
  * Never throws: a canonical failure must not fail the scan (same contract as the other report blocks).
  */
 export async function writeCanonical({ payload, tag, cli, cwd, latestDir, fail_on, atomicWrite, withHtml = true, log = console.log, sequences }) {
@@ -78,16 +78,16 @@ export async function writeCanonical({ payload, tag, cli, cwd, latestDir, fail_o
     const canon = toCanonical(payload, { cwd, cli, live: true, fail_on, sequences });
     const json = JSON.stringify(canon, null, 2);
     const write = atomicWrite || ((f, d) => fs.writeFileSync(f, d));
-    const jp = path.join(latestDir, `latest.${tag}.canonical.json`);
+    const jp = path.join(latestDir, `latest.${tag}.json`);
     write(jp, json);
-    entries.push({ name: `report.${tag}.canonical.json`, data: json });
+    entries.push({ name: `report.${tag}.json`, data: json });
     log(`[${cli}] Canonical JSON : ${jp}`);
     if (withHtml) {
       const { generateCanonicalHtml } = await import('./html.js');
       const html = await generateCanonicalHtml(canon, { family: detectFamily(payload) });
-      const hp = path.join(latestDir, `latest.${tag}.canonical.html`);
+      const hp = path.join(latestDir, `latest.${tag}.html`);
       write(hp, html);
-      entries.push({ name: `report.${tag}.canonical.html`, data: html });
+      entries.push({ name: `report.${tag}.html`, data: html });
       log(`[${cli}] Canonical HTML : ${hp}`);
     }
   } catch (e) {
