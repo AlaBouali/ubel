@@ -9,7 +9,8 @@
 const reportData = (function (C) {
   const st = C.stats || {};
   return {
-    findings: C.findings.map(function (f) { return f.details; }),
+    // observations (passed checks, coverage, behaviors …) are canonical findings only: the module's own lists / compliance / diffs never saw them
+    findings: C.findings.filter(function (f) { return !(f.details && f.details.observation); }).map(function (f) { return f.details; }),
     compliance_summary: C.compliance_summary,
     executive_summary: C.executive_summary,
     diffs: st.diffs || { enabled: false },
@@ -697,7 +698,7 @@ function openDiffModal(i) {
 
 // ── glue: canonical entry → module modal ──
 const FAMILY = {
-  openFinding: function (i) { const f = reportData.findings[i]; if (!f) return false; renderFindingDetail(f); return true; },
+  openFinding: function (i) { const f = CANON.findings[i] && CANON.findings[i].details; if (!f) return false; renderFindingDetail(f); return true; },
   openInventory: function () { return false; },   // the module has no inventory view
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); },

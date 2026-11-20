@@ -3,7 +3,7 @@
 // Original keys used: findings[] {check, resource, region, provider, service, severity, title, description, remediation, compliance},
 // providers[], regions{}, accounts{}, provider_status[], scan_options, stats, compliance_summary, executive_summary, diffs.
 // The original has no inventory: it is derived from the resources / regions the findings point at.
-import { arr, isObj, first, mkFinding, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
 
 export const family = 'cloud';
 
@@ -23,7 +23,7 @@ export function translate(p, opts, H) {
       severity: f.severity,
       confidence: f.confidence ?? null,
       violate_policy: violates(f.severity),
-      type: 'misconfiguration',
+      type: TYPES.MISCONFIG,
       details: f,
     }));
     if (f.resource) {
@@ -46,6 +46,26 @@ export function translate(p, opts, H) {
   for (const prov of arr(p.providers)) {
     const name = typeof prov === 'string' ? prov : first(prov.name, prov.provider);
     out.scopes.push({ type: 'cloud', name, account: (isObj(p.accounts) ? p.accounts[name] : null) ?? null, status: arr(p.provider_status).find((s) => s.provider === name) ?? null });
+  }
+
+  // What was and was not assessed, per provider (observations, appended after the findings). A provider that was scanned in full is the
+  // normal case (info); one that was partly scanned or skipped means findings may be missing (low).
+  for (const ps of arr(p.provider_status)) {
+    if (!isObj(ps) || !ps.provider) continue;
+    const st = String(ps.status ?? (ps.ok === false ? 'error' : 'scanned'));
+    const ok = st === 'scanned';
+    out.findings.push(observe({
+      rule_id: `coverage.provider.${st}`,
+      title: ok ? `Provider ${String(ps.provider).toUpperCase()} scanned` : `Provider ${String(ps.provider).toUpperCase()} ${st === 'skipped' ? 'skipped' : st === 'partial' ? 'only partly scanned' : 'not scanned (' + st + ')'}`,
+      component_id: `provider:${ps.provider}`, component_name: String(ps.provider), component_type: 'cloud_provider',
+      severity: ok ? 'info' : 'low', type: TYPES.COVERAGE,
+      details: {
+        check: `coverage.provider.${st}`, area: 'coverage', provider: ps.provider, service: '', region: '', resource: String(ps.provider), severity: ok ? 'info' : 'low',
+        title: ok ? `Provider ${ps.provider} scanned` : `Provider ${ps.provider}: ${st}`,
+        description: ok ? 'All checks for this provider ran.' : `${ps.reason || 'Some checks did not run.'} Findings for the part that was not assessed are not in this report.`,
+        remediation: ok ? '' : 'Grant the scanner the missing read permissions / credentials and scan again.', compliance: null, status: st, reason: ps.reason ?? null,
+      },
+    }));
   }
 
   const incomplete = arr(p.provider_status).some((s) => s && (s.status === 'error' || s.ok === false));

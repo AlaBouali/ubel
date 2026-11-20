@@ -8,7 +8,7 @@
 // finding_id: sha256(chunk_id + rule_id [+ fingerprint for secrets])  — the only family that has one.
 // component:  id = chunk id (relative path); name = "<file name>: (<class>.)<function>".
 import path from 'node:path';
-import { arr, first, mkFinding, mkInventory, makeRel, sha, slug, uniq } from '../common.js';
+import { arr, first, mkFinding, observe, mkInventory, makeRel, sha, slug, uniq, TYPES } from '../common.js';
 
 export const family = 'sast';
 
@@ -74,7 +74,7 @@ export function translate(p, opts, H) {
         severity: f.severity,
         confidence: f.confidence,
         violate_policy: violates(f),
-        type: isSecret ? 'secret' : 'code',
+        type: isSecret ? TYPES.SECRET : TYPES.CODE,
         details: R.deep(f),
       }));
     }
@@ -84,6 +84,18 @@ export function translate(p, opts, H) {
       violate_policy: fl.length ? fl.some((x) => violates(x)) : false,
       type: 'code',
       details: R.deep({ ...r, id: cid, file }),
+    }));
+  }
+
+  // Code the engine could not analyse (observations, appended last so the findings above keep their positions): a clean list over
+  // chunks that failed must not read as "all clear".
+  for (const r of arr(p.results)) {
+    if (!r.error) continue;
+    const { cid, label, file } = chunkParts(r, R);
+    out.findings.push(observe({
+      finding_id: sha(cid, 'coverage.chunk-error'), rule_id: 'coverage.chunk-error', title: 'Code chunk could not be analysed',
+      component_id: cid, component_name: label, component_type: 'code', severity: 'low', type: TYPES.COVERAGE,
+      details: R.deep({ file, chunk_id: cid, error: typeof r.error === 'string' ? r.error : (r.error?.message ?? JSON.stringify(r.error)), description: 'The analyser returned an error for this chunk, so any weakness in it is not in this report.' }),
     }));
   }
 

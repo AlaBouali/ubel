@@ -3,7 +3,7 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
-import { arr, isObj, first, mkFinding, mkInventory, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate } from '../common.js';
+import { arr, isObj, first, mkFinding, mkInventory, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, TYPES } from '../common.js';
 
 export const family = 'posture';
 
@@ -30,13 +30,16 @@ export function translate(p, opts, H) {
       severity: f.severity,
       confidence: null,
       violate_policy: violates(f.severity),
-      type: isK8s ? 'misconfiguration' : 'hardening',
+      type: isK8s ? TYPES.MISCONFIG : TYPES.HARDENING,
       details: R.deep(f),
     }));
     if (cid) {
       out.inventory.push(mkInventory({ component_id: cid, component_name: res, status: 'unknown', type: kind, details: { resource: res, scope: f.scope || null, area: f.area || null, kind: isK8s ? (res.match(K8S_KIND)?.[1] ?? null) : null } }));
     }
   }
+  // Passed / not-assessed checks (observations, appended after the findings so those keep their positions).
+  const subject = isK8s ? (t.subject ?? 'cluster') : (t.hostname ?? 'vm');
+  out.findings.push(...checkObservations(p.checks, { passType: isK8s ? TYPES.MISCONFIG : TYPES.HARDENING, component_id: isK8s ? null : subject, component_name: subject, component_type: isK8s ? 'kubernetes_cluster' : 'host', resource: subject }));
   if (!isK8s) {
     out.inventory.unshift(mkInventory({ component_id: t.hostname ?? 'vm', component_name: t.hostname ?? 'vm', status: p.coverage?.status === 'partial' ? 'partially_assessed' : 'assessed', type: 'host', details: R.deep(t) }));
   }

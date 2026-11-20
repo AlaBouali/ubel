@@ -24,7 +24,13 @@ function switchTab(tabId) {
 function cnSevBadge(s) { s = String(s || 'unknown').toLowerCase(); return '<span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + cnEsc(s) + '">' + cnEsc(s) + '</span>'; }
 function cnTypeChip(t) { return '<span class="px-2 py-0.5 rounded border border-neutral-700 text-[10px] mono text-neutral-300">' + cnEsc(t) + '</span>'; }
 function cnPolicyCell(v) { return v === true ? '<span class="text-red-400 flex items-center gap-1">' + CN_CROSS + ' Violates</span>' : (v === false ? '<span class="text-green-400 flex items-center gap-1">' + CN_CHECK + ' Safe</span>' : '<span class="text-neutral-600">—</span>'); }
-function cnReachCell(v) { return v === true ? '<span class="text-red-400 text-xs font-semibold">Reachable</span>' : (v === false ? '<span class="text-green-400 text-xs">Not reachable</span>' : '<span class="text-neutral-600 text-xs">—</span>'); }
+// finding status: "reachable" | "non reachable" | "false positive". A reachable informational finding (a normal behavior, a passed check) is not an alarm: neutral colour.
+function cnStatusCell(f) {
+  const s = f.status || 'reachable';
+  if (s === 'non reachable') return '<span class="text-green-400 text-xs">Non reachable</span>';
+  if (s === 'false positive') return '<span class="text-yellow-400 text-xs">False positive</span>';
+  return f.severity === 'info' ? '<span class="text-neutral-400 text-xs">Reachable</span>' : '<span class="text-red-400 text-xs font-semibold">Reachable</span>';
+}
 function cnCard(label, value, cls, border) { return '<div class="glass p-6 rounded-xl' + (border ? ' border-l-4 ' + border : '') + '"><p class="text-xs text-neutral-500 uppercase font-semibold mb-1">' + cnEsc(label) + '</p><p class="text-3xl font-bold ' + (cls || '') + '">' + cnEsc(value) + '</p></div>'; }
 function cnRow(label, value, cls) { return '<div class="flex justify-between text-sm"><span class="text-neutral-500">' + cnEsc(label) + '</span><span class="mono ' + (cls || '') + '">' + cnEsc(value) + '</span></div>'; }
 function cnSysRow(label, value) { return '<div class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-neutral-500 text-xs">' + cnEsc(label) + '</span><span class="mono text-xs break-all text-right">' + (value == null || value === '' ? '—' : cnEsc(Array.isArray(value) ? value.join(', ') : value)) + '</span></div>'; }
@@ -54,9 +60,33 @@ function cnBlock(title, obj, icon) { return '<div class="glass p-6 rounded-xl sp
 function cnGenericModal(kind, badge, title, id, obj) {
   const scalars = [], nested = [];
   Object.keys(obj || {}).forEach(function (k) { const v = obj[k]; if (v !== null && typeof v === 'object') nested.push(k); else if (v !== null && v !== undefined && v !== '') scalars.push(k); });
-  document.getElementById('modal-body').innerHTML = '<div class="space-y-6"><div><div class="flex items-center gap-3 mb-1 flex-wrap"><span class="text-[10px] uppercase font-bold text-neutral-300 border border-current px-2 py-0.5 rounded">' + cnEsc(badge) + '</span><h2 class="text-xl font-bold">' + cnEsc(title) + '</h2></div><p class="mono text-[11px] text-neutral-500 break-all">' + cnEsc(id) + '</p></div>'
+  document.getElementById('modal-body').innerHTML = '<div class="space-y-6"><div><div class="flex items-center gap-3 mb-1 flex-wrap"><span class="text-[10px] uppercase font-bold text-neutral-300 border border-current px-2 py-0.5 rounded">' + cnEsc(badge) + '</span><h2 class="text-xl font-bold">' + cnEsc(title) + '</h2></div>' + (id ? '<p class="mono text-[11px] text-neutral-500 break-all">' + cnEsc(id) + '</p>' : '') + '</div>'
     + '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">' + scalars.map(function (k) { return '<div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">' + cnEsc(cnTitle(k)) + '</p><p class="mono text-xs break-all">' + cnEsc(obj[k]) + '</p></div>'; }).join('') + '</div>'
     + nested.map(function (k) { return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">' + cnEsc(cnTitle(k)) + '</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><pre class="mono text-[11px] text-neutral-300 whitespace-pre-wrap break-all">' + cnEsc(JSON.stringify(obj[k], null, 2)) + '</pre></div></div>'; }).join('') + '</div>';
+  document.getElementById('modal-overlay').style.display = 'flex';
+  document.body.style.overflow = 'hidden';
+}
+
+// modal for findings whose module has no modal of its own (observations: normal behaviors, passed checks, open ports, licenses, coverage gaps …)
+function cnFindingModal(f) {
+  const d = f.details || {};
+  const skip = { description: 1, remediation: 1, evidence: 1, observation: 1, category: 1, title: 1, severity: 1, compliance: 1 };
+  const scalars = [], nested = [];
+  Object.keys(d).forEach(function (k) {
+    if (skip[k]) return;
+    const v = d[k];
+    if (v !== null && typeof v === 'object') { if (!(Array.isArray(v) && !v.length)) nested.push(k); } else if (v !== null && v !== undefined && v !== '') scalars.push(k);
+  });
+  const ev = Array.isArray(d.evidence) ? d.evidence : (d.evidence ? [d.evidence] : []);
+  const para = function (t) { return '<p class="text-sm text-neutral-300 leading-relaxed whitespace-pre-line">' + cnEsc(t) + '</p>'; };
+  const sec = function (t, inner) { return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">' + cnEsc(t) + '</h4>' + inner + '</div>'; };
+  document.getElementById('modal-body').innerHTML = '<div class="space-y-6"><div><div class="flex items-center gap-3 mb-2 flex-wrap">' + cnSevBadge(f.severity) + cnTypeChip(f.type) + cnStatusCell(f) + (f.violate_policy ? '<span class="text-red-400 text-xs font-semibold">POLICY VIOLATION</span>' : '') + '</div>'
+    + '<h2 class="text-xl font-bold pr-8">' + cnEsc(f.title) + '</h2><p class="mono text-[11px] text-neutral-500 break-all">' + cnEsc(f.rule_id) + (f.affected_component_name ? ' · ' + cnEsc(f.affected_component_name) : '') + '</p></div>'
+    + (d.description ? sec('Description', para(d.description)) : '')
+    + (ev.length ? sec('Evidence', '<ul class="bg-neutral-900 rounded-lg p-3 border border-neutral-800 mono text-[11px] text-neutral-300 space-y-1">' + ev.slice(0, 60).map(function (e) { return '<li class="break-all">' + cnEsc(typeof e === 'object' ? JSON.stringify(e) : e) + '</li>'; }).join('') + '</ul>') : '')
+    + (d.remediation ? sec('Remediation', para(d.remediation)) : '')
+    + (scalars.length ? '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">' + scalars.map(function (k) { return '<div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">' + cnEsc(cnTitle(k)) + '</p><p class="mono text-xs break-all">' + cnEsc(d[k]) + '</p></div>'; }).join('') + '</div>' : '')
+    + nested.map(function (k) { return sec(cnTitle(k), '<div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><pre class="mono text-[11px] text-neutral-300 whitespace-pre-wrap break-all">' + cnEsc(JSON.stringify(d[k], null, 2)) + '</pre></div>'); }).join('') + '</div>';
   document.getElementById('modal-overlay').style.display = 'flex';
   document.body.style.overflow = 'hidden';
 }
@@ -64,19 +94,19 @@ function cnGenericModal(kind, badge, title, id, obj) {
 function cnOpenFinding(i) {
   let done = false;
   try { done = FAMILY.openFinding(i); } catch (e) { console.error('finding modal failed', e); }
-  if (!done) { const f = CANON.findings[i]; cnGenericModal('finding', f.type, f.title, f.rule_id, f.details); }
+  if (!done) cnFindingModal(CANON.findings[i]);
 }
 function cnOpenInventory(i) {
   let done = false;
   try { done = FAMILY.openInventory(i); } catch (e) { console.error('inventory modal failed', e); }
-  if (!done) { const c = CANON.inventory[i]; cnGenericModal('inventory', c.type, c.component_name, c.component_id, c.details); }
+  if (!done) { const c = CANON.inventory[i]; cnGenericModal('inventory', c.type, c.component_name, '', c.details); }
 }
 function cnOpenScope(i) { const s = CANON.scopes[i]; cnGenericModal('scope', s.type, s.name || s.type, s.path || s.name || '', s); }
 
 // ── dashboard ───────────────────────────────────────────────────────────────────────────────────────
 function cnRenderDashboard() {
   const st = CANON.stats || {}, fs = st.findings || {}, is = st.inventory || {}, bs = fs.by_severity || {};
-  const reachable = CANON.findings.filter(function (f) { return f.reachable === true; }).length;
+  const reachable = CANON.findings.filter(function (f) { return f.status === 'reachable' && f.severity !== 'info'; }).length;   // informational findings (normal behaviors) are not counted
   document.getElementById('report-id').textContent = 'GENERATED_AT: ' + (CANON.metadata.scan_info.generated_at || '');
   document.getElementById('stat-total').textContent = fs.total || 0;
   document.getElementById('stat-critical-high').textContent = (bs.critical || 0) + ' / ' + (bs.high || 0);
@@ -101,16 +131,14 @@ function cnRenderDashboard() {
 // ── findings ────────────────────────────────────────────────────────────────────────────────────────
 function cnRenderFindings() {
   const q = document.getElementById('f-search').value.toLowerCase(), sev = document.getElementById('f-sev').value, type = document.getElementById('f-type').value,
-    conf = document.getElementById('f-conf').value, reach = document.getElementById('f-reach').value, pol = document.getElementById('f-policy').value;
+    conf = document.getElementById('f-conf').value, status = document.getElementById('f-status').value, pol = document.getElementById('f-policy').value;
   const tbody = document.getElementById('f-body'); tbody.innerHTML = '';
   const rows = [];
   CANON.findings.forEach(function (f, i) {
     if (sev !== 'all' && f.severity !== sev) return;
     if (type !== 'all' && f.type !== type) return;
     if (conf !== 'all' && (f.confidence || '') !== conf) return;
-    if (reach === 'reachable' && f.reachable !== true) return;
-    if (reach === 'unreachable' && f.reachable !== false) return;
-    if (reach === 'unknown' && f.reachable !== null) return;
+    if (status !== 'all' && f.status !== status) return;
     if (pol === 'violate' && f.violate_policy !== true) return;
     if (pol === 'safe' && f.violate_policy === true) return;
     if (q && [f.title, f.rule_id, f.finding_id, f.affected_component_name, f.affected_component_id, f.type].join(' ').toLowerCase().indexOf(q) < 0) return;
@@ -128,7 +156,7 @@ function cnRenderFindings() {
       + '<td class="px-6 py-4">' + cnTypeChip(f.type) + '</td>'
       + '<td class="px-6 py-4 mono text-xs text-neutral-400 break-all">' + cnEsc(f.affected_component_name) + '</td>'
       + '<td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(f.confidence || '') + '</td>'
-      + '<td class="px-6 py-4">' + cnReachCell(f.reachable) + '</td>'
+      + '<td class="px-6 py-4">' + cnStatusCell(f) + '</td>'
       + '<td class="px-6 py-4">' + cnPolicyCell(f.violate_policy) + '</td>'
       + '<td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>';
     tbody.appendChild(tr);
@@ -141,33 +169,34 @@ function cnSetupFindings() {
     + '<select id="f-sev" class="' + CN_SELECT + '"><option value="all">All Severities</option>' + CN_SEV.map(function (s) { return '<option value="' + s + '">' + cnTitle(s) + '</option>'; }).join('') + '</select>'
     + cnSelect('f-type', 'All Types', cnUniq(F.map(function (f) { return f.type; })))
     + cnSelect('f-conf', 'All Confidence', cnUniq(F.map(function (f) { return f.confidence; })))
-    + '<select id="f-reach" class="' + CN_SELECT + '"><option value="all">All Reachability</option><option value="reachable">Reachable / exploitable</option><option value="unreachable">Not reachable</option><option value="unknown">Not assessed</option></select>'
+    + '<select id="f-status" class="' + CN_SELECT + '"><option value="all">All Statuses</option><option value="reachable">Reachable</option><option value="non reachable">Non reachable</option><option value="false positive">False positive</option></select>'
     + '<select id="f-policy" class="' + CN_SELECT + '"><option value="all">All Policy</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select>')
-    + cnTable(['Rule', 'Severity', 'Title', 'Type', 'Component', 'Confidence', 'Reachable', 'Policy', 'Action'], 'f-body');
+    + cnTable(['Rule', 'Severity', 'Title', 'Type', 'Component', 'Confidence', 'Status', 'Policy', 'Action'], 'f-body');
   ['f-search'].forEach(function (id) { document.getElementById(id).addEventListener('input', cnRenderFindings); });
-  ['f-sev', 'f-type', 'f-conf', 'f-reach', 'f-policy'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderFindings); });
+  ['f-sev', 'f-type', 'f-conf', 'f-status', 'f-policy'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderFindings); });
   cnRenderFindings();
 }
 
 // ── inventory ───────────────────────────────────────────────────────────────────────────────────────
 function cnRenderInventory() {
   const q = document.getElementById('i-search').value.toLowerCase(), type = document.getElementById('i-type').value, status = document.getElementById('i-status').value,
-    eco = document.getElementById('i-eco').value, pol = document.getElementById('i-policy').value, has = document.getElementById('i-has').value;
+    //eco = document.getElementById('i-eco').value, 
+    pol = document.getElementById('i-policy').value, has = document.getElementById('i-has').value;
   const count = {}; CANON.findings.forEach(function (f) { count[f.affected_component_id] = (count[f.affected_component_id] || 0) + 1; });
   const tbody = document.getElementById('i-body'); tbody.innerHTML = '';
   const rows = [];
   CANON.inventory.forEach(function (c, i) {
     if (type !== 'all' && c.type !== type) return;
     if (status !== 'all' && c.status !== status) return;
-    if (eco !== 'all' && ((c.details && c.details.ecosystem) || '') !== eco) return;
+    //if (eco !== 'all' && ((c.details && c.details.ecosystem) || '') !== eco) return;
     if (pol === 'violate' && c.violate_policy !== true) return;
     if (pol === 'safe' && c.violate_policy === true) return;
     if (has === 'with' && !count[c.component_id]) return;
     if (has === 'without' && count[c.component_id]) return;
-    if (q && [c.component_name, c.component_id, c.type].join(' ').toLowerCase().indexOf(q) < 0) return;
+    if (q && [c.component_name, c.type].join(' ').toLowerCase().indexOf(q) < 0) return;
     rows.push([i, c]);
   });
-  if (!rows.length) { tbody.innerHTML = cnEmptyRow(7, 'No inventory entries match the criteria.'); return; }
+  if (!rows.length) { tbody.innerHTML = cnEmptyRow(6, 'No inventory entries match the criteria.'); return; }
   rows.slice(0, 1500).forEach(function (r) {
     const c = r[1], tr = document.createElement('tr');
     tr.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
@@ -175,11 +204,11 @@ function cnRenderInventory() {
     const sc = c.status === 'clean' || c.status === 'safe' ? 'text-green-400' : c.status === 'infected' ? 'text-red-400' : c.status === 'undetermined' ? 'text-blue-400' : c.status === 'vulnerable' || c.status === 'misconfigured' || c.status === 'non_compliant' || c.status === 'at_risk' ? 'text-orange-400' : 'text-neutral-400';
     tr.innerHTML = '<td class="px-6 py-4 font-medium break-all">' + cnEsc(c.component_name) + '</td><td class="px-6 py-4">' + cnTypeChip(c.type) + '</td>'
       + '<td class="px-6 py-4"><span class="text-xs ' + sc + '">' + cnEsc(c.status) + '</span></td><td class="px-6 py-4 text-xs text-neutral-400">' + (count[c.component_id] || 0) + '</td>'
-      + '<td class="px-6 py-4">' + cnPolicyCell(c.violate_policy) + '</td><td class="px-6 py-4 mono text-[10px] text-neutral-500 break-all">' + cnEsc(c.component_id) + '</td>'
+      + '<td class="px-6 py-4">' + cnPolicyCell(c.violate_policy) + '</td>'
       + '<td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>';
     tbody.appendChild(tr);
   });
-  if (rows.length > 1500) { const tr = document.createElement('tr'); tr.innerHTML = '<td colspan="7" class="px-6 py-4 text-center text-xs text-neutral-500 italic">Showing the first 1500 of ' + rows.length + ' entries; narrow the filters to see the rest.</td>'; tbody.appendChild(tr); }
+  if (rows.length > 1500) { const tr = document.createElement('tr'); tr.innerHTML = '<td colspan="6" class="px-6 py-4 text-center text-xs text-neutral-500 italic">Showing the first 1500 of ' + rows.length + ' entries; narrow the filters to see the rest.</td>'; tbody.appendChild(tr); }
 }
 function cnSetupInventory() {
   const I = CANON.inventory;
@@ -190,7 +219,7 @@ function cnSetupInventory() {
     + cnSelect('i-eco', 'All Ecosystems', cnUniq(I.map(function (c) { return c.details && c.details.ecosystem; })))
     + '<select id="i-policy" class="' + CN_SELECT + '"><option value="all">All</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select>'
     + '<select id="i-has" class="' + CN_SELECT + '"><option value="all">All</option><option value="with">With findings</option><option value="without">Without findings</option></select>')
-    + cnTable(['Component', 'Type', 'State', 'Findings', 'Policy Violation', 'Id', 'Action'], 'i-body');
+    + cnTable(['Component', 'Type', 'State', 'Findings', 'Policy Violation', 'Action'], 'i-body');
   document.getElementById('i-search').addEventListener('input', cnRenderInventory);
   ['i-type', 'i-status', 'i-eco', 'i-policy', 'i-has'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderInventory); });
   cnRenderInventory();
@@ -222,7 +251,7 @@ function cnRenderStats() {
   const PAL = ['#ef4444', '#60a5fa', '#fb923c', '#10b981', '#a78bfa', '#facc15', '#f472b6', '#94a3b8'];
   const rows = function (o, colorOf) { return Object.keys(o || {}).map(function (k) { return cnRow(k, o[k], colorOf ? colorOf(k) : ''); }).join(''); };
   const f = CANON.findings;
-  const reach = { reachable: f.filter(function (x) { return x.reachable === true; }).length, 'not reachable': f.filter(function (x) { return x.reachable === false; }).length, 'not assessed': f.filter(function (x) { return x.reachable === null; }).length };
+  const reach = { 'reachable': f.filter(function (x) { return x.status === 'reachable'; }).length, 'non reachable': f.filter(function (x) { return x.status === 'non reachable'; }).length, 'false positive': f.filter(function (x) { return x.status === 'false positive'; }).length };
   const card = function (title, canvas, inner) { return '<div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">' + title + '</h3>' + (canvas ? '<div class="h-48"><canvas id="' + canvas + '"></canvas></div>' : '') + '<div class="space-y-2">' + inner + '</div></div>'; };
   const sevColor = function (k) { return { critical: 'text-red-600', high: 'text-red-400', medium: 'text-orange-400', low: 'text-blue-400' }[k] || 'text-gray-400'; };
   const sec = document.getElementById('section-stats');
@@ -230,7 +259,7 @@ function cnRenderStats() {
     + card('Finding Stats', 'cnSevChart', cnRow('Total findings', fs.total || 0) + rows(fs.by_severity, sevColor))
     + card('Finding Types', 'cnTypeChart', rows(fs.by_type))
     + card('Confidence', 'cnConfChart', rows(fs.by_confidence))
-    + card('Reachability', 'cnReachChart', rows(reach) + cnRow('Violating policy', fs.violating_policy || 0, 'text-red-400'))
+    + card('Status', 'cnReachChart', rows(reach) + cnRow('Violating policy', fs.violating_policy || 0, 'text-red-400'))
     + card('Inventory Stats', 'cnInvTypeChart', cnRow('Total size', is.total || 0) + rows(is.by_type))
     + card('Inventory State', 'cnInvStatusChart', rows(is.by_status) + cnRow('Violating policy', is.violating_policy || 0, 'text-red-400'))
     + '</div>';
@@ -243,7 +272,7 @@ function cnRenderStats() {
   cnDonut('cnSevChart', CN_SEV, CN_SEV.map(function (s) { return (fs.by_severity || {})[s] || 0; }), CN_SEV.map(function (s) { return CN_SEV_COLORS[s]; }));
   cnDonut('cnTypeChart', keys(fs.by_type), vals(fs.by_type), PAL);
   cnDonut('cnConfChart', keys(fs.by_confidence), vals(fs.by_confidence), PAL);
-  cnDonut('cnReachChart', keys(reach), vals(reach), ['#ef4444', '#10b981', '#525252']);
+  cnDonut('cnReachChart', keys(reach), vals(reach), ['#ef4444', '#10b981', '#facc15']);
   cnDonut('cnInvTypeChart', keys(is.by_type), vals(is.by_type), PAL);
   cnDonut('cnInvStatusChart', keys(is.by_status), vals(is.by_status), PAL);
 }

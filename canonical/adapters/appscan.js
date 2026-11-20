@@ -3,9 +3,23 @@
 // They all share one payload (mobile/lib/report.js buildPayload; mcp/lib/report.js reuses it).
 // Original keys used: schema, tool, target, apps[], vulnerabilities[], secrets[], misconfigurations[], dependencies[]
 // (each with vulnerabilities[]), gate, min_severity, analysis, summary, stats, compliance_summary, executive_summary, diffs.
-import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
 
 export const family = 'appscan';
+
+// Behavior categories (mobile/lib/behavior.js, binary/lib/behavior.js, package/lib/sourcebehavior.js) → severity of the capability.
+// info: what nearly every program does · low: needs a reason · medium: powers that fit surveillance, persistence or evasion · high: attacks other processes.
+const BEHAVIOR_SEV = {
+  file_io: 'info', network: 'info', ipc: 'info', crypto: 'info', system_info: 'info', reflection: 'info',
+  process: 'low', device_access: 'low', native_code: 'low', dynamic_loading: 'low',
+  privilege: 'medium', persistence: 'medium', input_capture: 'medium', anti_analysis: 'medium', credentials: 'medium', obfuscation: 'medium',
+  injection: 'high',
+};
+const BEHAVIOR_TITLE = {
+  file_io: 'File access', network: 'Network', ipc: 'Inter-app communication', process: 'Process execution', reflection: 'Reflection / dynamic lookup', native_code: 'Native code loading',
+  device_access: 'Sensitive device APIs', dynamic_loading: 'Dynamic loading / resolution', injection: 'Debugging / process injection', anti_analysis: 'Anti-analysis', privilege: 'Privilege',
+  persistence: 'Persistence', input_capture: 'Input capture / sensitive devices', crypto: 'Cryptography', system_info: 'System fingerprinting', credentials: 'Credential / environment access', obfuscation: 'Obfuscation',
+};
 
 const HARDENING = /(^|[._-])(pie|relro|canary|fortify|nx|exec[_-]?stack|textrel|rpath|wx|stripped|hardening|bitcode|arc|stack[_-]?protector|no[_-]?gnu[_-]?stack)([._-]|$)/i;
 const BEHAVIOUR = /behavio|intent|exfil|beacon|c2\b|dynamic[_-]?load|obfusc|persist|anti[_-]?(debug|analysis)|self[_-]?modif/i;
@@ -37,9 +51,9 @@ export function translate(p, opts, H) {
       details: R.deep(f),
     }));
   };
-  for (const f of arr(p.vulnerabilities)) push(f, BEHAVIOUR.test(f.rule || '') ? 'behaviour' : 'code');
-  for (const f of arr(p.secrets)) push(f, 'secret');
-  for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? 'behaviour' : (HARDENING.test(f.rule || '') ? 'hardening' : 'misconfiguration'));
+  for (const f of arr(p.vulnerabilities)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE);
+  for (const f of arr(p.secrets)) push(f, TYPES.SECRET);
+  for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
 
   for (const a of apps) {
     out.inventory.push(mkInventory({ component_id: R.rel(String(appId(a))), component_name: R.text(String(first(a.name, a.id))), status: 'unknown', type: 'application', details: R.deep(a) }));
@@ -65,11 +79,69 @@ export function translate(p, opts, H) {
         severity: v.severity,
         confidence: d.confidence ?? null,
         violate_policy: v.is_policy_violation ?? violates(v.severity),
-        type: v.is_infection ? 'sc_infection' : 'sc_vulnerability',
+        type: v.is_infection ? TYPES.INFECTION : TYPES.VULN,
         details: R.deep(v),
       }));
     }
   }
+  // ── observations (appended after the findings so those keep their positions) ──
+  const LOWER = { critical: 'high', high: 'medium', medium: 'low', low: 'info', info: 'info' };
+  for (const a of apps) {
+    const cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
+    const base = { component_id: cid, component_name: cname, component_type: 'application' };
+    // what the code does: one finding per behavior category. Common capabilities are the normal case (info); the rest are rated by what
+    // they let code do. Code that is only in third-party library code is rated one level lower.
+    for (const [cat, byOrigin] of Object.entries(a.behavior?.categories || {})) {
+      const origins = Object.keys(byOrigin || {});
+      if (!origins.length) continue;
+      const own = origins.some((o) => o !== 'library');
+      const sevFull = BEHAVIOR_SEV[cat] ?? 'info';
+      const severity = own ? sevFull : LOWER[sevFull];
+      const functions = origins.reduce((n, o) => n + (byOrigin[o].functions ?? Object.keys(byOrigin[o].apis || {}).length), 0);
+      const calls = origins.reduce((n, o) => n + (byOrigin[o].calls ?? 0), 0);
+      const apis = origins.flatMap((o) => Object.entries(byOrigin[o].apis || {}).map(([k, n]) => `${o}: ${k}${n > 1 ? ` ×${n}` : ''}`)).slice(0, 25);
+      out.findings.push(observe({
+        ...base, rule_id: `behavior.${cat}`, title: `Behavior: ${BEHAVIOR_TITLE[cat] ?? cat.replace(/_/g, ' ')}`, severity, confidence: own ? 'high' : 'medium', type: TYPES.BEHAVIOR,
+        details: R.deep({ app: a.id ?? a.package ?? a.name, behavior_category: cat, origins: byOrigin, functions, calls, evidence: apis, artifact: a.name ?? '',
+          description: `The code references ${functions} ${BEHAVIOR_TITLE[cat] ? BEHAVIOR_TITLE[cat].toLowerCase() : cat.replace(/_/g, ' ')} function(s)${calls ? ` (${calls} call site(s))` : ''} in ${origins.join(', ')} code. ${severity === 'info' ? 'This is ordinary behavior for software of this kind.' : 'Check that this capability is needed and cannot be abused.'}` }),
+      }));
+    }
+    // remote hosts the files name
+    const rh = a.remote_hosts;
+    if (rh && arr(rh.hosts).length) {
+      const hosts = rh.hosts.map((h) => (typeof h === 'string' ? h : first(h.host, h.domain, h.ip, h.value))).filter(Boolean);
+      out.findings.push(observe({
+        ...base, rule_id: 'exposure.remote_hosts', title: `Remote hosts referenced (${rh.total ?? hosts.length})`, severity: 'info', type: TYPES.EXPOSURE,
+        details: R.deep({ app: a.id ?? a.package ?? a.name, total: rh.total ?? hosts.length, domains: rh.domains ?? null, ips: rh.ips ?? null, evidence: hosts.slice(0, 40), artifact: a.name ?? '',
+          description: `${rh.total ?? hosts.length} remote host(s) are named in the files (${hosts.slice(0, 5).join(', ')}${hosts.length > 5 ? ', …' : ''}). Check that each is expected.` }),
+      }));
+    }
+    // MCP: what each tool the server exposes can do, and what was seen of the live server
+    for (const tl of arr(a.definitions?.tools)) {
+      const caps = arr(tl.capabilities);
+      const severity = caps.includes('exec') ? 'medium' : caps.some((c) => ['file_write', 'sql', 'secrets', 'messaging'].includes(c)) ? 'low' : 'info';
+      out.findings.push(observe({
+        ...base, rule_id: 'behavior.mcp.tool', title: `Tool exposed: ${tl.name}${caps.length ? ` (${caps.join(', ')})` : ''}`, severity, type: TYPES.BEHAVIOR,
+        details: R.deep({ app: a.id ?? a.name, tool: tl.name, capabilities: caps, params: tl.params ?? [], annotations: tl.annotations ?? null, artifact: `tools.${tl.name}`,
+          description: `${tl.description || 'The server registers this tool.'} ${caps.length ? `It can: ${caps.join(', ')}.` : ''}`.trim() }),
+      }));
+    }
+    for (const o of arr(a.observed)) {
+      out.findings.push(observe({
+        ...base, rule_id: 'behavior.mcp.process', title: `Server process observed (pid ${o.pid})`, severity: o.uid === 0 ? 'low' : 'info', type: TYPES.BEHAVIOR,
+        details: R.deep({ app: a.id ?? a.name, pid: o.pid, uid: o.uid, cmdline: o.cmdline, listening: o.listening ?? [], artifact: a.name ?? '',
+          description: `The server runs as uid ${o.uid}${arr(o.listening).length ? ` and listens on ${o.listening.map((l) => `${l.addr}:${l.port}`).join(', ')}` : ''}.` }),
+      }));
+    }
+  }
+  // parts of the artifact the scan could not look at: a clean list over incomplete coverage must not read as "all clear"
+  for (const gap of arr(p.analysis?.gaps)) {
+    out.findings.push(observe({
+      component_id: null, component_name: null, component_type: 'application', rule_id: 'coverage.gap', title: 'Part of the artifact could not be analysed', severity: 'low', type: TYPES.COVERAGE,
+      details: R.deep({ description: String(typeof gap === 'string' ? gap : JSON.stringify(gap)), artifact: '' }),
+    }));
+  }
+
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings);
 
@@ -100,7 +172,7 @@ export function translate(p, opts, H) {
 // (mobile/lib/report.js buildHtml) for the executive-summary section, which that template renders on the server.
 export function restore(c) {
   const si = c.metadata?.scan_info || {}, st = c.stats || {}, src = st.source || {}, pol = c.policy || {};
-  const own = (f) => f.type !== 'sc_vulnerability' && f.type !== 'sc_infection';
+  const own = (f) => f.type !== TYPES.VULN && f.type !== TYPES.INFECTION;
   const cat = (k) => arr(c.findings).filter((f) => own(f) && f.details?.category === k).map((f) => f.details);
   const t0 = arr(c.scopes).find((s) => s.type === 'artifact' || s.type === 'mcp') || {};
   const { type: _t, name, ...target } = t0;

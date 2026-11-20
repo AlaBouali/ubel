@@ -8,7 +8,7 @@
 
 const reportData = (function (C) {
   const st = C.stats || {};
-  const own = function (f) { return f.type !== 'sc_vulnerability' && f.type !== 'sc_infection'; };
+  const own = function (f) { return f.type !== 'vuln' && f.type !== 'infection'; };
   const byCat = function (cat) { return C.findings.filter(function (f) { return own(f) && f.details && f.details.category === cat; }).map(function (f) { return f.details; }); };
   return {
     vulnerabilities: byCat('vulnerability'), secrets: byCat('secret'), misconfigurations: byCat('misconfiguration'),
@@ -290,7 +290,7 @@ function openDependencyModal(index) {
 const FAMILY = {
   openFinding: function (i) {
     const f = CANON.findings[i];
-    if (f.type === 'sc_vulnerability' || f.type === 'sc_infection') {
+    if (f.type === 'vuln' || f.type === 'infection') {
       const k = reportData.dependencies.findIndex(function (d) { return (d.purl || (d.name + '@' + (d.version || ''))) === f.affected_component_id; });
       if (k < 0) return false; openDependencyModal(k); return true;
     }

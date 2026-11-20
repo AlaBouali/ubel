@@ -65,9 +65,26 @@ export function makeRel(root) {
   return { rel, text, deep, usable };
 }
 
-// `reachable` (root of every finding): true when the original says the finding is reachable or exploitable
-// (SCA/EASM `reachability.reachable`, SAST `taint.reachable` / `taint.exploitable`), false when it says it is not,
-// null when the original has no such assessment.
+// ── finding types (short names) ─────────────────────────────────────────────
+// One vocabulary for every module. A finding's `type` says what KIND of thing it is, not which scanner produced it.
+//   vuln        known advisory on a package / product (CVE, GHSA, OSV …)          infection   package flagged as malicious / compromised
+//   secret      hardcoded credential                                             code        weakness in source / bytecode (SAST, malware)
+//   misconfig   insecure configuration (cloud, k8s, manifests, headers …)        hardening   missing / present host or binary protection (passed checks too)
+//   behavior    what the software does or runs (capabilities, processes, tools)  exposure    reachable network surface (open ports, listeners, remote hosts)
+//   license     license obligation / risk of a component                         coverage    part of the scan that could not be (fully) assessed
+export const TYPES = {
+  VULN: 'vuln', INFECTION: 'infection', SECRET: 'secret', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
+  BEHAVIOR: 'behavior', EXPOSURE: 'exposure', LICENSE: 'license', COVERAGE: 'coverage',
+};
+
+// ── finding status ───────────────────────────────────────────────────────────
+// `status` (root of every finding) replaces the old `reachable` boolean. One of:
+//   "reachable"       the finding applies: the original says it is reachable / exploitable, or makes no claim either way
+//   "non reachable"   the original says it is NOT reachable / exploitable (SCA / EASM `reachability.reachable === false`,
+//                     SAST `taint.reachable === false` or `taint.exploitable === false`)
+//   "false positive"  the original says it is not a real issue (SAST / malware `is_valid === false`)
+export const STATUS = { REACHABLE: 'reachable', NON_REACHABLE: 'non reachable', FALSE_POSITIVE: 'false positive' };
+
 export function reachableOf(d) {
   if (!isObj(d)) return null;
   const r = isObj(d.reachability) ? d.reachability.reachable : undefined;
@@ -77,8 +94,32 @@ export function reachableOf(d) {
   return null;
 }
 
+export function statusOf(d) {
+  if (!isObj(d)) return STATUS.REACHABLE;
+  if (d.is_valid === false || d.false_positive === true) return STATUS.FALSE_POSITIVE;
+  return reachableOf(d) === false ? STATUS.NON_REACHABLE : STATUS.REACHABLE;
+}
+
+// ── network exposure ─────────────────────────────────────────────────────────
+// Severity of a reachable TCP port, by what normally listens there: web and mail are the normal case (info), remote-administration and
+// database ports facing a network are worth a look (low / medium), clear-text or unauthenticated-by-default services are not (high).
+const PORTS = {
+  21: ['FTP', 'medium'], 22: ['SSH', 'low'], 23: ['Telnet', 'high'], 25: ['SMTP', 'info'], 53: ['DNS', 'info'], 80: ['HTTP', 'info'], 110: ['POP3', 'low'],
+  111: ['rpcbind', 'medium'], 135: ['MSRPC', 'medium'], 139: ['NetBIOS', 'medium'], 143: ['IMAP', 'low'], 443: ['HTTPS', 'info'], 445: ['SMB', 'high'],
+  465: ['SMTPS', 'info'], 587: ['SMTP submission', 'info'], 993: ['IMAPS', 'info'], 995: ['POP3S', 'info'], 1433: ['MS SQL Server', 'medium'], 1521: ['Oracle DB', 'medium'],
+  2375: ['Docker API (no TLS)', 'high'], 2376: ['Docker API', 'medium'], 3306: ['MySQL', 'medium'], 3389: ['RDP', 'high'], 5432: ['PostgreSQL', 'medium'],
+  5900: ['VNC', 'high'], 5984: ['CouchDB', 'medium'], 6379: ['Redis', 'medium'], 8080: ['HTTP (alt)', 'info'], 8443: ['HTTPS (alt)', 'info'],
+  9200: ['Elasticsearch', 'medium'], 11211: ['Memcached', 'medium'], 27017: ['MongoDB', 'medium'],
+};
+export function portRisk(port) {
+  const e = PORTS[Number(port)];
+  return e ? { service: e[0], severity: e[1] } : { service: null, severity: 'info' };
+}
+
 // ── finding / inventory builders ────────────────────────────────────────────
 // finding_id is NOT part of the canonical finding by default; only SAST supplies one (see adapters/sast.js).
+// An *observation* (observe() below) is a finding for something that is normal or merely informative: a passed check, a capability,
+// a running process, an open port. It never makes its component 'vulnerable' and never violates the policy.
 export function mkFinding(o) {
   const f = {};
   if (o.finding_id) f.finding_id = o.finding_id;
@@ -90,10 +131,47 @@ export function mkFinding(o) {
   f.severity = sev(o.severity);
   f.confidence = o.confidence == null ? null : String(o.confidence).toLowerCase();
   f.violate_policy = o.violate_policy === undefined ? null : (o.violate_policy === null ? null : !!o.violate_policy);
-  f.reachable = o.reachable !== undefined ? o.reachable : reachableOf(o.details);
+  f.status = o.status ?? statusOf(o.details);
   f.type = o.type;
   f.details = o.details ?? {};
   return f;
+}
+
+export function observe(o) {
+  return mkFinding({
+    ...o,
+    violate_policy: false,
+    severity: o.severity ?? 'info',
+    confidence: o.confidence ?? 'high',
+    details: { ...(o.details ?? {}), observation: true, category: 'observation' },
+  });
+}
+
+export const isObservation = (f) => !!(f && f.details && f.details.observation === true);
+
+/**
+ * Observations for the checks of a baseline scan (ubel-vm / ubel-k8s / ubel-runtime): a check that PASSED is the normal case (info,
+ * same type as its failed counterpart); one that applies but could not be evaluated is a coverage gap (low). Checks that do not apply
+ * (n/a) are not findings. Details use the posture finding shape, so the module's own modal renders them.
+ */
+export function checkObservations(checks, { passType, component_id, component_name, component_type, resource }) {
+  const out = [];
+  for (const k of arr(checks)) {
+    if (!isObj(k) || (k.status !== 'pass' && k.status !== 'unassessed')) continue;
+    const pass = k.status === 'pass';
+    out.push(observe({
+      rule_id: k.check, title: pass ? `${k.title ?? k.check}: passed` : `${k.title ?? k.check}: could not be assessed`,
+      component_id: component_id ?? null, component_name: component_name ?? null, component_type: component_type ?? null,
+      severity: pass ? 'info' : 'low', type: pass ? passType : TYPES.COVERAGE,
+      details: {
+        check: k.check, area: k.area ?? '', scope: '', resource: resource ?? component_name ?? '', severity: pass ? 'info' : 'low', rule_severity: k.severity ?? null,
+        title: k.title ?? k.check, outcome: k.status, frameworks: arr(k.frameworks), compliance: null,
+        description: pass ? 'The check ran and found nothing to report: this part of the baseline is in the expected state.' : `The check applies here but could not be evaluated${k.reason ? `: ${k.reason}` : ''}. A violation, if any, is not in this report.`,
+        remediation: pass ? '' : 'Run the scan with the access the check needs (see the reason above), then scan again.',
+      },
+    }));
+  }
+  return out;
 }
 
 export function mkInventory(o) {
@@ -180,6 +258,7 @@ export function buildStats(findings, inventory, source) {
       total: findings.length,
       by_severity: bySev,
       by_type: count(findings, (f) => f.type),
+      by_status: count(findings, (f) => f.status),
       by_confidence: count(findings, (f) => f.confidence),
       violating_policy: findings.filter((f) => f.violate_policy === true).length,
     },
@@ -198,14 +277,14 @@ export function applyFindingStatus(inventory, findings, { vulnerable = 'vulnerab
   const by = new Map();
   for (const f of findings) {
     const id = f.affected_component_id;
-    if (id == null) continue;
+    if (id == null || isObservation(f) || f.status === STATUS.FALSE_POSITIVE) continue;   // normal behaviour / dismissed: not a reason to mark a component
     if (!by.has(id)) by.set(id, []);
     by.get(id).push(f);
   }
   for (const c of inventory) {
     const fs_ = by.get(c.component_id);
     if (!fs_ || !fs_.length) { if (c.status === 'unknown' || c.status === undefined) c.status = clean; continue; }
-    c.status = fs_.some((f) => f.type === 'sc_infection') ? infected : vulnerable;
+    c.status = fs_.some((f) => f.type === TYPES.INFECTION) ? infected : vulnerable;
     c.violate_policy = fs_.some((f) => f.violate_policy === true) ? true : (fs_.every((f) => f.violate_policy === false) ? false : c.violate_policy);
   }
   return inventory;

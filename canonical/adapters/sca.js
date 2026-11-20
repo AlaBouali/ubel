@@ -2,7 +2,7 @@
 // SCA (ubel-npm / pip / … / docker / os / secrets / license / resbom) → canonical.
 // Original keys used: vulnerabilities[], inventory[], secrets.findings[], policy, decision, scan_info, tool_info,
 // os_metadata, git_metadata, runtime, stats, compliance_summary, executive_summary, diffs, threat_intel.
-import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, TYPES } from '../common.js';
 
 export const family = 'sca';
 
@@ -33,7 +33,7 @@ export function translate(p, opts, H) {
       severity: v.severity,
       confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
-      type: v.is_infection ? 'sc_infection' : 'sc_vulnerability',
+      type: v.is_infection ? TYPES.INFECTION : TYPES.VULN,
       details: R.deep({ ...v, affected_dependency_sequences: seqFor(v, cid) }),
     }));
   }
@@ -48,7 +48,7 @@ export function translate(p, opts, H) {
       severity: s.severity,
       confidence: null,
       violate_policy: null,
-      type: 'secret',
+      type: TYPES.SECRET,
       details: R.deep(s),
     }));
   }
@@ -64,6 +64,28 @@ export function translate(p, opts, H) {
     }));
   }
   applyFindingStatus(out.inventory, out.findings);
+
+  // Licenses that need a decision (observations: appended after the advisories / secrets so those keep their positions).
+  // Permissive licenses are the normal case and are not listed; copyleft / proprietary / unrecognised ones are.
+  const LICENSE_SEV = { high: 'medium', medium: 'low', unknown: 'low' };
+  for (const c of arr(p.inventory)) {
+    const li = isObj(c.license_info) ? c.license_info : null;
+    const risk = li ? String(li.risk ?? 'unknown').toLowerCase() : null;
+    if (!li || !(risk in LICENSE_SEV)) continue;
+    const cid = c.id ?? `${c.name}@${c.version}`;
+    const lic = first(li.spdx, typeof c.license === 'string' ? c.license : null, 'no license declared');
+    out.findings.push(observe({
+      rule_id: `license.${risk}`,
+      title: `${risk === 'unknown' ? 'Unrecognised or missing license' : `${risk === 'high' ? 'Strong-copyleft / proprietary' : 'Weak-copyleft'} license`}: ${lic}`,
+      component_id: cid,
+      component_name: depName(c.name, c.ecosystem, c.version),
+      component_type: String(c.id ?? '').startsWith('pkg:') ? 'dependency' : 'application',
+      severity: LICENSE_SEV[risk],
+      type: TYPES.LICENSE,
+      details: R.deep({ license: lic, license_info: li, name: c.name, version: c.version, ecosystem: c.ecosystem,
+        description: `The declared license (${lic}) is classified ${risk} risk${li.category ? ` (${li.category})` : ''}${li.osi_approved === false ? ' and is not OSI-approved' : ''}. Check that it is compatible with how this component is distributed.` }),
+    }));
+  }
 
   // scopes: what was scanned
   out.scopes.push({ type: si.scan_scope === 'container-image' ? 'container_image' : 'filesystem', name: '.', path: '.', scope: si.scan_scope ?? null, scan_type: si.type ?? null });

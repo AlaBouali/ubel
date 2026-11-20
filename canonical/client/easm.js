@@ -8,11 +8,11 @@
 
 const reportData = (function (C) {
   const st = C.stats || {};
-  const isVuln = function (f) { return f.type === 'sc_vulnerability' || f.type === 'sc_infection'; };
+  const isVuln = function (f) { return f.type === 'vuln' || f.type === 'infection'; };
   return {
     inventory: C.inventory.filter(function (c) { return c.type === 'application'; }).map(function (c) { return c.details; }),
     vulnerabilities: C.findings.filter(isVuln).map(function (f) { return f.details; }),
-    misconfigurations: C.findings.filter(function (f) { return f.type === 'misconfiguration'; }).map(function (f) { return f.details; }),
+    misconfigurations: C.findings.filter(function (f) { return f.type === 'misconfig'; }).map(function (f) { return f.details; }),
     secrets: C.findings.filter(function (f) { return f.type === 'secret'; }).map(function (f) { return f.details; }),
     scope: C.inventory.filter(function (c) { return c.type === 'ip' || c.type === 'domain'; }).map(function (c) { return c.details; }),
     compliance_summary: C.compliance_summary, executive_summary: C.executive_summary, diffs: st.diffs || { enabled: false },
@@ -1280,8 +1280,8 @@ function openModal(html) {
 const FAMILY = {
   openFinding: function (i) {
     const f = CANON.findings[i], d = f.details;
-    if (f.type === 'sc_vulnerability' || f.type === 'sc_infection') { openVulnModal(vulnKey(d)); return true; }
-    if (f.type === 'misconfiguration') { openMisconfigModal(d.id); return true; }
+    if (f.type === 'vuln' || f.type === 'infection') { openVulnModal(vulnKey(d)); return true; }
+    if (f.type === 'misconfig') { openMisconfigModal(d.id); return true; }
     if (f.type === 'secret') { openSecretModal(secretKey(d)); return true; }
     return false;
   },
