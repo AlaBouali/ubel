@@ -25,7 +25,7 @@ const SCA_FINDING_REF = new Map();   // canonical finding index -> the original 
 const reportData = (function (C) {
   const vulns = [];
   C.findings.forEach(function (f, i) {
-    if (f.type === 'sc_vulnerability' || f.type === 'dependency_infection') { const v = JSON.parse(JSON.stringify(f.details)); vulns.push(v); SCA_FINDING_REF.set(i, v); }
+    if (f.type === 'sc_vulnerability' || f.type === 'sc_infection') { const v = JSON.parse(JSON.stringify(f.details)); vulns.push(v); SCA_FINDING_REF.set(i, v); }
   });
   assignFindingKeys(vulns);
   const secrets = C.findings.filter(function (f) { return f.type === 'secret'; }).map(function (f) { return f.details; });
