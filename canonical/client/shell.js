@@ -180,7 +180,7 @@ function cnSetupFindings() {
 // ── inventory ───────────────────────────────────────────────────────────────────────────────────────
 function cnRenderInventory() {
   const q = document.getElementById('i-search').value.toLowerCase(), type = document.getElementById('i-type').value, status = document.getElementById('i-status').value,
-    //eco = document.getElementById('i-eco').value, 
+    eco = document.getElementById('i-eco').value, 
     pol = document.getElementById('i-policy').value, has = document.getElementById('i-has').value;
   const count = {}; CANON.findings.forEach(function (f) { count[f.affected_component_id] = (count[f.affected_component_id] || 0) + 1; });
   const tbody = document.getElementById('i-body'); tbody.innerHTML = '';
@@ -188,7 +188,7 @@ function cnRenderInventory() {
   CANON.inventory.forEach(function (c, i) {
     if (type !== 'all' && c.type !== type) return;
     if (status !== 'all' && c.status !== status) return;
-    //if (eco !== 'all' && ((c.details && c.details.ecosystem) || '') !== eco) return;
+    if (eco !== 'all' && ((c.details && c.details.ecosystem) || '') !== eco) return;
     if (pol === 'violate' && c.violate_policy !== true) return;
     if (pol === 'safe' && c.violate_policy === true) return;
     if (has === 'with' && !count[c.component_id]) return;
