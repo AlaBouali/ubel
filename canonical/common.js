@@ -73,7 +73,7 @@ export function makeRel(root) {
 //   behavior    what the software does or runs (capabilities, processes, tools)  exposure    reachable network surface (open ports, listeners, remote hosts)
 //   license     license obligation / risk of a component                         coverage    part of the scan that could not be (fully) assessed
 export const TYPES = {
-  VULN: 'vuln', INFECTION: 'infection', SECRET: 'secret', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
+  VULN: 'vuln', SC_VULN: 'sc_vuln', SC_INFECTION: 'sc_infection', SECRET: 'secret', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
   BEHAVIOR: 'behavior', EXPOSURE: 'exposure', LICENSE: 'license', COVERAGE: 'coverage',
 };
 

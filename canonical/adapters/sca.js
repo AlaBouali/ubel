@@ -33,7 +33,7 @@ export function translate(p, opts, H) {
       severity: v.severity,
       confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
-      type: v.is_infection ? TYPES.INFECTION : TYPES.VULN,
+      type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
       details: R.deep({ ...v, affected_dependency_sequences: seqFor(v, cid) }),
     }));
   }
