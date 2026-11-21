@@ -371,6 +371,12 @@ async function scanTargetsGuarded(targets, opts = {}) {
   const assets = cleanTargets.map((t) => assetByTarget.get(t)).filter(Boolean);
 
   let inventory = [...inventoryByKey.values()];
+  for (const item of inventory) {
+    if (item.name.toLowerCase().includes("nginx")) {
+      item.ids.push(`cpe:2.3:a:nginx:nginx:${item.version}:*:*:*:*:*:*:*`);
+      item.ids.push(`cpe:2.3:a:f5:nginx_open_source:${item.version}:*:*:*:*:*:*:*`);
+    }
+  }
   log(`[*] ${inventory.length} unique component(s) fingerprinted across all targets.`);
 
   // Reverse lookup so a vulnerability found under any one of an item's ids
