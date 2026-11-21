@@ -195,7 +195,7 @@ function cnRenderFindings() {
       +'<td class="px-6 py-4">' + cnSevBadge(f.severity) + '</td>'
       + '<td class="px-6 py-4">' + cnTypeChip(f.type) + '</td>'
       + '<td class="px-6 py-4 mono text-xs text-neutral-400 break-all">' + cnEsc(f.affected_component_name) + '</td>'
-      + '<td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(f.confidence || '') + '</td>'
+      + '<td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(f.confidence || 'high') + '</td>'
       + '<td class="px-6 py-4">' + cnStatusCell(f) + '</td>'
       + '<td class="px-6 py-4">' + cnPolicyCell(f.violate_policy) + '</td>'
       + '<td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>';

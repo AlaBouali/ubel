@@ -28,7 +28,7 @@ export function translate(p, opts, H) {
       component_name: res,
       component_type: kind,
       severity: f.severity,
-      confidence: null,
+      confidence: "high",
       violate_policy: violates(f.severity),
       type: isK8s ? TYPES.MISCONFIG : TYPES.HARDENING,
       details: R.deep(f),

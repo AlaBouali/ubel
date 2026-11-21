@@ -77,7 +77,7 @@ export function translate(p, opts, H) {
         component_name: depName(d.name, d.ecosystem, d.version),
         component_type: 'dependency',
         severity: v.severity,
-        confidence: d.confidence ?? null,
+        confidence: d.confidence ?? "high",
         violate_policy: v.is_policy_violation ?? violates(v.severity),
         type: v.is_infection ? TYPES.INFECTION : TYPES.VULN,
         details: R.deep(v),

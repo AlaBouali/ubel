@@ -21,7 +21,7 @@ export function translate(p, opts, H) {
       component_name: f.resource ? lastSeg(f.resource) : null,
       component_type: 'cloud_resource',
       severity: f.severity,
-      confidence: f.confidence ?? null,
+      confidence: f.confidence ?? "high",
       violate_policy: violates(f.severity),
       type: TYPES.MISCONFIG,
       details: f,

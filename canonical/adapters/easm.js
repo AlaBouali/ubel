@@ -36,9 +36,10 @@ export function translate(p, opts, H) {
       rule_id: `${v.id}-${pname}${pver ? `@${pver}` : ''}`,   // advisory-componentname@version
       title: `${v.id} affecting ${cname}`,//first(v.summary, v.id),
       component_id: cid, component_name: cname, component_type: 'application',
+      confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
       severity: v.severity, confidence: v.release_confidence?.level ?? null,
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
-      type: v.is_infection ? TYPES.INFECTION : TYPES.VULN, details: R.deep(v),
+      type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN, details: R.deep(v),
     }));
   }
 

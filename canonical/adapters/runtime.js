@@ -59,7 +59,7 @@ export function translate(p, opts, H) {
     }
     out.findings.push(mkFinding({
       rule_id: rule, title: f.title, component_id: cid, component_name: cname, component_type: ctype,
-      severity: f.severity, confidence: null, violate_policy: violates(f.severity), type, details,
+      severity: f.severity, confidence: "high", violate_policy: violates(f.severity), type, details,
     }));
     if (cid && type !== TYPES.VULN) derived.push(mkInventory({ component_id: cid, component_name: cname, status: 'running', type: 'application', details: { resource: f.resource, scope: f.scope ?? null, area: f.area ?? null } }));
   }
