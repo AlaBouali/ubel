@@ -25,7 +25,8 @@ const SCA_FINDING_REF = new Map();   // canonical finding index -> the original 
 const reportData = (function (C) {
   const vulns = [];
   C.findings.forEach(function (f, i) {
-    if (f.type === 'vuln' || f.type === 'infection') { const v = JSON.parse(JSON.stringify(f.details)); vulns.push(v); SCA_FINDING_REF.set(i, v); }
+    // sc_vuln / sc_infection are what the SCA adapter emits; vuln / infection are accepted too so canonical JSON written earlier still renders
+    if (f.type === 'sc_vuln' || f.type === 'sc_infection' || f.type === 'vuln' || f.type === 'infection') { const v = JSON.parse(JSON.stringify(f.details)); vulns.push(v); SCA_FINDING_REF.set(i, v); }
   });
   assignFindingKeys(vulns);
   const secrets = C.findings.filter(function (f) { return f.type === 'secret'; }).map(function (f) { return f.details; });

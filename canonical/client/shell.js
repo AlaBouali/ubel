@@ -40,6 +40,45 @@ function cnHeader(title, controls) { return '<div class="flex flex-col md:flex-r
 function cnTable(heads, bodyId, empty) { return '<div class="glass rounded-xl overflow-hidden"><table class="w-full text-left text-sm"><thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest"><tr>' + heads.map(function (h, i) { return '<th class="' + (i === 0 ? 'px-6 ' : '') + 'py-4' + (h === 'Action' ? ' text-right' : '') + '">' + cnEsc(h) + '</th>'; }).join('') + '</tr></thead><tbody id="' + bodyId + '" class="divide-y divide-neutral-800"></tbody></table></div>'; }
 function cnEmptyRow(cols, text) { return '<tr><td colspan="' + cols + '" class="px-6 py-12 text-center text-neutral-500 italic">' + cnEsc(text) + '</td></tr>'; }
 
+// ── pagination (findings + inventory: 20 rows per page) ─────────────────────────────────────────────
+// cnPage holds the current page of each list ('f' findings, 'i' inventory). Changing a filter / search goes back to page 1.
+const CN_PAGE_SIZE = 20;
+const cnPage = { f: 1, i: 1 };
+function cnPageRows(key, rows) {                      // the rows of the current page (the page is clamped to the rows that exist)
+  const pages = Math.max(1, Math.ceil(rows.length / CN_PAGE_SIZE));
+  cnPage[key] = Math.min(Math.max(cnPage[key], 1), pages);
+  const start = (cnPage[key] - 1) * CN_PAGE_SIZE;
+  return rows.slice(start, start + CN_PAGE_SIZE);
+}
+function cnPagerHtml(key) { return '<div id="' + key + '-pager" class="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-neutral-400"></div>'; }
+function cnRenderPager(key, total, rerender) {
+  const el = document.getElementById(key + '-pager'); if (!el) return;
+  if (!total) { el.innerHTML = ''; return; }
+  const pages = Math.ceil(total / CN_PAGE_SIZE), cur = cnPage[key];
+  const from = (cur - 1) * CN_PAGE_SIZE + 1, to = Math.min(cur * CN_PAGE_SIZE, total);
+  const base = 'min-w-[2rem] px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ';
+  const btn = function (label, p, active, disabled) {
+    return '<button type="button" data-p="' + p + '"' + (disabled ? ' disabled' : '') + ' class="' + base + (active ? 'bg-red-600 border-red-600 text-white' : disabled ? 'border-neutral-800 text-neutral-600 cursor-default' : 'bg-neutral-800 border-neutral-700 text-neutral-300 hover:bg-neutral-700') + '">' + label + '</button>';
+  };
+  const nums = [];                                    // first, last and the pages around the current one; "…" for the gaps
+  for (let p = 1; p <= pages; p++) if (p === 1 || p === pages || Math.abs(p - cur) <= 1) nums.push(p);
+  let html = '';
+  nums.forEach(function (p, k) {
+    if (k && p - nums[k - 1] > 1) html += '<span class="px-1 text-neutral-600">…</span>';
+    html += btn(p, p, p === cur, false);
+  });
+  el.innerHTML = '<span>Showing ' + from + '–' + to + ' of ' + total + '</span>'
+    + (pages > 1 ? '<div class="flex items-center gap-1 flex-wrap justify-center">' + btn('Prev', cur - 1, false, cur === 1) + html + btn('Next', cur + 1, false, cur === pages) + '</div>' : '');
+  Array.prototype.forEach.call(el.querySelectorAll('button[data-p]:not([disabled])'), function (b) {
+    b.onclick = function () {
+      cnPage[key] = +b.getAttribute('data-p');
+      rerender();
+      const table = el.previousElementSibling;        // keep the top of the table in view after a page change
+      if (table) { const top = table.getBoundingClientRect().top + window.pageYOffset - 150; if (window.pageYOffset > top) window.scrollTo({ top: top }); }
+    };
+  });
+}
+
 // key/value rendering of an arbitrary original block (stats, policy, …): scalars as rows, nested values as indented rows
 function cnKv(obj, depth) {
   depth = depth || 0;
@@ -145,8 +184,8 @@ function cnRenderFindings() {
     rows.push([i, f]);
   });
   rows.sort(function (a, b) { return CN_SEV.indexOf(a[1].severity) - CN_SEV.indexOf(b[1].severity); });
-  if (!rows.length) { tbody.innerHTML = cnEmptyRow(9, 'No findings match the criteria.'); return; }
-  rows.forEach(function (r) {
+  if (!rows.length) { tbody.innerHTML = cnEmptyRow(9, 'No findings match the criteria.'); cnRenderPager('f', 0, cnRenderFindings); return; }
+  cnPageRows('f', rows).forEach(function (r) {
     const f = r[1], tr = document.createElement('tr');
     tr.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
     tr.onclick = function () { cnOpenFinding(r[0]); };
@@ -162,7 +201,9 @@ function cnRenderFindings() {
       + '<td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>';
     tbody.appendChild(tr);
   });
+  cnRenderPager('f', rows.length, cnRenderFindings);
 }
+function cnFindingsFilterChanged() { cnPage.f = 1; cnRenderFindings(); }
 function cnSetupFindings() {
   const F = CANON.findings;
   document.getElementById('section-findings').innerHTML = cnHeader('Findings',
@@ -172,9 +213,9 @@ function cnSetupFindings() {
     + cnSelect('f-conf', 'All Confidence', cnUniq(F.map(function (f) { return f.confidence; })))
     + '<select id="f-status" class="' + CN_SELECT + '"><option value="all">All Statuses</option><option value="reachable">Reachable</option><option value="non reachable">Non reachable</option><option value="false positive">False positive</option></select>'
     + '<select id="f-policy" class="' + CN_SELECT + '"><option value="all">All Policy</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select>')
-    + cnTable([ 'Title', 'Severity', 'Type', 'Component', 'Confidence', 'Status', 'Policy', 'Action'], 'f-body');
-  ['f-search'].forEach(function (id) { document.getElementById(id).addEventListener('input', cnRenderFindings); });
-  ['f-sev', 'f-type', 'f-conf', 'f-status', 'f-policy'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderFindings); });
+    + cnTable([ 'Title', 'Severity', 'Type', 'Component', 'Confidence', 'Status', 'Policy', 'Action'], 'f-body') + cnPagerHtml('f');
+  ['f-search'].forEach(function (id) { document.getElementById(id).addEventListener('input', cnFindingsFilterChanged); });
+  ['f-sev', 'f-type', 'f-conf', 'f-status', 'f-policy'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnFindingsFilterChanged); });
   cnRenderFindings();
 }
 
@@ -197,8 +238,8 @@ function cnRenderInventory() {
     if (q && [c.component_name, c.type].join(' ').toLowerCase().indexOf(q) < 0) return;
     rows.push([i, c]);
   });
-  if (!rows.length) { tbody.innerHTML = cnEmptyRow(6, 'No inventory entries match the criteria.'); return; }
-  rows.slice(0, 1500).forEach(function (r) {
+  if (!rows.length) { tbody.innerHTML = cnEmptyRow(6, 'No inventory entries match the criteria.'); cnRenderPager('i', 0, cnRenderInventory); return; }
+  cnPageRows('i', rows).forEach(function (r) {
     const c = r[1], tr = document.createElement('tr');
     tr.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
     tr.onclick = function () { cnOpenInventory(r[0]); };
@@ -209,8 +250,9 @@ function cnRenderInventory() {
       + '<td class="px-6 py-4 text-right"><button class="text-red-400 hover:text-red-300 text-xs font-semibold">View Details</button></td>';
     tbody.appendChild(tr);
   });
-  if (rows.length > 1500) { const tr = document.createElement('tr'); tr.innerHTML = '<td colspan="6" class="px-6 py-4 text-center text-xs text-neutral-500 italic">Showing the first 1500 of ' + rows.length + ' entries; narrow the filters to see the rest.</td>'; tbody.appendChild(tr); }
+  cnRenderPager('i', rows.length, cnRenderInventory);
 }
+function cnInventoryFilterChanged() { cnPage.i = 1; cnRenderInventory(); }
 function cnSetupInventory() {
   const I = CANON.inventory;
   document.getElementById('section-inventory').innerHTML = cnHeader('Inventory',
@@ -220,9 +262,9 @@ function cnSetupInventory() {
     + cnSelect('i-eco', 'All Ecosystems', cnUniq(I.map(function (c) { return c.details && c.details.ecosystem; })))
     + '<select id="i-policy" class="' + CN_SELECT + '"><option value="all">All</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select>'
     + '<select id="i-has" class="' + CN_SELECT + '"><option value="all">All</option><option value="with">With findings</option><option value="without">Without findings</option></select>')
-    + cnTable(['Component', 'Type', 'State', 'Findings', 'Policy Violation', 'Action'], 'i-body');
-  document.getElementById('i-search').addEventListener('input', cnRenderInventory);
-  ['i-type', 'i-status', 'i-eco', 'i-policy', 'i-has'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderInventory); });
+    + cnTable(['Component', 'Type', 'State', 'Findings', 'Policy Violation', 'Action'], 'i-body') + cnPagerHtml('i');
+  document.getElementById('i-search').addEventListener('input', cnInventoryFilterChanged);
+  ['i-type', 'i-status', 'i-eco', 'i-policy', 'i-has'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnInventoryFilterChanged); });
   cnRenderInventory();
 }
 
@@ -266,7 +308,7 @@ function cnRenderStats() {
     + '</div>';
   const extra = [];
   if (st.source) extra.push(cnBlock('Scanner Statistics', st.source));
-  Object.keys(st).forEach(function (k) { if (['findings', 'inventory', 'source', 'diffs', 'compliance_posture'].indexOf(k) < 0 && st[k] != null) extra.push(cnBlock(cnTitle(k), st[k])); });
+  Object.keys(st).forEach(function (k) { if (['findings', 'inventory', 'source', 'diffs', 'compliance_posture', 'findings_summary'].indexOf(k) < 0 && st[k] != null) extra.push(cnBlock(cnTitle(k), st[k])); });
   if (extra.length) html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">' + extra.join('') + '</div>';
   sec.innerHTML = html;
   const keys = function (o) { return Object.keys(o || {}); }, vals = function (o) { return keys(o).map(function (k) { return o[k]; }); };

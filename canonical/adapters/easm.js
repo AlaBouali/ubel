@@ -22,7 +22,7 @@ export function translate(p, opts, H) {
   for (const it of arr(p.inventory)) {
     const cid = prodId(it.name ?? 'unknown', it.version);
     const cname = depName(it.name, it.ecosystem, it.version);
-    for (const id of [it.id, ...arr(it.ids)]) if (id) byId.set(id, { cid, cname });
+    for (const id of [it.id, ...arr(it.ids)]) if (id) byId.set(id, { cid, cname, name: it.name ?? 'unknown', version: it.version });
     out.inventory.push(mkInventory({ component_id: cid, component_name: cname, status: it.state ?? 'undetermined', type: 'application', details: R.deep(it) }));
   }
 
@@ -30,8 +30,11 @@ export function translate(p, opts, H) {
     const hit = byId.get(v.affected_package_id) || null;
     const cid = hit ? hit.cid : prodId(v.affected_dependency ?? 'unknown', v.affected_dependency_version);
     const cname = hit ? hit.cname : depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version);
+    const pname = hit ? hit.name : (v.affected_dependency ?? 'unknown');
+    const pver = hit ? hit.version : v.affected_dependency_version;
     out.findings.push(mkFinding({
-      rule_id: v.id, title: `${v.id} affecting ${cname}`,//first(v.summary, v.id), 
+      rule_id: `${v.id}-${pname}${pver ? `@${pver}` : ''}`,   // advisory-componentname@version
+      title: `${v.id} affecting ${cname}`,//first(v.summary, v.id),
       component_id: cid, component_name: cname, component_type: 'application',
       severity: v.severity, confidence: v.release_confidence?.level ?? null,
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
