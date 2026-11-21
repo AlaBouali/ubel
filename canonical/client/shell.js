@@ -150,9 +150,10 @@ function cnRenderFindings() {
     const f = r[1], tr = document.createElement('tr');
     tr.className = 'hover:bg-neutral-800/30 transition-colors cursor-pointer';
     tr.onclick = function () { cnOpenFinding(r[0]); };
-    tr.innerHTML = '<td class="px-6 py-4 mono text-xs font-medium">' + cnEsc(f.rule_id) + (f.finding_id ? '<div class="text-[10px] text-neutral-600 font-normal">' + cnEsc(f.finding_id) + '</div>' : '') + '</td>'
-      + '<td class="px-6 py-4">' + cnSevBadge(f.severity) + '</td>'
-      + '<td class="px-6 py-4 font-medium">' + cnEsc(f.title) + '</td>'
+    tr.innerHTML = //'<td class="px-6 py-4 mono text-xs font-medium">' + cnEsc(f.rule_id) + (f.finding_id ? '<div class="text-[10px] text-neutral-600 font-normal">' + cnEsc(f.finding_id) + '</div>' : '') + '</td>'
+      //+ 
+      '<td class="px-6 py-4 font-medium">' + cnEsc(f.title) + '</td>'
+      +'<td class="px-6 py-4">' + cnSevBadge(f.severity) + '</td>'
       + '<td class="px-6 py-4">' + cnTypeChip(f.type) + '</td>'
       + '<td class="px-6 py-4 mono text-xs text-neutral-400 break-all">' + cnEsc(f.affected_component_name) + '</td>'
       + '<td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(f.confidence || '') + '</td>'
@@ -165,13 +166,13 @@ function cnRenderFindings() {
 function cnSetupFindings() {
   const F = CANON.findings;
   document.getElementById('section-findings').innerHTML = cnHeader('Findings',
-    '<input type="text" id="f-search" placeholder="Search rule, title or component..." class="' + CN_INPUT + '">'
+    '<input type="text" id="f-search" placeholder="Search: title or component..." class="' + CN_INPUT + '">'
     + '<select id="f-sev" class="' + CN_SELECT + '"><option value="all">All Severities</option>' + CN_SEV.map(function (s) { return '<option value="' + s + '">' + cnTitle(s) + '</option>'; }).join('') + '</select>'
     + cnSelect('f-type', 'All Types', cnUniq(F.map(function (f) { return f.type; })))
     + cnSelect('f-conf', 'All Confidence', cnUniq(F.map(function (f) { return f.confidence; })))
     + '<select id="f-status" class="' + CN_SELECT + '"><option value="all">All Statuses</option><option value="reachable">Reachable</option><option value="non reachable">Non reachable</option><option value="false positive">False positive</option></select>'
     + '<select id="f-policy" class="' + CN_SELECT + '"><option value="all">All Policy</option><option value="violate">Violates Policy</option><option value="safe">Policy Safe</option></select>')
-    + cnTable(['Rule', 'Severity', 'Title', 'Type', 'Component', 'Confidence', 'Status', 'Policy', 'Action'], 'f-body');
+    + cnTable([ 'Title', 'Severity', 'Type', 'Component', 'Confidence', 'Status', 'Policy', 'Action'], 'f-body');
   ['f-search'].forEach(function (id) { document.getElementById(id).addEventListener('input', cnRenderFindings); });
   ['f-sev', 'f-type', 'f-conf', 'f-status', 'f-policy'].forEach(function (id) { document.getElementById(id).addEventListener('change', cnRenderFindings); });
   cnRenderFindings();

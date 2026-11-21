@@ -25,7 +25,7 @@ export function translate(p, opts, H) {
   for (const v of arr(p.vulnerabilities)) {
     const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
     out.findings.push(mkFinding({
-      rule_id: v.id,
+      rule_id: `${v.id}-${v.ecosystem}-${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`,
       title: `${v.id} affecting ${depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version)}`,
       component_id: cid,
       component_name: depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version),
