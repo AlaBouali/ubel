@@ -26,7 +26,7 @@ export function translate(p, opts, H) {
     const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
     out.findings.push(mkFinding({
       rule_id: v.id,
-      title: first(v.summary, v.id),
+      title: `${v.id} affecting ${depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version)}`,
       component_id: cid,
       component_name: depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version),
       component_type: 'dependency',

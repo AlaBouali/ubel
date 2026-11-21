@@ -31,7 +31,8 @@ export function translate(p, opts, H) {
     const cid = hit ? hit.cid : prodId(v.affected_dependency ?? 'unknown', v.affected_dependency_version);
     const cname = hit ? hit.cname : depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version);
     out.findings.push(mkFinding({
-      rule_id: v.id, title: first(v.summary, v.id), component_id: cid, component_name: cname, component_type: 'application',
+      rule_id: v.id, title: `${v.id} affecting ${cname}`,//first(v.summary, v.id), 
+      component_id: cid, component_name: cname, component_type: 'application',
       severity: v.severity, confidence: v.release_confidence?.level ?? null,
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
       type: v.is_infection ? TYPES.INFECTION : TYPES.VULN, details: R.deep(v),
@@ -58,7 +59,7 @@ export function translate(p, opts, H) {
   // discovered network entities → inventory (ip / domain); the scanned scope itself goes to scopes[]
   for (const row of arr(p.scope)) {
     const type = row.type === 'ip' ? 'ip' : 'domain';
-    out.inventory.push(mkInventory({ component_id: row.name, component_name: row.name, status: row.status ?? 'unknown', type, details: R.deep(row) }));
+    out.inventory.push(mkInventory({ component_id: row.name, component_name: row.name, ecosystem: row.ecosystem ?? "network", status: row.status ?? 'unknown', type, details: R.deep(row) }));
     out.scopes.push({ type, name: row.name, status: row.status ?? null, ...R.deep(row) });
   }
   for (const a of arr(p.assets)) out.scopes.push({ type: 'url', name: a.target, status: a.status ?? null, ...R.deep(a) });
