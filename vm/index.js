@@ -96,6 +96,7 @@ const spec = {
           lookup: r.os.error || r.apps.error ? 'incomplete' : 'complete',
         };
         for (const n of r.notes) ctx.notes.push(n);
+        if (!args.quiet) console.log(`[ubel-vm] Package list: ${r.os.installed} operating-system${r.os.distro ? ` (${r.os.distro})` : ''}${r.apps.scanned ? ` + ${r.apps.installed} application` : ''} package(s) read${r.os.error || r.apps.error ? ' — advisory lookup incomplete (see the notes)' : ''}${r.os.supported ? '' : ` — operating-system list unavailable: ${r.os.reason}`}`);
       },
       ...(args.fsMaxEntries ? { fsMaxEntries: args.fsMaxEntries } : {}),
       ...(args.fsTimeout ? { fsTimeoutMs: args.fsTimeout * 1000 } : {}),

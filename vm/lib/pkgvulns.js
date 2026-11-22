@@ -58,6 +58,17 @@ function compactPackage(c, vulns, unassessed) {
 }
 
 /**
+ * Last resort for the operating-system list: the package database read straight by SCA's package reader (no scan pipeline, no network),
+ * used when the SCA scan itself failed for a reason that has nothing to do with the packages. The items are SCA inventory items.
+ */
+async function readOsPackagesDirect(base) {
+  const { LinuxHostScanner } = await import('../../sca/linux_runner.js');
+  const scanner = new LinuxHostScanner(base);
+  scanner.getInstalled();
+  return Array.isArray(scanner.inventoryData) ? scanner.inventoryData : [];
+}
+
+/**
  * Runs one SCA scan with its vulnerability lookup; when the lookup cannot be completed the same scan is repeated WITHOUT it, so the
  * package list is still read (it is local) and the failure is returned for the checks to report as "not assessed".
  * @returns {Promise<{result:object|null, error:Error|null}>}
@@ -86,6 +97,13 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
   const os = { supported: true, reason: null, ecosystem: '', distro: '', installed: 0, error: null };
   const apps = { scanned: false, roots: [], installed: 0, osInstalledSkipped: 0, error: null };
   let mode;
+  /** the SCA scan failed for good: still list the operating-system packages (the error stays, so the check is "not assessed") */
+  const direct = async (b, into, notesOut, why) => {
+    try {
+      const inv = await readOsPackagesDirect(b);
+      if (inv.length) { into.push({ vulnerabilities: [], inventory: inv, scan_warnings: [], threat_intel: null }); notesOut.push(`The SCA scan failed (${why && why.message}); the operating-system package list was read directly from the package database.`); }
+    } catch (e) { notesOut.push(`The SCA scan failed (${why && why.message}) and the package database could not be read directly either (${e.message}).`); }
+  };
 
   if (live) {
     mode = 'platform';
@@ -93,6 +111,7 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
       const g = await guarded((vulns) => scanPlatform({ workDir, threatIntel, vulns, log }));
       if (g.result) parts.push(g.result);
       if (g.error) os.error = g.error;
+      if (!g.result) await direct(base, parts, notes, g.error);
     } catch (e) { os.supported = false; os.reason = e.message; }
     if (!skipApps) {
       const dirs = [...new Set([...DEFAULT_APP_ROOTS, ...extraRoots].map((d) => path.posix.normalize(d)))].filter((d) => isDir(d));
@@ -112,6 +131,7 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
       if (!skipApps) g = await guarded((vulns) => scanDocker({ root: base || '/', workDir, threatIntel, vulns, scanOs: false, log }));
     }
     if (g && g.result) parts.push(g.result);                           // one docker-mode scan holds both halves
+    if (g && !g.result && os.supported) await direct(base, parts, notes, g.error);
     if (g && g.error) { if (os.supported) os.error = g.error; apps.error = g.error; }
     apps.scanned = !skipApps; if (!skipApps) apps.roots.push('/');
   }
@@ -119,8 +139,8 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
   const merged = mergeResults(parts);
   if (!parts.length && !os.error && !apps.error) throw new PackageScanUnsupported(os.reason || 'no package database and no application location to read');
   if (!os.supported) notes.push(`The operating-system package list could not be read: ${os.reason}`);
-  if (os.error) notes.push(`The vulnerability lookup for the operating-system packages could not be completed (${os.error.message}); the package list is reported without advisories.`);
-  if (apps.error) notes.push(`The vulnerability lookup for the application packages could not be completed (${apps.error.message}); the package list is reported without advisories.`);
+  if (os.error) notes.push(`The SCA scan of the operating-system packages did not complete (${os.error.message}); the package list is reported without advisories and the check is not assessed.`);
+  if (apps.error) notes.push(`The SCA scan of the application packages did not complete (${apps.error.message}); the package list is reported without advisories and the check is not assessed.`);
 
   // application packages the distribution itself installed are the operating-system check's business
   const owners = new OwnerIndex(base || '/').load();
@@ -138,6 +158,7 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
   if (osInv.length) { os.ecosystem = osInv[0].ecosystem || ''; os.distro = osInv[0].distro || ''; }
   apps.installed = inventory.length - osInv.length;
   for (const w of merged.scan_warnings) notes.push(w);
+  notes.push(`Package list: ${os.installed} operating-system package(s)${os.distro ? ` (${os.distro})` : ''}${apps.scanned ? ` and ${apps.installed} application package(s)` : ''} read${os.supported ? '' : '; the operating-system list was not available'} (report tab: Inventory / Packages).`);
 
   const byPkg = new Map();
   for (const v of vulnerabilities) { if (!byPkg.has(v.affected_package_id)) byPkg.set(v.affected_package_id, []); byPkg.get(v.affected_package_id).push(v); }

@@ -398,6 +398,7 @@ async function generateHtmlReport(reportPayload) {
       <button onclick="switchTab('dashboard')" id="tab-dashboard" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors tab-active">Dashboard</button>
       <button onclick="switchTab('executive')" id="tab-executive" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Executive Summary</button>
       <button onclick="switchTab('findings')"  id="tab-findings"  class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Findings(0)</button>
+      <button onclick="switchTab('packages')"  id="tab-packages"  class="hidden py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Packages(0)</button>
       <button onclick="switchTab('compliance')" id="tab-compliance" class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Compliance(0)</button>
       <button onclick="switchTab('diffs')"      id="tab-diffs"      class="hidden py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Diffs</button>
       <button onclick="switchTab('stats')"      id="tab-stats"      class="py-4 text-sm font-medium text-neutral-400 hover:text-white transition-colors">Detailed Stats</button>
@@ -485,6 +486,34 @@ async function generateHtmlReport(reportPayload) {
             </tr>
           </thead>
           <tbody id="findings-table-body" class="divide-y divide-neutral-800"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Installed packages (ubel-vm) -->
+    <section id="section-packages" class="hidden space-y-4">
+      <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
+        <input id="p-search" type="text" placeholder="Search package, version, ecosystem, license, path..."
+               class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
+               oninput="renderPackages()">
+        <select id="p-state" onchange="renderPackages()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+          <option value="all">All states</option>
+          <option value="infected">Infected</option>
+          <option value="vulnerable">Vulnerable</option>
+          <option value="unknown">Not assessed</option>
+          <option value="safe">Safe</option>
+        </select>
+        <select id="p-eco" onchange="renderPackages()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm">
+          <option value="all">All ecosystems</option>
+        </select>
+        <span id="p-count" class="text-xs text-neutral-500"></span>
+      </div>
+      <div class="glass rounded-xl overflow-x-auto">
+        <table class="w-full text-left">
+          <thead class="border-b border-neutral-800 text-xs text-neutral-500 uppercase tracking-wider">
+            <tr><th class="px-4 py-3">Package</th><th class="px-4 py-3">Version</th><th class="px-4 py-3">Ecosystem</th><th class="px-4 py-3">License</th><th class="px-4 py-3">State</th><th class="px-4 py-3">Location</th></tr>
+          </thead>
+          <tbody id="packages-table-body" class="divide-y divide-neutral-800"></tbody>
         </table>
       </div>
     </section>
@@ -1239,6 +1268,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderCompliancePosture();
   try { renderDiffs(); } catch (e) { console.error('Diffs render failed:', e); }
   renderStats();
+  try { renderPackages(); } catch (e) { console.error('Packages render failed:', e); }
 });
 
 // ── TAB LABEL COUNTS ─────────────────────────────────────────────────────────
@@ -1248,6 +1278,41 @@ function updateTabCounts() {
   const cs = reportData.compliance_summary;
   document.getElementById('tab-compliance').textContent = 'Compliance(' + (cs && cs.frameworks ? cs.frameworks.length : 0) + ')';
   if (reportData.diffs && reportData.diffs.enabled) document.getElementById('tab-diffs').classList.remove('hidden');
+  const pk = reportData.package_inventory;
+  if (Array.isArray(pk) && pk.length) { const t = document.getElementById('tab-packages'); t.classList.remove('hidden'); t.textContent = 'Packages(' + pk.length + ')'; }
+}
+
+// ── INSTALLED PACKAGES (ubel-vm: the list the SCA engine read; the canonical report opens each one in the SCA package modal) ──
+const PKG_STATE_CLASS = { infected: 'text-red-400', vulnerable: 'text-orange-400', unknown: 'text-yellow-400', safe: 'text-green-400' };
+const PKG_STATE_LABEL = { unknown: 'not assessed' };
+function renderPackages() {
+  const all = Array.isArray(reportData.package_inventory) ? reportData.package_inventory : [];
+  const body = document.getElementById('packages-table-body');
+  if (!body) return;
+  const eco = document.getElementById('p-eco');
+  if (eco && eco.options.length <= 1) {
+    Array.from(new Set(all.map(function (c) { return c.ecosystem; }).filter(Boolean))).sort().forEach(function (e) { const o = document.createElement('option'); o.value = e; o.textContent = e; eco.appendChild(o); });
+  }
+  const q = (document.getElementById('p-search').value || '').toLowerCase();
+  const st = document.getElementById('p-state').value;
+  const ec = eco ? eco.value : 'all';
+  const rows = all.filter(function (c) {
+    if (st !== 'all' && c.state !== st) return false;
+    if (ec !== 'all' && c.ecosystem !== ec) return false;
+    if (!q) return true;
+    const loc = (c.paths || []).map(function (p) { return p && p.text ? p.text : String(p || ''); }).join(' ');
+    return (c.name + ' ' + c.version + ' ' + c.ecosystem + ' ' + (c.license || '') + ' ' + loc).toLowerCase().indexOf(q) !== -1;
+  });
+  const LIMIT = 2000;
+  body.innerHTML = rows.slice(0, LIMIT).map(function (c) {
+    const loc = (c.paths && c.paths[0]) ? (c.paths[0].text || String(c.paths[0])) : '';
+    return '<tr class="hover:bg-neutral-800/40"><td class="px-4 py-2 text-sm font-medium">' + escH(c.name) + '</td><td class="px-4 py-2 mono text-xs text-neutral-300">' + escH(c.version) + '</td>'
+      + '<td class="px-4 py-2 text-xs text-neutral-400">' + escH(c.ecosystem) + (c.distro ? ' <span class="text-neutral-600">' + escH(c.distro) + '</span>' : '') + '</td>'
+      + '<td class="px-4 py-2 text-xs text-neutral-400">' + escH(c.license || '-') + '</td>'
+      + '<td class="px-4 py-2 text-xs font-bold uppercase ' + (PKG_STATE_CLASS[c.state] || 'text-neutral-400') + '">' + escH(PKG_STATE_LABEL[c.state] || c.state) + '</td>'
+      + '<td class="px-4 py-2 mono text-[11px] text-neutral-500 break-all">' + escH(loc) + '</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="px-4 py-6 text-sm text-neutral-500">No package matches.</td></tr>';
+  document.getElementById('p-count').textContent = rows.length + ' of ' + all.length + ' package(s)' + (rows.length > LIMIT ? ' - showing the first ' + LIMIT + '; narrow the filter' : '');
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
