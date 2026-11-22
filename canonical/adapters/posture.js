@@ -48,11 +48,12 @@ export function translate(p, opts, H) {
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'non_compliant', clean: 'compliant' });
 
-  // The installed-package list (ubel-vm: operating-system and application packages, as the SCA engine read them). Every package is a
+  // The installed packages (ubel-vm: operating-system and application packages, as the SCA engine read them), the dependency entries of the
+  // payload's inventory. Every package is a
   // dependency of the inventory, like in an SCA report, whether or not it has an advisory; the dependency entries that the findings
   // above created are replaced by these. Their status uses the SCA words (vulnerable / infected / clean) and their details are the SCA
   // inventory item, which the SCA package modal renders.
-  const pkgs = arr(p.package_inventory).filter((c) => isObj(c) && c.id);
+  const pkgs = arr(p.inventory).filter((i) => isObj(i) && i.type === 'dependency' && isObj(i.details) && i.details.id).map((i) => i.details);
   if (pkgs.length) {
     const ids = new Set(pkgs.map((c) => c.id));
     out.inventory = out.inventory.filter((i) => !(i.type === 'dependency' && ids.has(i.component_id)));
