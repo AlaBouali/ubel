@@ -76,7 +76,7 @@ export async function writeCanonical({ payload, tag, cli, cwd, latestDir, fail_o
   const entries = [];
   try {
     const canon = toCanonical(payload, { cwd, cli, live: true, fail_on, sequences });
-    const json = JSON.stringify(canon, null, 2);
+    const json = JSON.stringify(canon);
     const write = atomicWrite || ((f, d) => fs.writeFileSync(f, d));
     const jp = path.join(latestDir, `latest.${tag}.json`);
     write(jp, json);
