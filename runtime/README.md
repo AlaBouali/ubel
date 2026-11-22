@@ -28,8 +28,9 @@ ubel-runtime --list-checks
 | `exposure` | sensitive or clear-text service on a non-loopback address; services bound to all interfaces; with `--probe`: sensitive endpoints that answer on loopback (`/.env`, `/.git/HEAD`, actuator, pprof, metrics, inspector, …) |
 | `libraries` | mapped library replaced or deleted on disk (stale after an upgrade); native code from a world-writable directory; `LD_PRELOAD` / `LD_LIBRARY_PATH` / `/etc/ld.so.preload` injection; executables and libraries with embedded vulnerable components (version banners → NVD, Go modules / Rust crates / bundled npm and Python packages → OSV.dev) |
 | `components` | npm packages installed under each Node.js application (OSV.dev); the Node.js release and the libraries it bundles (NVD); Node.js end of life |
+| `packages` | operating-system packages that the running programs and libraries belong to (SCA engine: platform mode on the host, docker mode on `/proc/<pid>/root` for a container; only the packages in use are reported); Python / Ruby / PHP packages under the application directory of each running process (SCA health scan). Findings are `sc_vuln` / `sc_infection` |
 | `secrets` | credentials in process environments (UBEL's secret rules) and on command lines — values are always redacted |
-| `containers` | privileged; host namespaces; sensitive host mounts; dangerous capabilities; confinement disabled; credentials in the configuration; sensitive ports published on all interfaces; root user; no limits; mutable image tag; with `--container-packages`: vulnerable packages inside the container |
+| `containers` | privileged; host namespaces; sensitive host mounts; dangerous capabilities; confinement disabled; credentials in the configuration; sensitive ports published on all interfaces; root user; no limits; mutable image tag; with `--container-packages`: vulnerable packages inside the container (`sc_vuln`) |
 | `inspection` | with `--inspect`: Node.js processes that could not be inspected; inspector left open; code loaded from a world-writable directory; files changed on disk after the process started |
 
 `ubel-runtime --list-checks` prints the catalogue with severities.
@@ -44,7 +45,9 @@ ubel-runtime --list-checks
 | `--include-self` | Also assess the scanner's own process |
 | `--libs app\|all\|none` | Which mapped native files are read for embedded component versions: outside the system library directories (default), all, or none |
 | `--max-libs <n>` | Read at most `n` distinct executables / libraries (default 150) |
-| `--container-packages` | Read each running container's package database through `/proc/<pid>/root` and look it up in OSV.dev (best effort: containers whose root cannot be reached are reported as not assessed) |
+| `--packages host\|all\|none` | Packages used by running processes: this machine only, containers too (default `all`), or none |
+| `--max-package-scopes <n>` | Read the packages of at most `n` container filesystems / application directories (default 20) |
+| `--container-packages` | Also scan **every** package of each running container (SCA docker mode on `/proc/<pid>/root`), in use or not (best effort: containers whose root cannot be reached are reported as not assessed) |
 | `--inspect` | Look inside Node.js processes — see below |
 | `--inspect-max <n>` | Inspect at most `n` Node.js processes (default 25) |
 | `--probe` | Loopback HTTP probe of the listening ports — see below |
@@ -53,6 +56,16 @@ ubel-runtime --list-checks
 | `--only` / `--skip` / `--min-severity` / `--fail-on` / `--allow-partial` / `--working-dir` / `--verbose` / `--quiet` | As in `ubel-vm` |
 
 Set `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` for an internal mirror.
+
+## Packages in use (`packages`)
+
+`ubel-vm` lists every installed package; `ubel-runtime` reports the ones **a running process uses**, through the SCA engine (`vm/lib/scascan.js`):
+
+- **Operating-system packages.** The executable and every executable file a process has mapped (`/proc/<pid>/maps`) is matched to the package that owns it, using the package database on disk (dpkg file lists, apk, rpm; `/bin` ≡ `/usr/bin` is normalised). The SCA engine scans the host (**platform mode**) or the container's filesystem (**docker mode** on `/proc/<pid>/root`) and only the advisories of the packages in use are kept (`rt-pkg-os-vulnerable`). An upgrade does not replace code already loaded in a process, so the remediation is "update and restart".
+- **Python, Ruby and PHP applications.** The application directory of each running interpreter process — its virtualenv (`VIRTUAL_ENV` or the interpreter's `pyvenv.cfg`), script directory or working directory, up to the nearest project marker (`requirements.txt`, `pyproject.toml`, `Gemfile.lock`, `composer.json`, `Cargo.lock`, …) — is scanned by the SCA **health scan (full stack)**: the venv's `site-packages`, Composer `vendor/`, lockfiles. A process on the system Python also gets the pip-installed `/usr/local/lib` (`rt-pkg-app-vulnerable`).
+- Node.js applications keep their own check (`rt-comp-vulnerable-package`, with `--inspect` it knows which packages are loaded); Go and Rust programs carry their modules inside the binary, which the library check reads. **Java applications are not read.**
+
+All of these findings carry the SCA vulnerability record and the type `sc_vuln` (`sc_infection` for malware advisories), so the report shows them in the **SCA vulnerability modal**, with the process or application that uses the package. `--no-lookups` makes them *not applicable*; a scan that cannot be completed is *not assessed*.
 
 ## `--inspect` — what a Node.js process has really loaded
 

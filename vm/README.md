@@ -26,7 +26,9 @@ ubel-vm --list-checks                          # print the catalogue
 |---|---|
 | `--root <dir>` | Audit a mounted image / extracted root filesystem instead of the running host |
 | `--host-proc` | With `--root`: the root is a **host filesystem mounted into this process** (a pod with `hostPID` / `hostNetwork`), so `/proc` and `/sys` are read from the process's own view — the host's kernel — and the live checks (sysctl, listening ports, kubelet flags) work. See *Auditing every node from inside the cluster* |
-| `--skip-packages` | Do not look up the installed packages in OSV.dev (the package check becomes *not applicable*) |
+| `--skip-packages` | Do not scan the installed packages (the package checks become *not applicable*) |
+| `--skip-app-packages` | Scan the operating-system packages only, not the application packages |
+| `--app-roots <a,b>` | Directories to scan for application packages in addition to the defaults (with `--root`, the root is scanned whole) |
 | `--no-threat-intel` | Do not fetch CISA KEV / FIRST EPSS data for the vulnerabilities found |
 | `--skip-fs-walk` | Skip the one-pass filesystem walk (world-writable files / dirs, set-uid programs) |
 | `--fs-max-entries <n>` | Stop the filesystem walk after `n` entries (default 3,000,000) |
@@ -62,21 +64,29 @@ the same tabs as the cloud report:
 The JSON is the exact object the HTML renders from: `findings[]`, `checks[]` (one entry per check with its outcome),
 `coverage`, `stats`, `compliance_summary`, `compliance_posture`, `diffs`, `executive_summary`, `target`, `scan_options`.
 
-## Installed-package vulnerabilities (OSV)
+## Installed-package vulnerabilities (SCA engine, OSV)
 
-`vm-pkg-vulnerabilities` runs the same package scan as **`ubel-docker`**, pointed at the machine (or at the `--root` image) instead of an extracted container image:
+`vm-pkg-vulnerabilities` (operating-system packages) and `vm-app-pkg-vulnerabilities` (application packages) do not re-implement package scanning: they run the **SCA engine's own scans** in memory and keep what it returns.
 
-1. the package database is **read from disk** (dpkg `status`, apk `installed`, the rpm database) — no `dpkg`, `apk` or `rpm` is run — and every package is tagged with its release (`debian-12`, `ubuntu-22.04`, …);
-2. OSV.dev is queried for every package URL with that distro qualifier (batched and paginated);
-3. each advisory is fetched, and **advisories written for another release or already fixed in the installed build are dropped**; fixed versions and the confidence of the release match are attached;
-4. duplicates by alias are merged and **CISA KEV / FIRST EPSS** data is attached (an actively exploited vulnerability is never rated below *high*; a failure of this enrichment only loses that extra data).
+| Where | SCA mode used | What it reads |
+|---|---|---|
+| the running machine | **platform mode** (`ubel-platform`) | the operating-system packages: the package database **read from disk** (dpkg `status`, apk `installed`, the rpm database) — no `dpkg`, `apk` or `rpm` is run — each tagged with its release (`debian-12`, `ubuntu-22.04`, …) |
+| the running machine, application packages | the SCA **health scan (full stack)** of `/opt`, `/srv`, `/var/www`, `/app`, `/usr/src`, `/usr/local`, `/home`, `/root` and every directory given with `--app-roots` | `node_modules`, virtualenvs and `site-packages`, Composer `vendor/`, Bundler, Cargo, Go, NuGet, Maven, pub and SwiftPM files — whatever the SCA scanners find in those trees |
+| `--root <dir>` / `--host-proc` | **docker mode** on the mounted root | the operating-system packages and every ecosystem's dependencies in one scan, exactly as `ubel-docker` scans an extracted image (paths are reported relative to the root) |
 
-It reuses `sca/linux_runner.js` (`LinuxHostScanner`) and the OSV functions of `sca/engine.js`, loaded lazily when the check runs. Those modules also contain the package-manager firewall, which does start `apt` / `dnf`; **none of that code is used here**, and `tests/vm.test.js` proves it by making every process-spawning API throw and running complete scans.
+The SCA pipeline then does what it does everywhere: OSV.dev is queried for every package URL (OS packages with their distro qualifier), **advisories written for another release or already fixed in the installed build are dropped**, fixed versions are ranked, and **CISA KEV / FIRST EPSS** data is attached (an actively exploited vulnerability is never rated below *high*; a malicious-package advisory is an *infection*, rated *critical*).
 
-- It needs network access to `api.osv.dev` (and, for the enrichment, CISA and FIRST). Set `UBEL_OSV_ENDPOINT` to use an internal OSV mirror; use `--skip-packages` (or `--skip vm-pkg-vulnerabilities`) when the machine has no egress.
-- A lookup that cannot be completed (OSV unreachable, an advisory not fetchable) makes the check **not assessed** — never a clean result — and the run exits `3` unless `--allow-partial`.
-- Supported package databases are the ones `ubel-docker` supports (Debian / Ubuntu, Alpine, RHEL-family images). A machine without a readable database gets *not applicable*.
-- The report's *Scan Info → Target* lists the package summary (installed, advisories, vulnerable packages, actively exploited, advisories for other releases dropped).
+**The findings are SCA findings.** Each one carries the SCA vulnerability record unchanged and has the finding type `sc_vuln` (`sc_infection` for malware advisories) in the canonical JSON, so the report opens it in the **same vulnerability modal as an SCA report** (CVSS, KEV / EPSS, fixed versions, references, dependency sequences, compliance), with the check that found it added.
+
+Packages the distribution's own package manager installed (their files are listed by dpkg / apk / rpm) are left out of the *application* check: their versions are the distribution's patched builds (Debian keeps the upstream version number and backports the fix), so an upstream PyPI / npm advisory would report a vulnerability the distribution already fixed. The operating-system check judges them with release-scoped advisories instead.
+
+The SCA modules are loaded lazily when the check runs. They also contain the package-manager firewall, which does start `apt` / `dnf`; **none of that code is used here**, and nothing is written to the scanned directories (the engine's policy file goes to the working directory's `.ubel` folder).
+
+- It needs network access to `api.osv.dev` (and, for the enrichment, CISA and FIRST). Set `UBEL_OSV_ENDPOINT` to use an internal OSV mirror; use `--skip-packages` (or `--skip vm-pkg-vulnerabilities,vm-app-pkg-vulnerabilities`) when the machine has no egress, `--skip-app-packages` for the operating-system packages only.
+- A scan or lookup that cannot be completed (OSV unreachable, an advisory not fetchable) makes the check **not assessed** — never a clean result — and the run exits `3` unless `--allow-partial`.
+- Supported package databases are the ones `ubel-docker` supports (Debian / Ubuntu, Alpine, RHEL-family). A machine without a readable database gets *not applicable* for the operating-system check; the application check still runs.
+- The SCA scanners walk the directories they are given, so the application scan covers the locations above; software installed elsewhere needs `--app-roots`.
+- The report's *Scan Info → Target* lists the package summary (installed, advisories, vulnerable packages, application packages, actively exploited, feed status).
 
 ## Auditing a Kubernetes node
 
@@ -260,11 +270,12 @@ When the machine is a Kubernetes node: permissions of the cluster's files and ke
 
 ### Installed packages (`packages`)
 
-Known vulnerabilities (OSV.dev) in the software packages installed on the machine, for its operating-system release.
+Known vulnerabilities (OSV.dev, through the SCA engine) in the software installed on the machine: operating-system packages for the machine's release, and application packages (npm, Python, Composer, Bundler, Cargo, Go, …). Findings are `sc_vuln` / `sc_infection`.
 
 | Check | Severity | What it detects |
 |---|---|---|
-| `vm-pkg-vulnerabilities` | high | Installed package has a known vulnerability |
+| `vm-pkg-vulnerabilities` | high | Installed operating-system package has a known vulnerability |
+| `vm-app-pkg-vulnerabilities` | high | Installed application package has a known vulnerability |
 
 ### Boot loader (`boot`)
 
@@ -277,7 +288,7 @@ Protection of the boot process against tampering from the console.
 ## Limits worth knowing
 
 - **Linux only.** Windows and macOS guests are not audited (a Linux image can be audited from any OS with `--root`).
-- **Configuration and known vulnerabilities, not exploitation.** It does not test whether a service is exploitable. Installed packages are matched against OSV.dev advisories (see above); a vulnerability in software that was not installed through the package manager is not seen.
+- **Configuration and known vulnerabilities, not exploitation.** It does not test whether a service is exploitable. Installed operating-system and application packages are matched against OSV.dev advisories by the SCA engine (see above); software that is neither in the package database nor in a scanned application directory (a statically linked binary, a vendored copy) is not seen.
 - **Kubernetes nodes:** the node checks read the kubelet's flags from the running process (live) or the service files (offline root) and its configuration from the usual paths (`/var/lib/kubelet/config.yaml`, `/etc/kubernetes/kubelet/kubelet-config.json`, …); a node whose kubelet configuration lives elsewhere is reported as *not applicable* for that check.
 - **No root, no full picture.** `/etc/shadow`, `/etc/sudoers*` and other users' homes need root; the affected checks are *not assessed*.
 - **Reachability is not tested.** A listening port is a fact about the host; whether it is reachable from the internet also depends on

@@ -78,6 +78,8 @@ rules:
 | `--kubelet-configz` | Read each kubelet's configuration through the API (anonymous auth, authorization mode, read-only port) |
 | `--allowed-registries <a,b>` | Flag images that do not come from these registries |
 | `--timeout <seconds>` | Per-request timeout (default 30) |
+| `--no-lookups` | Do not look the cluster's component versions up in OSV.dev (the component check becomes not applicable). Without it a live scan sends those versions, e.g. `k8s.io/kubernetes v1.28.3`, to OSV.dev (`UBEL_OSV_ENDPOINT` selects an internal mirror) |
+| `--no-threat-intel` | Do not fetch CISA KEV / FIRST EPSS data for the vulnerabilities found |
 | `--only` / `--skip` / `--min-severity` / `--fail-on` / `--allow-partial` / `--working-dir` / `--verbose` / `--quiet` / `--list-checks` | As in `ubel-vm` |
 
 Exit codes: `0` ok · `2` a `--fail-on` finding exists or bad arguments · `3` incomplete assessment · `1` fatal error.
@@ -208,9 +210,21 @@ The machines that run workloads: kubelet settings, versions and operating-system
 | `k8s-node-version-skew` | medium | Kubelet version is outside the supported skew |
 | `k8s-node-external-ip` | low | Node has a public IP address |
 
+### Cluster components (`components`)
+
+Known vulnerabilities (OSV.dev, through the **SCA engine**) in the component versions the cluster itself reports. The findings are SCA findings: the SCA vulnerability record travels with them and the type is `sc_vuln` (`sc_infection` for a malicious-package advisory), so the report opens them in the same vulnerability modal as an SCA report.
+
+| Check | Severity | What it detects |
+|---|---|---|
+| `k8s-component-vulnerable` | high | A Kubernetes component version has a known vulnerability |
+
+What is checked, because the API states it by name: the API server (`GET /version`) and every kubelet (`nodeInfo.kubeletVersion`) as `k8s.io/kubernetes`; each node's container runtime (`containerd://…`, `cri-o://…`); and the official control-plane and add-on images in `kube-system` (kube-apiserver / controller-manager / scheduler / kube-proxy, etcd, CoreDNS — only from `registry.k8s.io`, `k8s.gcr.io`, `gcr.io/google_containers` and CoreDNS's own repository). Vendor suffixes (`-eks-…`, `-gke.…`, `+k3s1`, `+rke2r1`) are cut because advisories are written against the upstream release; on a managed control plane the provider may have back-ported a fix without changing the version, and the finding says so. Live clusters only.
+
+**What is not applicable to a cluster scan.** `ubel-k8s` talks to the API server and never runs another program, so it cannot pull an image or open a node's disk: the packages *inside* images are scanned with `ubel-docker`, the operating-system and application packages of a node with `ubel-vm --root <mount> --host-proc` (run as a DaemonSet with the node's filesystem mounted), and the packages used by the processes running in containers with `ubel-runtime`.
+
 ## Limits worth knowing
 
-- **API objects, not runtime.** It does not scan images for vulnerabilities and cannot see what happens inside containers.
+- **API objects, not runtime.** It does not scan images or the packages inside them and cannot see what happens inside containers; it checks only the component versions the cluster reports (see *Cluster components*).
 - **Policy engines are not evaluated.** Kyverno, OPA Gatekeeper, ValidatingAdmissionPolicy and CNI-level policies (Cilium, Calico) may compensate for a missing
   Kubernetes object; the *Pod Security Admission* and *NetworkPolicy* findings say so.
 - **Manifest mode is a partial view.** Checks that conclude from the *absence* of objects (no NetworkPolicy, no quota, API server version, anonymous access) are *not applicable*.

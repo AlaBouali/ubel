@@ -2,42 +2,41 @@
 import { rule } from './util.js';
 import { na } from '../lib/engine.js';
 import { PackageScanUnsupported } from '../lib/pkgvulns.js';
-
-const RANK = { critical: 0, high: 1, medium: 2, low: 3 };
-const SEV = { critical: 'critical', high: 'high', medium: 'medium', moderate: 'medium', low: 'low', unknown: 'medium' };
-const upgradeHint = (eco, dep) => (eco === 'alpine' ? `apk upgrade ${dep}` : (['debian', 'ubuntu'].includes(eco) ? `apt-get update && apt-get install --only-upgrade ${dep}` : `dnf upgrade ${dep}`));
+import { scViolation, sortViolations } from '../lib/scfinding.js';
+import { pathsOf, purlType } from '../lib/scascan.js';
 
 export default [
   rule({
-    id: 'vm-pkg-vulnerabilities', area: 'packages', severity: 'high', title: 'Installed package has a known vulnerability',
-    description: 'OSV.dev lists a security advisory that applies to this package version on this operating-system release.',
+    id: 'vm-pkg-vulnerabilities', area: 'packages', severity: 'high', title: 'Installed operating-system package has a known vulnerability',
+    description: 'The SCA engine (platform mode on a live host, docker mode on a --root image) found a security advisory that applies to an operating-system package version installed on this machine, for its release (OSV.dev).',
     remediation: 'Update the package to a fixed version and restart the services that use it; where no fix exists yet, apply the vendor\'s mitigation or restrict exposure.',
     cap: 250,
     async evaluate(ctx) {
       const r = await ctx.packageScan();
-      if (r === null) return na(ctx.opts.skipPackages ? 'package scan skipped (--skip-packages)' : 'package scan not run');
+      if (r === null) return na('package scan skipped (--skip-packages)');
       if (r instanceof PackageScanUnsupported) return na(`no supported package database: ${r.message}`);
-      const kev = (v) => v.is_kev === true;
-      const list = r.vulnerabilities.map((v) => {
-        let sev = SEV[String(v.severity || 'unknown').toLowerCase()] || 'medium';
-        if (kev(v) && RANK[sev] > RANK.high) sev = 'high';                   // actively exploited: never below high
-        return { v, sev };
-      }).sort((a, b) => RANK[a.sev] - RANK[b.sev] || (kev(b.v) - kev(a.v)) || ((b.v.epss_score || 0) - (a.v.epss_score || 0)) || String(a.v.affected_dependency).localeCompare(String(b.v.affected_dependency)));
-      return list.map(({ v, sev }) => {
-        const cve = (v.aliases || []).find((a) => /^CVE-/.test(a)) || v.id;
-        const fixed = (v.fixed_versions || [])[0];
-        const sum = String(v.summary || '').replace(/\s+/g, ' ').slice(0, 90);
-        return {
-          resource: `${v.affected_dependency}@${v.affected_dependency_version}: ${cve}`,
-          severity: sev,
-          title: `${v.affected_dependency}: ${cve}${sum ? ' — ' + sum : ''}`,
-          detail: `Installed ${v.affected_dependency_version}. ${fixed ? `Fixed in ${fixed}.` : 'No fixed version is published for this release yet.'}` +
-            `${kev(v) ? ' Listed in the CISA Known Exploited Vulnerabilities catalogue (exploited in the wild).' : ''}` +
-            `${typeof v.epss_score === 'number' ? ` EPSS ${(v.epss_score * 100).toFixed(1)}%.` : ''}` +
-            `${v.release_confidence && v.release_confidence !== 'high' ? ` Release match: ${v.release_confidence_reason}` : ''} ${v.url || ''}`.trimEnd(),
-          remediation: fixed ? `Update ${v.affected_dependency} to ${fixed} or later (${upgradeHint(r.ecosystem, v.affected_dependency)}) and restart the services that use it.` : `No fixed version is available yet: apply the vendor's mitigation or restrict exposure of ${v.affected_dependency}; track ${v.url || v.id}.`,
-        };
-      });
+      if (!r.os.supported) return na(`no supported operating-system package database: ${r.os.reason}`);
+      return r.osVulnerabilities.map((v) => scViolation(v)).sort(sortViolations);
+    },
+  }),
+  rule({
+    id: 'vm-app-pkg-vulnerabilities', area: 'packages', severity: 'high', title: 'Installed application package has a known vulnerability',
+    description: 'The SCA engine found a security advisory (OSV.dev) for a package that applications on this machine are built from: an npm module, Python distribution, Composer, Bundler, Cargo, Go, NuGet, Maven, pub or SwiftPM dependency found on disk outside the distribution\'s own package database. Malicious-package advisories are reported as infections.',
+    remediation: 'Update the package to a fixed version (or the dependency that brings it in), redeploy and restart the application; where no fix exists yet, remove or replace the package or restrict exposure of the application.',
+    cap: 250,
+    async evaluate(ctx) {
+      const r = await ctx.packageScan();
+      if (r === null) return na('package scan skipped (--skip-packages)');
+      if (r instanceof PackageScanUnsupported) return na(`nothing to read: ${r.message}`);
+      if (!r.apps.scanned) return na('application package scan skipped (--skip-app-packages)');
+      if (!r.apps.installed) return na(`no application packages found${r.apps.roots.length ? ` under ${r.apps.roots.join(', ')}` : ' (none of the standard application directories exists; add directories with --app-roots)'}`);
+      const comp = new Map(r.inventory.map((c) => [c.id, c]));
+      return r.appVulnerabilities.map((v) => {
+        const c = comp.get(v.affected_package_id);
+        const at = c ? pathsOf(c) : [];
+        const dev = c && Array.isArray(c.scopes) && c.scopes.length && !c.scopes.includes('prod');
+        return scViolation(v, { prefix: purlType(v.affected_package_id), where: `${at.length ? `at ${at[0]}${at.length > 1 ? ` (+${at.length - 1} more)` : ''}` : ''}${dev ? ' (development dependency)' : ''}`.trim() });
+      }).sort(sortViolations);
     },
   }),
 ];

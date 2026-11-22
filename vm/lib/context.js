@@ -40,7 +40,7 @@ class VmContext {
     this.fs = new FsView(opts.root || '/', this.hostProc ? { passthrough: ['/proc', '/sys'] } : {});
     this.live = this.fs.live || this.hostProc;
     this.root = this.fs.root;
-    this.opts = { skipFsWalk: false, skipPackages: false, threatIntel: true, fsMaxEntries: 3_000_000, fsTimeoutMs: 90_000, ...opts };
+    this.opts = { skipFsWalk: false, skipPackages: false, skipAppPackages: false, appRoots: [], threatIntel: true, fsMaxEntries: 3_000_000, fsTimeoutMs: 90_000, ...opts };
     this.now = opts.now || new Date();
     this.notes = [];              // coverage caveats collected while scanning (truncated walks, …)
     this._m = new Map();
@@ -51,18 +51,20 @@ class VmContext {
     return this._m.get(key);
   }
 
-  // ── installed-package vulnerabilities (OSV) ────────────────────────────────
+  // ── installed-package vulnerabilities (SCA engine) ──────────────────────────
   /**
-   * Result of the package vulnerability scan (see pkgvulns.js), shared by every rule that needs it. null when the scan was
-   * not requested (--skip-packages); a PackageScanUnsupported instance when no supported package database exists; throws
-   * when a lookup could not be completed (→ the rule is "not assessed").
+   * Result of the package scan (see pkgvulns.js): the SCA engine's platform / docker mode for the operating-system packages and its
+   * application scan for npm / Python / Composer / … dependencies, shared by every rule that needs it. null when the scan was not
+   * requested (--skip-packages); a PackageScanUnsupported instance when there is nothing to read; throws when a scan or lookup could not
+   * be completed (→ the rule is "not assessed").
    */
   packageScan() {
     return this._memo('pkgscan', async () => {
       if (this.opts.skipPackages) return null;
-      const { scanInstalledPackages, PackageScanUnsupported } = await import('./pkgvulns.js');
+      const { scanMachinePackages, PackageScanUnsupported } = await import('./pkgvulns.js');
       try {
-        const r = await scanInstalledPackages({ root: this.hostProc ? this.root : (this.live ? '/' : this.root), threatIntel: this.opts.threatIntel });
+        const live = this.live && !this.hostProc && this.root === '/';
+        const r = await scanMachinePackages({ root: live ? '/' : this.root, live, extraRoots: this.opts.appRoots || [], skipApps: !!this.opts.skipAppPackages, workDir: this.opts.workDir, threatIntel: this.opts.threatIntel, log: this.opts.log });
         if (typeof this.opts.onPackageScan === 'function') this.opts.onPackageScan(r);
         return r;
       } catch (e) {

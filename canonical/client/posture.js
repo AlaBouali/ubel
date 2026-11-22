@@ -731,7 +731,12 @@ function openDiffModal(i) {
 
 // ── glue: canonical entry → module modal ──
 const FAMILY = {
-  openFinding: function (i) { const f = CANON.findings[i] && CANON.findings[i].details; if (!f) return false; renderFindingDetail(f); return true; },
+  openFinding: function (i) {
+    const cf = CANON.findings[i]; if (!cf) return false;
+    // package vulnerabilities of the SCA engine (sc_vuln / sc_infection): the SCA vulnerability modal (client/scvuln.js)
+    if ((cf.type === 'sc_vuln' || cf.type === 'sc_infection') && window.UBEL_SC_VULN) return window.UBEL_SC_VULN.open(cf.details);
+    const f = cf.details; if (!f) return false; renderFindingDetail(f); return true;
+  },
   openInventory: function () { return false; },   // the module has no inventory view
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); renderCompliancePosture(); },

@@ -45,7 +45,7 @@ export default [
             let sev = vulnSeverity(v);
             if (isLoaded === false && !v.is_infection) sev = downgrade(sev);
             const state = isLoaded === true ? 'The running process has loaded this package.' : isLoaded === false ? 'Installed but NOT loaded by the running process at the time of inspection (rated one level lower; it can still be loaded later).' : 'Installed on disk; run with --inspect to learn whether the running process has loaded it.';
-            out.push({ resource: `${key}: ${cveOf(v)} (${label})`, scope: scopeOf(e.procs[0]), severity: sev, kev: v.is_kev === true,
+            out.push({ resource: `${key}: ${cveOf(v)} (${label})`, scope: scopeOf(e.procs[0]), severity: sev, kev: v.is_kev === true, type: v.is_infection ? 'sc_infection' : 'sc_vuln', vuln: v,
               title: `${pkg.name}: ${cveOf(v)}${v.summary ? ' — ' + short(v.summary) : ''}`,
               detail: `${pkg.name} ${pkg.version} in ${e.app.root} (${e.procs.length === 1 ? 'pid ' + e.procs[0].pid : e.procs.length + ' processes, e.g. pid ' + e.procs[0].pid}). ${state} ${vulnFacts(v)}`,
               remediation: (v.fixed_versions || [])[0] ? `Update ${pkg.name} to ${v.fixed_versions[0]} or later, redeploy, and restart the process.` : `No fixed version is published yet: remove or replace ${pkg.name}, or apply the mitigation in ${v.url || v.id}.` });

@@ -126,28 +126,31 @@ export default [
   }),
   rule({
     id: 'rt-ctr-packages-vulnerable', area: 'containers', severity: 'high', title: 'Package installed in a running container has a known vulnerability',
-    description: 'The package database of a running container (read through /proc/<pid>/root; no engine command is run) lists a package with an OSV.dev advisory for that container\'s distribution release. Opt-in because it queries OSV.dev for every container (--container-packages).',
+    description: 'The SCA engine (docker mode on the container\'s filesystem, read through /proc/<pid>/root; no engine command is run) finds an OSV.dev advisory for an operating-system package of a running container for its distribution release, or for an application package installed in it (npm, Python, Composer, …). Every installed package is checked, in use or not (rt-pkg-os-vulnerable reports the ones in use). Opt-in because it queries OSV.dev for every container (--container-packages).',
     remediation: 'Rebuild the image from an updated base image, redeploy, and restart the container.',
     cap: 250,
     async evaluate(ctx) {
       if (!ctx.opts.containerPackages) return na('container package scan not requested (--container-packages)');
       if (ctx.opts.noLookups) return na('advisory lookups disabled (--no-lookups)');
       const e = await engine(ctx); if (e.skip) return e.skip;
-      const { scanInstalledPackages, PackageScanUnsupported } = await import('../../vm/lib/pkgvulns.js');
+      const { scanDocker } = await import('../../vm/lib/scascan.js');
+      const { scViolation } = await import('../../vm/lib/scfinding.js');
       const out = [], errors = [];
       let scanned = 0;
       for (const c of e.list) {
         if (!c.pid) continue;
         const root = path.join(ctx.procs.root, String(c.pid), 'root');
         let r;
-        try { r = await scanInstalledPackages({ root, threatIntel: ctx.opts.threatIntel, log: ctx.log }); } catch (x) { if (x instanceof PackageScanUnsupported) { ctx.notes.push(`${c.name}: no supported package database (${x.message}).`); continue; } errors.push(`${c.name}: ${x.message}`); continue; }
+        try { r = await scanDocker({ root, workDir: ctx.opts.workDir, threatIntel: ctx.opts.threatIntel, log: ctx.log }); } catch (x) {
+          if (/Cannot detect OS|Unsupported OS ecosystem|No scanner implemented|status file not found|database not found/i.test(x.message)) { ctx.notes.push(`${c.name}: no supported package database (${x.message}).`); continue; }
+          errors.push(`${c.name}: ${x.message}`); continue;
+        }
         scanned++;
+        for (const w of r.scan_warnings || []) if (!ctx.notes.includes(w)) ctx.notes.push(w);
         for (const v of r.vulnerabilities) {
           const fixed = (v.fixed_versions || [])[0];
-          out.push({ resource: `${c.name}: ${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)}`, scope: '', severity: vulnSeverity(v), kev: v.is_kev === true,
-            title: `${v.affected_dependency}: ${cveOf(v)}${v.summary ? ' — ' + short(v.summary) : ''}`,
-            detail: `Container ${c.name} (${r.distro || r.ecosystem}) has ${v.affected_dependency} ${v.affected_dependency_version}. ${vulnFacts(v)}`,
-            remediation: fixed ? `Rebuild ${c.image} with ${v.affected_dependency} ${fixed} or later and redeploy.` : `No fix is published yet: restrict exposure of ${c.name} and track ${v.url || v.id}.` });
+          out.push(scViolation(v, { resource: `${c.name}: ${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)}`, scope: '', where: `in container ${c.name}`,
+            remediation: fixed ? `Rebuild ${c.image} with ${v.affected_dependency} ${fixed} or later and redeploy.` : `No fix is published yet: restrict exposure of ${c.name} and track ${v.url || v.id}.` }));
         }
       }
       if (errors.length && !scanned) return unassessed(errors.slice(0, 3).join('; '));

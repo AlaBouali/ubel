@@ -4613,6 +4613,9 @@ export class UbelEngineInstance {
       scan_scope          = "repository",
       scan_secrets        = true,
       scan_vulns          = true,
+      // false: no CISA KEV / FIRST EPSS requests (is_kev / epss_* stay null, the feeds are reported "skipped"). ubel-vm / ubel-runtime /
+      // ubel-k8s pass it for --no-threat-intel; every other caller keeps the default (enrich).
+      threat_intel        = true,
       // When true, an allowed health/check scan returns the report instead of
       // calling process.exit(0), so the caller's finally/cleanup blocks run
       // (dockerScan passes this). The CLI entry point owns the process exit.
@@ -5038,7 +5041,7 @@ export class UbelEngineInstance {
 
       // ── KEV + EPSS enrichment (never aborts the scan) ─────────────────────
       let threatIntel = { kev: { status: "skipped" }, epss: { status: "skipped" }, warnings: [] };
-      if (scan_vulns && vulnerabilities.length > 0) {
+      if (scan_vulns && threat_intel !== false && vulnerabilities.length > 0) {
         try {
           threatIntel = await enrichWithThreatIntel(vulnerabilities);
         } catch (err) {

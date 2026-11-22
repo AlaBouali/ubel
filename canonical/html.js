@@ -4,7 +4,8 @@
 // Look, colours, statics (Tailwind, Chart.js, fonts), header, tabs and modal frame are the SCA report's
 // (sca/engine.js report template). The finding / inventory modals, executive summary, compliance and diff renderers are each
 // module's own code, copied verbatim into client/<family>.js and fed the original `details` of every entry. client/shell.js is
-// the part common to all modules (dashboard, lists with filters, scopes, stats, policy, system info).
+// the part common to all modules (dashboard, lists with filters, scopes, stats, policy, system info). The vm / k8s / runtime reports (bundle
+// posture) also carry client/scvuln.js — the SCA vulnerability modal — when they hold sc_vuln / sc_infection findings.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -111,6 +112,7 @@ export async function generateCanonicalHtml(canon, opts = {}) {
         </div>
     </div>
     <script>const CANON = ${forScript(canon)};</script>
+    ${bundle === 'posture' && (canon.findings || []).some((f) => f.type === 'sc_vuln' || f.type === 'sc_infection') ? `<script>${read('scvuln.js')}</script>` : ''}
     <script>${read(`${bundle}.js`)}</script>
     <script>${read('shell.js')}</script>
 </body>

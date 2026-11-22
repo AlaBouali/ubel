@@ -129,6 +129,9 @@ async function runRules(rules, ctx, reporter, opts = {}) {
         remediation: v.remediation || (typeof rule.remediation === 'function' ? rule.remediation(v) : rule.remediation),
         ...(rule.action ? { action: rule.action } : {}),
         ...(v.evidence ? { evidence: v.evidence } : {}),
+        // an SCA vulnerability record travels unchanged with its finding type (sc_vuln / sc_infection): see scfinding.js
+        ...(v.type ? { type: v.type } : {}),
+        ...(v.vuln ? { vuln: v.vuln } : {}),
       });
     }
     const suppressed = violations.length - shown.length;

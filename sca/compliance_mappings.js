@@ -889,6 +889,7 @@ const VM_CHECK_CATEGORY = {
   'vm-secrets-credential-files': ['secrets_management'],
   'vm-boot-grub-password': ['broken_access_control'],
   'vm-pkg-vulnerabilities': ['vulnerable_components'],
+  'vm-app-pkg-vulnerabilities': ['vulnerable_components'],
   // Kubernetes node checks (vm/checks/k8snode.js)
   'vm-k8s-controlplane-manifests': ['broken_access_control'],
   'vm-k8s-controlplane-kubeconfigs': ['broken_access_control', 'secrets_management'],
@@ -973,6 +974,7 @@ const K8S_CHECK_MAP = {
   'k8s-controlplane-flags':             { categories: ['security_misconfiguration'], pss: [] },
   'k8s-kubelet-config':                 { categories: ['security_misconfiguration', 'iam_misconfiguration'], pss: [] },
   'k8s-node-version-skew':              { categories: ['vulnerable_components'], pss: [] },
+  'k8s-component-vulnerable':           { categories: ['vulnerable_components'], pss: [] },
   'k8s-node-external-ip':               { categories: ['public_exposure'], pss: [] },
   // managed control planes (provider API): see k8s/checks/managed.js
   'k8s-eks-endpoint-exposure':          { categories: ['public_exposure'], pss: [] },
@@ -1172,6 +1174,8 @@ const RUNTIME_CHECK_CATEGORY = {
   'rt-lib-preload-hijack': ['malicious_code_supply_chain'],
   'rt-lib-vulnerable': ['vulnerable_components'],
   'rt-comp-vulnerable-package': ['vulnerable_components'],
+  'rt-pkg-os-vulnerable': ['vulnerable_components'],
+  'rt-pkg-app-vulnerable': ['vulnerable_components'],
   'rt-comp-node-runtime-vulnerable': ['vulnerable_components'],
   'rt-comp-node-eol': ['vulnerable_components'],
   'rt-secret-env': ['secrets_management'],

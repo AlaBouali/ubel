@@ -3,7 +3,7 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
-import { arr, isObj, first, mkFinding, mkInventory, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, mkInventory, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, TYPES } from '../common.js';
 
 export const family = 'posture';
 
@@ -18,6 +18,8 @@ export function translate(p, opts, H) {
   const out = { findings: [], inventory: [], scopes: [] };
 
   for (const f of arr(p.findings)) {
+    // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
+    if (isScFinding(f)) { const sc = scFinding(f, { violates, R }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const res = f.resource == null ? null : R.rel(f.resource);
     const cid = res == null ? null : (isK8s && f.scope ? `${f.scope}/${res}` : res);
     const kind = isK8s ? 'kubernetes_resource' : (typeof res === 'string' && res.startsWith('/') ? 'filesystem' : 'host_object');

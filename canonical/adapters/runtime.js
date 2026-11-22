@@ -5,6 +5,7 @@
 // machine, so paths are kept as they are (nothing is made relative).
 //
 // finding.type by check:  *-vulnerable*            → vuln (rule_id = the advisory id, check kept in details.check)
+//                         a vulnerability record of the SCA engine (vuln in the finding) → sc_vuln / sc_infection, the SCA record as details
 //                         rt-secret-*              → secret
 //                         deleted exe / memfd / code or library from temp / traced / preload hijack → behavior
 //                         containers, network exposure → misconfig
@@ -14,7 +15,7 @@
 // is rated by what normally listens there).
 // inventory:  processes → application, listening sockets → network_service, containers → container,
 //             packages the inspector saw loaded → dependency.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, isScFinding, scFinding, TYPES } from '../common.js';
 
 export const family = 'runtime';
 
@@ -45,6 +46,8 @@ export function translate(p, opts, H) {
   const derived = [];   // components only known from a finding's resource (kept unless the runtime block already lists that id)
 
   for (const f of arr(p.findings)) {
+    // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
+    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x } }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const type = typeOf(f);
     let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
     if (type === TYPES.VULN) {
