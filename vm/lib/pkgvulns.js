@@ -42,47 +42,85 @@ function installedByDistro(owners, base, comp) {
 }
 
 /**
+ * The package list as the report carries it: the SCA inventory item of every installed package (operating-system and application),
+ * trimmed to what the SCA package modal shows, with `state` taken from the advisories that were kept.
+ */
+function compactPackage(c, vulns, unassessed) {
+  const cap = (a, n) => (Array.isArray(a) ? a.slice(0, n) : []);
+  const mine = vulns.get(c.id) || [];
+  return {
+    id: c.id, name: c.name, version: c.version, type: c.type || 'library', ecosystem: c.ecosystem || '', ...(c.distro ? { distro: c.distro } : {}),
+    license: c.license ?? null, ...(c.license_info ? { license_info: c.license_info } : {}),
+    state: mine.some((v) => v.is_infection) ? 'infected' : mine.length ? 'vulnerable' : unassessed(c) ? 'unknown' : 'safe',   // 'unknown': its lookup could not be completed, never "safe"
+    scopes: cap(c.scopes, 5), paths: cap(c.paths, 5), dependencies: cap(c.dependencies, 25), introduced_by: cap(c.introduced_by, 10), parents: cap(c.parents, 25),
+    is_direct: c.is_direct ?? null, is_policy_violation: false, vulnerable_transitive_dependencies: [], policy_violations: [], suggested_fixes: c.suggested_fixes || { fixes: [], unfixed: [] },
+  };
+}
+
+/**
+ * Runs one SCA scan with its vulnerability lookup; when the lookup cannot be completed the same scan is repeated WITHOUT it, so the
+ * package list is still read (it is local) and the failure is returned for the checks to report as "not assessed".
+ * @returns {Promise<{result:object|null, error:Error|null}>}
+ * @throws the engine's "no package database" errors (the caller decides what they mean)
+ */
+async function guarded(run) {
+  try { return { result: await run(true), error: null }; } catch (e) {
+    if (UNSUPPORTED_OS.test(e.message)) throw e;
+    try { return { result: await run(false), error: e }; } catch (e2) { if (UNSUPPORTED_OS.test(e2.message)) throw e2; return { result: null, error: e }; }
+  }
+}
+
+/**
  * @param {{root?:string, live?:boolean, extraRoots?:string[], skipApps?:boolean, workDir?:string, threatIntel?:boolean, log?:(m:string)=>void}} [opts]
  *   root: "/" or a mounted root; live: scan the running host (platform mode) instead of a mounted root (docker mode)
- * @returns {Promise<{mode:'platform'|'docker', os:{supported:boolean, reason:string|null, ecosystem:string, distro:string, installed:number},
- *   apps:{scanned:boolean, roots:string[], installed:number, osInstalledSkipped:number}, inventory:object[], vulnerabilities:object[],
- *   osVulnerabilities:object[], appVulnerabilities:object[], threatIntel:object|null, notes:string[]}>}
+ * @returns {Promise<{mode:'platform'|'docker', os:{supported:boolean, reason:string|null, ecosystem:string, distro:string, installed:number, error:Error|null},
+ *   apps:{scanned:boolean, roots:string[], installed:number, osInstalledSkipped:number, error:Error|null}, inventory:object[], packages:object[],
+ *   vulnerabilities:object[], osVulnerabilities:object[], appVulnerabilities:object[], threatIntel:object|null, notes:string[]}>}
+ *   os.error / apps.error: the vulnerability lookup of that part could not be completed (the package list is still there; the check must be "not assessed")
  * @throws {PackageScanUnsupported} the machine has neither a readable package database nor any application package location
- * @throws {Error} a scan or lookup failed (OSV unreachable, an advisory not fetchable …) — the caller reports "not assessed"
  */
 async function scanMachinePackages({ root = '/', live = true, extraRoots = [], skipApps = false, workDir, threatIntel = true, log = () => {} } = {}) {
   const base = !root || root === '/' ? '' : root.replace(/\/+$/, '');
   const notes = [];
   const parts = [];
-  const os = { supported: true, reason: null, ecosystem: '', distro: '', installed: 0 };
-  const apps = { scanned: false, roots: [], installed: 0, osInstalledSkipped: 0 };
+  const os = { supported: true, reason: null, ecosystem: '', distro: '', installed: 0, error: null };
+  const apps = { scanned: false, roots: [], installed: 0, osInstalledSkipped: 0, error: null };
   let mode;
 
   if (live) {
     mode = 'platform';
-    try { parts.push(await scanPlatform({ workDir, threatIntel, log })); } catch (e) {
-      if (!UNSUPPORTED_OS.test(e.message)) throw e;
-      os.supported = false; os.reason = e.message;
-    }
+    try {
+      const g = await guarded((vulns) => scanPlatform({ workDir, threatIntel, vulns, log }));
+      if (g.result) parts.push(g.result);
+      if (g.error) os.error = g.error;
+    } catch (e) { os.supported = false; os.reason = e.message; }
     if (!skipApps) {
       const dirs = [...new Set([...DEFAULT_APP_ROOTS, ...extraRoots].map((d) => path.posix.normalize(d)))].filter((d) => isDir(d));
       for (const dir of dirs) {
-        try { parts.push(await scanTree({ dir, workDir, threatIntel, log })); apps.roots.push(dir); } catch (e) { throw new Error(`application scan of ${dir}: ${e.message}`); }
+        let g;
+        try { g = await guarded((vulns) => scanTree({ dir, workDir, threatIntel, vulns, log })); } catch (e) { notes.push(`${dir}: could not be read (${e.message}).`); continue; }
+        if (g.result) { parts.push(g.result); apps.roots.push(dir); }
+        if (g.error && !apps.error) apps.error = new Error(`application scan of ${dir}: ${g.error.message}`);
       }
       apps.scanned = true;
     }
   } else {
     mode = 'docker';
-    try { parts.push(await scanDocker({ root: base || '/', workDir, threatIntel, scanOs: true, log })); } catch (e) {
-      if (!UNSUPPORTED_OS.test(e.message)) throw e;
+    let g;
+    try { g = await guarded((vulns) => scanDocker({ root: base || '/', workDir, threatIntel, vulns, scanOs: true, log })); } catch (e) {
       os.supported = false; os.reason = e.message;
-      if (!skipApps) parts.push(await scanDocker({ root: base || '/', workDir, threatIntel, scanOs: false, log }));
+      if (!skipApps) g = await guarded((vulns) => scanDocker({ root: base || '/', workDir, threatIntel, vulns, scanOs: false, log }));
     }
+    if (g && g.result) parts.push(g.result);                           // one docker-mode scan holds both halves
+    if (g && g.error) { if (os.supported) os.error = g.error; apps.error = g.error; }
     apps.scanned = !skipApps; if (!skipApps) apps.roots.push('/');
   }
 
   const merged = mergeResults(parts);
-  if (!parts.length || (!merged.inventory.length && !os.supported && !apps.scanned)) throw new PackageScanUnsupported(os.reason || 'no package database and no application location to read');
+  if (!parts.length && !os.error && !apps.error) throw new PackageScanUnsupported(os.reason || 'no package database and no application location to read');
+  if (!os.supported) notes.push(`The operating-system package list could not be read: ${os.reason}`);
+  if (os.error) notes.push(`The vulnerability lookup for the operating-system packages could not be completed (${os.error.message}); the package list is reported without advisories.`);
+  if (apps.error) notes.push(`The vulnerability lookup for the application packages could not be completed (${apps.error.message}); the package list is reported without advisories.`);
 
   // application packages the distribution itself installed are the operating-system check's business
   const owners = new OwnerIndex(base || '/').load();
@@ -101,8 +139,10 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
   apps.installed = inventory.length - osInv.length;
   for (const w of merged.scan_warnings) notes.push(w);
 
+  const byPkg = new Map();
+  for (const v of vulnerabilities) { if (!byPkg.has(v.affected_package_id)) byPkg.set(v.affected_package_id, []); byPkg.get(v.affected_package_id).push(v); }
   return {
-    mode, os, apps, inventory, vulnerabilities, threatIntel: merged.threat_intel, notes,
+    mode, os, apps, inventory, packages: inventory.map((c) => compactPackage(c, byPkg, (c) => (isOsPurl(c.id) ? !!os.error : !!apps.error))), vulnerabilities, threatIntel: merged.threat_intel, notes,
     osVulnerabilities: vulnerabilities.filter((v) => isOsPurl(v.affected_package_id)),
     appVulnerabilities: vulnerabilities.filter((v) => !isOsPurl(v.affected_package_id)),
   };

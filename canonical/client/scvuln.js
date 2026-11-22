@@ -1,13 +1,16 @@
-/* canonical/client/scvuln.js — the SCA vulnerability modal, for the reports of the modules that take their package vulnerabilities from the SCA engine
- * (ubel-vm, ubel-runtime, ubel-k8s: findings of type sc_vuln / sc_infection whose `details` is the SCA vulnerability record).
- * The renderers below are extracted verbatim from client/sca.js (openVulnModal and what it calls); only the record lookup is replaced:
- * the modal opens the record it is given. After it, two blocks are added that only these reports have: which check found the package and
- * where, and the dependency sequences. Exposed as window.UBEL_SC_VULN.open(record). */
+/* canonical/client/scvuln.js — the SCA vulnerability modal and the SCA package modal, for the reports of the modules that take their package
+ * vulnerabilities from the SCA engine (ubel-vm, ubel-runtime, ubel-k8s): findings of type sc_vuln / sc_infection whose `details` is the SCA
+ * vulnerability record, and dependency inventory entries whose `details` is the SCA inventory item (ubel-vm lists every installed package).
+ * The renderers below are extracted verbatim from client/sca.js (openVulnModal, openInvModal and what they call); the only change is that
+ * they read the report data from RD, which is built from this report's CANON (findings + inventory) instead of the SCA report's reportData.
+ * Two blocks that only these reports have are added to the vulnerability modal: which check found the package and where, and the
+ * dependency sequences. Exposed as window.UBEL_SC_VULN.open(record) and .openInventory(item); the inline handlers of the modals
+ * (openVulnModal / openInvModal) are defined on window when the page has none of its own. */
 (function () {
 'use strict';
 const NOT_PROVIDED = 'Not provided by the advisory source';
-let CURRENT = null;
-function findVuln() { return CURRENT; }
+const RD = { vulnerabilities: [], inventory: [] };
+let BUILT = false;
 
 function escapeHtml(str) {
             if (!str) return '';
@@ -55,7 +58,37 @@ function releaseConfBadge(level, reason) {
             return '<span title="' + escapeHtml(String(reason || '')) + '" class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold ' + cls + '">' + escapeHtml(String(level)) + '</span>';
         }
 
+function riskBadge(risk) {
+            const riskColor = {
+                low: 'text-green-400 border-green-400/40',
+                medium: 'text-yellow-400 border-yellow-400/40',
+                high: 'text-red-400 border-red-400/40',
+                unknown: 'text-neutral-400 border-neutral-600'
+            }[risk] || 'text-neutral-400 border-neutral-600';
+            return `<span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold ${riskColor}">${risk || 'unknown'}</span>`;
+        }
+
 function tiEsc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function findVuln(key) {
+            const list = RD.vulnerabilities || [];
+            return list.find(function (x) { return x.finding_key === key; })
+                || list.find(function (x) { return x.id === key; });
+        }
+
+function findingKeyOf(v) {
+            return v ? (v.finding_key || (v.id + '::' + (v.affected_package_id || ''))) : '';
+        }
+
+function vulnOnclick(key) {
+            const arg = JSON.stringify(String(key == null ? '' : key)).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            return 'event.stopPropagation(); closeModal(); setTimeout(function () { openVulnModal(' + arg + '); }, 50)';
+        }
+
+function closeModal() {
+            document.getElementById('modal-overlay').style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
 
 function renderComplianceSection(compliance) {
             if (!compliance || !compliance.frameworks || !compliance.frameworks.length) return '';
@@ -96,6 +129,35 @@ function renderIocTable(iocs) {
             `;
         }
 
+function renderLicenseInfoTable(licenseInfo) {
+            if (!licenseInfo || typeof licenseInfo !== 'object') {
+                return '<p class="text-neutral-500 text-xs italic">No license classification available.</p>';
+            }
+            const osiLabel = licenseInfo.osi_approved === true ? 'Yes'
+                : licenseInfo.osi_approved === false ? 'No'
+                : 'Unverified';
+            const rows = [
+                ['SPDX', escapeHtmlClient(licenseInfo.spdx || '—')],
+                ['Identifiers', escapeHtmlClient((licenseInfo.identifiers || []).join(', ') || '—')],
+                ['OSI Approved', osiLabel],
+                ['Risk', riskBadge(licenseInfo.risk)],
+                ['Category', escapeHtmlClient(licenseInfo.category || '—')],
+                ['Reason', escapeHtmlClient(licenseInfo.reason || '—')],
+            ];
+            return `
+                <table class="w-full text-left text-xs">
+                    <tbody class="divide-y divide-neutral-800">
+                        ${rows.map(([k, v]) => `
+                            <tr>
+                                <td class="py-1.5 pr-4 text-neutral-500 uppercase text-[10px] font-bold align-top whitespace-nowrap">${k}</td>
+                                <td class="py-1.5 mono">${v}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
 function renderReachabilitySection(r) {
             if (!r) return '<div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800"><p class="text-xs text-neutral-500 italic">Reachability analysis not available.</p></div>';
             const lc={total:'#c084fc',high:'#f87171',medium:'#fb923c',low:'#60a5fa'}[r.level]||'#737373';
@@ -118,6 +180,80 @@ function renderReachabilitySection(r) {
             }else{isHtml='<span class="text-neutral-600 italic text-[10px]">Source scan not performed</span>';}
             const tags=(r.tags||[]).map(t=>`<span class="mono text-[9px] bg-neutral-800 px-1.5 py-0.5 rounded border border-neutral-700 text-neutral-400">${t}</span>`).join('');
             return `<div class="space-y-3"><div class="flex flex-wrap gap-4"><span class="text-[10px] uppercase text-neutral-500 font-bold">Reachable: </span><span class="font-bold text-sm" style="color:${r.reachable?'#f87171':'#4ade80'}">${r.reachable?'YES':'NO'}</span><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold mono" style="color:${lc};border-color:${lc}">${r.level}</span><span class="text-[10px] font-semibold" style="color:${cc}">${r.confidence.toUpperCase()} confidence</span></div><div class="grid grid-cols-3 md:grid-cols-6 gap-2 text-[10px]"><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Depth</p><p class="mono">${s.depth!=null?s.depth:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">AV</p><p class="mono">${s.attack_vector||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Scope</p><p class="mono">${s.scope||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Orphan</p><p class="mono">${s.is_orphan_tool?'yes':'no'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Paths</p><p class="mono">${s.num_paths!=null?s.num_paths:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Non-Lib</p><p class="mono">${s.is_non_library?'yes':'no'}</p></div></div><div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Import Scan</p>${isHtml}</div><p class="text-xs text-neutral-300 bg-neutral-900/50 px-3 py-2 rounded border border-neutral-800 italic">${r.rationale}</p>${tags?'<div class="flex flex-wrap gap-1">'+tags+'</div>':''}</div>`;
+        }
+
+function renderSuggestedFixes(sf) {
+            if (!sf) return '<p class="text-neutral-500 text-xs italic">No suggested-fix data available.</p>';
+            const fixes = sf.fixes || [];
+            const unfixed = sf.unfixed || [];
+            // Key of one finding instance; older reports without finding_key fall back to the id.
+            const openVuln = function(v) { return vulnOnclick(v.finding_key || v.id); };
+            const sevBadge = function(v) {
+                const sev = v.is_infection ? 'critical' : (v.severity || 'unknown');
+                const label = v.is_infection ? 'infection' : sev;
+                return '<span class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold severity-' + escapeHtml(String(sev)) + '">' + escapeHtml(String(label)) + '</span>';
+            };
+
+            let html = '';
+
+            if (fixes.length) {
+                // One row per suggested version: range | version | vulnerabilities, side by side.
+                const rangeRows = {};
+                fixes.forEach(function(f) { const k = f.range ? f.range.key : ''; rangeRows[k] = (rangeRows[k] || 0) + 1; });
+                const rangeSeen = {};
+                const anyConf = fixes.some(function(f) { return !!f.release_confidence; });
+                html += '<div class="rounded-lg border border-neutral-800 overflow-auto max-h-96">' +
+                    '<table class="w-full min-w-full text-xs text-left border-collapse">' +
+                    '<thead class="bg-neutral-800 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr>' +
+                    '<th class="px-3 py-2 whitespace-nowrap w-px">Range</th>' +
+                    '<th class="px-3 py-2 whitespace-nowrap w-px">Suggested version</th>' +
+                    (anyConf ? '<th class="px-3 py-2 whitespace-nowrap w-px" title="Confidence that this version is for the installed distro release">Release match</th>' : '') +
+                    '<th class="px-3 py-2">Policy-violating vulnerabilities fixed</th>' +
+                    '</tr></thead><tbody>' +
+                    fixes.map(function(f) {
+                        const k = f.range ? f.range.key : '';
+                        let rangeCell = '';
+                        if (!rangeSeen[k]) {
+                            rangeSeen[k] = true;
+                            rangeCell = '<td rowspan="' + rangeRows[k] + '" class="px-3 py-2 align-top whitespace-nowrap border-t border-neutral-800 bg-neutral-900/60">' +
+                                '<div class="mono text-xs text-neutral-200">' + escapeHtml(f.range ? f.range.label : '—') + '</div>' +
+                                '<div class="text-[10px] uppercase tracking-widest text-neutral-500 mt-0.5">' + (f.range && f.range.scope === 'major' ? 'major range' : 'minor range') + '</div></td>';
+                        }
+                        return '<tr>' + rangeCell +
+                            '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' +
+                            '<span class="mono text-sm font-bold text-green-400">' + escapeHtml(String(f.version)) + '</span>' +
+                            '<span class="ml-2 text-[10px] text-neutral-500" title="Policy-violating vulnerabilities fixed by this version">fixes ' + f.count + ' violating</span></td>' +
+                            (anyConf ? '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' + releaseConfBadge(f.release_confidence, f.release_confidence_reason) + '</td>' : '') +
+                            '<td class="px-3 py-2 align-top border-t border-l border-neutral-800"><div class="flex flex-wrap gap-x-4 gap-y-1.5">' +
+                            (f.vulnerabilities || []).map(function(v) {
+                                return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1" onclick="' + openVuln(v) + '">' +
+                                    '<span class="mono text-xs text-white">' + escapeHtml(String(v.id)) + '</span>' + sevBadge(v) + '</div>';
+                            }).join('') +
+                            '</div></td></tr>';
+                    }).join('') +
+                    '</tbody></table></div>';
+            } else {
+                html += '<p class="text-neutral-500 text-xs italic">No upgrade version fixes any policy-violating vulnerability of this package.</p>';
+            }
+
+            html += '<h5 class="text-[10px] font-semibold uppercase tracking-widest text-neutral-500 mt-4 mb-2">Policy-violating vulnerabilities with no fix (' + unfixed.length + ')</h5>';
+            if (unfixed.length) {
+                html += '<div class="rounded-lg border border-neutral-800 overflow-auto max-h-48">' +
+                    '<table class="w-full text-xs text-left">' +
+                    '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Severity</th>' + (unfixed.some(function(v) { return !!v.release_confidence; }) ? '<th class="px-3 py-2">Release match</th>' : '') + '<th class="px-3 py-2 text-right">Score</th></tr></thead>' +
+                    '<tbody class="divide-y divide-neutral-800">' +
+                    unfixed.map(function(v) {
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40" onclick="' + openVuln(v) + '">' +
+                            '<td class="px-3 py-2 mono text-white">' + escapeHtml(String(v.id)) + '</td>' +
+                            '<td class="px-3 py-2">' + sevBadge(v) + '</td>' +
+                            (v.release_confidence ? '<td class="px-3 py-2">' + releaseConfBadge(v.release_confidence, '') + '</td>' : (unfixed.some(function(u) { return !!u.release_confidence; }) ? '<td class="px-3 py-2">—</td>' : '')) +
+                            '<td class="px-3 py-2 mono text-neutral-400 text-right">' + (v.severity_score != null ? Number(v.severity_score).toFixed(1) : '—') + '</td></tr>';
+                    }).join('') +
+                    '</tbody></table></div>';
+            } else {
+                html += '<p class="text-neutral-500 text-xs italic">None — every policy-violating vulnerability has a published fix.</p>';
+            }
+            return html;
         }
 
 function renderThreatIntelSection(v) {
@@ -148,6 +284,53 @@ function renderVulnPolicyViolations(v) {
                     + '</tbody></table>';
             }
             return '<div><h4 class="text-sm font-semibold mb-3 text-neutral-300">Policy Violations (' + list.length + ')</h4><div class="bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">' + body + '</div></div>';
+        }
+
+function renderVulnTransitiveTable(list) {
+            if (!Array.isArray(list) || list.length === 0) {
+                return '<p class="text-neutral-500 text-xs italic">No vulnerable transitive dependencies.</p>';
+            }
+            const rows = list.map(dep => `
+                <tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${dep.id}'), 50)">
+                    <td class="py-2 pr-4 mono">${escapeHtmlClient(dep.name)}</td>
+                    <td class="py-2 pr-4 text-neutral-400">${dep.vulns_count}</td>
+                    <td class="py-2">${dep.is_policy_violation
+                        ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Yes</span>'
+                        : '<span class="text-[10px] text-neutral-500">No</span>'}</td>
+                </tr>
+            `).join('');
+            return `
+                <table class="w-full text-left text-xs">
+                    <thead class="text-neutral-500 uppercase text-[10px] tracking-widest">
+                        <tr><th class="pb-2 pr-4 font-bold">Name</th><th class="pb-2 pr-4 font-bold">Vulns</th><th class="pb-2 font-bold">Policy Violation</th></tr>
+                    </thead>
+                    <tbody class="divide-y divide-neutral-800">${rows}</tbody>
+                </table>
+            `;
+        }
+
+function renderComponentPolicyViolations(item) {
+            const list = Array.isArray(item.policy_violations) ? item.policy_violations : [];
+            let body;
+            if (list.length === 0) {
+                body = item.policy_violation_inherited
+                    ? '<p class="text-xs text-neutral-400">None of the vulnerabilities in this component violate policy on their own. It is flagged because a vulnerable dependency does (see Vulnerable Transitive Dependencies).</p>'
+                    : '<p class="text-xs text-neutral-500 italic">No policy violations.</p>';
+            } else {
+                body = '<table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr><th class="pb-2 pr-4 font-bold">Vulnerability</th><th class="pb-2 pr-4 font-bold">Severity</th><th class="pb-2 font-bold">Violations</th></tr></thead><tbody class="divide-y divide-neutral-800">'
+                    + list.map(function(r) {
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="' + vulnOnclick(r.finding_key || r.vuln_id) + '">'
+                            + '<td class="py-2 pr-4 align-top mono text-white">' + escapeHtmlClient(r.vuln_id) + '</td>'
+                            + '<td class="py-2 pr-4 align-top"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + escapeHtmlClient(r.severity) + '">' + escapeHtmlClient(r.severity) + '</span></td>'
+                            + '<td class="py-2"><div class="flex flex-col gap-1.5">'
+                            + (r.violations || []).map(function(x) {
+                                return '<div class="flex flex-wrap items-center gap-2">' + policyRuleBadge(x) + '<span class="text-neutral-400">' + escapeHtmlClient(x.detail || '') + '</span></div>';
+                            }).join('')
+                            + '</div></td></tr>';
+                    }).join('')
+                    + '</tbody></table>';
+            }
+            return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Policy Violations (' + list.length + ')</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">' + body + '</div></div>';
         }
 
 function openVulnModal(key) {
@@ -274,6 +457,99 @@ function openVulnModal(key) {
             document.body.style.overflow = 'hidden';
         }
 
+function openInvModal(id) {
+            const item = RD.inventory.find(x => x.id === id);
+            if (!item) return;
+
+            const itemVulns = RD.vulnerabilities.filter(v => v.affected_package_id === item.id);
+            const stateColor = item.state === 'safe' ? 'text-green-400'
+                             : item.state === 'infected' ? 'text-red-400'
+                             : 'text-yellow-400';
+
+            const vulnRows = itemVulns.length ? itemVulns.map(v => `
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="${vulnOnclick(findingKeyOf(v))}">
+                    <div class="flex items-center gap-3">
+                        <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-${v.severity}">${v.severity}</span>
+                        <span class="mono text-xs text-white">${v.id}</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        ${v.severity_score != null ? `<span class="mono text-xs text-neutral-400">${parseFloat(v.severity_score).toFixed(1)}</span>` : ''}
+                        ${v.is_kev ? '<span class="text-[10px] font-bold text-red-400 border border-red-400 rounded px-1.5 py-0.5">KEV</span>' : ''}
+                        ${v.is_policy_violation ? '<span class="text-[10px] text-red-400 border border-red-400/50 rounded px-1.5 py-0.5">Policy Block</span>' : '<span class="text-[10px] text-neutral-500">Allowed</span>'}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-neutral-500"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </div>
+                </div>
+            `).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
+
+            const introRows = (item.introduced_by || []).length
+                ? (item.introduced_by).map(ib => `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${ib}'), 50)">${ib}</span>`).join('')
+                : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
+
+            const parentsRows = (item.parents || []).length
+                ? item.parents.map(p => {
+                    const par = RD.inventory.find(x => x.id === p);
+                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${p}'), 50)">${par ? par.name + '@' + par.version : p}</span>`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No dependents (root)</span>';
+
+            const pathRows = (item.paths || []).length
+                ? item.paths.map(p => {
+                    const isObj = p && typeof p === 'object' && p.type === 'system_path';
+                    const text  = isObj ? p.text  : String(p ?? '');
+                    return `
+                      <div class="mono text-[10px] text-neutral-400 bg-neutral-900 px-2 py-1.5 rounded border border-neutral-800 break-all space-y-0.5">
+                        <div class="text-neutral-300">${text}</div>
+                      </div>`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No path info</span>';
+
+            const depsRows = (item.dependencies || []).length
+                ? item.dependencies.map(d => {
+                    const dep = RD.inventory.find(x => x.id === d);
+                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${d}'), 50)">${dep ? dep.name + '@' + dep.version : d}</span>`;
+                  }).join('')
+                : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
+
+            document.getElementById('modal-body').innerHTML = `
+                <div class="space-y-6">
+                    <div class="flex items-start justify-between gap-4 flex-wrap">
+                        <div>
+                            <div class="flex items-center gap-3 mb-1 flex-wrap">
+                                <span class="text-[10px] uppercase font-bold ${stateColor} border border-current px-2 py-0.5 rounded">${item.state}</span>
+                                <h2 class="text-xl font-bold">${item.name}</h2>
+                                <span class="mono text-neutral-400 text-sm">v${item.version}</span>
+                            </div>
+                            <p class="mono text-[11px] text-neutral-500 break-all">${item.id}</p>
+                        </div>
+                        <div class="text-right shrink-0">
+                            <p class="text-[10px] uppercase text-neutral-500 font-bold tracking-widest mb-1">Ecosystem</p>
+                            <p class="mono text-sm">${item.ecosystem}</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Type</p><p class="mono text-xs">${item.type || 'library'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">License</p><p class="mono text-xs">${item.license || 'unknown'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Scopes</p><p class="mono text-xs">${(item.scopes || []).join(', ') || '—'}</p></div>
+                        <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold ${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
+                    </div>
+
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">License Risk</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderLicenseInfoTable(item.license_info)}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">${parentsRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes)}</div>
+                    ${renderComponentPolicyViolations(item)}
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (${itemVulns.length})</h4><div class="space-y-0">${vulnRows}</div></div>
+                </div>
+            `;
+
+            document.getElementById('modal-overlay').style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
 function nodeLabel(id) { return String(id == null ? '' : id).replace(/^pkg:[^/]+\//, ''); }
 function extraBlocks(v) {
   const by = v.detected_by || null;
@@ -296,16 +572,49 @@ function extraBlocks(v) {
   return html;
 }
 
+/* RD from this report: the SCA records of the sc_vuln / sc_infection findings and the SCA items of the package inventory */
+function build() {
+  if (BUILT) return;
+  BUILT = true;
+  const C = (typeof CANON !== 'undefined' && CANON) || {};
+  (C.findings || []).forEach(function (f) { if ((f.type === 'sc_vuln' || f.type === 'sc_infection') && f.details) RD.vulnerabilities.push(f.details); });
+  (C.inventory || []).forEach(function (c) { if (c.type === 'dependency' && c.details && String(c.details.id || '').indexOf('pkg:') === 0 && c.details.state) RD.inventory.push(c.details); });
+}
+
+const openVulnModalSca = openVulnModal;
+function openVulnWithExtras(key) {
+  build();
+  openVulnModalSca(key);
+  const v = findVuln(key);
+  const body = document.getElementById('modal-body');
+  const root = body && body.firstElementChild;
+  const extra = v ? extraBlocks(v) : '';
+  if (root && extra) root.insertAdjacentHTML('beforeend', extra);
+}
+const openInvModalSca = openInvModal;
+function openInvWithData(id) { build(); openInvModalSca(id); }
+if (typeof window.openVulnModal !== 'function') window.openVulnModal = openVulnWithExtras;
+if (typeof window.openInvModal !== 'function') window.openInvModal = openInvWithData;
+
 window.UBEL_SC_VULN = {
+  /** The SCA vulnerability modal for a record (the `details` of an sc_vuln / sc_infection finding). */
   open: function (record) {
     if (!record || typeof record !== 'object') return false;
-    CURRENT = JSON.parse(JSON.stringify(record));
-    openVulnModal(CURRENT.finding_key || CURRENT.id);
-    const body = document.getElementById('modal-body');
-    const root = body && body.firstElementChild;
-    const extra = extraBlocks(CURRENT);
-    if (root && extra) root.insertAdjacentHTML('beforeend', extra);
+    build();
+    const key = findingKeyOf(record);
+    if (!findVuln(key)) RD.vulnerabilities.push(JSON.parse(JSON.stringify(record)));
+    openVulnWithExtras(key);
     return true;
   },
+  /** The SCA package modal for an inventory item (the `details` of a dependency inventory entry); false when it is not an SCA package item. */
+  openInventory: function (item) {
+    if (!item || typeof item !== 'object' || String(item.id || '').indexOf('pkg:') !== 0 || !item.state) return false;
+    build();
+    if (!RD.inventory.some(function (x) { return x.id === item.id; })) RD.inventory.push(item);
+    openInvWithData(item.id);
+    return true;
+  },
+  /** For the tests: the data the modals read. */
+  data: RD,
 };
 })();

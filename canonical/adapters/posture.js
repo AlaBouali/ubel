@@ -3,7 +3,7 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
-import { arr, isObj, first, mkFinding, mkInventory, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, TYPES } from '../common.js';
 
 export const family = 'posture';
 
@@ -48,6 +48,19 @@ export function translate(p, opts, H) {
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'non_compliant', clean: 'compliant' });
 
+  // The installed-package list (ubel-vm: operating-system and application packages, as the SCA engine read them). Every package is a
+  // dependency of the inventory, like in an SCA report, whether or not it has an advisory; the dependency entries that the findings
+  // above created are replaced by these. Their status uses the SCA words (vulnerable / infected / clean) and their details are the SCA
+  // inventory item, which the SCA package modal renders.
+  const pkgs = arr(p.package_inventory).filter((c) => isObj(c) && c.id);
+  if (pkgs.length) {
+    const ids = new Set(pkgs.map((c) => c.id));
+    out.inventory = out.inventory.filter((i) => !(i.type === 'dependency' && ids.has(i.component_id)));
+    for (const c of pkgs) out.inventory.push(mkInventory({ component_id: c.id, component_name: depName(c.name, c.ecosystem, c.version), status: 'unknown', type: 'dependency', details: R.deep(c) }));
+  }
+  applyFindingStatus(out.inventory.filter((i) => i.type === 'dependency'), out.findings);
+  for (const i of out.inventory) if (i.type === 'dependency' && i.details && i.details.state === 'unknown' && i.status === 'clean') i.status = 'unknown';   // its lookup could not be completed: not "clean"
+
   if (isK8s) {
     for (const f of arr(t.paths)) out.scopes.push({ type: 'manifest', name: R.rel(f), path: R.rel(f) });
     for (const ns of arr(t.scopes_scanned)) out.scopes.push({ type: 'kubernetes_namespace', name: ns, findings: out.findings.filter((x) => x.details?.scope === ns).length });
@@ -55,6 +68,7 @@ export function translate(p, opts, H) {
   } else {
     out.scopes.push({ type: 'filesystem', name: R.rel(t.root ?? '/'), path: R.rel(t.root ?? '/'), mode: t.mode ?? null });
     out.scopes.push({ type: 'host', name: t.hostname ?? null, os: t.os ?? null, kernel: t.kernel ?? null, virtualization: t.virtualization ?? null, container: !!t.container });
+    for (const e of uniq(pkgs.map((c) => c.ecosystem).filter(Boolean))) out.scopes.push({ type: 'ecosystem', name: e, components: pkgs.filter((c) => c.ecosystem === e).length });
   }
 
   const meta = H.buildMetadata({

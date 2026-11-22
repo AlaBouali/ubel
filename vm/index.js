@@ -93,6 +93,7 @@ const spec = {
           ...(r.apps.scanned ? { application_packages: r.apps.installed, application_advisories: r.appVulnerabilities.length, application_vulnerable_packages: new Set(r.appVulnerabilities.map((v) => v.affected_package_id)).size, application_locations: r.apps.roots, application_packages_installed_by_the_distribution_skipped: r.apps.osInstalledSkipped } : {}),
           actively_exploited: r.vulnerabilities.filter((v) => v.is_kev === true).length, total_vulnerable_packages: vulnerablePackages.size,
           threat_intel: { kev: (ti.kev && ti.kev.status) || 'unknown', epss: (ti.epss && ti.epss.status) || 'unknown' },
+          lookup: r.os.error || r.apps.error ? 'incomplete' : 'complete',
         };
         for (const n of r.notes) ctx.notes.push(n);
       },
@@ -118,6 +119,11 @@ const spec = {
     return {
       ctx, rules, target,
       options: { root, ...(args.hostProc ? { host_proc: true } : {}), skip_fs_walk: !!args.skipFsWalk, ...(args.skipPackages ? { packages: 'skipped' } : {}), ...(args.skipAppPackages ? { application_packages: 'skipped' } : {}), ...(args.appRoots ? { app_roots: args.appRoots } : {}) },
+      // the installed-package list (operating-system and application packages) travels in the report: the canonical inventory is built from it
+      meta: async () => {
+        if (!ctx.pkgScanRan) return {};                  // no package check was evaluated (--skip / --only): do not start a scan for the report
+        try { const r = await ctx.packageScan(); return r && Array.isArray(r.packages) && r.packages.length ? { package_inventory: r.packages } : {}; } catch { return {}; }
+      },
       notes: () => {
         const n = [...ctx.notes];
         if (ctx.fs.denied.size) n.push(`${ctx.fs.denied.size} file(s) could not be read (permission denied), e.g. ${[...ctx.fs.denied].slice(0, 3).join(', ')}.`);

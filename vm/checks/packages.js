@@ -16,6 +16,7 @@ export default [
       if (r === null) return na('package scan skipped (--skip-packages)');
       if (r instanceof PackageScanUnsupported) return na(`no supported package database: ${r.message}`);
       if (!r.os.supported) return na(`no supported operating-system package database: ${r.os.reason}`);
+      if (r.os.error) throw r.os.error;                  // the lookup could not be completed: not assessed, never clean
       return r.osVulnerabilities.map((v) => scViolation(v)).sort(sortViolations);
     },
   }),
@@ -29,6 +30,7 @@ export default [
       if (r === null) return na('package scan skipped (--skip-packages)');
       if (r instanceof PackageScanUnsupported) return na(`nothing to read: ${r.message}`);
       if (!r.apps.scanned) return na('application package scan skipped (--skip-app-packages)');
+      if (r.apps.error) throw r.apps.error;              // the lookup could not be completed: not assessed, never clean
       if (!r.apps.installed) return na(`no application packages found${r.apps.roots.length ? ` under ${r.apps.roots.join(', ')}` : ' (none of the standard application directories exists; add directories with --app-roots)'}`);
       const comp = new Map(r.inventory.map((c) => [c.id, c]));
       return r.appVulnerabilities.map((v) => {

@@ -61,6 +61,7 @@ class VmContext {
   packageScan() {
     return this._memo('pkgscan', async () => {
       if (this.opts.skipPackages) return null;
+      this.pkgScanRan = true;
       const { scanMachinePackages, PackageScanUnsupported } = await import('./pkgvulns.js');
       try {
         const live = this.live && !this.hostProc && this.root === '/';
@@ -68,7 +69,7 @@ class VmContext {
         if (typeof this.opts.onPackageScan === 'function') this.opts.onPackageScan(r);
         return r;
       } catch (e) {
-        if (e instanceof PackageScanUnsupported) return e;
+        if (e instanceof PackageScanUnsupported) { this.notes.push(`The package list could not be read: ${e.message}`); return e; }
         throw e;
       }
     });

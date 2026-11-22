@@ -14,7 +14,8 @@
 //   scanComponents() the SCA pipeline on a plain list of package URLs through `resbom` (ubel-resbom): no project, no package manager.
 // Nothing is written to the scanned directories and no report files are saved: is_script + save_reports:false makes the engine return the
 // payload before anything is serialised, and asset_ubel_dir moves the policy file it keeps to the scanner's own .ubel folder. The SCA
-// package-manager firewall code lives in the same modules and is never reached. Network: OSV.dev / NVD / CISA / FIRST (UBEL_OSV_ENDPOINT
+// package-manager firewall code lives in the same modules and is never reached. `vulns: false` reads the package list only (no OSV / KEV / EPSS request): the
+// VM uses it to still report what is installed when the vulnerability lookup could not be completed. Network: OSV.dev / NVD / CISA / FIRST (UBEL_OSV_ENDPOINT
 // and UBEL_NVD_ENDPOINT select internal mirrors). A lookup that cannot be completed makes the engine throw: the check that asked is then
 // "not assessed", never clean.
 
@@ -37,7 +38,7 @@ const ubelDirOf = (workDir) => path.join(path.resolve(workDir || process.cwd()),
 const sca = () => import('../../sca/main.js');
 
 /** The options every in-memory scan shares. */
-const base = (workDir, threatIntel = true) => ({ engine: 'npm', mode: 'health', is_script: true, save_reports: false, scan_secrets: false, scan_vulns: true, threat_intel: threatIntel !== false, asset_ubel_dir: ubelDirOf(workDir) });
+const base = (workDir, threatIntel = true, vulns = true) => ({ engine: 'npm', mode: 'health', is_script: true, save_reports: false, scan_secrets: false, scan_vulns: vulns !== false, threat_intel: threatIntel !== false, asset_ubel_dir: ubelDirOf(workDir) });
 
 /** @returns {Promise<object>} the SCA payload (vulnerabilities[], inventory[], scan_info, threat_intel, …) plus `scan_warnings` (what the engine reported on the console) */
 async function run(opts, log, what) {
@@ -51,22 +52,22 @@ async function run(opts, log, what) {
 }
 
 /** SCA platform mode: the operating-system packages installed on this host. */
-export async function scanPlatform({ workDir, threatIntel = true, log = () => {} } = {}) {
+export async function scanPlatform({ workDir, threatIntel = true, vulns = true, log = () => {} } = {}) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ubel-platform-'));
   try {
-    return await run({ ...base(workDir, threatIntel), projectRoot: scratch, full_stack: false, scan_os: true, scan_node: false, scan_scope: 'developer_platform' }, log, 'platform scan (operating-system packages)');
+    return await run({ ...base(workDir, threatIntel, vulns), projectRoot: scratch, full_stack: false, scan_os: true, scan_node: false, scan_scope: 'developer_platform' }, log, 'platform scan (operating-system packages)');
   } finally { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { /* best effort */ } }
 }
 
 /** SCA docker mode on a directory that is a root filesystem: OS packages plus every ecosystem's application dependencies. */
-export async function scanDocker({ root, workDir, threatIntel = true, scanOs = true, osOnly = false, log = () => {} } = {}) {
+export async function scanDocker({ root, workDir, threatIntel = true, vulns = true, scanOs = true, osOnly = false, log = () => {} } = {}) {
   const what = `docker-mode scan of ${root}${osOnly ? ' (operating-system packages)' : scanOs ? '' : ' (application packages only)'}`;
-  return run({ ...base(workDir, threatIntel), engine: 'docker', projectRoot: root, full_stack: !osOnly, scan_os: scanOs || osOnly, scan_node: !osOnly, scan_scope: 'container-image' }, log, what);
+  return run({ ...base(workDir, threatIntel, vulns), engine: 'docker', projectRoot: root, full_stack: !osOnly, scan_os: scanOs || osOnly, scan_node: !osOnly, scan_scope: 'container-image' }, log, what);
 }
 
 /** SCA health scan (full stack, no OS packages) of an application directory. */
-export async function scanTree({ dir, workDir, threatIntel = true, log = () => {} } = {}) {
-  return run({ ...base(workDir, threatIntel), projectRoot: dir, full_stack: true, scan_os: false, scan_node: true, scan_scope: 'developer_platform' }, log, `application scan of ${dir}`);
+export async function scanTree({ dir, workDir, threatIntel = true, vulns = true, log = () => {} } = {}) {
+  return run({ ...base(workDir, threatIntel, vulns), projectRoot: dir, full_stack: true, scan_os: false, scan_node: true, scan_scope: 'developer_platform' }, log, `application scan of ${dir}`);
 }
 
 /**

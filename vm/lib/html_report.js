@@ -272,6 +272,8 @@ function buildReportPayload(reporter, meta = {}) {
     checks,
     findings,
   };
+  // ubel-vm: the installed-package list (SCA inventory items) read for the package checks; the canonical report builds its inventory from it
+  if (Array.isArray(meta.package_inventory) && meta.package_inventory.length) payload.package_inventory = meta.package_inventory;
 
   if (meta.previous_report !== undefined) {
     try {

@@ -737,7 +737,8 @@ const FAMILY = {
     if ((cf.type === 'sc_vuln' || cf.type === 'sc_infection') && window.UBEL_SC_VULN) return window.UBEL_SC_VULN.open(cf.details);
     const f = cf.details; if (!f) return false; renderFindingDetail(f); return true;
   },
-  openInventory: function () { return false; },   // the module has no inventory view
+  // the installed-package list of ubel-vm (dependency entries whose details are the SCA inventory item): the SCA package modal (client/scvuln.js)
+  openInventory: function (i) { const c = CANON.inventory[i]; return !!(c && c.type === 'dependency' && window.UBEL_SC_VULN && window.UBEL_SC_VULN.openInventory(c.details)); },
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); renderCompliancePosture(); },
   diffs: function () { renderDiffs(); },

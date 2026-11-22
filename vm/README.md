@@ -83,10 +83,10 @@ Packages the distribution's own package manager installed (their files are liste
 The SCA modules are loaded lazily when the check runs. They also contain the package-manager firewall, which does start `apt` / `dnf`; **none of that code is used here**, and nothing is written to the scanned directories (the engine's policy file goes to the working directory's `.ubel` folder).
 
 - It needs network access to `api.osv.dev` (and, for the enrichment, CISA and FIRST). Set `UBEL_OSV_ENDPOINT` to use an internal OSV mirror; use `--skip-packages` (or `--skip vm-pkg-vulnerabilities,vm-app-pkg-vulnerabilities`) when the machine has no egress, `--skip-app-packages` for the operating-system packages only.
-- A scan or lookup that cannot be completed (OSV unreachable, an advisory not fetchable) makes the check **not assessed** — never a clean result — and the run exits `3` unless `--allow-partial`.
+- A scan or lookup that cannot be completed (OSV unreachable, an advisory not fetchable) makes the check **not assessed** — never a clean result — and the run exits `3` unless `--allow-partial`; the package list is still reported.
 - Supported package databases are the ones `ubel-docker` supports (Debian / Ubuntu, Alpine, RHEL-family). A machine without a readable database gets *not applicable* for the operating-system check; the application check still runs.
 - The SCA scanners walk the directories they are given, so the application scan covers the locations above; software installed elsewhere needs `--app-roots`.
-- The report's *Scan Info → Target* lists the package summary (installed, advisories, vulnerable packages, application packages, actively exploited, feed status).
+- **The package list is in the report.** Every installed package — operating-system and application, vulnerable or not — is a dependency in the report's *Inventory* tab (`Inventory(n)`), with the SCA package modal (license risk, install paths, dependencies, advisories) and the SCA status `vulnerable` / `infected` / `clean`; the *Scan Info → Target* block holds the summary (installed, advisories, vulnerable packages, application packages, actively exploited, feed status). The list is read from local files, so it is there even when the lookup fails: the packages are then `unknown` (never `clean`), the package checks are *not assessed*, and a note says why.
 
 ## Auditing a Kubernetes node
 
