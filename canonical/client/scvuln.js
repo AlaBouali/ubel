@@ -3,8 +3,9 @@
  * vulnerability record, and dependency inventory entries whose `details` is the SCA inventory item (ubel-vm lists every installed package).
  * The renderers below are extracted verbatim from client/sca.js (openVulnModal, openInvModal and what they call); the only change is that
  * they read the report data from RD, which is built from this report's CANON (findings + inventory) instead of the SCA report's reportData.
- * Two blocks that only these reports have are added to the vulnerability modal: which check found the package and where, and the
- * dependency sequences. Exposed as window.UBEL_SC_VULN.open(record) and .openInventory(item); the inline handlers of the modals
+ * Blocks that only these reports have are added to the vulnerability modal: which check found the package and where (and, for an OS
+ * package, the source package it was matched through). The affected dependency sequences are not in the vulnerability modal: they are
+ * listed under the affected package in its inventory modal (affectedSequencesBlock, also in client/sca.js). Exposed as window.UBEL_SC_VULN.open(record) and .openInventory(item); the inline handlers of the modals
  * (openVulnModal / openInvModal) are defined on window when the page has none of its own. */
 (function () {
 'use strict';
@@ -519,6 +520,32 @@ function renderPackageDetails(item) {
     + (links ? '<div class="flex flex-wrap gap-2 mt-4">' + links + '</div>' : '') + '</div>';
 }
 
+// "Affected dependency sequences" (every path root → … → this package) are listed under the package in the inventory, and only when it is
+// affected (state vulnerable / infected, or an advisory on it). Reports made before they moved still carry them on the findings: used then.
+function affectedSequencesBlock(item, itemVulns, inventory) {
+  if (!(item.state === 'vulnerable' || item.state === 'infected' || itemVulns.length)) return '';
+  let seqs = Array.isArray(item.dependency_sequences) ? item.dependency_sequences : [];
+  let total = item.dependency_sequences_total;
+  if (!seqs.length) {
+    for (const v of itemVulns) { if (Array.isArray(v.affected_dependency_sequences) && v.affected_dependency_sequences.length) { seqs = v.affected_dependency_sequences; total = v.affected_dependency_sequences_total; break; } }
+  }
+  const chip = function (id, last) {
+    const known = !last && id !== item.id && inventory.some(function (x) { return x.id === id; });
+    const cls = last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300';
+    return '<span title="' + escapeHtmlClient(id) + '" class="px-2 py-1 rounded border text-xs mono ' + cls + (known ? ' cursor-pointer hover:border-neutral-500 transition-colors' : '') + '"'
+      + (known ? ' onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal(\'' + escapeHtmlClient(id) + '\'), 50)"' : '') + '>' + escapeHtmlClient(String(id == null ? '' : id).replace(/^pkg:[^/]+\//, '')) + '</span>';
+  };
+  const count = total && total > seqs.length ? 'shortest ' + seqs.length + ' of ' + total : String(seqs.length);
+  const body = seqs.length
+    ? '<div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">' + seqs.map(function (sq, n) {
+        const nodes = Array.isArray(sq) ? sq : [sq];
+        return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
+          + nodes.map(function (id, k) { const last = k === nodes.length - 1; return chip(id, last) + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('') + '</div></div>';
+      }).join('') + '</div>'
+    : '<span class="text-neutral-500 text-xs italic">No dependency sequences recorded for this package</span>';
+  return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + count + ')</h4>' + body + '</div>';
+}
+
 function openInvModal(id) {
             const item = RD.inventory.find(x => x.id === id);
             if (!item) return;
@@ -601,6 +628,7 @@ function openInvModal(id) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
+                    ${affectedSequencesBlock(item, itemVulns, RD.inventory)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes)}</div>
@@ -616,7 +644,6 @@ function openInvModal(id) {
 function nodeLabel(id) { return String(id == null ? '' : id).replace(/^pkg:[^/]+\//, ''); }
 function extraBlocks(v) {
   const by = v.detected_by || null;
-  const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
   let html = '';
   if (v.source_package && v.source_package !== v.affected_dependency) {     // OS package: the advisory is keyed by the source package it was built from
     html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Matched through source package</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
@@ -626,15 +653,6 @@ function extraBlocks(v) {
     html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Found by</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
       + '<p class="text-xs mono text-neutral-500 mb-1">' + escapeHtmlClient(by.check || '') + (by.scope ? ' · ' + escapeHtmlClient(by.scope) : '') + '</p>'
       + '<p>' + escapeHtmlClient(by.resource || '') + '</p></div></div>';
-  }
-  if (seqs.length) {
-    html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Affected dependency sequences (' + (v.affected_dependency_sequences_total && v.affected_dependency_sequences_total > seqs.length ? 'shortest ' + seqs.length + ' of ' + v.affected_dependency_sequences_total : seqs.length) + ')</h4><div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">'
-      + seqs.map(function (sq, n) {
-        const nodes = Array.isArray(sq) ? sq : [sq];
-        return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
-          + nodes.map(function (id, k) { const last = k === nodes.length - 1; return '<span title="' + escapeHtmlClient(id) + '" class="px-2 py-1 rounded border text-xs mono ' + (last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300') + '">' + escapeHtmlClient(nodeLabel(id)) + '</span>' + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('')
-          + '</div></div>';
-      }).join('') + '</div></div>';
   }
   return html;
 }

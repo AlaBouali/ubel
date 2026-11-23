@@ -3,6 +3,10 @@
 // The record travels UNCHANGED in `vuln` and the finding's `type` is sc_vuln (sc_infection for a malicious-package advisory), which is
 // what makes every report open it in the SCA vulnerability modal (canonical/client/scvuln.js). The rest — resource, title, detail,
 // remediation — is the plain-language line the check lists.
+// A check that has the package's SCA inventory item hands it over (`comp`): the violation then carries it (`package`) so the report can list
+// the package in its inventory with the SCA package modal's data; the report builder moves it out of the finding (vm/lib/html_report.js).
+
+import { compactPackage } from './scpackage.js';
 
 export const RANK = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 const SEV = { critical: 'critical', high: 'high', medium: 'medium', moderate: 'medium', low: 'low', unknown: 'medium' };
@@ -58,8 +62,9 @@ export function facts(v) {
  * @param {object} v   SCA vulnerability record
  * @param {{resource?:string, scope?:string, where?:string, prefix?:string, remediation?:string}} [o]
  *   where: what to say after "<package> <version>" (a location, "in container x" …); prefix: label before the package in the resource
+ *   comp: the package's SCA inventory item; base: the mount point its paths are read under ('' on the live host)
  */
-export function scViolation(v, { resource, scope, where = '', prefix = '', remediation } = {}) {
+export function scViolation(v, { resource, scope, where = '', prefix = '', remediation, comp, base = '' } = {}) {
   const cve = cveOf(v);
   const fixed = (v.fixed_versions || [])[0];
   const hint = upgradeHint(v);
@@ -70,6 +75,7 @@ export function scViolation(v, { resource, scope, where = '', prefix = '', remed
     kev: v.is_kev === true,
     type: typeOf(v),
     vuln: v,
+    ...(comp && comp.id ? { package: compactPackage(comp, new Map([[comp.id, [v]]]), () => false, base) } : {}),
     title: `${v.affected_dependency}: ${cve}${v.summary ? ' — ' + short(v.summary) : ''}`,
     detail: `${v.affected_dependency} ${v.affected_dependency_version}${where ? ` ${where}` : ''}. ${facts(v)}`,
     remediation: remediation || (fixed

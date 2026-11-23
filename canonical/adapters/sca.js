@@ -2,7 +2,7 @@
 // SCA (ubel-npm / pip / … / docker / os / secrets / license / resbom) → canonical.
 // Original keys used: vulnerabilities[], inventory[], secrets.findings[], policy, decision, scan_info, tool_info,
 // os_metadata, git_metadata, runtime, stats, compliance_summary, executive_summary, diffs, threat_intel.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, withoutSequences, TYPES } from '../common.js';
 
 export const family = 'sca';
 
@@ -22,6 +22,7 @@ export function translate(p, opts, H) {
     return [];
   };
 
+  const seqs = new Map();   // affected package id -> its dependency sequences
   for (const v of arr(p.vulnerabilities)) {
     const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
     out.findings.push(mkFinding({
@@ -34,8 +35,10 @@ export function translate(p, opts, H) {
       confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
       violate_policy: v.is_policy_violation ?? (v.policy_decision != null ? v.policy_decision === 'block' : null),
       type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
-      details: R.deep({ ...v, affected_dependency_sequences: seqFor(v, cid) }),
+      details: R.deep(withoutSequences(v)),
     }));
+    // the dependency sequences belong to the package: listed under its inventory entry, only because it is affected
+    if (!seqs.has(cid)) { const q = seqFor(v, cid); if (q.length) seqs.set(cid, { list: q, total: v.affected_dependency_sequences_total }); }
   }
 
   for (const s of arr(p.secrets?.findings)) {
@@ -64,6 +67,12 @@ export function translate(p, opts, H) {
     }));
   }
   applyFindingStatus(out.inventory, out.findings);
+  for (const c of out.inventory) {
+    const q = c.type === 'dependency' ? seqs.get(c.component_id) : null;
+    if (!q) continue;
+    c.details.dependency_sequences = q.list;
+    if (q.total > q.list.length) c.details.dependency_sequences_total = q.total;
+  }
 
   // Licenses that need a decision (observations: appended after the advisories / secrets so those keep their positions).
   // Permissive licenses are the normal case and are not listed; copyleft / proprietary / unrecognised ones are.

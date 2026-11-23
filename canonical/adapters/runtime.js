@@ -15,7 +15,8 @@
 // is rated by what normally listens there).
 // inventory:  processes → application, listening sockets → network_service, containers → container,
 //             packages the inspector saw loaded → dependency.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, isScFinding, scFinding, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, isScFinding, scFinding, moveSequences, TYPES } from '../common.js';
+import { npmPurl } from '../../binary/lib/records.js';
 
 export const family = 'runtime';
 
@@ -44,10 +45,11 @@ export function translate(p, opts, H) {
   const violates = failOnPredicate(opts.fail_on);
   const out = { findings: [], inventory: [], scopes: [] };
   const derived = [];   // components only known from a finding's resource (kept unless the runtime block already lists that id)
+  const scInv = [];     // the dependency entries the package findings made: they hold the dependency sequences
 
   for (const f of arr(p.findings)) {
     // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
-    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x } }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
+    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x } }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); scInv.push(sc.inventory); continue; }
     const type = typeOf(f);
     let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
     if (type === TYPES.VULN) {
@@ -79,12 +81,34 @@ export function translate(p, opts, H) {
   for (const c of arr(cont?.items)) {
     out.inventory.push(mkInventory({ component_id: c.name, component_name: c.name, status: 'running', type: 'container', details: c }));
   }
+  // Packages: every dependency entry is an SCA inventory item, like the SCA report's (the SCA package modal renders it). The packages the
+  // advisories are about come from the payload's inventory; those the V8 inspector saw loaded are added as items of their own (or, when
+  // an advisory is about them too, noted on that item).
+  const pkgs = arr(p.inventory).filter((i) => isObj(i) && i.type === 'dependency' && isObj(i.details) && i.details.id).map((i) => i.details);
+  const byPkg = new Map(pkgs.map((c) => [c.id, c]));
+  for (const c of pkgs) out.inventory.push(mkInventory({ component_id: c.id, component_name: depName(c.name, c.ecosystem, c.version), status: 'unknown', type: 'dependency', details: c }));
+  const looked = arr(p.checks).find((c) => c.check === 'rt-comp-vulnerable-package');
+  const assessed = !!looked && (looked.status === 'pass' || looked.status === 'fail');    // no advisory found + lookup done = safe; otherwise unknown, never safe
   for (const i of arr(rt.inspections)) {
     for (const pk of arr(i.loaded_packages)) {
       const pp = splitPkg(pk);
-      out.inventory.push(mkInventory({ component_id: pk, component_name: depName(pp.name, 'npm', pp.version), status: 'loaded', type: 'dependency', details: { name: pp.name, version: pp.version, ecosystem: 'npm', source: 'v8 inspector (loaded by the running process)', application: i.label, scope: i.scope ?? null } }));
+      const id = npmPurl(pp.name, pp.version);
+      const by = `${i.label}${i.scope && i.scope !== 'host' ? ` (${i.scope})` : ''}`;
+      const have = byPkg.get(id);
+      if (have) { have.package_info = { ...(have.package_info || {}), loaded_by: [have.package_info?.loaded_by, by].filter(Boolean).join(', ') }; continue; }
+      const item = {
+        id, name: pp.name, version: pp.version, type: 'library', ecosystem: 'npm', license: null, state: assessed ? 'safe' : 'unknown',
+        package_info: { source: 'v8 inspector (loaded by the running process)', loaded_by: by },
+        scopes: [], paths: [], dependencies: [], introduced_by: [], parents: [], is_direct: null, is_policy_violation: false,
+        vulnerable_transitive_dependencies: [], policy_violations: [], suggested_fixes: { fixes: [], unfixed: [] },
+      };
+      byPkg.set(id, item);
+      out.inventory.push(mkInventory({ component_id: id, component_name: depName(pp.name, 'npm', pp.version), status: 'loaded', type: 'dependency', details: item }));
     }
   }
+  // the bare entries the package findings made are replaced by the items above; the dependency sequences move to them
+  out.inventory = out.inventory.filter((c, n) => !(c.type === 'dependency' && c.details && !c.details.state && byPkg.has(c.component_id)));
+  moveSequences(out.inventory, scInv);
   // ── observations ──
   const t0 = p.target || {};
   out.findings.push(...checkObservations(p.checks, { passType: TYPES.HARDENING, component_id: t0.hostname ?? t0.subject ?? 'host', component_name: t0.hostname ?? t0.subject ?? 'host', component_type: 'host', resource: t0.hostname ?? t0.subject ?? 'host' }));

@@ -30,6 +30,7 @@ export default [
           out.push(scViolation(v, {
             resource: `${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)} (${used ? list(used.procs, 2) : s.label})`, scope: s.scope,
             where: `is used by ${used ? list(used.procs) : 'a running process'}${used ? ` (${list(used.files, 2)})` : ''} on ${s.label === 'host' ? 'the host' : `container ${s.label}`}`,
+            comp: inv.get(v.affected_package_id), base: s.root,
           }));
         }
       }
@@ -56,6 +57,7 @@ export default [
           out.push(scViolation(v, {
             prefix: purlType(v.affected_package_id), resource: `${purlType(v.affected_package_id)}:${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)} (${a.root})`, scope: a.scope,
             where: `in ${a.root}${at.length ? ` at ${at[0]}` : ''} (used by ${list(new Set(a.procs.map((p) => p.pid)), 3).replace(/^/, 'pid ')})`,
+            comp: c, base: a.base,
           }));
         }
       }

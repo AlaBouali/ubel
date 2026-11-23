@@ -2,6 +2,7 @@
 import { rule, needLive, vulnSeverity, cveOf, short, vulnFacts, sortVulns } from './util.js';
 import { na, unassessed } from '../../vm/lib/engine.js';
 import { procLabel, scopeOf, downgrade, nodeEol } from '../lib/util.js';
+import { compactPackage } from '../../vm/lib/scpackage.js';
 
 /** The Node.js release a process runs: what it reported about itself (--inspect) or the release string compiled into its executable. */
 async function nodeVersion(ctx, proc) {
@@ -38,6 +39,7 @@ export default [
       const out = [];
       for (const e of apps.values()) {
         const label = e.app.rootPackage && e.app.rootPackage.name ? e.app.rootPackage.name : e.app.root;
+        const base = ctx.fsPath(e.procs[0], '/').replace(/\/+$/, '');            // '' on the host, the container's root otherwise
         for (const [key, pkg] of e.app.installed.packages) {
           const vulns = adv.byPackage.get(key); if (!vulns) continue;
           const isLoaded = e.loaded ? e.loaded.has(key) : null;
@@ -46,6 +48,7 @@ export default [
             if (isLoaded === false && !v.is_infection) sev = downgrade(sev);
             const state = isLoaded === true ? 'The running process has loaded this package.' : isLoaded === false ? 'Installed but NOT loaded by the running process at the time of inspection (rated one level lower; it can still be loaded later).' : 'Installed on disk; run with --inspect to learn whether the running process has loaded it.';
             out.push({ resource: `${key}: ${cveOf(v)} (${label})`, scope: scopeOf(e.procs[0]), severity: sev, kev: v.is_kev === true, type: v.is_infection ? 'sc_infection' : 'sc_vuln', vuln: v,
+              package: compactPackage({ id: v.affected_package_id, name: pkg.name, version: pkg.version, ecosystem: v.ecosystem || 'npm', paths: pkg.dirs }, new Map([[v.affected_package_id, [v]]]), () => false, base),
               title: `${pkg.name}: ${cveOf(v)}${v.summary ? ' — ' + short(v.summary) : ''}`,
               detail: `${pkg.name} ${pkg.version} in ${e.app.root} (${e.procs.length === 1 ? 'pid ' + e.procs[0].pid : e.procs.length + ' processes, e.g. pid ' + e.procs[0].pid}). ${state} ${vulnFacts(v)}`,
               remediation: (v.fixed_versions || [])[0] ? `Update ${pkg.name} to ${v.fixed_versions[0]} or later, redeploy, and restart the process.` : `No fixed version is published yet: remove or replace ${pkg.name}, or apply the mitigation in ${v.url || v.id}.` });

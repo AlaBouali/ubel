@@ -147,9 +147,10 @@ export default [
         }
         scanned++;
         for (const w of r.scan_warnings || []) if (!ctx.notes.includes(w)) ctx.notes.push(w);
+        const comp = new Map(r.inventory.map((x) => [x.id, x]));
         for (const v of r.vulnerabilities) {
           const fixed = (v.fixed_versions || [])[0];
-          out.push(scViolation(v, { resource: `${c.name}: ${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)}`, scope: '', where: `in container ${c.name}`,
+          out.push(scViolation(v, { resource: `${c.name}: ${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)}`, scope: '', where: `in container ${c.name}`, comp: comp.get(v.affected_package_id), base: root,
             remediation: fixed ? `Rebuild ${c.image} with ${v.affected_dependency} ${fixed} or later and redeploy.` : `No fix is published yet: restrict exposure of ${c.name} and track ${v.url || v.id}.` }));
         }
       }

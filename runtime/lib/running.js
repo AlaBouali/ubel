@@ -44,7 +44,7 @@ function filesOf(ctx, p) {
 
 /**
  * Operating-system packages in use by running processes, with the SCA advisories that apply to them.
- * @returns {Promise<{scopes:object[], notes:string[]}>}  scopes[]: { scope, label, procs, packages:Map<name,{files,procs}>, inventory, vulnerabilities, unowned }
+ * @returns {Promise<{scopes:object[], notes:string[]}>}  scopes[]: { scope, label, root, procs, packages:Map<name,{files,procs}>, inventory, vulnerabilities, unowned }
  */
 export function runningOsPackages(ctx) {
   return ctx.memo('running-os', async () => {
@@ -81,7 +81,7 @@ export function runningOsPackages(ctx) {
       const inventory = scan.inventory.filter((c) => isOsPurl(c.id) && packages.has(c.name));
       const ids = new Set(inventory.map((c) => c.id));
       const merged = mergeResults([scan]);
-      scopes.push({ scope: g.host ? 'host' : g.scope, label: g.host ? 'host' : g.scope, host: g.host, procs: g.procs, packages, inventory, unowned,
+      scopes.push({ scope: g.host ? 'host' : g.scope, label: g.host ? 'host' : g.scope, host: g.host, root: g.host ? '' : g.root.replace(/\/+$/, ''), procs: g.procs, packages, inventory, unowned,
         vulnerabilities: merged.vulnerabilities.filter((v) => ids.has(v.affected_package_id)), threatIntel: scan.threat_intel });
     }
     return { scopes, notes };
@@ -123,7 +123,7 @@ export function appRootsOf(ctx, p) {
 
 /**
  * Application packages installed under the application directories of running Python / Ruby / PHP processes, with SCA advisories.
- * @returns {Promise<{apps:object[], notes:string[]}>}  apps[]: { root, scope, procs, inventory, vulnerabilities }
+ * @returns {Promise<{apps:object[], notes:string[]}>}  apps[]: { root, base, scope, procs, inventory, vulnerabilities }
  */
 export function runningAppPackages(ctx) {
   return ctx.memo('running-apps', async () => {
@@ -147,7 +147,7 @@ export function runningAppPackages(ctx) {
       const scan = await scanTree({ dir, workDir: ctx.opts.workDir, threatIntel: ctx.opts.threatIntel, log: ctx.log });
       for (const w of scan.scan_warnings || []) if (!notes.includes(w)) notes.push(w);
       const inventory = scan.inventory.map((c) => ({ ...c, paths: pathsOf(c).map((x) => (strip && x.startsWith(strip) ? x.slice(strip.length) || '/' : x)) }));
-      apps.push({ root: a.root, scope: a.scope, procs: a.procs, inventory, vulnerabilities: scan.vulnerabilities, threatIntel: scan.threat_intel });
+      apps.push({ root: a.root, base: strip, scope: a.scope, procs: a.procs, inventory, vulnerabilities: scan.vulnerabilities, threatIntel: scan.threat_intel });
     }
     return { apps, notes };
   });
