@@ -3,7 +3,7 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
-import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, TYPES } from '../common.js';
+import { arr, first, mkFinding, mkInventory, makeRel, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, TYPES } from '../common.js';
 
 export const family = 'posture';
 
@@ -18,8 +18,6 @@ export function translate(p, opts, H) {
   const out = { findings: [], inventory: [], scopes: [] };
 
   for (const f of arr(p.findings)) {
-    // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
-    if (isScFinding(f)) { const sc = scFinding(f, { violates, R }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const res = f.resource == null ? null : R.rel(f.resource);
     const cid = res == null ? null : (isK8s && f.scope ? `${f.scope}/${res}` : res);
     const kind = isK8s ? 'kubernetes_resource' : (typeof res === 'string' && res.startsWith('/') ? 'filesystem' : 'host_object');
@@ -48,20 +46,6 @@ export function translate(p, opts, H) {
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'non_compliant', clean: 'compliant' });
 
-  // The installed packages (ubel-vm: operating-system and application packages, as the SCA engine read them), the dependency entries of the
-  // payload's inventory. Every package is a
-  // dependency of the inventory, like in an SCA report, whether or not it has an advisory; the dependency entries that the findings
-  // above created are replaced by these. Their status uses the SCA words (vulnerable / infected / clean) and their details are the SCA
-  // inventory item, which the SCA package modal renders.
-  const pkgs = arr(p.inventory).filter((i) => isObj(i) && i.type === 'dependency' && isObj(i.details) && i.details.id).map((i) => i.details);
-  if (pkgs.length) {
-    const ids = new Set(pkgs.map((c) => c.id));
-    out.inventory = out.inventory.filter((i) => !(i.type === 'dependency' && ids.has(i.component_id)));
-    for (const c of pkgs) out.inventory.push(mkInventory({ component_id: c.id, component_name: depName(c.name, c.ecosystem, c.version), status: 'unknown', type: 'dependency', details: R.deep(c) }));
-  }
-  applyFindingStatus(out.inventory.filter((i) => i.type === 'dependency'), out.findings);
-  for (const i of out.inventory) if (i.type === 'dependency' && i.details && i.details.state === 'unknown' && i.status === 'clean') i.status = 'unknown';   // its lookup could not be completed: not "clean"
-
   if (isK8s) {
     for (const f of arr(t.paths)) out.scopes.push({ type: 'manifest', name: R.rel(f), path: R.rel(f) });
     for (const ns of arr(t.scopes_scanned)) out.scopes.push({ type: 'kubernetes_namespace', name: ns, findings: out.findings.filter((x) => x.details?.scope === ns).length });
@@ -69,7 +53,6 @@ export function translate(p, opts, H) {
   } else {
     out.scopes.push({ type: 'filesystem', name: R.rel(t.root ?? '/'), path: R.rel(t.root ?? '/'), mode: t.mode ?? null });
     out.scopes.push({ type: 'host', name: t.hostname ?? null, os: t.os ?? null, kernel: t.kernel ?? null, virtualization: t.virtualization ?? null, container: !!t.container });
-    for (const e of uniq(pkgs.map((c) => c.ecosystem).filter(Boolean))) out.scopes.push({ type: 'ecosystem', name: e, components: pkgs.filter((c) => c.ecosystem === e).length });
   }
 
   const meta = H.buildMetadata({
@@ -78,7 +61,7 @@ export function translate(p, opts, H) {
     scan: {
       generated_at: p.generated_at, status: p.coverage?.status === 'partial' ? 'partial' : 'completed',
       scan_type: p.profile?.key ?? (isK8s ? 'k8s' : 'vm'), scan_scope: isK8s ? (t.source ?? 'manifests') : (t.mode ?? 'live'),
-      ecosystems: [], vulnerability_scan: !isK8s, report_id: p.report_id, asset_id: p.asset_id, asset_name: p.asset_name, asset_type: p.asset_type, machine_id: p.machine_id, tool_version: p.tool_version,
+      ecosystems: [], vulnerability_scan: false, report_id: p.report_id, asset_id: p.asset_id, asset_name: p.asset_name, asset_type: p.asset_type, machine_id: p.machine_id, tool_version: p.tool_version,
     },
   });
   return {

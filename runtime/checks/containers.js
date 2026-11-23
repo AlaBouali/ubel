@@ -1,6 +1,5 @@
 'use strict';
-import path from 'node:path';
-import { rule, vulnSeverity, cveOf, short, vulnFacts, sortVulns } from './util.js';
+import { rule } from './util.js';
 import { na, unassessed } from '../../vm/lib/engine.js';
 
 const RISKY_PORTS = { 2375: ['Docker API', 'critical'], 2379: ['etcd', 'high'], 3306: ['MySQL/MariaDB', 'medium'], 5432: ['PostgreSQL', 'medium'], 6379: ['Redis', 'high'], 9200: ['Elasticsearch', 'high'], 11211: ['Memcached', 'high'], 27017: ['MongoDB', 'high'], 9229: ['Node.js inspector', 'critical'] };
@@ -123,40 +122,5 @@ export default [
     remediation: 'Pin images by digest (image@sha256:…) or at least by an exact version tag, and update them deliberately.',
     cap: 100,
     async evaluate(ctx) { const e = await engine(ctx); if (e.skip) return e.skip; return e.list.filter((c) => c.image && !/@sha256:/.test(c.image) && (!/:[^/]+$/.test(c.image) || /:latest$/.test(c.image))).map((c) => ({ resource: res(c), scope: '', detail: `Image reference: ${c.image}.` })); },
-  }),
-  rule({
-    id: 'rt-ctr-packages-vulnerable', area: 'containers', severity: 'high', title: 'Package installed in a running container has a known vulnerability',
-    description: 'The SCA engine (docker mode on the container\'s filesystem, read through /proc/<pid>/root; no engine command is run) finds an OSV.dev advisory for an operating-system package of a running container for its distribution release, or for an application package installed in it (npm, Python, Composer, …). Every installed package is checked, in use or not (rt-pkg-os-vulnerable reports the ones in use). Opt-in because it queries OSV.dev for every container (--container-packages).',
-    remediation: 'Rebuild the image from an updated base image, redeploy, and restart the container.',
-    cap: 250,
-    async evaluate(ctx) {
-      if (!ctx.opts.containerPackages) return na('container package scan not requested (--container-packages)');
-      if (ctx.opts.noLookups) return na('advisory lookups disabled (--no-lookups)');
-      const e = await engine(ctx); if (e.skip) return e.skip;
-      const { scanDocker } = await import('../../vm/lib/scascan.js');
-      const { scViolation } = await import('../../vm/lib/scfinding.js');
-      const out = [], errors = [];
-      let scanned = 0;
-      for (const c of e.list) {
-        if (!c.pid) continue;
-        const root = path.join(ctx.procs.root, String(c.pid), 'root');
-        let r;
-        try { r = await scanDocker({ root, workDir: ctx.opts.workDir, threatIntel: ctx.opts.threatIntel, log: ctx.log }); } catch (x) {
-          if (/Cannot detect OS|Unsupported OS ecosystem|No scanner implemented|status file not found|database not found/i.test(x.message)) { ctx.notes.push(`${c.name}: no supported package database (${x.message}).`); continue; }
-          errors.push(`${c.name}: ${x.message}`); continue;
-        }
-        scanned++;
-        for (const w of r.scan_warnings || []) if (!ctx.notes.includes(w)) ctx.notes.push(w);
-        const comp = new Map(r.inventory.map((x) => [x.id, x]));
-        for (const v of r.vulnerabilities) {
-          const fixed = (v.fixed_versions || [])[0];
-          out.push(scViolation(v, { resource: `${c.name}: ${v.affected_dependency}@${v.affected_dependency_version}: ${cveOf(v)}`, scope: '', where: `in container ${c.name}`, comp: comp.get(v.affected_package_id), base: root,
-            remediation: fixed ? `Rebuild ${c.image} with ${v.affected_dependency} ${fixed} or later and redeploy.` : `No fix is published yet: restrict exposure of ${c.name} and track ${v.url || v.id}.` }));
-        }
-      }
-      if (errors.length && !scanned) return unassessed(errors.slice(0, 3).join('; '));
-      if (errors.length) ctx.notes.push(`Package scan failed for ${errors.length} container(s): ${errors.slice(0, 3).join('; ')}.`);
-      return out.sort(sortVulns);
-    },
   }),
 ];

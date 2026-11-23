@@ -1,15 +1,15 @@
 'use strict';
 // context.js — the lazily evaluated view of the running machine that ubel-runtime's rules read from.
 //
-// Everything comes from /proc, the application's files on disk (node_modules, package.json) and, only when asked for, the local
-// container engine socket, a loopback HTTP probe and the Node.js inspector. Each accessor is memoised, so a rule that needs the
-// listener table or the npm advisory lookup asks for it and every other rule shares the result. Nothing is executed or changed.
+// Everything comes from /proc and, only when asked for, the local container engine socket, a loopback HTTP probe and the Node.js
+// inspector. Each accessor is memoised, so a rule that needs the listener table or the native-component lookup asks for it and
+// every other rule shares the result. Nothing is executed or changed.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { ProcFs } from './procfs.js';
-import { isNodeExe, scriptOf, procLabel, baseName, mapLimit } from './util.js';
-import { findProjectRoot, readInstalledPackages, readRootPackage, packagesFromScripts } from './components.js';
+import { isNodeExe, procLabel, baseName, mapLimit } from './util.js';
+import { scriptFiles } from './components.js';
 import { listContainers } from './docker.js';
 import { inspectNode } from './inspector.js';
 import { probeListeners } from './probe.js';
@@ -23,11 +23,11 @@ export class RuntimeContext {
    * @param {string} [o.procRoot]        procfs directory (tests point it at a fixture)
    * @param {number[]} [o.pids] @param {string[]} [o.names] @param {boolean} [o.nodeOnly] @param {boolean} [o.includeSelf]
    * @param {'app'|'all'|'none'} [o.libs] @param {number} [o.maxLibs]
-   * @param {boolean} [o.inspect] @param {boolean} [o.probe] @param {boolean} [o.noLookups] @param {boolean} [o.threatIntel]
+   * @param {boolean} [o.inspect] @param {boolean} [o.probe] @param {boolean} [o.noLookups]
    * @param {(m:string)=>void} [o.log]
    */
   constructor(o = {}) {
-    this.opts = { libs: 'app', maxLibs: 150, threatIntel: true, ...o };
+    this.opts = { libs: 'app', maxLibs: 150, ...o };
     this.log = o.log || (() => {});
     this.procs = new ProcFs({ root: o.procRoot || '/proc' });
     this.notes = [];
@@ -95,31 +95,11 @@ export class RuntimeContext {
   }
   inspectionOf(proc) { return this.inspections.get(proc.pid) || null; }
 
-  // ── Node.js applications ───────────────────────────────────────────────────
-  /** Project, installed packages and (when inspected) loaded packages of one Node.js process. Shared between processes of the same project. */
-  appOf(proc) {
-    const script = scriptOf(proc);
-    const fsPath = (x) => this.fsPath(proc, x);
-    const root = findProjectRoot([script && script.startsWith('/') ? script : null, proc.cwd], fsPath);
-    const key = `app:${proc.ns.mnt || ''}:${root}`;
-    const base = root ? this.memo(key, () => ({ root, rootPackage: readRootPackage(root, fsPath), installed: readInstalledPackages(root, fsPath) })) : null;
+  // ── Node.js processes ──────────────────────────────────────────────────────
+  /** The script files a live Node.js process has loaded (--inspect): null when it was not inspected. */
+  loadedOf(proc) {
     const insp = this.inspectionOf(proc);
-    const loaded = insp && insp.ok ? this.memo(`loaded:${proc.pid}`, () => packagesFromScripts(insp.scripts, fsPath)) : null;
-    return { script, root, ...(base || {}), loaded };
-  }
-
-  /** Every distinct npm package installed under the Node.js applications in scope, looked up once. */
-  npmAdvisories() {
-    return this.memo('npm-adv', async () => {
-      const pkgs = new Map();
-      for (const p of this.nodeTargets) { const a = this.appOf(p); if (a.installed) for (const [k, v] of a.installed.packages) pkgs.set(k, { name: v.name, version: v.version }); }
-      if (!pkgs.size) return { packages: 0, byPackage: new Map(), intel: null };
-      const { lookupNpm } = await import('./lookups.js');
-      const r = await lookupNpm([...pkgs.values()], { threatIntel: this.opts.threatIntel, log: this.log });
-      const byPackage = new Map();
-      for (const v of r.vulnerabilities) { const k = `${v.affected_dependency}@${v.affected_dependency_version}`; if (!byPackage.has(k)) byPackage.set(k, []); byPackage.get(k).push(v); }
-      return { packages: pkgs.size, byPackage, intel: r.intel };
-    });
+    return insp && insp.ok ? this.memo(`loaded:${proc.pid}`, () => scriptFiles(insp.scripts)) : null;
   }
 
   // ── native code ────────────────────────────────────────────────────────────

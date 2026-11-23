@@ -243,18 +243,14 @@ function buildDiffs(current, previous) {
  * @param {object} [meta.options]        extra scan options to record (only_checks, skipped checks, …)
  * @param {{file?:string, report:object}|null} [meta.previous_report]  undefined = no diff lookup was done (no Diffs tab)
  */
-/** The VM inventory: host, objects with findings, installed packages. Entries have the shape of the canonical report's inventory. */
-function buildInventory(payload, packages) {
+/** The VM inventory: host and the objects with findings. Entries have the shape of the canonical report's inventory. */
+function buildInventory(payload) {
   const t = payload.target || {};
   const host = t.hostname || 'vm';
   const inv = [{ component_id: host, component_name: host, type: 'host', status: payload.coverage && payload.coverage.status === 'partial' ? 'partially_assessed' : 'assessed', details: t }];
   const count = new Map();
-  for (const f of payload.findings) { if (f.vuln || f.resource == null) continue; const id = String(f.resource); count.set(id, (count.get(id) || 0) + 1); }
+  for (const f of payload.findings) { if (f.resource == null) continue; const id = String(f.resource); count.set(id, (count.get(id) || 0) + 1); }
   for (const [id, n] of count) inv.push({ component_id: id, component_name: id, type: id.startsWith('/') ? 'filesystem' : 'host_object', status: 'non_compliant', details: { resource: id, findings: n } });
-  for (const c of packages) {
-    if (!c || !c.id) continue;
-    inv.push({ component_id: c.id, component_name: `${c.name} (${c.ecosystem || 'unknown'}) : ${c.version}`, type: 'dependency', status: c.state === 'safe' ? 'clean' : (c.state || 'unknown'), details: c });
-  }
   return inv;
 }
 
@@ -288,9 +284,8 @@ function buildReportPayload(reporter, meta = {}) {
     findings,
   };
 
-  // ubel-vm: one inventory — the host, the objects the findings are about and every installed package (SCA inventory items, with their
-  // state) — the same list the canonical report carries; there is no separate package block.
-  if ((profile.key || '') === 'vm') payload.inventory = buildInventory(payload, Array.isArray(meta.package_inventory) ? meta.package_inventory : []);
+  // ubel-vm: one inventory — the host and the objects the findings are about — the same list the canonical report carries.
+  if ((profile.key || '') === 'vm') payload.inventory = buildInventory(payload);
 
   if (meta.previous_report !== undefined) {
     try {
@@ -507,10 +502,10 @@ async function generateHtmlReport(reportPayload) {
       </div>
     </section>
 
-    <!-- Inventory (ubel-vm): host, objects with findings, installed packages -->
+    <!-- Inventory (ubel-vm): host and objects with findings -->
     <section id="section-inventory" class="hidden space-y-4">
       <div class="glass p-4 rounded-xl flex flex-wrap gap-3 items-center">
-        <input id="i-search" type="text" placeholder="Search component, version, ecosystem..."
+        <input id="i-search" type="text" placeholder="Search component..."
                class="flex-1 min-w-[220px] bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
                oninput="renderInventory()">
         <select id="i-type" onchange="renderInventory()" class="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm">
@@ -1294,11 +1289,10 @@ function updateTabCounts() {
   if (Array.isArray(reportData.inventory) && reportData.inventory.length) { const t = document.getElementById('tab-inventory'); t.classList.remove('hidden'); t.textContent = 'Inventory(' + reportData.inventory.length + ')'; }
 }
 
-// ── INVENTORY (ubel-vm: host, objects with findings and every installed package, in one list) ──────────────────────────
+// ── INVENTORY (ubel-vm: host and objects with findings, in one list) ──────────────────────────
 const INV_STATE_CLASS = { infected: 'text-red-400', vulnerable: 'text-orange-400', non_compliant: 'text-orange-400', unknown: 'text-yellow-400', partially_assessed: 'text-yellow-400', clean: 'text-green-400', assessed: 'text-green-400' };
 let INV_SHOWN = [];
 function invFindingCount(c) {
-  if (c.type === 'dependency') return (reportData.findings || []).filter(function (f) { return f.vuln && f.vuln.affected_package_id === c.component_id; }).length;
   return c.details && typeof c.details.findings === 'number' ? c.details.findings : (c.type === 'host' ? reportData.findings.length : 0);
 }
 function renderInventory() {
@@ -1314,7 +1308,7 @@ function renderInventory() {
   INV_SHOWN = all.filter(function (c) {
     if (ty !== 'all' && c.type !== ty) return false;
     if (st !== 'all' && c.status !== st) return false;
-    return !q || (String(c.component_name) + ' ' + String(c.component_id) + ' ' + (c.details && c.details.ecosystem || '')).toLowerCase().indexOf(q) !== -1;
+    return !q || (String(c.component_name) + ' ' + String(c.component_id)).toLowerCase().indexOf(q) !== -1;
   });
   const LIMIT = 2000;
   body.innerHTML = INV_SHOWN.slice(0, LIMIT).map(function (c, i) {
@@ -1328,17 +1322,8 @@ function renderInventory() {
 function openInventoryItem(i) {
   const c = INV_SHOWN[i]; if (!c) return;
   const d = Object.assign({}, c.details || {});
-  ['dependencies', 'parents', 'introduced_by', 'paths', 'suggested_fixes', 'vulnerable_transitive_dependencies', 'policy_violations', 'license_info', 'scopes'].forEach(function (k) { if (d[k] && typeof d[k] === 'object' && !Array.isArray(d[k])) d[k] = JSON.stringify(d[k]); });
-  if (Array.isArray(d.paths)) d.paths = d.paths.map(function (p) { return p && p.text ? p.text : String(p); });
-  if (d.package_info && typeof d.package_info === 'object') {       // package details (description, maintainer, source package …): one row each
-    const pi = d.package_info; delete d.package_info;
-    Object.keys(pi).forEach(function (k) { if (k !== 'links') d['pkg ' + k] = Array.isArray(pi[k]) ? pi[k].join(', ') : pi[k]; });
-    if (Array.isArray(pi.links)) d['pkg links'] = pi.links.map(function (l) { return l.label + ': ' + l.url; }).join(' | ');
-  }
-  const related = c.type === 'dependency' ? (reportData.findings || []).filter(function (f) { return f.vuln && f.vuln.affected_package_id === c.component_id; }) : [];
   openModal('<div class="space-y-4"><div class="flex items-center gap-3"><span class="px-2 py-0.5 rounded border border-neutral-700 text-xs mono">' + escH(c.type) + '</span><h2 class="text-lg font-semibold text-white break-all">' + escH(c.component_name) + '</h2></div>'
     + '<div class="text-xs text-neutral-500">State: <span class="font-bold uppercase ' + (INV_STATE_CLASS[c.status] || '') + '">' + escH(String(c.status).replace(/_/g, ' ')) + '</span></div>'
-    + (related.length ? '<div><h3 class="text-sm font-semibold mb-2">Advisories (' + related.length + ')</h3>' + related.map(function (f) { return '<div class="text-xs mono text-neutral-300 border-b border-neutral-800 py-1">' + escH(f.vuln.id) + ' - ' + escH(f.severity) + ' - ' + escH(f.vuln.summary || '') + '</div>'; }).join('') + '</div>' : '')
     + '<div class="space-y-2">' + kvLines(d) + '</div></div>');
 }
 

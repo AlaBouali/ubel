@@ -297,31 +297,3 @@ export function dedupeInventory(list) {
   for (const c of list) { const k = `${c.type}\u0000${c.component_id}`; if (!seen.has(k)) seen.set(k, c); }
   return [...seen.values()];
 }
-
-// ── SCA vulnerability findings inside the vm / k8s / runtime payloads ──────────────────────────────────────────────
-// ubel-vm, ubel-runtime and ubel-k8s take their package vulnerabilities from the SCA engine (vm/lib/scascan.js). A finding for one
-// carries the SCA vulnerability record unchanged in `vuln` and a `type` of sc_vuln / sc_infection. Here it becomes the same canonical
-// finding the SCA adapter writes — same rule id, component, type and `details` (the record), so the SCA vulnerability modal renders it —
-// plus the check that found it (`detected_by`), and a dependency inventory entry for the package.
-export const isScFinding = (f) => isObj(f) && isObj(f.vuln) && (f.type === TYPES.SC_VULN || f.type === TYPES.SC_INFECTION);
-
-export function scFinding(f, { violates, R }) {
-  const v = f.vuln;
-  const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
-  const name = depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version);
-  const finding = mkFinding({
-    rule_id: `${v.id}-${v.ecosystem ?? 'unknown'}-${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`,   // advisory-ecosystem-pkgname@version, as in the SCA adapter
-    title: `${v.id} affecting ${name}`,
-    component_id: cid,
-    component_name: name,
-    component_type: 'dependency',
-    severity: f.severity ?? v.severity,
-    confidence: 'high',
-    violate_policy: violates ? violates(f.severity ?? v.severity) : (v.is_policy_violation ?? null),
-    type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
-    details: R.deep({ ...v, affected_dependency_sequences: Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [],
-      detected_by: { check: f.check ?? null, area: f.area ?? null, scope: f.scope ?? null, resource: f.resource ?? null, description: f.description ?? null } }),
-  });
-  const inventory = mkInventory({ component_id: cid, component_name: name, status: 'unknown', type: 'dependency', details: { name: v.affected_dependency, version: v.affected_dependency_version, ecosystem: v.ecosystem ?? null, id: cid } });
-  return { finding, inventory };
-}

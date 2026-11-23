@@ -1,7 +1,7 @@
 'use strict';
 // ubel-runtime — stdlib-only security scan of the applications running on a Linux machine.
 //
-// Reads /proc (processes, sockets, mapped files, environments), the applications' files on disk (package.json, node_modules)
+// Reads /proc (processes, sockets, mapped files, environments)
 // and — only when asked — the local container engine socket (read-only GETs), a loopback HTTP probe (--probe) and the V8 inspector
 // of Node.js processes (--inspect). Node.js built-ins only: no third-party packages and no external programs are executed.
 
@@ -21,17 +21,14 @@ runtime-scanner — stdlib-only security scan of the applications running on thi
 
 Usage:
   ubel-runtime [--pid <n,..>] [--name <text|/regex/>] [--node-only] [--include-self]
-               [--libs app|all|none] [--max-libs <n>] [--packages host|all|none]
-               [--max-package-scopes <n>] [--container-packages]
-               [--inspect] [--inspect-max <n>] [--probe] [--no-lookups] [--no-threat-intel]
+               [--libs app|all|none] [--max-libs <n>]
+               [--inspect] [--inspect-max <n>] [--probe] [--no-lookups]
                [--working-dir <path>] [--min-severity <sev>] [--fail-on <sev|none|N:sev>]
                [--only <checks|areas>] [--skip <checks|areas>] [--allow-partial] [--verbose] [--quiet]
 
 Assesses what is running now: how each process is confined (root, capabilities, seccomp, tracing, debug interfaces, programs run from
 deleted files, memory or temporary directories), what it listens on, the native libraries it has mapped (stale, injected, vulnerable),
-the npm packages and the Node.js release it is made of (checked against OSV.dev / NVD), the operating-system packages its programs
-and libraries belong to and the Python / Ruby / PHP packages of its application directories (the SCA engine: findings are SCA
-vulnerabilities, sc_vuln / sc_infection), credentials in process environments and command
+the Node.js release it is made of (checked against NVD), credentials in process environments and command
 lines, and — when a Docker / Podman socket is readable — the configuration of the running containers. It reads /proc and files only; the
 two optional active steps below are opt-in.
 
@@ -48,13 +45,7 @@ Software:
   --libs app|all|none      Which mapped native files are read for embedded component versions: "app" = everything outside the
                            system library directories (default), "all" = system libraries too, "none" = skip
   --max-libs <n>           Read at most n distinct executables / libraries (default 150)
-  --packages host|all|none Operating-system packages used by running processes (the files they map belong to packages; the SCA engine
-                           looks those up in OSV.dev): "host" = this machine only, "all" = containers too (default), "none" = skip.
-                           Python / Ruby / PHP application packages follow the same switch
-  --max-package-scopes <n> Read the packages of at most n container filesystems / application directories (default 20)
-  --container-packages     Also scan EVERY package of each running container (through /proc/<pid>/root, SCA docker mode), in use or not
   --no-lookups             Do not query OSV.dev / NVD (the checks that need them become not applicable)
-  --no-threat-intel        Do not fetch CISA KEV / FIRST EPSS data for the vulnerabilities found
 
 Opt-in active steps:
   --inspect                Look inside Node.js processes. For each one the scanner sends SIGUSR1 (only if the process handles it, otherwise it
@@ -80,20 +71,15 @@ const spec = {
     '--include-self': { key: 'includeSelf', value: false },
     '--libs': { key: 'libs', value: true, default: 'app' },
     '--max-libs': { key: 'maxLibs', value: true, number: true },
-    '--packages': { key: 'packages', value: true, default: 'all' },
-    '--max-package-scopes': { key: 'maxPackageScopes', value: true, number: true },
-    '--container-packages': { key: 'containerPackages', value: false },
     '--inspect': { key: 'inspect', value: false },
     '--inspect-max': { key: 'inspectMax', value: true, number: true },
     '--probe': { key: 'probe', value: false },
     '--no-lookups': { key: 'noLookups', value: false },
-    '--no-threat-intel': { key: 'noThreatIntel', value: false },
   },
   async catalogue() { return { rules }; },
 
   async prepare(args, log) {
     if (process.platform !== 'linux') throw new UsageError(`ubel-runtime needs Linux and /proc (this is ${process.platform}).`);
-    if (!['host', 'all', 'none'].includes(args.packages || 'all')) throw new UsageError(`--packages must be host, all or none (got "${args.packages}")`);
     if (!['app', 'all', 'none'].includes(args.libs)) throw new UsageError(`--libs must be app, all or none (got "${args.libs}")`);
     let pids;
     if (args.pids) {
@@ -103,8 +89,7 @@ const spec = {
     const ctx = new RuntimeContext({
       pids, names: args.names, nodeOnly: !!args.nodeOnly, includeSelf: !!args.includeSelf, libs: args.libs,
       ...(args.maxLibs ? { maxLibs: args.maxLibs } : {}), inspect: !!args.inspect, ...(args.inspectMax ? { inspectMax: args.inspectMax } : {}),
-      probe: !!args.probe, noLookups: !!args.noLookups, threatIntel: !args.noThreatIntel, containerPackages: !!args.containerPackages, packages: args.packages || 'all',
-      ...(args.maxPackageScopes ? { maxPackageScopes: args.maxPackageScopes } : {}), workDir: args.workingDir, log,
+      probe: !!args.probe, noLookups: !!args.noLookups, log,
     });
     if (!ctx.live) throw new UsageError('/proc is not available on this machine; ubel-runtime cannot see any process.');
     const targets = ctx.targets;
@@ -123,7 +108,7 @@ const spec = {
       ctx, rules, target,
       options: {
         scope: { ...(pids ? { pids } : {}), ...(args.names ? { names: args.names } : {}), ...(args.nodeOnly ? { node_only: true } : {}) },
-        libs: args.libs, inspect: !!args.inspect, probe: !!args.probe, container_packages: !!args.containerPackages, packages: args.packages || 'all', lookups: !args.noLookups,
+        libs: args.libs, inspect: !!args.inspect, probe: !!args.probe, lookups: !args.noLookups,
       },
       notes: () => {
         const n = [...ctx.notes];
@@ -186,11 +171,10 @@ function buildInspections(ctx) {
   for (const p of ctx.nodeTargets) {
     const r = ctx.inspectionOf(p); if (!r) continue;
     if (!r.ok) { out.push({ label: procLabel(p), scope: scopeOf(p), ok: false, reason: r.reason }); continue; }
-    const a = ctx.appOf(p);
+    const loaded = ctx.loadedOf(p);
     out.push({
       label: procLabel(p), scope: scopeOf(p), ok: true, node_version: r.node && r.node.versions ? r.node.versions.node : null, opened_by_scanner: !!r.opened, left_open: !!r.leftOpen,
-      scripts: r.scripts.length, loaded_packages: a.loaded ? [...a.loaded.packages.values()].map((x) => `${x.name}@${x.version}`).sort().slice(0, 400) : [],
-      installed_packages: a.installed ? a.installed.packages.size : null, app_files: a.loaded ? a.loaded.appFiles.length : 0,
+      scripts: r.scripts.length, loaded_files: loaded ? loaded.files.length : 0,
     });
   }
   return out;

@@ -70,7 +70,7 @@ const SECTIONS = `<!-- Processes -->
 
     <!-- Live data (--inspect) -->
     <section id="section-livedata" class="hidden space-y-6">
-      <p class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800">Read through the V8 inspector of each Node.js process (--inspect): the scripts it has compiled and process.versions. A package listed as loaded has been read into memory by the running process; the rest of node_modules is installed but unused so far.</p>
+      <p class="text-xs text-neutral-500 italic bg-neutral-900/50 p-3 rounded-lg border border-neutral-800">Read through the V8 inspector of each Node.js process (--inspect): the scripts it has compiled and process.versions.</p>
       <div id="rt-live" class="space-y-4"></div>
     </section>
 
@@ -147,11 +147,9 @@ const CLIENT = `
     document.getElementById('tab-livedata').textContent = 'Live data(' + list.length + ')';
     document.getElementById('rt-live').innerHTML = list.length ? list.map(function (i) {
       if (!i.ok) return '<div class="glass p-5 rounded-xl"><div class="mono text-sm break-all">' + escH(i.label) + '</div><div class="text-xs text-orange-300 mt-1">Not inspected: ' + escH(i.reason) + '</div></div>';
-      var loaded = i.loaded_packages || [];
       return '<div class="glass p-5 rounded-xl space-y-3"><div class="flex flex-wrap justify-between gap-2"><div class="mono text-sm break-all">' + escH(i.label) + '</div><div class="text-xs text-neutral-400">' + escH(i.scope) + '</div></div>' +
-        '<div class="text-xs text-neutral-400">Node.js ' + escH(i.node_version || '?') + ' · ' + escH(i.scripts) + ' scripts compiled · ' + escH(i.app_files) + ' application files · ' + escH(loaded.length) + ' packages loaded' +
-        (i.installed_packages != null ? ' of ' + escH(i.installed_packages) + ' installed' : '') + (i.left_open ? ' · <span class="text-red-400">inspector left open</span>' : '') + '</div>' +
-        '<details><summary class="cursor-pointer text-xs text-neutral-400">Loaded packages</summary><div class="mt-2">' + (loaded.map(function (n) { return chip(n); }).join('') || '<span class="text-xs text-neutral-600">none</span>') + '</div></details></div>';
+        '<div class="text-xs text-neutral-400">Node.js ' + escH(i.node_version || '?') + ' · ' + escH(i.scripts) + ' scripts compiled · ' + escH(i.loaded_files) + ' script files loaded' +
+        (i.left_open ? ' · <span class="text-red-400">inspector left open</span>' : '') + '</div></div>';
     }).join('') : '<div class="text-sm text-neutral-500 italic">--inspect was requested but no Node.js process was in scope.</div>';
   }
 

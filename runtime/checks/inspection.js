@@ -10,7 +10,7 @@ const gate = (ctx) => needLive(ctx) || (ctx.opts.inspect ? null : na('live inspe
 export default [
   rule({
     id: 'rt-insp-coverage', area: 'inspection', severity: 'info', title: 'Node.js process could not be inspected',
-    description: 'Live inspection of this Node.js process did not complete, so what it has loaded is unknown and the checks that depend on it (loaded-package reachability, code loaded from temporary directories, stale code) were not applied to it.',
+    description: 'Live inspection of this Node.js process did not complete, so what it has loaded is unknown and the checks that depend on it (code loaded from temporary directories, stale code) were not applied to it.',
     remediation: 'Run ubel-runtime as the process\'s owner or as root; start the application with --inspect=127.0.0.1:9229 if its SIGUSR1 handling prevents the signal route.',
     cap: 100,
     evaluate(ctx) {
@@ -38,8 +38,8 @@ export default [
       const g = gate(ctx); if (g) return g;
       const out = [];
       for (const p of ctx.nodeTargets) {
-        const a = ctx.appOf(p); if (!a.loaded) continue;
-        const bad = a.loaded.files.filter(inTempDir);
+        const loaded = ctx.loadedOf(p); if (!loaded) continue;
+        const bad = loaded.files.filter(inTempDir);
         if (bad.length) out.push({ resource: procLabel(p), scope: scopeOf(p), detail: `pid ${p.pid} loaded ${bad.length} script(s) from a temporary directory, e.g. ${bad.slice(0, 3).join(', ')}.` });
       }
       return out;
@@ -47,16 +47,16 @@ export default [
   }),
   rule({
     id: 'rt-insp-stale-code', area: 'inspection', severity: 'medium', title: 'Application files changed on disk after the process started',
-    description: 'Files this process loaded were modified after it started, so the code in memory is not the code on disk (a deployment or `npm install` without a restart). Package versions in this report are read from disk and may differ from what is running; vulnerabilities fixed on disk are still exploitable in memory.',
+    description: 'Files this process loaded were modified after it started, so the code in memory is not the code on disk (a deployment or `npm install` without a restart). Vulnerabilities fixed on disk are still exploitable in memory.',
     remediation: 'Restart the process so that memory and disk agree, and make deployments restart the service.',
     cap: 100,
     evaluate(ctx) {
       const g = gate(ctx); if (g) return g;
       const out = [];
       for (const p of ctx.nodeTargets) {
-        const a = ctx.appOf(p); if (!a.loaded || p.startMs == null) continue;
+        const loaded = ctx.loadedOf(p); if (!loaded || p.startMs == null) continue;
         let newer = [], statted = 0;
-        for (const f of a.loaded.files.slice(0, MAX_STAT)) {
+        for (const f of loaded.files.slice(0, MAX_STAT)) {
           statted++;
           try { if (fs.statSync(ctx.fsPath(p, f)).mtimeMs > p.startMs + 2000) newer.push(f); } catch { /* file gone */ }
         }

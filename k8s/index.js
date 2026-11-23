@@ -22,7 +22,6 @@ k8s-scanner — stdlib-only Kubernetes security audit
 Usage:
   ubel-k8s [--kubeconfig <file>] [--context <name>] [--token-file <file>] [--namespace <ns,..>] [--exclude-namespace <ns,..>]
            [--kubelet-configz] [--allowed-registries <reg,..>] [--insecure-skip-tls-verify] [--timeout <seconds>]
-           [--no-lookups] [--no-threat-intel]
   ubel-k8s --manifests <file|dir>[,<file|dir>…]
            [--working-dir <path>] [--min-severity <sev>] [--fail-on <sev|none|N:sev>] [--only …] [--skip …]
            [--allow-partial] [--verbose] [--quiet]
@@ -48,10 +47,6 @@ Options:
   --allowed-registries <a,b>   Flag images that do not come from these registries (e.g. registry.example.com,ghcr.io)
   --manifests <paths>          Audit manifest files / directories instead of a cluster
   --timeout <seconds>          Per-request timeout (default 30)
-  --no-lookups                 Do not look the cluster's component versions up in OSV.dev (the component check becomes not applicable).
-                               Without it, a live scan sends those versions (for example k8s.io/kubernetes v1.28.3) to OSV.dev
-                               (UBEL_OSV_ENDPOINT selects an internal mirror); nothing else leaves the machine
-  --no-threat-intel            Do not fetch CISA KEV / FIRST EPSS data for the vulnerabilities found
 `;
 
 const spec = {
@@ -71,8 +66,6 @@ const spec = {
     '--allowed-registries': { key: 'allowedRegistries', value: true, list: true },
     '--manifests': { key: 'manifests', value: true, list: true },
     '--timeout': { key: 'timeout', value: true, number: true },
-    '--no-lookups': { key: 'noLookups', value: false },
-    '--no-threat-intel': { key: 'noThreatIntel', value: false },
   },
   async catalogue() { return { rules }; },
   async prepare(args, log) {
@@ -107,7 +100,7 @@ const spec = {
     const client = new KubeClient(conn, { timeoutMs: (args.timeout || 30) * 1000 });
     log(`Connecting to ${conn.server} (${conn.source})`);
     const inv = await Inventory.fromCluster(client, { namespaces, excludeNamespaces, kubeletConfigz: !!args.kubeletConfigz, log });
-    inv.options = { allowedRegistries: args.allowedRegistries || [], noLookups: !!args.noLookups, threatIntel: !args.noThreatIntel, workDir: args.workingDir, log };
+    inv.options = { allowedRegistries: args.allowedRegistries || [] };
     const failed = [...inv.status.values()].filter((s) => !s.ok);
     if (failed.length === RESOURCES.length && !inv.version) {
       client.close();

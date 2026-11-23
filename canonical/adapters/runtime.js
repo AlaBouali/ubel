@@ -5,7 +5,6 @@
 // machine, so paths are kept as they are (nothing is made relative).
 //
 // finding.type by check:  *-vulnerable*            → vuln (rule_id = the advisory id, check kept in details.check)
-//                         a vulnerability record of the SCA engine (vuln in the finding) → sc_vuln / sc_infection, the SCA record as details
 //                         rt-secret-*              → secret
 //                         deleted exe / memfd / code or library from temp / traced / preload hijack → behavior
 //                         containers, network exposure → misconfig
@@ -13,9 +12,8 @@
 // Observations (info unless noted, appended after the findings): passed checks (hardening), checks that could not run (coverage, low),
 // every running program / loaded Node.js inspection / container (behavior) and every listening socket (exposure; a non-loopback port
 // is rated by what normally listens there).
-// inventory:  processes → application, listening sockets → network_service, containers → container,
-//             packages the inspector saw loaded → dependency.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, isScFinding, scFinding, TYPES } from '../common.js';
+// inventory:  processes → application, listening sockets → network_service, containers → container.
+import { arr, isObj, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, TYPES } from '../common.js';
 
 export const family = 'runtime';
 
@@ -46,8 +44,6 @@ export function translate(p, opts, H) {
   const derived = [];   // components only known from a finding's resource (kept unless the runtime block already lists that id)
 
   for (const f of arr(p.findings)) {
-    // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
-    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x } }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const type = typeOf(f);
     let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
     if (type === TYPES.VULN) {
@@ -78,12 +74,6 @@ export function translate(p, opts, H) {
   const cont = rt.containers;
   for (const c of arr(cont?.items)) {
     out.inventory.push(mkInventory({ component_id: c.name, component_name: c.name, status: 'running', type: 'container', details: c }));
-  }
-  for (const i of arr(rt.inspections)) {
-    for (const pk of arr(i.loaded_packages)) {
-      const pp = splitPkg(pk);
-      out.inventory.push(mkInventory({ component_id: pk, component_name: depName(pp.name, 'npm', pp.version), status: 'loaded', type: 'dependency', details: { name: pp.name, version: pp.version, ecosystem: 'npm', source: 'v8 inspector (loaded by the running process)', application: i.label, scope: i.scope ?? null } }));
-    }
   }
   // ── observations ──
   const t0 = p.target || {};
@@ -118,16 +108,16 @@ export function translate(p, opts, H) {
   }
   for (const i of arr(rt.inspections)) {
     if (i.ok) obs({ rule_id: 'behavior.inspection', area: 'inspection', title: `Node.js process inspected: ${i.label}`, component_id: i.label, component_name: i.label, type: TYPES.BEHAVIOR,
-      details: { ...i, loaded_packages: arr(i.loaded_packages).length, description: `${arr(i.loaded_packages).length} package(s) loaded by the running process were read through the V8 inspector${i.left_open ? ' (the inspector was left open)' : ''}.` } });
+      details: { ...i, description: `${i.loaded_files ?? 0} script file(s) loaded by the running process were read through the V8 inspector${i.left_open ? ' (the inspector was left open)' : ''}.` } });
     else obs({ rule_id: 'coverage.inspection', area: 'inspection', title: `Node.js process could not be inspected: ${i.label}`, component_id: i.label, component_name: i.label, severity: 'low', type: TYPES.COVERAGE,
-      details: { ...i, description: `The V8 inspector could not be used on this process${i.reason ? ` (${i.reason})` : ''}; the packages it loaded are not in this report.` } });
+      details: { ...i, description: `The V8 inspector could not be used on this process${i.reason ? ` (${i.reason})` : ''}; what it has loaded is not in this report.` } });
   }
 
   const known = new Set(out.inventory.map((i) => i.component_id));
   out.inventory.push(...derived.filter((d) => !known.has(d.component_id)));
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'at_risk', clean: 'running' });
-  // keep the original "running"/"listening"/"loaded" state for components with no findings; applyFindingStatus only overrides 'unknown'
+  // keep the original "running"/"listening" state for components with no findings; applyFindingStatus only overrides 'unknown'
 
   const t = p.target || {};
   out.scopes.push({ type: 'host', name: t.hostname ?? t.subject ?? null, os: t.os ?? null, arch: t.arch ?? null, mode: t.mode ?? 'live', processes_assessed: t.processes_assessed ?? null });
