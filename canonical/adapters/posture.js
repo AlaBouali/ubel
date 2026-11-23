@@ -3,7 +3,7 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
-import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, moveSequences, TYPES } from '../common.js';
+import { arr, isObj, first, mkFinding, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, isScFinding, scFinding, TYPES } from '../common.js';
 
 export const family = 'posture';
 
@@ -16,11 +16,10 @@ export function translate(p, opts, H) {
   const R = makeRel(root);
   const violates = failOnPredicate(opts.fail_on);
   const out = { findings: [], inventory: [], scopes: [] };
-  const scInv = [];   // the dependency entries the package findings made: they hold the dependency sequences
 
   for (const f of arr(p.findings)) {
     // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
-    if (isScFinding(f)) { const sc = scFinding(f, { violates, R }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); scInv.push(sc.inventory); continue; }
+    if (isScFinding(f)) { const sc = scFinding(f, { violates, R }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const res = f.resource == null ? null : R.rel(f.resource);
     const cid = res == null ? null : (isK8s && f.scope ? `${f.scope}/${res}` : res);
     const kind = isK8s ? 'kubernetes_resource' : (typeof res === 'string' && res.startsWith('/') ? 'filesystem' : 'host_object');
@@ -60,7 +59,6 @@ export function translate(p, opts, H) {
     out.inventory = out.inventory.filter((i) => !(i.type === 'dependency' && ids.has(i.component_id)));
     for (const c of pkgs) out.inventory.push(mkInventory({ component_id: c.id, component_name: depName(c.name, c.ecosystem, c.version), status: 'unknown', type: 'dependency', details: R.deep(c) }));
   }
-  moveSequences(out.inventory, scInv);   // the dependency sequences of an affected package are listed under its inventory entry, not on its findings
   applyFindingStatus(out.inventory.filter((i) => i.type === 'dependency'), out.findings);
   for (const i of out.inventory) if (i.type === 'dependency' && i.details && i.details.state === 'unknown' && i.status === 'clean') i.status = 'unknown';   // its lookup could not be completed: not "clean"
 

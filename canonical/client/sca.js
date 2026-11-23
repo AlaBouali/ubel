@@ -795,32 +795,6 @@ function renderSuggestedFixes(sf) {
             return html;
         }
 
-// "Affected dependency sequences" (every path root → … → this package) are listed under the package in the inventory, and only when it is
-// affected (state vulnerable / infected, or an advisory on it). Reports made before they moved still carry them on the findings: used then.
-function affectedSequencesBlock(item, itemVulns, inventory) {
-  if (!(item.state === 'vulnerable' || item.state === 'infected' || itemVulns.length)) return '';
-  let seqs = Array.isArray(item.dependency_sequences) ? item.dependency_sequences : [];
-  let total = item.dependency_sequences_total;
-  if (!seqs.length) {
-    for (const v of itemVulns) { if (Array.isArray(v.affected_dependency_sequences) && v.affected_dependency_sequences.length) { seqs = v.affected_dependency_sequences; total = v.affected_dependency_sequences_total; break; } }
-  }
-  const chip = function (id, last) {
-    const known = !last && id !== item.id && inventory.some(function (x) { return x.id === id; });
-    const cls = last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300';
-    return '<span title="' + escapeHtmlClient(id) + '" class="px-2 py-1 rounded border text-xs mono ' + cls + (known ? ' cursor-pointer hover:border-neutral-500 transition-colors' : '') + '"'
-      + (known ? ' onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal(\'' + escapeHtmlClient(id) + '\'), 50)"' : '') + '>' + escapeHtmlClient(String(id == null ? '' : id).replace(/^pkg:[^/]+\//, '')) + '</span>';
-  };
-  const count = total && total > seqs.length ? 'shortest ' + seqs.length + ' of ' + total : String(seqs.length);
-  const body = seqs.length
-    ? '<div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">' + seqs.map(function (sq, n) {
-        const nodes = Array.isArray(sq) ? sq : [sq];
-        return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
-          + nodes.map(function (id, k) { const last = k === nodes.length - 1; return chip(id, last) + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('') + '</div></div>';
-      }).join('') + '</div>'
-    : '<span class="text-neutral-500 text-xs italic">No dependency sequences recorded for this package</span>';
-  return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + count + ')</h4>' + body + '</div>';
-}
-
 function openInvModal(id) {
             const item = reportData.inventory.find(x => x.id === id);
             if (!item) return;
@@ -902,7 +876,6 @@ function openInvModal(id) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">${parentsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
-                    ${affectedSequencesBlock(item, itemVulns, reportData.inventory)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes)}</div>
@@ -1279,6 +1252,12 @@ const FAMILY = {
   openFinding: function (i) {
     const v = SCA_FINDING_REF.get(i); if (!v) return false;
     openVulnModal(findingKeyOf(v));
+    // "Affected dependency sequences": SCA's own renderSequences(), mounted as a scrollable box at the bottom of the modal
+    const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
+    const wrap = document.createElement('div'); wrap.className = 'mt-6';
+    wrap.innerHTML = '<h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + seqs.length + ')</h4><div id="sequences-container" class="border border-neutral-700 rounded-xl bg-black/30 p-3 overflow-y-auto" style="max-height:16rem"></div>';
+    document.getElementById('modal-body').appendChild(wrap);
+    renderSequences({ sequences: seqs });
     return true;
   },
   openInventory: function (i) { const d = CANON.inventory[i].details; if (!d || !d.id) return false; openInvModal(d.id); return true; },

@@ -251,38 +251,16 @@ function buildInventory(payload, packages) {
   const count = new Map();
   for (const f of payload.findings) { if (f.vuln || f.resource == null) continue; const id = String(f.resource); count.set(id, (count.get(id) || 0) + 1); }
   for (const [id, n] of count) inv.push({ component_id: id, component_name: id, type: id.startsWith('/') ? 'filesystem' : 'host_object', status: 'non_compliant', details: { resource: id, findings: n } });
-  for (const c of packages) if (c && c.id) inv.push(dependencyEntry(c));
-  return inv;
-}
-
-/** An installed / reported package (SCA inventory item with its `state`) as an inventory entry. */
-function dependencyEntry(c) {
-  return { component_id: c.id, component_name: `${c.name} (${c.ecosystem || 'unknown'}) : ${c.version}`, type: 'dependency', status: c.state === 'safe' ? 'clean' : (c.state || 'unknown'), details: c };
-}
-
-/**
- * Checks of ubel-runtime / ubel-k8s attach the SCA inventory item of the package an advisory is about to the finding (`package`, see
- * vm/lib/scfinding.js). It is listed once in the inventory instead: the same package under several advisories (or several scopes) is one
- * entry, infected beats vulnerable, install paths are joined. Returns the findings without it and the packages.
- */
-function hoistPackages(sorted) {
-  const items = new Map();
-  for (const f of sorted) {
-    const c = f.package;
+  for (const c of packages) {
     if (!c || !c.id) continue;
-    const e = items.get(c.id);
-    if (!e) { items.set(c.id, { ...c, paths: [...(c.paths || [])] }); continue; }
-    if (c.state === 'infected') e.state = 'infected';
-    for (const p of c.paths || []) if (e.paths.length < 10 && !e.paths.includes(p)) e.paths.push(p);
+    inv.push({ component_id: c.id, component_name: `${c.name} (${c.ecosystem || 'unknown'}) : ${c.version}`, type: 'dependency', status: c.state === 'safe' ? 'clean' : (c.state || 'unknown'), details: c });
   }
-  if (!items.size) return { findings: sorted, packages: [] };
-  return { findings: sorted.map(({ package: _p, ...rest }) => rest), packages: [...items.values()] };
+  return inv;
 }
 
 function buildReportPayload(reporter, meta = {}) {
   const profile = meta.profile || {};
-  const hoisted = hoistPackages(reporter.sorted());
-  const findings = hoisted.findings;
+  const findings = reporter.sorted();
   const checks = reporter.checks;
   const complianceSummary = summarizeCompliance(findings.map((f) => f.compliance));
 
@@ -313,8 +291,6 @@ function buildReportPayload(reporter, meta = {}) {
   // ubel-vm: one inventory — the host, the objects the findings are about and every installed package (SCA inventory items, with their
   // state) — the same list the canonical report carries; there is no separate package block.
   if ((profile.key || '') === 'vm') payload.inventory = buildInventory(payload, Array.isArray(meta.package_inventory) ? meta.package_inventory : []);
-  // ubel-runtime / ubel-k8s: the packages their advisories are about, with the same SCA item the vm list has
-  else if (hoisted.packages.length) payload.inventory = hoisted.packages.map(dependencyEntry);
 
   if (meta.previous_report !== undefined) {
     try {

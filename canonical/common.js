@@ -305,7 +305,7 @@ export function dedupeInventory(list) {
 // plus the check that found it (`detected_by`), and a dependency inventory entry for the package.
 export const isScFinding = (f) => isObj(f) && isObj(f.vuln) && (f.type === TYPES.SC_VULN || f.type === TYPES.SC_INFECTION);
 
-export function scFinding(f, { violates, R, keepSequences = false }) {
+export function scFinding(f, { violates, R }) {
   const v = f.vuln;
   const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
   const name = depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version);
@@ -319,36 +319,9 @@ export function scFinding(f, { violates, R, keepSequences = false }) {
     confidence: 'high',
     violate_policy: violates ? violates(f.severity ?? v.severity) : (v.is_policy_violation ?? null),
     type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
-    details: R.deep({ ...(keepSequences ? { ...v, affected_dependency_sequences: Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [] } : withoutSequences(v)),
+    details: R.deep({ ...v, affected_dependency_sequences: Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [],
       detected_by: { check: f.check ?? null, area: f.area ?? null, scope: f.scope ?? null, resource: f.resource ?? null, description: f.description ?? null } }),
   });
-  // the dependency sequences are listed under the package in the inventory (see withoutSequences), not on each of its findings
-  const inventory = mkInventory({ component_id: cid, component_name: name, status: 'unknown', type: 'dependency', details: { name: v.affected_dependency, version: v.affected_dependency_version, ecosystem: v.ecosystem ?? null, id: cid, ...(keepSequences ? {} : sequencesOf(v)) } });
+  const inventory = mkInventory({ component_id: cid, component_name: name, status: 'unknown', type: 'dependency', details: { name: v.affected_dependency, version: v.affected_dependency_version, ecosystem: v.ecosystem ?? null, id: cid } });
   return { finding, inventory };
-}
-
-// ── dependency sequences ──────────────────────────────────────────────────────────────────────────────────────────
-// "Affected dependency sequences" (every path root → … → affected package) belong to the package, not to each advisory on it: they are
-// emitted once, as `dependency_sequences` (and `dependency_sequences_total` when only the shortest ones were kept) on the dependency entry
-// of the inventory, and only for a package that is affected (has an advisory or infection). The vulnerability records keep everything else.
-// `keepSequences`: the report of that module keeps them on its findings (ubel-runtime).
-export function withoutSequences(v) {
-  const { affected_dependency_sequences: _s, affected_dependency_sequences_total: _t, ...rest } = v;
-  return rest;
-}
-export function sequencesOf(v) {
-  const seq = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
-  return seq.length ? { dependency_sequences: seq, ...(v.affected_dependency_sequences_total > seq.length ? { dependency_sequences_total: v.affected_dependency_sequences_total } : {}) } : {};
-}
-/** Copies the sequences of the affected packages (`from`: inventory entries made by scFinding) onto the dependency entries of `inventory` with the same id. */
-export function moveSequences(inventory, from) {
-  const by = new Map();
-  for (const c of from) { const d = c && c.details; if (d && Array.isArray(d.dependency_sequences) && d.dependency_sequences.length && !by.has(c.component_id)) by.set(c.component_id, d); }
-  for (const c of inventory) {
-    const d = by.get(c.component_id);
-    if (c.type !== 'dependency' || !d || !c.details || (Array.isArray(c.details.dependency_sequences) && c.details.dependency_sequences.length)) continue;
-    c.details.dependency_sequences = d.dependency_sequences;
-    if (d.dependency_sequences_total) c.details.dependency_sequences_total = d.dependency_sequences_total;
-  }
-  return inventory;
 }

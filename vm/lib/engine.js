@@ -132,7 +132,6 @@ async function runRules(rules, ctx, reporter, opts = {}) {
         // an SCA vulnerability record travels unchanged with its finding type (sc_vuln / sc_infection): see scfinding.js
         ...(v.type ? { type: v.type } : {}),
         ...(v.vuln ? { vuln: v.vuln } : {}),
-        ...(v.package ? { package: v.package } : {}),      // the package's SCA inventory item: moved into the report's inventory by buildReportPayload
       });
     }
     const suppressed = violations.length - shown.length;

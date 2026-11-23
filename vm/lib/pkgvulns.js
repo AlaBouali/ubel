@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { OwnerIndex } from './owners.js';
-import { compactPackage } from './scpackage.js';
+import { buildPackageInfo } from './pkginfo.js';
 import { scanPlatform, scanDocker, scanTree, mergeResults, isOsPurl, pathsOf } from './scascan.js';
 
 class PackageScanUnsupported extends Error {}
@@ -40,6 +40,24 @@ function installedByDistro(owners, base, comp) {
     const lp = base && p.startsWith(base) ? (p.slice(base.length) || '/') : p;
     return owners.owns(lp) || ['package.json', 'METADATA', 'PKG-INFO', 'RECORD'].some((f) => owners.owns(`${lp}/${f}`));
   });
+}
+
+/**
+ * The package list as the report carries it: the SCA inventory item of every installed package (operating-system and application),
+ * trimmed to what the SCA package modal shows, with `state` taken from the advisories that were kept.
+ */
+function compactPackage(c, vulns, unassessed, base = '') {
+  const cap = (a, n) => (Array.isArray(a) ? a.slice(0, n) : []);
+  const mine = vulns.get(c.id) || [];
+  return {
+    id: c.id, name: c.name, version: c.version, type: c.type || 'library', ecosystem: c.ecosystem || '', ...(c.distro ? { distro: c.distro } : {}),
+    ...(c.source_name ? { source_name: c.source_name, source_version: c.source_version || c.version } : {}),
+    ...(() => { try { const pi = buildPackageInfo(c, base); return pi && Object.keys(pi).length ? { package_info: pi } : {}; } catch { return {}; } })(),   // what the package is (modal details); never fails the scan
+    license: c.license ?? null, ...(c.license_info ? { license_info: c.license_info } : {}),
+    state: mine.some((v) => v.is_infection) ? 'infected' : mine.length ? 'vulnerable' : unassessed(c) ? 'unknown' : 'safe',   // 'unknown': its lookup could not be completed, never "safe"
+    scopes: cap(c.scopes, 5), paths: cap(c.paths, 5), dependencies: cap(c.dependencies, 25), introduced_by: cap(c.introduced_by, 10), parents: cap(c.parents, 25),
+    is_direct: c.is_direct ?? null, is_policy_violation: false, vulnerable_transitive_dependencies: [], policy_violations: [], suggested_fixes: c.suggested_fixes || { fixes: [], unfixed: [] },
+  };
 }
 
 /**

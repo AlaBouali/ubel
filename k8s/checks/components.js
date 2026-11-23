@@ -20,15 +20,11 @@ export default [
       for (const w of r.scan_warnings || []) if (!inv.notes.includes(w)) inv.notes.push(w);
       inv.notes.push(`${components.length} component version(s) reported by the cluster were checked against OSV.dev by the SCA engine; container images and node packages are not scanned by ubel-k8s.`);
       const byId = new Map(components.map((c) => [c.purl, c]));
-      const items = new Map(r.inventory.map((c) => [c.id, c]));
       return r.vulnerabilities.map((v) => {
         const c = byId.get(v.affected_package_id) || { role: 'component', where: [] };
         const where = c.where.length > 3 ? `${c.where.slice(0, 3).join(', ')} and ${c.where.length - 3} more` : c.where.join(', ');
         const isApi = /API server/.test(c.role);
-        // the SCA item of the component, placed where the cluster reports it (the role and each node / workload it runs on)
-        const item = items.get(v.affected_package_id);
         return scViolation(v, {
-          comp: item && { ...item, paths: c.where.length ? c.where.map((w) => `${c.role}: ${w}`) : [c.role] },
           resource: `${c.role}: ${v.affected_dependency}@${v.affected_dependency_version}: ${(v.aliases || []).find((a) => /^CVE-/.test(a)) || v.id}`,
           where: `runs as ${c.role} (${where})${isApi && managed ? `; this is a managed ${managed} control plane — the provider may have back-ported the fix without changing the version` : ''}`,
         });

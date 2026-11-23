@@ -47,7 +47,7 @@ export function translate(p, opts, H) {
 
   for (const f of arr(p.findings)) {
     // package vulnerabilities come from the SCA engine: the SCA record + sc_vuln / sc_infection (see common.js)
-    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x }, keepSequences: true }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
+    if (isScFinding(f)) { const sc = scFinding(f, { violates, R: { deep: (x) => x } }); out.findings.push(sc.finding); out.inventory.push(sc.inventory); continue; }
     const type = typeOf(f);
     let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
     if (type === TYPES.VULN) {
