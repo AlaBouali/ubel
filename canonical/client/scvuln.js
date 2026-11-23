@@ -644,6 +644,7 @@ function openInvModal(id) {
 function nodeLabel(id) { return String(id == null ? '' : id).replace(/^pkg:[^/]+\//, ''); }
 function extraBlocks(v) {
   const by = v.detected_by || null;
+  const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
   let html = '';
   if (v.source_package && v.source_package !== v.affected_dependency) {     // OS package: the advisory is keyed by the source package it was built from
     html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Matched through source package</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
@@ -653,6 +654,15 @@ function extraBlocks(v) {
     html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Found by</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
       + '<p class="text-xs mono text-neutral-500 mb-1">' + escapeHtmlClient(by.check || '') + (by.scope ? ' · ' + escapeHtmlClient(by.scope) : '') + '</p>'
       + '<p>' + escapeHtmlClient(by.resource || '') + '</p></div></div>';
+  }
+  if (seqs.length) {   // only a report whose findings still carry them (ubel-runtime, older reports); elsewhere they are in the package's inventory modal
+    html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Affected dependency sequences (' + (v.affected_dependency_sequences_total && v.affected_dependency_sequences_total > seqs.length ? 'shortest ' + seqs.length + ' of ' + v.affected_dependency_sequences_total : seqs.length) + ')</h4><div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">'
+      + seqs.map(function (sq, n) {
+        const nodes = Array.isArray(sq) ? sq : [sq];
+        return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
+          + nodes.map(function (id, k) { const last = k === nodes.length - 1; return '<span title="' + escapeHtmlClient(id) + '" class="px-2 py-1 rounded border text-xs mono ' + (last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300') + '">' + escapeHtmlClient(nodeLabel(id)) + '</span>' + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('')
+          + '</div></div>';
+      }).join('') + '</div></div>';
   }
   return html;
 }

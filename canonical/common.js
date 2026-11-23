@@ -305,7 +305,7 @@ export function dedupeInventory(list) {
 // plus the check that found it (`detected_by`), and a dependency inventory entry for the package.
 export const isScFinding = (f) => isObj(f) && isObj(f.vuln) && (f.type === TYPES.SC_VULN || f.type === TYPES.SC_INFECTION);
 
-export function scFinding(f, { violates, R }) {
+export function scFinding(f, { violates, R, keepSequences = false }) {
   const v = f.vuln;
   const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
   const name = depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version);
@@ -319,11 +319,11 @@ export function scFinding(f, { violates, R }) {
     confidence: 'high',
     violate_policy: violates ? violates(f.severity ?? v.severity) : (v.is_policy_violation ?? null),
     type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
-    details: R.deep({ ...withoutSequences(v),
+    details: R.deep({ ...(keepSequences ? { ...v, affected_dependency_sequences: Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [] } : withoutSequences(v)),
       detected_by: { check: f.check ?? null, area: f.area ?? null, scope: f.scope ?? null, resource: f.resource ?? null, description: f.description ?? null } }),
   });
   // the dependency sequences are listed under the package in the inventory (see withoutSequences), not on each of its findings
-  const inventory = mkInventory({ component_id: cid, component_name: name, status: 'unknown', type: 'dependency', details: { name: v.affected_dependency, version: v.affected_dependency_version, ecosystem: v.ecosystem ?? null, id: cid, ...sequencesOf(v) } });
+  const inventory = mkInventory({ component_id: cid, component_name: name, status: 'unknown', type: 'dependency', details: { name: v.affected_dependency, version: v.affected_dependency_version, ecosystem: v.ecosystem ?? null, id: cid, ...(keepSequences ? {} : sequencesOf(v)) } });
   return { finding, inventory };
 }
 
@@ -331,6 +331,7 @@ export function scFinding(f, { violates, R }) {
 // "Affected dependency sequences" (every path root → … → affected package) belong to the package, not to each advisory on it: they are
 // emitted once, as `dependency_sequences` (and `dependency_sequences_total` when only the shortest ones were kept) on the dependency entry
 // of the inventory, and only for a package that is affected (has an advisory or infection). The vulnerability records keep everything else.
+// `keepSequences`: the report of that module keeps them on its findings (ubel-runtime).
 export function withoutSequences(v) {
   const { affected_dependency_sequences: _s, affected_dependency_sequences_total: _t, ...rest } = v;
   return rest;
