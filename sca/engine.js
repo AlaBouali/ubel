@@ -3465,10 +3465,15 @@ export function withDistroQualifier(purl, distro) {
  * @param {Map<string,string>} [opts.distroByPurl]  purl → distro ("ubuntu-24.04"). OS packages
  *   listed here are queried with `?distro=<value>`; results are still reported under the
  *   original (unqualified) purl.
+ * @param {Map<string,string>} [opts.sourcePurlByPurl]  binary-package purl → purl of the SOURCE package it was built from
+ *   (dpkg "Source:", apk origin). OSV keys Debian / Ubuntu / Alpine advisories by the source package
+ *   (libssl3t64 → openssl, libc6 → glibc), so those packages are queried by their source purl; results are
+ *   still reported under the binary purl and carry `lookup_name` / `lookup_version` (the source's).
  */
 export async function submitToOsv(purlsList, opts = {}) {
   const distroByPurl = opts.distroByPurl instanceof Map ? opts.distroByPurl : new Map();
-  const queryPurl = (p) => withDistroQualifier(p, distroByPurl.get(p));
+  const sourcePurlByPurl = opts.sourcePurlByPurl instanceof Map ? opts.sourcePurlByPurl : new Map();
+  const queryPurl = (p) => withDistroQualifier(sourcePurlByPurl.get(p) || p, distroByPurl.get(p));
 
   // pkg:conda/ is excluded: OSV has no conda ecosystem, and a purl type it
   // can't map risks failing the whole batch (any non-200 fails the scan).
@@ -3483,6 +3488,8 @@ export async function submitToOsv(purlsList, opts = {}) {
 
   const collect = (purl, item) => {
     const [dep, ver] = getDependencyFromPurl(purl);
+    const srcPurl = sourcePurlByPurl.get(purl);
+    const [lookupName, lookupVersion] = srcPurl ? getDependencyFromPurl(srcPurl) : [null, null];
     for (const v of (item.vulns || [])) {
       const k = `${purl}::${v.id}`;
       if (seen.has(k)) continue;
@@ -3490,6 +3497,7 @@ export async function submitToOsv(purlsList, opts = {}) {
       results.push({
         purl, vulnerability_id: v.id, dependency: dep, affected_version: ver, source: "osv",
         ...(distroByPurl.get(purl) ? { distro: distroByPurl.get(purl) } : {}),
+        ...(lookupName ? { lookup_name: lookupName, lookup_version: lookupVersion } : {}),
       });
     }
   };
@@ -3740,7 +3748,11 @@ export function installedVersionIsFixed(affected, dependency, installedVersion, 
   return false;
 }
 
-export async function getVulnById({ vulnerability_id, purl, dependency, affected_version, distro }) {
+export async function getVulnById({ vulnerability_id, purl, dependency, affected_version, distro, lookup_name, lookup_version }) {
+  // The advisory describes the package it is KEYED by: for an OS package that is its source package (lookup_name / lookup_version);
+  // the record is still reported for the installed binary package (dependency / affected_version).
+  const matchName    = lookup_name    || dependency;
+  const matchVersion = lookup_version || affected_version;
   let res;
   try {
     res = await fetchJSON(`${OSV_VULN_BASE}/${vulnerability_id}`);
@@ -3768,20 +3780,20 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
   // which always throws above).
   let release = null;
   if (OS_PURL_RE.test(purl || "")) {
-    release = scopeAffectedToDistro(data.affected, dependency, distro);
+    release = scopeAffectedToDistro(data.affected, matchName, distro);
     if (!release.applicable) return null;
     data.affected = release.affected;
   }
 
   // The installed version is the advisory's own fixed version (seen with RPM-based distros):
   // it is not affected, so drop the finding. null = "not applicable" (same as the release check).
-  if (installedVersionIsFixed(data.affected, dependency, affected_version, purl)) return null;
+  if (installedVersionIsFixed(data.affected, matchName, matchVersion, purl)) return null;
 
   processVulnerability(data);
 
   data.affected_package_id              = purl;
-  data.affected_dependency        = dependency;
-  data.affected_dependency_version = affected_version;
+  data.affected_dependency        = matchName;
+  data.affected_dependency_version = matchVersion;
   data.ecosystem                = getEcosystemFromPurl(purl);
   data.url                        = `https://osv.dev/vulnerability/${vulnerability_id}`;
   data.is_infection               = (data.id || "").startsWith("MAL-");
@@ -3793,7 +3805,10 @@ export async function getVulnById({ vulnerability_id, purl, dependency, affected
     data.release_confidence_reason = release.reason;
   }
 
-  getFix(data);
+  getFix(data);                                   // fixed / last-affected versions are the advisory's (the source package's)
+  data.affected_dependency         = dependency;
+  data.affected_dependency_version = affected_version;
+  if (lookup_name) { data.source_package = lookup_name; data.source_package_version = lookup_version; }
 
   // Extract CWE integer IDs from OSV's database_specific before deleting it.
   // OSV stores them as ["CWE-674", ...]; we normalise to plain ints [674, ...].
@@ -4919,7 +4934,17 @@ export class UbelEngineInstance {
         for (const c of inventory) {
           if (c && typeof c.id === "string" && c.distro) distroByPurl.set(c.id, c.distro);
         }
-        const vuln_ids = await submitToOsv(purls, { distroByPurl });
+        // Debian / Ubuntu / Alpine advisories are keyed by the SOURCE package (libssl3t64 → openssl): query by it.
+        const sourcePurlByPurl = new Map();
+        for (const c of inventory) {
+          if (!c || typeof c.id !== "string" || !c.source_name || !OS_PURL_RE.test(c.id)) continue;
+          const m = /^(pkg:[^/]+\/[^/]+\/)([^@?#]+)@([^?#]*)(.*)$/.exec(c.id);
+          if (!m) continue;
+          const srcVer = c.source_version || m[3];
+          if (c.source_name === decodeURIComponent(m[2]) && srcVer === m[3]) continue;     // same name and version: the binary purl is the source purl
+          sourcePurlByPurl.set(c.id, `${m[1]}${c.source_name}@${srcVer}${m[4]}`);
+        }
+        const vuln_ids = await submitToOsv(purls, { distroByPurl, sourcePurlByPurl });
 
         // ── Enrich vulnerabilities concurrently ─────────────────────────────
         let notApplicable = 0;

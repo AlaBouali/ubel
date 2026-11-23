@@ -1330,6 +1330,11 @@ function openInventoryItem(i) {
   const d = Object.assign({}, c.details || {});
   ['dependencies', 'parents', 'introduced_by', 'paths', 'suggested_fixes', 'vulnerable_transitive_dependencies', 'policy_violations', 'license_info', 'scopes'].forEach(function (k) { if (d[k] && typeof d[k] === 'object' && !Array.isArray(d[k])) d[k] = JSON.stringify(d[k]); });
   if (Array.isArray(d.paths)) d.paths = d.paths.map(function (p) { return p && p.text ? p.text : String(p); });
+  if (d.package_info && typeof d.package_info === 'object') {       // package details (description, maintainer, source package …): one row each
+    const pi = d.package_info; delete d.package_info;
+    Object.keys(pi).forEach(function (k) { if (k !== 'links') d['pkg ' + k] = Array.isArray(pi[k]) ? pi[k].join(', ') : pi[k]; });
+    if (Array.isArray(pi.links)) d['pkg links'] = pi.links.map(function (l) { return l.label + ': ' + l.url; }).join(' | ');
+  }
   const related = c.type === 'dependency' ? (reportData.findings || []).filter(function (f) { return f.vuln && f.vuln.affected_package_id === c.component_id; }) : [];
   openModal('<div class="space-y-4"><div class="flex items-center gap-3"><span class="px-2 py-0.5 rounded border border-neutral-700 text-xs mono">' + escH(c.type) + '</span><h2 class="text-lg font-semibold text-white break-all">' + escH(c.component_name) + '</h2></div>'
     + '<div class="text-xs text-neutral-500">State: <span class="font-bold uppercase ' + (INV_STATE_CLASS[c.status] || '') + '">' + escH(String(c.status).replace(/_/g, ' ')) + '</span></div>'

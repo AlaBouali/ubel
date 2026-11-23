@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { OwnerIndex } from './owners.js';
+import { buildPackageInfo } from './pkginfo.js';
 import { scanPlatform, scanDocker, scanTree, mergeResults, isOsPurl, pathsOf } from './scascan.js';
 
 class PackageScanUnsupported extends Error {}
@@ -45,11 +46,13 @@ function installedByDistro(owners, base, comp) {
  * The package list as the report carries it: the SCA inventory item of every installed package (operating-system and application),
  * trimmed to what the SCA package modal shows, with `state` taken from the advisories that were kept.
  */
-function compactPackage(c, vulns, unassessed) {
+function compactPackage(c, vulns, unassessed, base = '') {
   const cap = (a, n) => (Array.isArray(a) ? a.slice(0, n) : []);
   const mine = vulns.get(c.id) || [];
   return {
     id: c.id, name: c.name, version: c.version, type: c.type || 'library', ecosystem: c.ecosystem || '', ...(c.distro ? { distro: c.distro } : {}),
+    ...(c.source_name ? { source_name: c.source_name, source_version: c.source_version || c.version } : {}),
+    ...(() => { try { const pi = buildPackageInfo(c, base); return pi && Object.keys(pi).length ? { package_info: pi } : {}; } catch { return {}; } })(),   // what the package is (modal details); never fails the scan
     license: c.license ?? null, ...(c.license_info ? { license_info: c.license_info } : {}),
     state: mine.some((v) => v.is_infection) ? 'infected' : mine.length ? 'vulnerable' : unassessed(c) ? 'unknown' : 'safe',   // 'unknown': its lookup could not be completed, never "safe"
     scopes: cap(c.scopes, 5), paths: cap(c.paths, 5), dependencies: cap(c.dependencies, 25), introduced_by: cap(c.introduced_by, 10), parents: cap(c.parents, 25),
@@ -160,10 +163,19 @@ async function scanMachinePackages({ root = '/', live = true, extraRoots = [], s
   for (const w of merged.scan_warnings) notes.push(w);
   notes.push(`Package list: ${os.installed} operating-system package(s)${os.distro ? ` (${os.distro})` : ''}${apps.scanned ? ` and ${apps.installed} application package(s)` : ''} read${os.supported ? '' : '; the operating-system list was not available'} (report tab: Inventory / Packages).`);
 
+  // the dependency sequences of a package that nearly everything depends on (libc6) are numerous: keep the shortest few per advisory
+  const MAX_SEQUENCES = 25;
+  for (const v of vulnerabilities) {
+    const seq = v.affected_dependency_sequences;
+    if (Array.isArray(seq) && seq.length > MAX_SEQUENCES) {
+      v.affected_dependency_sequences_total = seq.length;
+      v.affected_dependency_sequences = [...seq].sort((a, b) => (Array.isArray(a) ? a.length : 1) - (Array.isArray(b) ? b.length : 1)).slice(0, MAX_SEQUENCES);
+    }
+  }
   const byPkg = new Map();
   for (const v of vulnerabilities) { if (!byPkg.has(v.affected_package_id)) byPkg.set(v.affected_package_id, []); byPkg.get(v.affected_package_id).push(v); }
   return {
-    mode, os, apps, inventory, packages: inventory.map((c) => compactPackage(c, byPkg, (c) => (isOsPurl(c.id) ? !!os.error : !!apps.error))), vulnerabilities, threatIntel: merged.threat_intel, notes,
+    mode, os, apps, inventory, packages: inventory.map((c) => compactPackage(c, byPkg, (c) => (isOsPurl(c.id) ? !!os.error : !!apps.error), base)), vulnerabilities, threatIntel: merged.threat_intel, notes,
     osVulnerabilities: vulnerabilities.filter((v) => isOsPurl(v.affected_package_id)),
     appVulnerabilities: vulnerabilities.filter((v) => !isOsPurl(v.affected_package_id)),
   };

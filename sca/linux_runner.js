@@ -208,7 +208,14 @@ function isExecutablePath(p) {
 // Build final package dict
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildPackage(ecosystem, name, version, license_, paths, depNames, purls) {
+/**
+ * @param {object} [extra]
+ * @param {string} [extra.source_name]     the SOURCE package the binary package was built from (dpkg "Source:", apk "o:" origin). OSV keys the
+ *                                         Debian / Ubuntu / Alpine advisories by this name, not by the binary package name (libssl3t64 → openssl).
+ * @param {string} [extra.source_version]  the source package's version (differs from the binary's on binNMU builds)
+ * @param {object} [extra.package_info]    descriptive metadata read from the package database (see trimInfo)
+ */
+function buildPackage(ecosystem, name, version, license_, paths, depNames, purls, extra = {}) {
   const id = makePurl(ecosystem, name, version);
   const dependencies = depNames
     .map(d => purls.get(d))
@@ -225,7 +232,24 @@ function buildPackage(ecosystem, name, version, license_, paths, depNames, purls
     scopes:       ["prod"],
     paths,
     dependencies,
+    ...(extra.source_name ? { source_name: extra.source_name, source_version: extra.source_version || version } : {}),
+    ...(extra.package_info && Object.keys(extra.package_info).length ? { package_info: extra.package_info } : {}),
   };
+}
+
+/** Descriptive package metadata, bounded in size (every installed package carries one): empty values dropped, strings and lists capped. */
+function trimInfo(o) {
+  const out = {};
+  for (const [k, v] of Object.entries(o || {})) {
+    if (v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    out[k] = Array.isArray(v) ? v.slice(0, 25).map(x => String(x).slice(0, 200)) : (typeof v === "string" ? v.slice(0, 400) : v);
+  }
+  return out;
+}
+
+/** dpkg relationship field ("a (>= 1), b | c") → the clauses as written, version constraints kept. */
+function splitRelations(raw) {
+  return raw ? raw.split(",").map(x => x.trim().replace(/\s+/g, " ")).filter(Boolean) : [];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,44 +257,75 @@ function buildPackage(ecosystem, name, version, license_, paths, depNames, purls
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseDpkgStatus(content) {
-  // Returns Map<name, {version, license, deps[]}>
-  // Only includes packages with "Status: install ok installed"
+  // Returns Map<name, {version, license, deps[], source, info}>
+  // Only includes packages with "Status: install ok installed". A stanza is a block of "Field: value" lines; a line that starts with
+  // a space or a tab continues the previous field (Description, long Depends …).
   const pkgs = new Map();
-  let pkg, ver, lic, dep, installed;
-
-  for (const raw of content.split("\n")) {
-    const line = raw.trimEnd();
-    if (line.startsWith("Package:")) {
-      pkg = line.slice("Package:".length).trim();
-    } else if (line.startsWith("Version:")) {
-      ver = line.slice("Version:".length).trim();
-    } else if (line.startsWith("Status:")) {
-      installed = line.slice("Status:".length).trim() === "install ok installed";
-    } else if (line.startsWith("License:")) {
-      lic = line.slice("License:".length).trim();
-    } else if (line.startsWith("Depends:")) {
-      dep = line.slice("Depends:".length).trim();
-    } else if (line.trim() === "") {
-      if (pkg && ver && installed) {
-        pkgs.set(pkg, {
-          version: ver,
-          license: lic || "unknown",
-          deps:    parseDpkgDeps(dep || ""),
-        });
-      }
-      pkg = ver = lic = dep = undefined;
-      installed = false;
+  for (const block of content.split(/\n[ \t]*\n/)) {
+    if (!block.trim()) continue;
+    const f = {};
+    let last = null;
+    for (const raw of block.split("\n")) {
+      const line = raw.trimEnd();
+      if (!line) continue;
+      if (/^[ \t]/.test(line)) { if (last) f[last] += "\n" + line.trim(); continue; }
+      const i = line.indexOf(":");
+      if (i <= 0) { last = null; continue; }
+      last = line.slice(0, i).trim().toLowerCase();
+      f[last] = line.slice(i + 1).trim();
     }
-  }
-  // flush last stanza
-  if (pkg && ver && installed) {
+    const pkg = f["package"], ver = f["version"];
+    if (!pkg || !ver || f["status"] !== "install ok installed") continue;
+
+    // "Source: openssl (3.0.13-0ubuntu3.16)" — the version is only present when it differs from the binary package's
+    let sourceName = pkg, sourceVersion = ver;
+    if (f["source"]) {
+      const m = /^([^\s(]+)(?:\s*\(([^)]+)\))?/.exec(f["source"]);
+      if (m) { sourceName = m[1]; if (m[2]) sourceVersion = m[2].trim(); }
+    }
+    const desc = (f["description"] || "").split("\n");
     pkgs.set(pkg, {
       version: ver,
-      license: lic || "unknown",
-      deps:    parseDpkgDeps(dep || ""),
+      license: f["license"] || "unknown",
+      deps:    parseDpkgDeps(f["depends"] || ""),
+      source:  { name: sourceName, version: sourceVersion },
+      info: {
+        description:    desc[0],
+        long_description: desc.slice(1).map(l => (l.trim() === "." ? "" : l.trim())).join(" ").replace(/\s+/g, " ").trim().slice(0, 400),
+        section:        f["section"],
+        priority:       f["priority"],
+        architecture:   f["architecture"],
+        multi_arch:     f["multi-arch"],
+        essential:      /^yes$/i.test(f["essential"] || "") ? true : undefined,
+        maintainer:     f["maintainer"],
+        homepage:       f["homepage"],
+        installed_size_kb: f["installed-size"] && /^\d+$/.test(f["installed-size"]) ? Number(f["installed-size"]) : undefined,
+        source_package: sourceName,
+        source_version: sourceVersion,
+        pre_depends:    splitRelations(f["pre-depends"]),
+        depends:        splitRelations(f["depends"]),
+        recommends:     splitRelations(f["recommends"]),
+        suggests:       splitRelations(f["suggests"]),
+        provides:       splitRelations(f["provides"]),
+        conflicts:      splitRelations(f["conflicts"]),
+        replaces:       splitRelations(f["replaces"]),
+        conffiles:      f["conffiles"] ? f["conffiles"].split("\n").map(l => l.trim().split(/\s+/)[0]).filter(Boolean) : undefined,
+      },
     });
   }
   return pkgs;
+}
+
+/** /var/lib/apt/extended_states: the packages apt installed only as dependencies ("Auto-Installed: 1"). Best effort; null when unreadable. */
+function readAptAutoInstalled(rootDir = "") {
+  let text;
+  try { text = fs.readFileSync(rootDir ? path.join(rootDir, "/var/lib/apt/extended_states") : "/var/lib/apt/extended_states", "utf8"); } catch { return null; }
+  const auto = new Set();
+  for (const block of text.split(/\n\s*\n/)) {
+    const pk = /^Package:\s*(\S+)/m.exec(block);
+    if (pk && /^Auto-Installed:\s*1/m.test(block)) auto.add(pk[1].split(":")[0]);
+  }
+  return auto;
 }
 
 /**
@@ -326,8 +381,10 @@ function scanDpkg(ecosystem, rootDir = "") {
     purls.set(name, makePurl(ecosystem, name, version));
   }
 
-  // Collect executable paths from .list files
+  // Collect executable paths from .list files (and count every file the package owns)
   const pathsByPkg = new Map();
+  const fileCount = new Map();
+  const autoInstalled = readAptAutoInstalled(rootDir);
   const infoDir = rootDir ? path.join(rootDir, "/var/lib/dpkg/info") : "/var/lib/dpkg/info";
 
   if (fs.existsSync(infoDir)) {
@@ -339,6 +396,7 @@ function scanDpkg(ecosystem, rootDir = "") {
       const listPath = path.join(infoDir, fname);
       try {
         for (const line of fs.readFileSync(listPath, "utf8").split("\n")) {
+          if (line.trim() && line.trim() !== "/.") fileCount.set(pkgName, (fileCount.get(pkgName) || 0) + 1);
           // fp is the *logical* path as it exists inside the image (e.g.
           // /usr/bin/bash) — that's what we record. Only the on-disk stat
           // check below needs the rootDir-prefixed real path.
@@ -363,12 +421,21 @@ function scanDpkg(ecosystem, rootDir = "") {
   }
 
   const result = [];
-  for (const [name, { version, license: lic, deps }] of pkgs.entries()) {
+  for (const [name, { version, license: lic, deps, source, info }] of pkgs.entries()) {
     result.push(buildPackage(
       ecosystem, name, version, lic,
       pathsByPkg.get(name) ?? [],
       deps,
       purls,
+      {
+        source_name: source.name, source_version: source.version,
+        package_info: trimInfo({
+          ...info,
+          file_count: fileCount.get(name),
+          installed_as: autoInstalled ? (autoInstalled.has(name) ? "dependency (auto-installed)" : "manually installed") : undefined,
+          package_manager: "dpkg",
+        }),
+      },
     ));
   }
   return result;
@@ -379,57 +446,49 @@ function scanDpkg(ecosystem, rootDir = "") {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseApkInstalled(content, ecosystem) {
-  // Returns Map<name, {version, license, deps[], paths[]}>
-  const pkgs  = new Map();
-  let name, version, license_ = "unknown", deps = [], prefix = "", seeded = false;
-
-  const flush = () => {
-    if (name && version && !seeded) {
-      pkgs.set(name, { version, license: license_, deps, paths: [] });
-    }
-    name = version = undefined;
-    prefix = ""; license_ = "unknown"; deps = []; seeded = false;
-  };
-
-  for (const raw of content.split("\n")) {
-    const line = raw.trimEnd();
-    if (line.startsWith("P:")) {
-      flush();
-      name = line.slice(2).trim();
-    } else if (line.startsWith("V:")) {
-      version = line.slice(2).trim();
-    } else if (line.startsWith("L:")) {
-      license_ = line.slice(2).trim() || "unknown";
-    } else if (line.startsWith("D:")) {
-      deps = parseApkDeps(line.slice(2).trim());
-    } else if (line.startsWith("F:")) {
-      prefix = line.slice(2).trim();
-      if (name && version && !seeded) {
-        pkgs.set(name, { version, license: license_, deps, paths: [] });
-        seeded = true;
-      }
-    } else if (line.startsWith("R:")) {
-      if (name && version) {
-        if (!seeded) {
-          pkgs.set(name, { version, license: license_, deps, paths: [] });
-          seeded = true;
+  // Returns Map<name, {version, license, deps[], paths[], origin, info}>
+  // Records are separated by a blank line; every line is "<letter>:<value>". P name, V version, A arch, S size, I installed size,
+  // T description, U url, L license, o ORIGIN (the source package the advisories are keyed by), m maintainer, t build time,
+  // c commit, D depends, p provides, F directory, R file.
+  const pkgs = new Map();
+  for (const block of content.split(/\n[ \t]*\n/)) {
+    if (!block.trim()) continue;
+    let name, version, license_ = "unknown", deps = [], prefix = "";
+    const info = {}, paths = [], provides = [];
+    let fileCount = 0;
+    for (const raw of block.split("\n")) {
+      const line = raw.trimEnd();
+      if (line.length < 2 || line[1] !== ":") continue;
+      const v = line.slice(2).trim();
+      switch (line[0]) {
+        case "P": name = v; break;
+        case "V": version = v; break;
+        case "L": license_ = v || "unknown"; break;
+        case "D": deps = parseApkDeps(v); info.depends = v.split(/\s+/).filter(Boolean); break;
+        case "A": info.architecture = v; break;
+        case "S": info.package_size_bytes = /^\d+$/.test(v) ? Number(v) : undefined; break;
+        case "I": info.installed_size_bytes = /^\d+$/.test(v) ? Number(v) : undefined; break;
+        case "T": info.description = v; break;
+        case "U": info.homepage = v; break;
+        case "o": info.origin = v; break;
+        case "m": info.maintainer = v; break;
+        case "t": info.build_time = /^\d+$/.test(v) ? new Date(Number(v) * 1000).toISOString() : undefined; break;
+        case "c": info.commit = v; break;
+        case "p": info.provides = v.split(/\s+/).filter(Boolean); break;
+        case "F": prefix = v; break;
+        case "R": {
+          fileCount++;
+          const filepath = prefix ? `/${prefix}/${v}` : `/${v}`;
+          if (isExecutablePath(filepath)) paths.push(filepath);
+          break;
         }
-        const filename = line.slice(2).trim();
-        const filepath = prefix ? `/${prefix}/${filename}` : `/${filename}`;
-        if (isExecutablePath(filepath)) {
-          pkgs.get(name).paths.push(filepath);
-        }
+        default: break;
       }
-    } else if (line.trim() === "") {
-      if (name && version && !seeded) {
-        pkgs.set(name, { version, license: license_, deps, paths: [] });
-      }
-      seeded = false;
-      prefix = ""; license_ = "unknown"; deps = [];
     }
+    if (!name || !version) continue;
+    const origin = info.origin || name;
+    pkgs.set(name, { version, license: license_, deps, paths, origin, info: { ...info, source_package: origin, file_count: fileCount || undefined, package_manager: "apk" } });
   }
-  flush();
-
   return pkgs;
 }
 
@@ -447,8 +506,9 @@ function scanApk(ecosystem, rootDir = "") {
   }
 
   const result = [];
-  for (const [name, { version, license: lic, deps, paths }] of pkgs.entries()) {
-    result.push(buildPackage(ecosystem, name, version, lic, paths, deps, purls));
+  for (const [name, { version, license: lic, deps, paths, origin, info }] of pkgs.entries()) {
+    // an apk "version" is also its origin's version: the advisories are keyed by origin name + that version
+    result.push(buildPackage(ecosystem, name, version, lic, paths, deps, purls, { source_name: origin, source_version: version, package_info: trimInfo(info) }));
   }
   return result;
 }
@@ -489,7 +549,7 @@ function scanRpm(ecosystem, rootDir = "") {
   }
 
   const result = [];
-  for (const [name, { version, license, requires, files }] of pkgs.entries()) {
+  for (const [name, { version, license, requires, files, info }] of pkgs.entries()) {
     const paths = [];
     for (const { path: fp, mode } of files) {
       if (!isExecutablePath(fp)) continue;
@@ -501,6 +561,7 @@ function scanRpm(ecosystem, rootDir = "") {
     result.push(buildPackage(
       ecosystem, name, version, license || "unknown", paths,
       cleanRpmDeps(requires.join(",")), purls,
+      { package_info: trimInfo({ ...info, file_count: files.length || undefined, package_manager: "rpm" }) },
     ));
   }
   return result;
@@ -700,10 +761,17 @@ export class LinuxManagerInstance {
     const roots     = inventory.map(c => c.id).filter(id => !depended.has(id));
     const sequences = new Map();
 
+    // Every simple path from a root to a package is a "sequence". On an operating-system package graph (libc6 is below nearly
+    // everything) that number explodes combinatorially — tens of thousands of paths for one package, megabytes of report and
+    // minutes of walking — so each package keeps at most MAX_SEQ_PER_NODE of them; a package that already has that many is not
+    // walked through again, which also bounds the work to MAX_SEQ_PER_NODE × edges.
+    const MAX_SEQ_PER_NODE = 100;
     function dfs(node, path) {
+      let list = sequences.get(node);
+      if (!list) { list = []; sequences.set(node, list); }
+      if (list.length >= MAX_SEQ_PER_NODE) return;
       const nextPath = [...path, node];
-      if (!sequences.has(node)) sequences.set(node, []);
-      sequences.get(node).push(nextPath);
+      list.push(nextPath);
       for (const dep of (byId.get(node)?.dependencies || [])) {
         if (!path.includes(dep)) dfs(dep, nextPath);
       }

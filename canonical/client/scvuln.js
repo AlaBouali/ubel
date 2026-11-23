@@ -457,6 +457,68 @@ function openVulnModal(key) {
             document.body.style.overflow = 'hidden';
         }
 
+/* Package details (ubel-vm): what the package is — carried on the inventory item as `package_info` (read from the dpkg / apk / rpm database or from the
+ * package's own manifest) next to `source_name` / `source_version`. Everything in it is data of the scanned machine, so it is escaped and links are
+ * limited to http(s). Items without it (an SCA report's) render nothing. */
+const PI_LABELS = [
+  ['description', 'Description'], ['summary', 'Summary'], ['long_description', 'Details'],
+  ['source_package', 'Source package'], ['origin', 'Origin'], ['source_rpm', 'Source RPM'],
+  ['architecture', 'Architecture'], ['section', 'Section'], ['priority', 'Priority'], ['group', 'Group'], ['essential', 'Essential'], ['multi_arch', 'Multi-Arch'],
+  ['installed_as', 'Installed as'], ['package_manager', 'Package manager'], ['maintainer', 'Maintainer'], ['vendor', 'Vendor'], ['packager', 'Packager'],
+  ['author', 'Author'], ['maintainers', 'Maintainers'], ['homepage', 'Homepage'], ['license_declared', 'Declared license'],
+  ['installed_size_kb', 'Installed size'], ['installed_size_bytes', 'Installed size'], ['package_size_bytes', 'Package size'], ['file_count', 'Files owned'],
+  ['installed_at', 'Installed / modified'], ['install_time', 'Installed'], ['build_time', 'Built'], ['commit', 'Build commit'], ['epoch', 'Epoch'],
+  ['location', 'Location'], ['locations', 'Install locations'], ['main', 'Entry point'], ['requires_python', 'Requires Python'], ['engines', 'Engines'],
+  ['runtime_dependencies', 'Runtime dependencies'], ['optional_dependencies', 'Optional dependencies'], ['deprecated', 'Deprecated'],
+];
+const PI_LISTS = [
+  ['install_scripts', 'Install-time scripts', true], ['executables', 'Executables', false], ['pre_depends', 'Pre-Depends', false], ['depends', 'Depends', false], ['recommends', 'Recommends', false],
+  ['suggests', 'Suggests', false], ['provides', 'Provides', false], ['conflicts', 'Conflicts', false], ['replaces', 'Replaces', false], ['conffiles', 'Config files', false], ['project_urls', 'Project URLs', false],
+];
+function piFmt(k, v) {
+  if (k === 'installed_size_kb') return Number(v) >= 1024 ? (Number(v) / 1024).toFixed(1) + ' MB' : Number(v) + ' KB';
+  if (k === 'installed_size_bytes' || k === 'package_size_bytes') { const n = Number(v); return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B'; }
+  if (k === 'installed_at' || k === 'install_time' || k === 'build_time') { const t = new Date(v); return isNaN(t.getTime()) ? String(v) : t.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC'); }
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  return Array.isArray(v) ? v.join(', ') : String(v);
+}
+function safeHref(u) { return /^https?:\/\/[^\s"'<>]+$/i.test(String(u || '')) ? String(u) : null; }
+function renderPackageDetails(item) {
+  const info = item && item.package_info && typeof item.package_info === 'object' ? item.package_info : null;
+  if (!info || !Object.keys(info).length) return '';
+  const e = escapeHtmlClient;
+  const shown = new Set(['links', 'source_version']);
+  const rows = [];
+  const wide = new Set(['description', 'summary', 'long_description']);
+  PI_LABELS.forEach(function (pair) {
+    const k = pair[0]; const v = info[k];
+    if (v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length) || (k === 'installed_size_bytes' && info.installed_size_kb != null)) return;
+    shown.add(k);
+    let val;
+    if (k === 'homepage' && safeHref(v)) val = '<a href="' + e(safeHref(v)) + '" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline">' + e(v) + '</a>';
+    else if (k === 'source_package' && item.source_version) val = e(v) + ' <span class="text-neutral-500">' + e(item.source_version) + '</span>';
+    else val = e(piFmt(k, v));
+    rows.push('<div class="' + (wide.has(k) ? 'md:col-span-2 ' : '') + 'bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">' + e(pair[1]) + '</p><p class="mono text-xs break-words">' + val + '</p></div>');
+  });
+  PI_LISTS.forEach(function (t) { shown.add(t[0]); });
+  Object.keys(info).forEach(function (k) {                                   // anything a reader added that has no label yet
+    if (shown.has(k) || info[k] === null || typeof info[k] === 'object') return;
+    rows.push('<div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">' + e(k.replace(/_/g, ' ')) + '</p><p class="mono text-xs break-words">' + e(piFmt(k, info[k])) + '</p></div>');
+  });
+  const lists = PI_LISTS.map(function (t) {
+    const a = info[t[0]];
+    if (!Array.isArray(a) || !a.length) return '';
+    const chips = a.map(function (x) { return '<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border ' + (t[2] ? 'border-yellow-500/60 text-yellow-300' : 'border-neutral-700') + ' break-all">' + e(String(x)) + '</span>'; }).join('');
+    return '<div class="mt-4"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-2">' + e(t[1]) + ' (' + a.length + (a.length >= 25 ? '+' : '') + ')</p><div class="flex flex-wrap gap-2">' + chips + '</div></div>';
+  }).join('');
+  const links = (Array.isArray(info.links) ? info.links : []).filter(function (l) { return l && safeHref(l.url); }).map(function (l) {
+    return '<a href="' + e(safeHref(l.url)) + '" target="_blank" rel="noopener noreferrer" class="text-xs text-blue-400 hover:underline border border-neutral-700 rounded px-2 py-1">' + e(l.label || l.url) + ' ↗</a>';
+  }).join('');
+  return '<div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Package Details</h4>'
+    + (rows.length ? '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">' + rows.join('') + '</div>' : '') + lists
+    + (links ? '<div class="flex flex-wrap gap-2 mt-4">' + links + '</div>' : '') + '</div>';
+}
+
 function openInvModal(id) {
             const item = RD.inventory.find(x => x.id === id);
             if (!item) return;
@@ -534,6 +596,7 @@ function openInvModal(id) {
                         <div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800"><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Policy Violation</p><p class="text-lg font-bold ${item.is_policy_violation ? 'text-red-400' : 'text-green-400'}">${item.is_policy_violation ? 'Yes' : 'No'}</p></div>
                     </div>
 
+                    ${renderPackageDetails(item)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">License Risk</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderLicenseInfoTable(item.license_info)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Introduced By ( root dependencies )</h4><div class="flex flex-wrap gap-2">${introRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Parents / Dependents (${(item.parents || []).length})</h4><div class="flex flex-wrap gap-2">${parentsRows}</div></div>
@@ -555,13 +618,17 @@ function extraBlocks(v) {
   const by = v.detected_by || null;
   const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
   let html = '';
+  if (v.source_package && v.source_package !== v.affected_dependency) {     // OS package: the advisory is keyed by the source package it was built from
+    html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Matched through source package</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
+      + '<span class="mono text-neutral-200">' + escapeHtmlClient(v.affected_dependency || '') + '</span> is built from the source package <span class="mono text-neutral-200">' + escapeHtmlClient(v.source_package) + (v.source_package_version ? ' ' + escapeHtmlClient(v.source_package_version) : '') + '</span>, which the distribution\'s advisories are filed under; the fixed versions are that source package\'s.</div></div>';
+  }
   if (by && (by.description || by.resource)) {
     html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Found by</h4><div class="text-sm text-neutral-400 leading-relaxed bg-neutral-900/50 p-4 rounded-lg border border-neutral-800">'
       + '<p class="text-xs mono text-neutral-500 mb-1">' + escapeHtmlClient(by.check || '') + (by.scope ? ' · ' + escapeHtmlClient(by.scope) : '') + '</p>'
       + '<p>' + escapeHtmlClient(by.resource || '') + '</p></div></div>';
   }
   if (seqs.length) {
-    html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Affected dependency sequences (' + seqs.length + ')</h4><div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">'
+    html += '<div class="mt-6"><h4 class="text-sm font-semibold mb-2 text-neutral-300">Affected dependency sequences (' + (v.affected_dependency_sequences_total && v.affected_dependency_sequences_total > seqs.length ? 'shortest ' + seqs.length + ' of ' + v.affected_dependency_sequences_total : seqs.length) + ')</h4><div class="border border-neutral-700 rounded-xl bg-black/30 p-3 space-y-3 overflow-y-auto" style="max-height:16rem">'
       + seqs.map(function (sq, n) {
         const nodes = Array.isArray(sq) ? sq : [sq];
         return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
