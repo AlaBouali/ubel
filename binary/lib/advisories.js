@@ -56,6 +56,9 @@ export function addAdvisoryFindings(findings, dependencies, { app, ruleFor = nul
         `Component: ${dep.name}${dep.version ? ` ${dep.version}` : ''} (${dep.ecosystem || 'component'})`,
         `Found by: ${(dep.sources || []).slice(0, 2).join('; ') || 'embedded version string'}`,
         v.severity_score != null ? `CVSS ${v.severity_score}${v.severity_vector ? ` · ${v.severity_vector}` : ''}` : null,
+        // exploit intelligence (mobile/lib/threatintel.js, the SCA report's own KEV / EPSS fields); absent when the feeds were not reachable
+        v.is_kev === true ? `Known exploited (CISA KEV)${v.kev_added ? `: added ${v.kev_added}` : ''}${v.kev_deadline ? `${v.kev_added ? ', ' : ': '}remediation due ${v.kev_deadline}` : ''}` : null,
+        typeof v.epss_score === 'number' ? `EPSS ${(v.epss_score * 100).toFixed(2)}%${typeof v.epss_percentile === 'number' ? ` (percentile ${(v.epss_percentile * 100).toFixed(2)}%)` : ''}` : null,
         fixed.length ? `Fixed in: ${fixed.slice(0, 6).join(', ')}` : 'No fixed version listed',
         v.url ? `Advisory: ${v.url}` : null,
       ].filter(Boolean);

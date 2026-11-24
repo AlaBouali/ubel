@@ -3,6 +3,7 @@
 // implementation as UBEL SCA; no separate HTTP client or third-party package.
 
 import { submitToOsv, getVulnById } from '../../sca/engine.js';
+import { getComplianceForVulnerability } from '../../sca/compliance_mappings.js';
 import { readBundleDependencies, DEPENDENCIES_PB } from './aab.js';
 
 const MAX_METADATA_BYTES = 8 * 1024 * 1024;
@@ -324,16 +325,30 @@ export function extractMobileDependencies(zip, { platform = 'unknown', prefix = 
   return mergeDependencies(out);
 }
 
-function minimalVulnerability(v) {
-  return {
-    id: v.id || v.vulnerability_id || 'Unknown advisory',
+/**
+ * One advisory as the report carries it: EVERYTHING the OSV.dev / NVD fetcher of the SCA engine returned (description, references, CWEs, published /
+ * modified, fixed and last-affected versions with their ranked upgrade tables, IOCs of malicious-package records, related ids …), so the report's
+ * vulnerability modal has the same content as the SCA report's, plus the SCA compliance mapping of its CWEs. Only the few fields every consumer
+ * relies on are normalised. Used for OSV records (mobile, binary Go / Rust, package) and, through binary/lib/deps.js, for NVD records.
+ */
+export function advisoryRecord(v) {
+  const id = v.id || v.vulnerability_id || 'Unknown advisory';
+  const description = String(v.description || v.details || v.summary || '').trim();
+  const isInfection = Boolean(v.is_infection || String(id).startsWith('MAL-'));
+  const cwes = Array.isArray(v.cwes) ? v.cwes : [];
+  const rec = {
+    ...v,
+    id,
     summary: v.summary || v.title || '',
-    // processVulnerability() folds `details` into `description` and deletes it, so read both.
-    details: v.description || v.details || '',
+    // processVulnerability() folds `details` into `description` and deletes it, so read both; both names are kept (older readers use `details`)
+    details: description,
+    description,
     aliases: Array.isArray(v.aliases) ? v.aliases : [],
     severity: String(v.severity || 'unknown').toLowerCase(),
     severity_score: v.severity_score == null ? null : Number(v.severity_score),
     severity_vector: v.severity_vector || null,
+    cwes,
+    references: Array.isArray(v.references) ? v.references.filter(r => r && r.url) : [],
     published: v.published || null,
     modified: v.modified || null,
     url: v.url || (v.id ? `https://osv.dev/vulnerability/${encodeURIComponent(v.id)}` : null),
@@ -341,8 +356,11 @@ function minimalVulnerability(v) {
     has_fix: Boolean(v.has_fix),
     affected_package_id: v.affected_package_id || null,
     affected_dependency_version: v.affected_dependency_version || null,
-    is_infection: Boolean(v.is_infection || String(v.id || '').startsWith('MAL-')),
+    is_infection: isInfection,
   };
+  try { rec.compliance = getComplianceForVulnerability(cwes, isInfection); } catch { /* the mapping is informational; never fails a lookup */ }
+  for (const k of ['affected', 'database_specific', 'schema_version']) delete rec[k];
+  return rec;
 }
 
 function isNativeDependency(component) {
@@ -421,7 +439,7 @@ export async function scanMobileDependencies(components, { log = () => {}, inclu
         continue;
       }
       if (!item.value) continue;
-      const vuln = minimalVulnerability(item.value);
+      const vuln = advisoryRecord(item.value);
       for (const dep of targetDeps) {
         if (!dep.vulnerabilities.some(v => v.id === vuln.id)) dep.vulnerabilities.push(vuln);
       }

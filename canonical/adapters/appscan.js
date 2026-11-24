@@ -41,6 +41,9 @@ function scRecord(v, d, cid) {
     affected_package_id: v.affected_package_id ?? cid,
     ecosystem: v.ecosystem ?? d.ecosystem ?? null,
     url: v.url ?? (v.id ? `https://osv.dev/vulnerability/${encodeURIComponent(v.id)}` : null),
+    // reports written before the modules kept the whole fetcher record carry `details` only and no references: the modal reads `description` / `references`
+    description: v.description ?? v.details ?? v.summary ?? '',
+    references: arr(v.references).length ? v.references : (v.url ? [{ type: 'ADVISORY', url: v.url }] : []),
     affected_dependency_sequences: arr(v.affected_dependency_sequences),
   };
 }

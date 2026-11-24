@@ -458,7 +458,7 @@ export function scanBinaryBuffer(buf, name) {
 }
 
 async function resolveDependencies(scan, notes, args) {
-  const result = await scanBinaryDependencies(scan.dependencies || [], { log: args.quiet ? () => {} : m => console.log(m) });
+  const result = await scanBinaryDependencies(scan.dependencies || [], { log: args.quiet ? () => {} : m => console.log(m), threatIntel: true });
   scan.dependencies = result.dependencies;
   scan.dependencySummary = result.summary;
   // A failed advisory lookup is a coverage gap, not a clean result (same fail-closed rule as the rest of UBEL).

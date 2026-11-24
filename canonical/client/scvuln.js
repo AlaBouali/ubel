@@ -35,6 +35,15 @@ function fmtAdvisoryDate(d) {
             return isNaN(t.getTime()) ? NOT_PROVIDED : t.toLocaleDateString();
         }
 
+// The package / binary / mobile (and MCP) reports take their advisories from OSV.dev / NVD and enrich them with CISA KEV + FIRST EPSS only
+// (mobile/lib/threatintel.js): they have no SCA policy evaluation and no reachability analysis, so the vulnerability modal does not carry the
+// "Policy Violations" and "Reachability Analysis" sections there. The vm / k8s / runtime reports (SCA engine records) keep them.
+function isAppScan() {
+            const C = (typeof CANON !== 'undefined' && CANON) || {};
+            const t = String(((C.metadata || {}).scan_info || {}).scan_type || '').toLowerCase();
+            return t === 'mobile' || t === 'binary' || t === 'package' || t === 'mcp-client' || t === 'mcp-server' || t === 'mcp_client' || t === 'mcp_server';
+        }
+
 function fmtPct(x) { return (x == null || isNaN(Number(x))) ? '—' : (Number(x) * 100).toFixed(2) + '%'; }
 
 function hasCvssScore(v) {
@@ -423,11 +432,7 @@ function openVulnModal(key) {
                         <div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">CVSS Vector</p>${vectorBlock}</div>
                     </div>
                     ${renderThreatIntelSection(v)}
-                    ${renderVulnPolicyViolations(v)}
-                    <div>
-                        <h4 class="text-sm font-semibold mb-3 text-neutral-300">Reachability Analysis</h4>
-                        ${renderReachabilitySection(v.reachability)}
-                    </div>
+                    ${isAppScan() ? '' : renderVulnPolicyViolations(v) + '<div><h4 class="text-sm font-semibold mb-3 text-neutral-300">Reachability Analysis</h4>' + renderReachabilitySection(v.reachability) + '</div>'}
                     ${(v.fix_versions_ranked && v.fix_versions_ranked.length > 0) ? `
                     <div>
                         <h4 class="text-sm font-semibold mb-3 text-green-400">Fix Version Recommendations</h4>

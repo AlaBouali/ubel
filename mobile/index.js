@@ -22,6 +22,7 @@ export { runOnlineChecks };
 import { extractMobileDependencies, extractBundleDependencies, scanMobileDependencies, summarise } from './lib/dependencies.js';
 import { NativeComponents } from './lib/native_components.js';
 import { addAdvisoryFindings } from '../binary/lib/advisories.js';
+import { enrichAdvisories } from './lib/threatintel.js';
 export { extractMobileDependencies, scanMobileDependencies };
 import { Findings } from './lib/findings.js';
 import { SEVERITY_RANK, SEVERITIES } from './lib/rules.js';
@@ -398,7 +399,9 @@ async function resolveDependencies(scan, notes, args) {
   // the ones of a standalone `ubel-binary` scan and listed in the same Dependencies tab.
   scan.nativeDependencies = [];
   const nativeRecords = scan.nativeComponents || [];
-  if (!nativeRecords.length) return;
+  // CISA KEV + FIRST EPSS for every advisory found (the app's own dependencies and the native components), once, after both lookups: as in the SCA report
+  const addThreatIntel = async () => { const intel = await enrichAdvisories(scan.dependencies, { log }); if (intel) scan.dependencySummary.threat_intel = intel; };
+  if (!nativeRecords.length) { await addThreatIntel(); return; }
   const { scanBinaryDependencies } = await import('../binary/lib/deps.js');         // loaded only when there is something to look up (it pulls in the SCA engine)
   const native = await scanBinaryDependencies(nativeRecords, { log });
   if (native.lookup_error) gap(notes, `Native library component lookup was incomplete: ${native.lookup_error}`);
@@ -408,6 +411,7 @@ async function resolveDependencies(scan, notes, args) {
   const summary = summarise(scan.dependencies);
   summary.queryable += native.dependencies.filter(d => !d.purl && d.cpe && d.lookup_status !== 'not_queryable').length;     // summarise() counts PURLs only
   scan.dependencySummary = summary;
+  await addThreatIntel();
 }
 
 async function writeReports(meta, scan, notes, args) {

@@ -7,19 +7,8 @@
 
 import { submitToNvd, getFix, scoreToSeverity } from '../../sca/engine.js';
 import { processVulnerability } from '../../sca/cvss_parser.js';
-import { scanMobileDependencies, settleLookupStatuses, summarise } from '../../mobile/lib/dependencies.js';
-
-function minimal(v) {
-  return {
-    id: v.id || v.vulnerability_id || 'Unknown advisory', summary: v.summary || v.title || '', details: v.description || v.details || '',   // processVulnerability() moves `details` into `description`
-    aliases: Array.isArray(v.aliases) ? v.aliases : [],
-    severity: String(v.severity || 'unknown').toLowerCase(), severity_score: v.severity_score == null ? null : Number(v.severity_score), severity_vector: v.severity_vector || null,
-    cwes: Array.isArray(v.cwes) ? v.cwes : [],
-    published: v.published || null, modified: v.modified || null, url: v.url || (v.id ? `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v.id)}` : null),
-    fixed_versions: Array.isArray(v.fixed_versions) ? v.fixed_versions : [], has_fix: Boolean(v.has_fix),
-    affected_package_id: v.affected_package_id || null, affected_dependency_version: v.affected_dependency_version || null, is_infection: false,
-  };
-}
+import { scanMobileDependencies, settleLookupStatuses, summarise, advisoryRecord } from '../../mobile/lib/dependencies.js';
+import { enrichAdvisories } from '../../mobile/lib/threatintel.js';
 
 // Same post-processing the SCA engine and the EASM module apply to an NVD item (processVulnerability expects OSV's severity shape and resets the NVD score).
 function finishNvd(v) {
@@ -31,8 +20,12 @@ function finishNvd(v) {
   getFix(v);
 }
 
-/** @returns {Promise<{dependencies:object[], summary:object, lookup_error:string|null}>} */
-export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
+/**
+ * `threatIntel`: also add CISA KEV / FIRST EPSS to every advisory (is_kev, kev_added, kev_deadline, epss_score, epss_percentile, as the SCA report has them)
+ * and the feeds' status to `summary.threat_intel`. Off by default: ubel-binary, ubel-package and ubel-mobile ask for it.
+ * @returns {Promise<{dependencies:object[], summary:object, lookup_error:string|null}>}
+ */
+export async function scanBinaryDependencies(records, { log = () => {}, threatIntel = false } = {}) {
   const purlRecs = records.filter(r => r.purl);
   const cpeRecs = records.filter(r => !r.purl && r.cpe).map(r => ({ ...r, vulnerabilities: [], vulnerability_count: 0 }));
   // Inventory-only records (a package that is in the file but whose version could not be recovered): shown, never looked up, never "clean".
@@ -49,7 +42,7 @@ export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
       for (const v of vulns) {
         finishNvd(v);
         const dep = byCpe.get(v.affected_package_id);
-        if (dep && !dep.vulnerabilities.some(x => x.id === v.id)) dep.vulnerabilities.push(minimal(v));
+        if (dep && !dep.vulnerabilities.some(x => x.id === v.id)) dep.vulnerabilities.push(advisoryRecord({ ...v, url: v.url || (v.id ? `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(v.id)}` : null), is_infection: false }));
       }
     } catch (err) {
       const msg = String(err?.message || err).slice(0, 500);
@@ -64,5 +57,6 @@ export async function scanBinaryDependencies(records, { log = () => {} } = {}) {
   for (const dep of dependencies) { dep.vulnerability_count = dep.vulnerabilities.length; }
   const summary = summarise(dependencies);
   summary.queryable += cpeRecs.filter(d => d.lookup_status !== 'not_queryable').length;     // summarise() counts PURLs only
+  if (threatIntel) { const intel = await enrichAdvisories(dependencies, { log }); if (intel) summary.threat_intel = intel; }
   return { dependencies, summary, lookup_error: lookupError };
 }

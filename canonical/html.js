@@ -9,6 +9,7 @@
 // compliance diffs stay in each family's own code. The vm / k8s / runtime reports (bundle
 // posture) also carry client/scvuln.js — the SCA vulnerability modal — when they hold sc_vuln / sc_infection findings or a package list (SCA package items); so do the
 // app-scan reports (package / binary / mobile / mcp) when they hold sc_vuln / sc_infection findings: each opens on its own, not inside its dependency's modal.
+// In the app-scan reports that modal has no Policy Violations / Reachability Analysis sections (client/scvuln.js isAppScan); it shows KEV / EPSS like the SCA report.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

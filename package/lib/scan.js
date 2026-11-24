@@ -369,7 +369,7 @@ export async function analyzePackage(pkg, opts = {}) {
 
 /** Looks up the advisories of the collected components and files them under the package rules. */
 export async function resolveAdvisories(scan, { log = () => {} } = {}) {
-  const result = await scanBinaryDependencies(scan.dependencies || [], { log });
+  const result = await scanBinaryDependencies(scan.dependencies || [], { log, threatIntel: true });
   scan.dependencies = result.dependencies;
   scan.dependencySummary = result.summary;
   if (result.lookup_error) gap(scan.notes, `Advisory lookup was incomplete: ${result.lookup_error}`);
