@@ -144,7 +144,7 @@ function scanOptionsFor(opts, mode, results) {
   const coverage = stats ? stats.coverage : null;
   const tooLarge = coverage && Array.isArray(coverage.files_skipped_too_large) ? coverage.files_skipped_too_large : null;
   const staticEngine = mode === 'analyze' && !!opts.noLlm;
-  return {
+  let options = {
     mode,
     engine:          staticEngine ? 'static' : 'llm',        // 'static' = --no-llm: deterministic rule engine, no model was used
     engine_version:  staticEngine ? STATIC_ENGINE_VERSION : null,
@@ -179,6 +179,12 @@ function scanOptionsFor(opts, mode, results) {
     files_skipped_generated:  coverage ? coverage.files_skipped_generated : null,
     chunks_partial_output:    coverage ? coverage.chunks_partial_output : null,
   };
+  if (options.engine === 'static') {
+    options.max_chunk_size = 1000000;  // static engine ignores --max-chunk-size, so report the default it actually used
+    options.max_chunks_effective = 1000000;  // static engine ignores --max-chunks, so report the default it actually used
+    options.max_chunks = 1000000;  // static engine ignores --max-chunks, so report the default it actually used
+  }
+  return options;
 }
 
 // Token usage + call counters for the report (real provider-reported numbers
