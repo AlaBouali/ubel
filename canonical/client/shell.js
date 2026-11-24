@@ -131,6 +131,18 @@ function cnFindingModal(f) {
   document.body.style.overflow = 'hidden';
 }
 
+// A reference replaces the modal's content: the new content starts at the top, whatever the scroll position of the one it replaced.
+// The modal box (.modal-content) is what scrolls. Every module's openModal / modal-body.innerHTML replacement is covered by the observer.
+function cnModalScrollTop() {
+  const box = document.querySelector('#modal-overlay .modal-content'), body = document.getElementById('modal-body');
+  if (box) box.scrollTop = 0;
+  if (body) body.scrollTop = 0;
+}
+(function () {
+  const body = document.getElementById('modal-body');
+  if (body && window.MutationObserver) new MutationObserver(cnModalScrollTop).observe(body, { childList: true });
+})();
+
 function cnOpenFinding(i) {
   let done = false;
   try { done = FAMILY.openFinding(i); } catch (e) { console.error('finding modal failed', e); }
@@ -359,6 +371,7 @@ function cnSetupCounts() {
 
 function cnInit() {
   closeModal();
+  if (FAMILY.bind) { try { FAMILY.bind(); } catch (e) { console.error('modal references failed to bind', e); } }
   cnRenderDashboard();
   if (FAMILY.executive && CANON.executive_summary) { try { FAMILY.executive(); } catch (e) { console.error('Executive summary render failed:', e); } }
   cnSetupFindings(); cnSetupInventory(); cnSetupScopes(); cnRenderStats(); cnRenderPolicy(); cnRenderSystem();

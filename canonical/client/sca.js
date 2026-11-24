@@ -86,7 +86,7 @@ function renderVulnTransitiveTable(list) {
                 return '<p class="text-neutral-500 text-xs italic">No vulnerable transitive dependencies.</p>';
             }
             const rows = list.map(dep => `
-                <tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${dep.id}'), 50)">
+                <tr class="${hasInvTarget(dep.id) ? 'cursor-pointer hover:bg-neutral-800/40 transition-colors' : ''}"${hasInvTarget(dep.id) ? refAttr('inv', dep.id) : ' title="' + REF_MISSING_TITLE + '"'}>
                     <td class="py-2 pr-4 mono">${escapeHtmlClient(dep.name)}</td>
                     <td class="py-2 pr-4 text-neutral-400">${dep.vulns_count}</td>
                     <td class="py-2">${dep.is_policy_violation
@@ -146,12 +146,67 @@ function findingKeyOf(v) {
 function findVuln(key) {
             const list = reportData.vulnerabilities || [];
             return list.find(function (x) { return x.finding_key === key; })
+                || list.find(function (x) { return findingKeyOf(x) === key; })
                 || list.find(function (x) { return x.id === key; });
         }
 
-function vulnOnclick(key) {
-            const arg = JSON.stringify(String(key == null ? '' : key)).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-            return 'event.stopPropagation(); closeModal(); setTimeout(function () { openVulnModal(' + arg + '); }, 50)';
+// ── references between modals ──
+// A clickable reference inside a modal (a package chip, a vulnerability row, a dependency-sequence node) carries data-ref / data-key
+// instead of an inline handler, and one delegated listener on #modal-body (bindModalRefs) opens the target. The id is only ever an
+// attribute value, never code, so an id containing a quote cannot break the markup. The target is looked up BEFORE anything changes:
+// a reference to something that is not in the report (a virtual or uninstalled package that a Debian package depends on) is drawn as
+// plain text, and a click that still cannot be resolved leaves the current modal open instead of closing it.
+function refAttr(kind, key) {
+            return ' data-ref="' + kind + '" data-key="' + escapeHtmlClient(String(key == null ? '' : key)) + '"';
+        }
+
+function hasInvTarget(id) {
+            return reportData.inventory.some(function (x) { return x.id === id; });
+        }
+
+function vulnRefAttr(key) { return refAttr('vuln', key); }
+
+// The key of a vulnerability reference: its finding_key, else <id>::<package> when that finding exists, else the bare advisory id.
+function vulnKeyFor(findingKey, id, pkgId) {
+            if (findingKey) return findingKey;
+            if (pkgId && findVuln(id + '::' + pkgId)) return id + '::' + pkgId;
+            return id;
+        }
+
+const REF_CHIP = 'mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700';
+const REF_MISSING_TITLE = 'Not in this report&#39;s inventory (for example a virtual or uninstalled package)';
+
+function invChip(id, label) {
+            const text = escapeHtmlClient(String(label == null || label === '' ? id : label));
+            return hasInvTarget(id)
+                ? '<span class="' + REF_CHIP + ' cursor-pointer hover:border-neutral-500 transition-colors"' + refAttr('inv', id) + '>' + text + '</span>'
+                : '<span class="' + REF_CHIP + ' text-neutral-500" title="' + REF_MISSING_TITLE + '">' + text + '</span>';
+        }
+
+function openModalRef(kind, key) {
+            if (kind === 'vuln') {
+                if (!findVuln(key)) return false;
+                openVulnModal(key);
+            } else if (kind === 'inv') {
+                if (!hasInvTarget(key)) return false;
+                openInvModal(key);
+            } else {
+                return false;
+            }
+            if (typeof cnModalScrollTop === 'function') cnModalScrollTop();
+            return true;
+        }
+
+function bindModalRefs() {
+            const body = document.getElementById('modal-body');
+            if (!body || body.dataset.refsBound) return;
+            body.dataset.refsBound = '1';
+            body.addEventListener('click', function (e) {
+                const el = e.target && e.target.closest ? e.target.closest('[data-ref]') : null;
+                if (!el || !body.contains(el)) return;
+                e.stopPropagation();
+                openModalRef(el.getAttribute('data-ref'), el.getAttribute('data-key'));
+            });
         }
 
 const NOT_PROVIDED = 'Not provided by the advisory source';
@@ -196,7 +251,7 @@ function renderSequences(pkg) {
                     const display = getPackageDisplay(node);
                     const isLast = i === sequence.length - 1;
                     html += `
-                        <div class="bg-neutral-800 px-3 py-1.5 rounded-lg border border-neutral-700 text-sm font-mono hover:bg-neutral-700 transition-colors cursor-pointer" onclick="showPackageDetails('${escapeHtml(node)}')">
+                        <div class="bg-neutral-800 px-3 py-1.5 rounded-lg border border-neutral-700 text-sm font-mono transition-colors ${hasInvTarget(node) ? 'hover:bg-neutral-700 cursor-pointer' : 'text-neutral-500'}"${hasInvTarget(node) ? refAttr('inv', node) : ' title="' + REF_MISSING_TITLE + '"'}>
                             ${escapeHtml(display)}
                         </div>
                     `;
@@ -658,7 +713,7 @@ function openComplianceModal(fwIdx, cIdx) {
             const secretMatches = ((reportData.secrets || {}).findings || []).filter(mapsToControl);
 
             const vulnRows = vulnMatches.map(v => `
-                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="${vulnOnclick(findingKeyOf(v))}">
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" ${vulnRefAttr(findingKeyOf(v))}>
                     <div class="flex items-center gap-3">
                         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-${v.severity}">${v.severity}</span>
                         <span class="mono text-xs text-white">${v.id}</span>
@@ -721,12 +776,12 @@ function releaseConfBadge(level, reason) {
             return '<span title="' + escapeHtml(String(reason || '')) + '" class="px-1.5 py-0.5 rounded border text-[9px] uppercase font-bold ' + cls + '">' + escapeHtml(String(level)) + '</span>';
         }
 
-function renderSuggestedFixes(sf) {
+function renderSuggestedFixes(sf, pkgId) {
             if (!sf) return '<p class="text-neutral-500 text-xs italic">No suggested-fix data available.</p>';
             const fixes = sf.fixes || [];
             const unfixed = sf.unfixed || [];
             // Key of one finding instance; older reports without finding_key fall back to the id.
-            const openVuln = function(v) { return vulnOnclick(v.finding_key || v.id); };
+            const openVuln = function(v) { return vulnRefAttr(vulnKeyFor(v.finding_key, v.id, pkgId)); };
             const sevBadge = function(v) {
                 const sev = v.is_infection ? 'critical' : (v.severity || 'unknown');
                 const label = v.is_infection ? 'infection' : sev;
@@ -765,7 +820,7 @@ function renderSuggestedFixes(sf) {
                             (anyConf ? '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' + releaseConfBadge(f.release_confidence, f.release_confidence_reason) + '</td>' : '') +
                             '<td class="px-3 py-2 align-top border-t border-l border-neutral-800"><div class="flex flex-wrap gap-x-4 gap-y-1.5">' +
                             (f.vulnerabilities || []).map(function(v) {
-                                return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1" onclick="' + openVuln(v) + '">' +
+                                return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1"' + openVuln(v) + '>' +
                                     '<span class="mono text-xs text-white">' + escapeHtml(String(v.id)) + '</span>' + sevBadge(v) + '</div>';
                             }).join('') +
                             '</div></td></tr>';
@@ -782,7 +837,7 @@ function renderSuggestedFixes(sf) {
                     '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Severity</th>' + (unfixed.some(function(v) { return !!v.release_confidence; }) ? '<th class="px-3 py-2">Release match</th>' : '') + '<th class="px-3 py-2 text-right">Score</th></tr></thead>' +
                     '<tbody class="divide-y divide-neutral-800">' +
                     unfixed.map(function(v) {
-                        return '<tr class="cursor-pointer hover:bg-neutral-800/40" onclick="' + openVuln(v) + '">' +
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40"' + openVuln(v) + '>' +
                             '<td class="px-3 py-2 mono text-white">' + escapeHtml(String(v.id)) + '</td>' +
                             '<td class="px-3 py-2">' + sevBadge(v) + '</td>' +
                             (v.release_confidence ? '<td class="px-3 py-2">' + releaseConfBadge(v.release_confidence, '') + '</td>' : (unfixed.some(function(u) { return !!u.release_confidence; }) ? '<td class="px-3 py-2">—</td>' : '')) +
@@ -805,7 +860,7 @@ function openInvModal(id) {
                              : 'text-yellow-400';
 
             const vulnRows = itemVulns.length ? itemVulns.map(v => `
-                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="${vulnOnclick(findingKeyOf(v))}">
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" ${vulnRefAttr(findingKeyOf(v))}>
                     <div class="flex items-center gap-3">
                         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-${v.severity}">${v.severity}</span>
                         <span class="mono text-xs text-white">${v.id}</span>
@@ -820,13 +875,13 @@ function openInvModal(id) {
             `).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
 
             const introRows = (item.introduced_by || []).length
-                ? (item.introduced_by).map(ib => `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${ib}'), 50)">${ib}</span>`).join('')
+                ? (item.introduced_by).map(ib => invChip(ib, ib)).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
             const parentsRows = (item.parents || []).length
                 ? item.parents.map(p => {
                     const par = reportData.inventory.find(x => x.id === p);
-                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${p}'), 50)">${par ? par.name + '@' + par.version : p}</span>`;
+                    return invChip(p, par ? par.name + '@' + par.version : p);
                   }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No dependents (root)</span>';
 
@@ -844,7 +899,7 @@ function openInvModal(id) {
             const depsRows = (item.dependencies || []).length
                 ? item.dependencies.map(d => {
                     const dep = reportData.inventory.find(x => x.id === d);
-                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${d}'), 50)">${dep ? dep.name + '@' + dep.version : d}</span>`;
+                    return invChip(d, dep ? dep.name + '@' + dep.version : d);
                   }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
 
@@ -878,7 +933,7 @@ function openInvModal(id) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
-                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes)}</div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes, item.id)}</div>
                     ${renderComponentPolicyViolations(item)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (${itemVulns.length})</h4><div class="space-y-0">${vulnRows}</div></div>
                 </div>
@@ -1008,8 +1063,21 @@ function openVulnModal(key) {
                 </div>
             `;
 
+            mountVulnSequences(v);
+
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
+        }
+
+// "Affected dependency sequences": SCA's own renderSequences(), mounted as a scrollable box at the bottom of the vulnerability modal.
+// It is part of the modal itself (not of the Findings tab's opener), so every way of opening the modal has the sequence-node links.
+function mountVulnSequences(v) {
+            const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
+            const wrap = document.createElement('div');
+            wrap.className = 'mt-6';
+            wrap.innerHTML = '<h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + seqs.length + ')</h4><div id="sequences-container" class="border border-neutral-700 rounded-xl bg-black/30 p-3 overflow-y-auto" style="max-height:16rem"></div>';
+            document.getElementById('modal-body').appendChild(wrap);
+            renderSequences({ sequences: seqs });
         }
 
 function tiEsc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1061,7 +1129,7 @@ function renderComponentPolicyViolations(item) {
             } else {
                 body = '<table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr><th class="pb-2 pr-4 font-bold">Vulnerability</th><th class="pb-2 pr-4 font-bold">Severity</th><th class="pb-2 font-bold">Violations</th></tr></thead><tbody class="divide-y divide-neutral-800">'
                     + list.map(function(r) {
-                        return '<tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="' + vulnOnclick(r.finding_key || r.vuln_id) + '">'
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors"' + vulnRefAttr(vulnKeyFor(r.finding_key, r.vuln_id, item.id)) + '>'
                             + '<td class="py-2 pr-4 align-top mono text-white">' + escapeHtmlClient(r.vuln_id) + '</td>'
                             + '<td class="py-2 pr-4 align-top"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + escapeHtmlClient(r.severity) + '">' + escapeHtmlClient(r.severity) + '</span></td>'
                             + '<td class="py-2"><div class="flex flex-col gap-1.5">'
@@ -1217,21 +1285,16 @@ function closeModal() {
         }
 
 // ── glue: canonical entry → module modal ──
-function showPackageDetails(id) { closeModal(); setTimeout(function () { openInvModal(id); }, 50); }   // the graph tab's node click; in the modal it opens the component
+function showPackageDetails(id) { openModalRef('inv', id); }   // a sequence node's click: opens the component, and only if it exists
 const FAMILY = {
   openFinding: function (i) {
     const v = SCA_FINDING_REF.get(i); if (!v) return false;
     openVulnModal(findingKeyOf(v));
-    // "Affected dependency sequences": SCA's own renderSequences(), mounted as a scrollable box at the bottom of the modal
-    const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
-    const wrap = document.createElement('div'); wrap.className = 'mt-6';
-    wrap.innerHTML = '<h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + seqs.length + ')</h4><div id="sequences-container" class="border border-neutral-700 rounded-xl bg-black/30 p-3 overflow-y-auto" style="max-height:16rem"></div>';
-    document.getElementById('modal-body').appendChild(wrap);
-    renderSequences({ sequences: seqs });
     return true;
   },
   openInventory: function (i) { const d = CANON.inventory[i].details; if (!d || !d.id) return false; openInvModal(d.id); return true; },
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); },
   diffs: function () { renderDiffs(); },
+  bind: bindModalRefs,
 };

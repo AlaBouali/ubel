@@ -73,6 +73,7 @@ function tiEsc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':
 function findVuln(key) {
             const list = RD.vulnerabilities || [];
             return list.find(function (x) { return x.finding_key === key; })
+                || list.find(function (x) { return findingKeyOf(x) === key; })
                 || list.find(function (x) { return x.id === key; });
         }
 
@@ -80,14 +81,65 @@ function findingKeyOf(v) {
             return v ? (v.finding_key || (v.id + '::' + (v.affected_package_id || ''))) : '';
         }
 
-function vulnOnclick(key) {
-            const arg = JSON.stringify(String(key == null ? '' : key)).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-            return 'event.stopPropagation(); closeModal(); setTimeout(function () { openVulnModal(' + arg + '); }, 50)';
+// ── references between modals ──
+// A clickable reference inside a modal (a package chip, a vulnerability row, a dependency-sequence node) carries data-ref / data-key
+// instead of an inline handler, and one delegated listener on #modal-body (bindModalRefs) opens the target. The id is only ever an
+// attribute value, never code, so an id containing a quote cannot break the markup. The target is looked up BEFORE anything changes:
+// a reference to something that is not in the report (a virtual or uninstalled package that a Debian package depends on) is drawn as
+// plain text, and a click that still cannot be resolved leaves the current modal open instead of closing it.
+function refAttr(kind, key) {
+            return ' data-ref="' + kind + '" data-key="' + escapeHtmlClient(String(key == null ? '' : key)) + '"';
         }
 
-function closeModal() {
-            document.getElementById('modal-overlay').style.display = 'none';
-            document.body.style.overflow = 'auto';
+function hasInvTarget(id) {
+            build();
+            return RD.inventory.some(function (x) { return x.id === id; });
+        }
+
+function vulnRefAttr(key) { return refAttr('vuln', key); }
+
+// The key of a vulnerability reference: its finding_key, else <id>::<package> when that finding exists, else the bare advisory id.
+function vulnKeyFor(findingKey, id, pkgId) {
+            if (findingKey) return findingKey;
+            if (pkgId && findVuln(id + '::' + pkgId)) return id + '::' + pkgId;
+            return id;
+        }
+
+const REF_CHIP = 'mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700';
+const REF_MISSING_TITLE = 'Not in this report&#39;s inventory (for example a virtual or uninstalled package)';
+
+function invChip(id, label) {
+            const text = escapeHtmlClient(String(label == null || label === '' ? id : label));
+            return hasInvTarget(id)
+                ? '<span class="' + REF_CHIP + ' cursor-pointer hover:border-neutral-500 transition-colors"' + refAttr('inv', id) + '>' + text + '</span>'
+                : '<span class="' + REF_CHIP + ' text-neutral-500" title="' + REF_MISSING_TITLE + '">' + text + '</span>';
+        }
+
+function openModalRef(kind, key) {
+            build();
+            if (kind === 'vuln') {
+                if (!findVuln(key)) return false;
+                openVulnWithExtras(key);
+            } else if (kind === 'inv') {
+                if (!hasInvTarget(key)) return false;
+                openInvWithData(key);
+            } else {
+                return false;
+            }
+            if (typeof cnModalScrollTop === 'function') cnModalScrollTop();
+            return true;
+        }
+
+function bindModalRefs() {
+            const body = document.getElementById('modal-body');
+            if (!body || body.dataset.scRefsBound) return;
+            body.dataset.scRefsBound = '1';
+            body.addEventListener('click', function (e) {
+                const el = e.target && e.target.closest ? e.target.closest('[data-ref]') : null;
+                if (!el || !body.contains(el)) return;
+                e.stopPropagation();
+                openModalRef(el.getAttribute('data-ref'), el.getAttribute('data-key'));
+            });
         }
 
 function renderComplianceSection(compliance) {
@@ -182,12 +234,12 @@ function renderReachabilitySection(r) {
             return `<div class="space-y-3"><div class="flex flex-wrap gap-4"><span class="text-[10px] uppercase text-neutral-500 font-bold">Reachable: </span><span class="font-bold text-sm" style="color:${r.reachable?'#f87171':'#4ade80'}">${r.reachable?'YES':'NO'}</span><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold mono" style="color:${lc};border-color:${lc}">${r.level}</span><span class="text-[10px] font-semibold" style="color:${cc}">${r.confidence.toUpperCase()} confidence</span></div><div class="grid grid-cols-3 md:grid-cols-6 gap-2 text-[10px]"><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Depth</p><p class="mono">${s.depth!=null?s.depth:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">AV</p><p class="mono">${s.attack_vector||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Scope</p><p class="mono">${s.scope||'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Orphan</p><p class="mono">${s.is_orphan_tool?'yes':'no'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Paths</p><p class="mono">${s.num_paths!=null?s.num_paths:'--'}</p></div><div class="bg-neutral-900 rounded p-2 border border-neutral-800"><p class="text-neutral-500">Non-Lib</p><p class="mono">${s.is_non_library?'yes':'no'}</p></div></div><div><p class="text-[10px] uppercase text-neutral-500 font-bold mb-1">Import Scan</p>${isHtml}</div><p class="text-xs text-neutral-300 bg-neutral-900/50 px-3 py-2 rounded border border-neutral-800 italic">${r.rationale}</p>${tags?'<div class="flex flex-wrap gap-1">'+tags+'</div>':''}</div>`;
         }
 
-function renderSuggestedFixes(sf) {
+function renderSuggestedFixes(sf, pkgId) {
             if (!sf) return '<p class="text-neutral-500 text-xs italic">No suggested-fix data available.</p>';
             const fixes = sf.fixes || [];
             const unfixed = sf.unfixed || [];
             // Key of one finding instance; older reports without finding_key fall back to the id.
-            const openVuln = function(v) { return vulnOnclick(v.finding_key || v.id); };
+            const openVuln = function(v) { return vulnRefAttr(vulnKeyFor(v.finding_key, v.id, pkgId)); };
             const sevBadge = function(v) {
                 const sev = v.is_infection ? 'critical' : (v.severity || 'unknown');
                 const label = v.is_infection ? 'infection' : sev;
@@ -226,7 +278,7 @@ function renderSuggestedFixes(sf) {
                             (anyConf ? '<td class="px-3 py-2 align-top whitespace-nowrap border-t border-l border-neutral-800">' + releaseConfBadge(f.release_confidence, f.release_confidence_reason) + '</td>' : '') +
                             '<td class="px-3 py-2 align-top border-t border-l border-neutral-800"><div class="flex flex-wrap gap-x-4 gap-y-1.5">' +
                             (f.vulnerabilities || []).map(function(v) {
-                                return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1" onclick="' + openVuln(v) + '">' +
+                                return '<div class="flex items-center gap-2 whitespace-nowrap cursor-pointer hover:bg-neutral-800/40 rounded px-1 -mx-1"' + openVuln(v) + '>' +
                                     '<span class="mono text-xs text-white">' + escapeHtml(String(v.id)) + '</span>' + sevBadge(v) + '</div>';
                             }).join('') +
                             '</div></td></tr>';
@@ -243,7 +295,7 @@ function renderSuggestedFixes(sf) {
                     '<thead class="bg-neutral-800/50 text-neutral-400 uppercase text-[10px] tracking-widest sticky top-0"><tr><th class="px-3 py-2">ID</th><th class="px-3 py-2">Severity</th>' + (unfixed.some(function(v) { return !!v.release_confidence; }) ? '<th class="px-3 py-2">Release match</th>' : '') + '<th class="px-3 py-2 text-right">Score</th></tr></thead>' +
                     '<tbody class="divide-y divide-neutral-800">' +
                     unfixed.map(function(v) {
-                        return '<tr class="cursor-pointer hover:bg-neutral-800/40" onclick="' + openVuln(v) + '">' +
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40"' + openVuln(v) + '>' +
                             '<td class="px-3 py-2 mono text-white">' + escapeHtml(String(v.id)) + '</td>' +
                             '<td class="px-3 py-2">' + sevBadge(v) + '</td>' +
                             (v.release_confidence ? '<td class="px-3 py-2">' + releaseConfBadge(v.release_confidence, '') + '</td>' : (unfixed.some(function(u) { return !!u.release_confidence; }) ? '<td class="px-3 py-2">—</td>' : '')) +
@@ -291,7 +343,7 @@ function renderVulnTransitiveTable(list) {
                 return '<p class="text-neutral-500 text-xs italic">No vulnerable transitive dependencies.</p>';
             }
             const rows = list.map(dep => `
-                <tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${dep.id}'), 50)">
+                <tr class="${hasInvTarget(dep.id) ? 'cursor-pointer hover:bg-neutral-800/40 transition-colors' : ''}"${hasInvTarget(dep.id) ? refAttr('inv', dep.id) : ' title="' + REF_MISSING_TITLE + '"'}>
                     <td class="py-2 pr-4 mono">${escapeHtmlClient(dep.name)}</td>
                     <td class="py-2 pr-4 text-neutral-400">${dep.vulns_count}</td>
                     <td class="py-2">${dep.is_policy_violation
@@ -319,7 +371,7 @@ function renderComponentPolicyViolations(item) {
             } else {
                 body = '<table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr><th class="pb-2 pr-4 font-bold">Vulnerability</th><th class="pb-2 pr-4 font-bold">Severity</th><th class="pb-2 font-bold">Violations</th></tr></thead><tbody class="divide-y divide-neutral-800">'
                     + list.map(function(r) {
-                        return '<tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors" onclick="' + vulnOnclick(r.finding_key || r.vuln_id) + '">'
+                        return '<tr class="cursor-pointer hover:bg-neutral-800/40 transition-colors"' + vulnRefAttr(vulnKeyFor(r.finding_key, r.vuln_id, item.id)) + '>'
                             + '<td class="py-2 pr-4 align-top mono text-white">' + escapeHtmlClient(r.vuln_id) + '</td>'
                             + '<td class="py-2 pr-4 align-top"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-' + escapeHtmlClient(r.severity) + '">' + escapeHtmlClient(r.severity) + '</span></td>'
                             + '<td class="py-2"><div class="flex flex-col gap-1.5">'
@@ -529,7 +581,7 @@ function openInvModal(id) {
                              : 'text-yellow-400';
 
             const vulnRows = itemVulns.length ? itemVulns.map(v => `
-                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" onclick="${vulnOnclick(findingKeyOf(v))}">
+                <div class="flex items-center justify-between py-2 border-b border-neutral-800 last:border-0 cursor-pointer hover:bg-neutral-800/40 px-2 rounded transition-colors" ${vulnRefAttr(findingKeyOf(v))}>
                     <div class="flex items-center gap-3">
                         <span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold severity-${v.severity}">${v.severity}</span>
                         <span class="mono text-xs text-white">${v.id}</span>
@@ -544,13 +596,13 @@ function openInvModal(id) {
             `).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
 
             const introRows = (item.introduced_by || []).length
-                ? (item.introduced_by).map(ib => `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${ib}'), 50)">${ib}</span>`).join('')
+                ? (item.introduced_by).map(ib => invChip(ib, ib)).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
 
             const parentsRows = (item.parents || []).length
                 ? item.parents.map(p => {
                     const par = RD.inventory.find(x => x.id === p);
-                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${p}'), 50)">${par ? par.name + '@' + par.version : p}</span>`;
+                    return invChip(p, par ? par.name + '@' + par.version : p);
                   }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No dependents (root)</span>';
 
@@ -568,7 +620,7 @@ function openInvModal(id) {
             const depsRows = (item.dependencies || []).length
                 ? item.dependencies.map(d => {
                     const dep = RD.inventory.find(x => x.id === d);
-                    return `<span class="mono text-[10px] bg-neutral-800 px-2 py-1 rounded border border-neutral-700 cursor-pointer hover:border-neutral-500 transition-colors" onclick="event.stopPropagation(); closeModal(); setTimeout(() => openInvModal('${d}'), 50)">${dep ? dep.name + '@' + dep.version : d}</span>`;
+                    return invChip(d, dep ? dep.name + '@' + dep.version : d);
                   }).join('')
                 : '<span class="text-neutral-500 text-xs italic">No dependencies</span>';
 
@@ -603,7 +655,7 @@ function openInvModal(id) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Dependencies (${(item.dependencies || []).length})</h4><div class="flex flex-wrap gap-2">${depsRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
-                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes)}</div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes, item.id)}</div>
                     ${renderComponentPolicyViolations(item)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (${itemVulns.length})</h4><div class="space-y-0">${vulnRows}</div></div>
                 </div>
@@ -632,19 +684,42 @@ function extraBlocks(v) {
       + seqs.map(function (sq, n) {
         const nodes = Array.isArray(sq) ? sq : [sq];
         return '<div class="border border-neutral-700 rounded-lg p-3 bg-neutral-900/40"><div class="text-[11px] text-neutral-500 mono mb-2">Sequence #' + (n + 1) + ' · ' + nodes.length + ' package' + (nodes.length === 1 ? '' : 's') + '</div><div class="flex flex-wrap items-center gap-1.5">'
-          + nodes.map(function (id, k) { const last = k === nodes.length - 1; return '<span title="' + escapeHtmlClient(id) + '" class="px-2 py-1 rounded border text-xs mono ' + (last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300') + '">' + escapeHtmlClient(nodeLabel(id)) + '</span>' + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('')
+          + nodes.map(function (id, k) { const last = k === nodes.length - 1; const ok = hasInvTarget(id); return '<span title="' + escapeHtmlClient(id) + (ok ? '' : ' (not in this report&#39;s inventory)') + '" class="px-2 py-1 rounded border text-xs mono ' + (last ? 'border-red-500/60 text-red-300' : 'border-neutral-700 text-neutral-300') + (ok ? ' cursor-pointer hover:bg-neutral-800' : '') + '"' + (ok ? refAttr('inv', id) : '') + '>' + escapeHtmlClient(nodeLabel(id)) + '</span>' + (last ? '' : '<span class="text-neutral-600">→</span>'); }).join('')
           + '</div></div>';
       }).join('') + '</div></div>';
   }
   return html;
 }
 
-/* RD from this report: the SCA records of the sc_vuln / sc_infection findings and the SCA items of the package inventory */
+/* RD from this report: the SCA records of the sc_vuln / sc_infection findings and the SCA items of the package inventory.
+ * The vulnerability records are copies with a unique finding_key each (assignFindingKeys, as sca/engine.js does before rendering): a record of a
+ * report written before finding_key existed has none, and without it a reference to the record found nothing and silently opened nothing. */
+const COPY = new Map();   // the finding's `details` -> its copy in RD.vulnerabilities
+function assignFindingKeys(vulns) {
+  const seen = new Set();
+  for (const v of vulns || []) {
+    if (!v) continue;
+    const component = v.affected_package_id || `${v.affected_dependency || 'unknown'}@${v.affected_dependency_version || ''}`;
+    const base = (typeof v.finding_key === 'string' && v.finding_key) ? v.finding_key : `${v.id}::${component}`;
+    let key = base;
+    for (let n = 2; seen.has(key); n++) key = `${base}#${n}`;
+    seen.add(key);
+    v.finding_key = key;
+  }
+  return vulns;
+}
 function build() {
   if (BUILT) return;
   BUILT = true;
   const C = (typeof CANON !== 'undefined' && CANON) || {};
-  (C.findings || []).forEach(function (f) { if ((f.type === 'sc_vuln' || f.type === 'sc_infection') && f.details) RD.vulnerabilities.push(f.details); });
+  (C.findings || []).forEach(function (f) {
+    if ((f.type === 'sc_vuln' || f.type === 'sc_infection') && f.details) {
+      const copy = JSON.parse(JSON.stringify(f.details));
+      COPY.set(f.details, copy);
+      RD.vulnerabilities.push(copy);
+    }
+  });
+  assignFindingKeys(RD.vulnerabilities);
   (C.inventory || []).forEach(function (c) { if (c.type === 'dependency' && c.details && String(c.details.id || '').indexOf('pkg:') === 0 && c.details.state) RD.inventory.push(c.details); });
 }
 
@@ -663,14 +738,22 @@ function openInvWithData(id) { build(); openInvModalSca(id); }
 if (typeof window.openVulnModal !== 'function') window.openVulnModal = openVulnWithExtras;
 if (typeof window.openInvModal !== 'function') window.openInvModal = openInvWithData;
 
+bindModalRefs();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindModalRefs);
+
 window.UBEL_SC_VULN = {
   /** The SCA vulnerability modal for a record (the `details` of an sc_vuln / sc_infection finding). */
   open: function (record) {
     if (!record || typeof record !== 'object') return false;
     build();
-    const key = findingKeyOf(record);
-    if (!findVuln(key)) RD.vulnerabilities.push(JSON.parse(JSON.stringify(record)));
-    openVulnWithExtras(key);
+    let rec = COPY.get(record);
+    if (!rec) {                                   // a record that is not one of this report's findings
+      rec = JSON.parse(JSON.stringify(record));
+      COPY.set(record, rec);
+      RD.vulnerabilities.push(rec);
+      assignFindingKeys(RD.vulnerabilities);
+    }
+    openVulnWithExtras(rec.finding_key);
     return true;
   },
   /** The SCA package modal for an inventory item (the `details` of a dependency inventory entry); false when it is not an SCA package item. */

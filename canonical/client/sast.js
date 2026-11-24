@@ -856,6 +856,34 @@ function openComplianceDiffModal(fi, gi) {
     '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
 }
 
+// Clicks on the references inside the modals (the report was ported to the canonical bundle without the module's listener):
+//  - a finding row of the chunk modal    -> that finding's modal (the finding at that position among the chunk's findings)
+//  - a finding row of a compliance modal -> that finding's modal (_currentComplianceMatches)
+// One delegated listener on the stable #modal-body, which only ever has its innerHTML replaced. The target is resolved first, so a
+// reference that cannot be resolved leaves the current modal open; a resolved one replaces its content directly (no close / reopen).
+function bindModalRefs() {
+  const modalBody = document.getElementById('modal-body');
+  if (!modalBody || modalBody.dataset.refsBound) return;
+  modalBody.dataset.refsBound = '1';
+  modalBody.addEventListener('click', function (event) {
+    const row = event.target.closest && event.target.closest('[data-finding-index]');
+    if (!row || !modalBody.contains(row)) return;
+    event.stopPropagation();
+    const fi = parseInt(row.dataset.findingIndex, 10);
+    let item = null;
+    if (_currentComplianceMatches) {
+      item = _currentComplianceMatches[fi];
+    } else {
+      const chunk = reportData.chunks.find(function (c) { return c.id === _currentModalChunkId; });
+      const finding = chunk && (chunk.findings || []).filter(function (f) { return !f._parse_error; })[fi];
+      if (chunk && finding) item = { chunk: chunk, finding: finding };
+    }
+    if (!item || !item.finding) return;
+    _renderFindingModal(item);
+    if (typeof cnModalScrollTop === 'function') cnModalScrollTop();
+  });
+}
+
 // ── glue: canonical entry → module modal ──
 const FAMILY = {
   openFinding: function (i) { const it = getAllFindings()[i]; if (!it) return false; _renderFindingModal(it); return true; },
@@ -863,4 +891,5 @@ const FAMILY = {
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); },
   diffs: function () { renderDiffs(); },
+  bind: bindModalRefs,
 };

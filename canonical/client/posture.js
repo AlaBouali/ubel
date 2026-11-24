@@ -672,6 +672,36 @@ function bindDiffs() {
   });
 }
 
+// Clicks the report was ported without (the module's listeners on #modal-body and on the compliance grid):
+//  - a finding row inside a compliance modal / compliance-diff modal -> that finding's modal (_currentComplianceMatches)
+//  - a control of the Compliance tab                                  -> its compliance modal
+// The target is resolved first, so a reference that cannot be resolved leaves the current modal open; a resolved one replaces the
+// modal's content directly (no close / reopen).
+function bindModalRefs() {
+  const modalBody = document.getElementById('modal-body');
+  if (modalBody && !modalBody.dataset.refsBound) {
+    modalBody.dataset.refsBound = '1';
+    modalBody.addEventListener('click', e => {
+      const row = e.target.closest && e.target.closest('[data-finding-index]');
+      if (!row || !modalBody.contains(row)) return;
+      e.stopPropagation();
+      const f = _currentComplianceMatches && _currentComplianceMatches[parseInt(row.dataset.findingIndex, 10)];
+      if (!f) return;
+      renderFindingDetail(f);
+      if (typeof cnModalScrollTop === 'function') cnModalScrollTop();
+    });
+  }
+  const grid = document.getElementById('compliance-frameworks-grid');
+  if (grid && !grid.dataset.refsBound) {
+    grid.dataset.refsBound = '1';
+    grid.addEventListener('click', e => {
+      const row = e.target.closest && e.target.closest('[data-fw-idx]');
+      if (!row) return;
+      openComplianceModal(parseInt(row.dataset.fwIdx, 10), parseInt(row.dataset.controlIdx, 10));
+    });
+  }
+}
+
 // ── glue: canonical entry → module modal ──
 const FAMILY = {
   openFinding: function (i) {
@@ -685,4 +715,5 @@ const FAMILY = {
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); renderCompliancePosture(); },
   diffs: function () { renderDiffs(); bindDiffs(); },
+  bind: bindModalRefs,
 };

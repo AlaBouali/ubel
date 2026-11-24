@@ -1255,6 +1255,45 @@ function openModal(html) {
   document.body.style.overflow = 'hidden';
 }
 
+// Clicks the report was ported without (the module's listeners on #modal-body and on the compliance grid). Inside a modal, a row that
+// carries one of these keys opens the modal of its target: a scope (ip / subdomain), a component, a vulnerability, a misconfiguration,
+// a secret, or (compliance modal) the vulnerability at that position of _currentComplianceMatches. The Compliance tab's controls open
+// their compliance modal. The modal functions look the target up before they touch the modal, so a reference that cannot be resolved
+// leaves the current modal open; a resolved one replaces the modal's content directly (no close / reopen).
+function bindModalRefs() {
+  var modalBody = document.getElementById('modal-body');
+  if (modalBody && !modalBody.dataset.refsBound) {
+    modalBody.dataset.refsBound = '1';
+    modalBody.addEventListener('click', function (e) {
+      var t = e.target && e.target.closest ? e.target : null;
+      if (!t) return;
+      var hit = function (sel) { var el = t.closest(sel); return el && modalBody.contains(el) ? el : null; };
+      var el;
+      if ((el = hit('[data-scope-key]'))) openScopeModal(el.dataset.scopeKey);
+      else if ((el = hit('[data-component-id]'))) openComponentModal(el.dataset.componentId);
+      else if ((el = hit('[data-vuln-key]'))) openVulnModal(el.dataset.vulnKey);
+      else if ((el = hit('[data-misconfig-key]'))) openMisconfigModal(el.dataset.misconfigKey);
+      else if ((el = hit('[data-secret-key]'))) openSecretModal(el.dataset.secretKey);
+      else if ((el = hit('[data-match-index]'))) {
+        var v = _currentComplianceMatches && _currentComplianceMatches[parseInt(el.dataset.matchIndex, 10)];
+        if (!v) return;
+        openVulnModal(vulnKey(v));
+      } else return;
+      e.stopPropagation();
+      if (typeof cnModalScrollTop === 'function') cnModalScrollTop();
+    });
+  }
+  var grid = document.getElementById('compliance-frameworks-grid');
+  if (grid && !grid.dataset.refsBound) {
+    grid.dataset.refsBound = '1';
+    grid.addEventListener('click', function (e) {
+      var row = e.target.closest && e.target.closest('[data-fw-idx]');
+      if (!row) return;
+      openComplianceModal(parseInt(row.dataset.fwIdx, 10), parseInt(row.dataset.controlIdx, 10));
+    });
+  }
+}
+
 // ── glue: canonical entry → module modal ──
 const FAMILY = {
   openFinding: function (i) {
@@ -1273,4 +1312,5 @@ const FAMILY = {
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); },
   diffs: function () { renderDiffs(); bindDiffs(); },
+  bind: bindModalRefs,
 };
