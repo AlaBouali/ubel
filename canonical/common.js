@@ -149,6 +149,11 @@ export function observe(o) {
   });
 }
 
+function getAssetName(git_url, cwd){
+  if(git_url) return git_url.split('/').filter(Boolean).slice(-2).join('/').replace(/\.git$/, '');
+  if(cwd) return path.basename(cwd);
+}
+
 export const isObservation = (f) => !!(f && f.details && f.details.observation === true);
 
 /**
@@ -232,7 +237,7 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
       vulnerability_scan: scan.vulnerability_scan ?? null,
       report_id: scan.report_id ?? null,
       asset_id: scan.asset_id ?? null,
-      asset_name: scan.asset_name ?? null,
+      asset_name: getAssetName(first(g.url, g.remote_url, g.remote, g.origin), cwd) ?? scan.asset_name ?? null,
       asset_type: scan.asset_type ?? null,
       machine_id: scan.machine_id ?? null,
       machine_name: machine_name ?? null,
