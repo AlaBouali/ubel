@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getLinux } from '../sca/os_metadata.js';
 
 export const SCHEMA_VERSION = '0.1.0';
 
@@ -207,6 +208,14 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
   const live = !!opts.live;
   const osm = os_meta || {};
   const g = git || {};
+  const getLinuxMeta = getLinux();
+  if (live && !osm.os_id && os.platform() === 'linux') {
+    const lm = getLinuxMeta();
+    osm.os_id = lm.id ?? null;
+    osm.os_name = lm.name ?? null;
+    osm.os_version = lm.version ?? null;
+    osm.os_release = lm.release ?? null;
+  }
   const cwd = opts.cwd ? path.resolve(opts.cwd) : (live ? process.cwd() : null);
   return {
     scan_info: {
@@ -233,7 +242,7 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
     environment: {
       os_id: first(osm.os_id, live ? process.platform : null),
       os_name: first(osm.os_name, live ? os.type() : null),
-      os_version: first(osm.os_version, live ? os.release() : null),
+      os_version: first(osm.os_version, live ? os.version() : null),
       os_arch: first(runtime.arch, payload?.arch, live ? process.arch : null),
       os_release: first(osm.os_release, live ? os.release() : null),
       cwd,
