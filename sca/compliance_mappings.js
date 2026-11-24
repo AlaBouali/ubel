@@ -1169,8 +1169,6 @@ const RUNTIME_CHECK_CATEGORY = {
   'rt-lib-stale-mapped': ['vulnerable_components'],
   'rt-lib-from-temp': ['malicious_code_supply_chain'],
   'rt-lib-preload-hijack': ['malicious_code_supply_chain'],
-  'rt-lib-vulnerable': ['vulnerable_components'],
-  'rt-comp-node-runtime-vulnerable': ['vulnerable_components'],
   'rt-comp-node-eol': ['vulnerable_components'],
   'rt-secret-env': ['secrets_management'],
   'rt-secret-cmdline': ['secrets_management'],

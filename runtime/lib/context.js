@@ -2,7 +2,7 @@
 // context.js — the lazily evaluated view of the running machine that ubel-runtime's rules read from.
 //
 // Everything comes from /proc and, only when asked for, the local container engine socket, a loopback HTTP probe and the Node.js
-// inspector. Each accessor is memoised, so a rule that needs the listener table or the native-component lookup asks for it and
+// inspector. Each accessor is memoised, so a rule that needs the listener table or the native files asks for it and
 // every other rule shares the result. Nothing is executed or changed.
 
 import fs from 'node:fs';
@@ -23,7 +23,7 @@ export class RuntimeContext {
    * @param {string} [o.procRoot]        procfs directory (tests point it at a fixture)
    * @param {number[]} [o.pids] @param {string[]} [o.names] @param {boolean} [o.nodeOnly] @param {boolean} [o.includeSelf]
    * @param {'app'|'all'|'none'} [o.libs] @param {number} [o.maxLibs]
-   * @param {boolean} [o.inspect] @param {boolean} [o.probe] @param {boolean} [o.noLookups]
+   * @param {boolean} [o.inspect] @param {boolean} [o.probe]
    * @param {(m:string)=>void} [o.log]
    */
   constructor(o = {}) {
@@ -149,25 +149,6 @@ export class RuntimeContext {
         } catch (e) { gaps.push(`${c.path}: ${e.message}`); }
       }
       return { files: out, gaps, unreadable };
-    });
-  }
-
-  /** Looks up every component of the native files plus the runtime each inspected Node.js process reports; returns dependency records with advisories. */
-  componentAdvisories() {
-    return this.memo('comp-adv', async () => {
-      const { nodeRuntimeRecords, lookupComponents } = await import('./lookups.js');
-      const native = await this.nativeComponents();
-      const byKey = new Map();
-      const key = (r) => r.purl || r.cpe;
-      for (const f of native.files) for (const r of f.records) { if (!byKey.has(key(r))) byKey.set(key(r), { record: r, sources: [] }); byKey.get(key(r)).sources.push({ file: f.path, pids: f.procs }); }
-      for (const [pid, insp] of this.inspections) {
-        if (!insp.ok || !insp.node || !insp.node.versions) continue;
-        for (const r of nodeRuntimeRecords(insp.node.versions)) { if (!byKey.has(key(r))) byKey.set(key(r), { record: r, sources: [] }); byKey.get(key(r)).sources.push({ file: `process.versions of pid ${pid}`, pids: [pid] }); }
-      }
-      const records = [...byKey.values()].map((x) => x.record);
-      if (!records.length) return { dependencies: [], byKey, native };
-      const r = await lookupComponents(records, { log: this.log });
-      return { dependencies: r.dependencies, byKey, native, summary: r.summary };
     });
   }
 

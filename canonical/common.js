@@ -68,7 +68,7 @@ export function makeRel(root) {
 // ── finding types (short names) ─────────────────────────────────────────────
 // One vocabulary for every module. A finding's `type` says what KIND of thing it is, not which scanner produced it.
 //   vuln        known advisory on a package / product (CVE, GHSA, OSV …)          infection   package flagged as malicious / compromised
-//   sc_vuln / sc_infection   the same two kinds, as reported by the SCA module (its own modals); EASM, app-scan and runtime keep vuln / infection
+//   sc_vuln / sc_infection   the same two kinds, as reported by the SCA module (its own modals); EASM and app-scan keep vuln / infection
 //   secret      hardcoded credential                                             code        weakness in source / bytecode (SAST, malware)
 //   misconfig   insecure configuration (cloud, k8s, manifests, headers …)        hardening   missing / present host or binary protection (passed checks too)
 //   behavior    what the software does or runs (capabilities, processes, tools)  exposure    reachable network surface (open ports, listeners, remote hosts)

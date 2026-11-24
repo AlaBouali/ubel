@@ -64,6 +64,8 @@ The JSON is the exact object the HTML renders from: `findings[]`, `checks[]` (on
 
 `ubel-vm` reads configuration, `/proc` and `/sys`. It does not read the package databases to look the installed operating-system or application packages up in a vulnerability database, and it makes no network request. Which packages are installed is read only where a configuration check needs it (for example whether a legacy network-service package is present).
 
+To look the installed operating-system packages of a machine up in a vulnerability database, run `ubel-platform`: its host scan reads the dpkg, apk or rpm database and matches the packages against vulnerability data (Debian, Ubuntu, Alpine and the Red Hat family). It is a separate scan with its own report, and unlike `ubel-vm` it needs network access. `ubel-docker` does the same for a container image and `ubel-binary` for native files. None of them covers the Python, Ruby and PHP packages that `ubel-vm` used to scan on a host.
+
 The report's **Inventory** tab lists the host and the objects the findings are about.
 
 ## Auditing a Kubernetes node

@@ -1,7 +1,7 @@
 'use strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { rule, needLive, vulnSeverity, cveOf, short, vulnFacts, sortVulns } from './util.js';
+import { rule, needLive } from './util.js';
 import { na, unassessed } from '../../vm/lib/engine.js';
 import { procLabel, scopeOf, inTempDir, baseName } from '../lib/util.js';
 
@@ -87,31 +87,6 @@ export default [
       if (!readable && ctx.targets.length && !out.length) return unassessed('the environment of every process is unreadable (run as root, or as the owner of the processes)');
       if (readable < ctx.targets.length) ctx.notes.push(`${ctx.targets.length - readable} process(es) had an unreadable environment: LD_PRELOAD / LD_LIBRARY_PATH were not checked in them.`);
       return out;
-    },
-  }),
-  rule({
-    id: 'rt-lib-vulnerable', area: 'libraries', severity: 'high', title: 'Executable or library in use contains a component with a known vulnerability',
-    description: 'A native file mapped by a running process (an executable, or a library outside the distribution\'s own directories — all of them with --libs all) embeds a component whose version banner matches an NVD or OSV advisory: C/C++ libraries by version string, Go modules, Rust crates, and the npm / Python packages bundled into pkg, Node SEA, Bun and PyInstaller executables.',
-    remediation: 'Update the application or library that bundles the component, or rebuild it against a fixed version, then restart the processes that use it.',
-    cap: 250,
-    async evaluate(ctx) {
-      const n = needLive(ctx); if (n) return n;
-      if (ctx.opts.libs === 'none') return na('native files not read (--libs none)');
-      if (ctx.opts.noLookups) return na('advisory lookups disabled (--no-lookups)');
-      const r = await ctx.componentAdvisories();
-      const out = [];
-      for (const dep of r.dependencies) {
-        if (dep.ecosystem === 'Node.js runtime' || !dep.vulnerabilities || !dep.vulnerabilities.length) continue;
-        const src = (r.byKey.get(dep.purl || dep.cpe) || { sources: [] }).sources;
-        const files = [...new Set(src.map((s) => s.file))];
-        for (const v of dep.vulnerabilities) {
-          const sev = vulnSeverity(v);
-          out.push({ resource: `${dep.name} ${dep.version}: ${cveOf(v)}`, scope: 'host', severity: sev, kev: v.is_kev === true,
-            title: `${dep.name} ${dep.version}: ${cveOf(v)}${v.summary ? ' — ' + short(v.summary) : ''}`,
-            detail: `Embedded in ${files.slice(0, 3).join(', ')}${files.length > 3 ? ` and ${files.length - 3} more` : ''} (${dep.sources && dep.sources[0] ? dep.sources[0] : 'version banner'}). ${vulnFacts(v)}` });
-        }
-      }
-      return out.sort(sortVulns);
     },
   }),
 ];

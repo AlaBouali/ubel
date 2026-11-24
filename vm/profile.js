@@ -22,7 +22,7 @@ export const VM_PROFILE = {
   ],
   limitations: [
     'Only Linux machines are audited. Windows and macOS guests are not covered; a Linux image can be audited from any operating system with --root.',
-    'The tool reads configuration; it does not test whether a service is exploitable and it does not look up the installed software in any vulnerability database.',
+    'The tool reads configuration; it does not test whether a service is exploitable and it does not look up the installed software in any vulnerability database (for the installed operating-system packages run ubel-platform, a separate scan that needs network access; for container images ubel-docker).',
     'Without root privileges some files (/etc/shadow, /etc/sudoers, other users\' homes) cannot be read; the checks that need them are reported as not assessed.',
     'Listening-port findings describe the host\'s own sockets; whether a port is reachable from the internet also depends on firewalls and security groups outside the machine.',
   ],

@@ -22,14 +22,14 @@ runtime-scanner — stdlib-only security scan of the applications running on thi
 Usage:
   ubel-runtime [--pid <n,..>] [--name <text|/regex/>] [--node-only] [--include-self]
                [--libs app|all|none] [--max-libs <n>]
-               [--inspect] [--inspect-max <n>] [--probe] [--no-lookups]
+               [--inspect] [--inspect-max <n>] [--probe]
                [--working-dir <path>] [--min-severity <sev>] [--fail-on <sev|none|N:sev>]
                [--only <checks|areas>] [--skip <checks|areas>] [--allow-partial] [--verbose] [--quiet]
 
 Assesses what is running now: how each process is confined (root, capabilities, seccomp, tracing, debug interfaces, programs run from
-deleted files, memory or temporary directories), what it listens on, the native libraries it has mapped (stale, injected, vulnerable),
-the Node.js release it is made of (checked against NVD), credentials in process environments and command
-lines, and — when a Docker / Podman socket is readable — the configuration of the running containers. It reads /proc and files only; the
+deleted files, memory or temporary directories), what it listens on, the native libraries it has mapped (stale, injected),
+whether the Node.js release it runs is past its end of life, credentials in process environments and command
+lines, and — when a Docker / Podman socket is readable — the configuration of the running containers. It reads /proc and files only and makes no network request (nothing is looked up in a vulnerability database); the
 two optional active steps below are opt-in.
 
 Run it as root for a complete result: other users' environments, mapped files and sockets are unreadable otherwise, and the checks that
@@ -42,10 +42,9 @@ Scope:
   --include-self           Also assess this scanner's own process (excluded by default)
 
 Software:
-  --libs app|all|none      Which mapped native files are read for embedded component versions: "app" = everything outside the
+  --libs app|all|none      Which mapped native files are read for embedded version banners (the Node.js release string, for the end-of-life check): "app" = everything outside the
                            system library directories (default), "all" = system libraries too, "none" = skip
   --max-libs <n>           Read at most n distinct executables / libraries (default 150)
-  --no-lookups             Do not query OSV.dev / NVD (the checks that need them become not applicable)
 
 Opt-in active steps:
   --inspect                Look inside Node.js processes. For each one the scanner sends SIGUSR1 (only if the process handles it, otherwise it
@@ -74,7 +73,6 @@ const spec = {
     '--inspect': { key: 'inspect', value: false },
     '--inspect-max': { key: 'inspectMax', value: true, number: true },
     '--probe': { key: 'probe', value: false },
-    '--no-lookups': { key: 'noLookups', value: false },
   },
   async catalogue() { return { rules }; },
 
@@ -89,7 +87,7 @@ const spec = {
     const ctx = new RuntimeContext({
       pids, names: args.names, nodeOnly: !!args.nodeOnly, includeSelf: !!args.includeSelf, libs: args.libs,
       ...(args.maxLibs ? { maxLibs: args.maxLibs } : {}), inspect: !!args.inspect, ...(args.inspectMax ? { inspectMax: args.inspectMax } : {}),
-      probe: !!args.probe, noLookups: !!args.noLookups, log,
+      probe: !!args.probe, log,
     });
     if (!ctx.live) throw new UsageError('/proc is not available on this machine; ubel-runtime cannot see any process.');
     const targets = ctx.targets;
@@ -102,13 +100,12 @@ const spec = {
     const target = { subject: hostname, hostname, os: `${os.type()} ${os.release()}`, arch: os.arch(), mode: 'live', processes_assessed: targets.length };
     const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
     if (!isRoot) ctx.notes.push('ubel-runtime ran without root privileges; other users\' processes (environment, mapped files, sockets) were not readable and the checks that need them were limited to what could be read.');
-    if (args.noLookups) ctx.notes.push('--no-lookups: OSV.dev / NVD were not queried; vulnerability checks were not applied.');
 
     return {
       ctx, rules, target,
       options: {
         scope: { ...(pids ? { pids } : {}), ...(args.names ? { names: args.names } : {}), ...(args.nodeOnly ? { node_only: true } : {}) },
-        libs: args.libs, inspect: !!args.inspect, probe: !!args.probe, lookups: !args.noLookups,
+        libs: args.libs, inspect: !!args.inspect, probe: !!args.probe,
       },
       notes: () => {
         const n = [...ctx.notes];

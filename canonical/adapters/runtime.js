@@ -4,8 +4,7 @@
 // containers, inspections, summary}. The original has no scanned directory: processes, libraries and containers belong to a
 // machine, so paths are kept as they are (nothing is made relative).
 //
-// finding.type by check:  *-vulnerable*            → vuln (rule_id = the advisory id, check kept in details.check)
-//                         rt-secret-*              → secret
+// finding.type by check:  rt-secret-*              → secret
 //                         deleted exe / memfd / code or library from temp / traced / preload hijack → behavior
 //                         containers, network exposure → misconfig
 //                         everything else (root service, capabilities, sandbox, wildcard bind, EOL) → hardening
@@ -13,28 +12,18 @@
 // every running program / loaded Node.js inspection / container (behavior) and every listening socket (exposure; a non-loopback port
 // is rated by what normally listens there).
 // inventory:  processes → application, listening sockets → network_service, containers → container.
-import { arr, isObj, mkFinding, observe, mkInventory, depName, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, TYPES } from '../common.js';
+import { arr, isObj, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, TYPES } from '../common.js';
 
 export const family = 'runtime';
 
 const BEHAVIOUR = /^rt-(proc-(deleted-exe|memfd-exec|code-in-temp|traced)|lib-(from-temp|preload-hijack|stale-mapped))$/;
-// "<package|product> <version>: <advisory> (<application>)"  /  "name@version: <advisory> (<application>)"
-const VULN_RESOURCE = /^(.*?): ((?:CVE|GHSA|OSV|MAL|PYSEC|RUSTSEC|GO)-[A-Za-z0-9._-]+|[A-Z]{2,}-[\w.-]+)(?: \((.*)\))?$/;
 
 function typeOf(f) {
   const c = String(f.check || '');
-  if (/vulnerable/.test(c)) return TYPES.VULN;
   if (/^rt-secret|secret/.test(c) || f.area === 'secrets') return TYPES.SECRET;
   if (BEHAVIOUR.test(c)) return TYPES.BEHAVIOR;
   if (f.area === 'containers' || f.area === 'exposure' || /^rt-net-/.test(c)) return TYPES.MISCONFIG;
   return TYPES.HARDENING;
-}
-
-function splitPkg(s) {            // "lodash@4.17.0" | "Node.js 20.1.0" | "libssl 1.1.1"  →  {name, version}
-  const at = String(s).match(/^(.+)@([^@\s]+)$/);
-  if (at) return { name: at[1], version: at[2] };
-  const sp = String(s).match(/^(.+?)\s+v?(\d[\w.+-]*)$/);
-  return sp ? { name: sp[1], version: sp[2] } : { name: String(s), version: null };
 }
 
 export function translate(p, opts, H) {
@@ -45,22 +34,12 @@ export function translate(p, opts, H) {
 
   for (const f of arr(p.findings)) {
     const type = typeOf(f);
-    let cid = f.resource ?? null, cname = f.resource ?? null, ctype = 'application', rule = f.check, details = { ...f };
-    if (type === TYPES.VULN) {
-      const m = VULN_RESOURCE.exec(String(f.resource ?? ''));
-      if (m) {
-        const pk = splitPkg(m[1]);
-        const eco = /^Node\.js/i.test(pk.name) ? 'Node.js runtime' : (/@/.test(m[1]) ? 'npm' : null);
-        cid = m[1]; cname = depName(pk.name, eco, pk.version); ctype = 'dependency'; rule = m[2];
-      }
-    } else if (type === TYPES.SECRET) {
-      ctype = 'application';
-    }
+    const cid = f.resource ?? null, cname = f.resource ?? null;
     out.findings.push(mkFinding({
-      rule_id: rule, title: f.title, component_id: cid, component_name: cname, component_type: ctype,
-      severity: f.severity, confidence: "high", violate_policy: violates(f.severity), type, details,
+      rule_id: f.check, title: f.title, component_id: cid, component_name: cname, component_type: 'application',
+      severity: f.severity, confidence: "high", violate_policy: violates(f.severity), type, details: { ...f },
     }));
-    if (cid && type !== TYPES.VULN) derived.push(mkInventory({ component_id: cid, component_name: cname, status: 'running', type: 'application', details: { resource: f.resource, scope: f.scope ?? null, area: f.area ?? null } }));
+    if (cid) derived.push(mkInventory({ component_id: cid, component_name: cname, status: 'running', type: 'application', details: { resource: f.resource, scope: f.scope ?? null, area: f.area ?? null } }));
   }
 
   for (const pr of arr(rt.processes)) {
@@ -131,7 +110,7 @@ export function translate(p, opts, H) {
     payload: p, opts, os_meta: { os_name: t.os ?? null }, git: p.git_metadata, runtime: { arch: t.arch ?? p.arch, node_version: p.runtime_version },
     scan: {
       generated_at: p.generated_at, status: p.coverage?.status === 'partial' ? 'partial' : 'completed', scan_type: 'runtime', scan_scope: t.mode ?? 'live',
-      ecosystems: uniq(out.inventory.filter((i) => i.type === 'dependency').map((i) => i.details?.ecosystem)), vulnerability_scan: p.scan_options?.lookups !== false,
+      ecosystems: [], vulnerability_scan: false,
       report_id: p.report_id, asset_id: p.asset_id, asset_name: p.asset_name, asset_type: p.asset_type, machine_id: p.machine_id, tool_version: p.tool_version,
     },
   });

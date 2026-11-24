@@ -8,7 +8,7 @@
   and the V8 inspector of Node.js processes. It never runs `ps`, `ss`, `lsof`, `docker` or any other program.
 - **Linux only** (`/proc`). On another platform it exits with a usage error.
 - **Honest coverage.** Every check ends as **passed**, **failed**, **not applicable** or **not assessed**. Anything the scanner could not
-  read (other users' environments, mapped files and sockets without root) or look up (OSV.dev / NVD unreachable) is *not assessed* and the
+  read (other users' environments, mapped files and sockets without root) is *not assessed* and the
   run exits `3` unless you pass `--allow-partial`. Run it as **root** for a complete result.
 
 ```bash
@@ -25,10 +25,10 @@ ubel-runtime --list-checks
 |---|---|
 | `processes` | program file deleted or replaced; running from an anonymous memory file (fileless); program or script in `/tmp`, `/var/tmp`, `/dev/shm`; network service as root; dangerous capabilities; being traced; debug interface enabled (`--inspect`, JDWP, …); network-facing without seccomp / `no_new_privs` |
 | `exposure` | sensitive or clear-text service on a non-loopback address; services bound to all interfaces; with `--probe`: sensitive endpoints that answer on loopback (`/.env`, `/.git/HEAD`, actuator, pprof, metrics, inspector, …) |
-| `libraries` | mapped library replaced or deleted on disk (stale after an upgrade); native code from a world-writable directory; `LD_PRELOAD` / `LD_LIBRARY_PATH` / `/etc/ld.so.preload` injection; executables and libraries with embedded vulnerable components (version banners → NVD, Go modules / Rust crates / bundled npm and Python packages → OSV.dev) |
-| `components` | the Node.js release and the libraries it bundles (NVD); Node.js end of life |
+| `libraries` | mapped library replaced or deleted on disk (stale after an upgrade); native code from a world-writable directory; `LD_PRELOAD` / `LD_LIBRARY_PATH` / `/etc/ld.so.preload` injection |
+| `components` | Node.js end of life (the release a process runs, against the end-of-life dates embedded in the tool) |
 | `secrets` | credentials in process environments (UBEL's secret rules) and on command lines — values are always redacted |
-| `containers` | privileged; host namespaces; sensitive host mounts; dangerous capabilities; confinement disabled; credentials in the configuration; sensitive ports published on all interfaces; root user; no limits; mutable image tag; with `--container-packages`: vulnerable packages inside the container (`sc_vuln`) |
+| `containers` | privileged; host namespaces; sensitive host mounts; dangerous capabilities; confinement disabled; credentials in the configuration; sensitive ports published on all interfaces; root user; no limits; mutable image tag |
 | `inspection` | with `--inspect`: Node.js processes that could not be inspected; inspector left open; code loaded from a world-writable directory; files changed on disk after the process started |
 
 `ubel-runtime --list-checks` prints the catalogue with severities.
@@ -41,19 +41,17 @@ ubel-runtime --list-checks
 | `--name <text\|/regex/>` | Only processes whose name, executable or command line matches (repeatable) |
 | `--node-only` | Only Node.js processes |
 | `--include-self` | Also assess the scanner's own process |
-| `--libs app\|all\|none` | Which mapped native files are read for embedded component versions: outside the system library directories (default), all, or none |
+| `--libs app\|all\|none` | Which mapped native files are read for the Node.js release string (end-of-life check): outside the system library directories (default), all, or none |
 | `--max-libs <n>` | Read at most `n` distinct executables / libraries (default 150) |
 | `--inspect` | Look inside Node.js processes — see below |
 | `--inspect-max <n>` | Inspect at most `n` Node.js processes (default 25) |
 | `--probe` | Loopback HTTP probe of the listening ports — see below |
-| `--no-lookups` | Do not query OSV.dev / NVD (the advisory checks become *not applicable*) |
 | `--only` / `--skip` / `--min-severity` / `--fail-on` / `--allow-partial` / `--working-dir` / `--verbose` / `--quiet` | As in `ubel-vm` |
 
-Set `UBEL_OSV_ENDPOINT` / `UBEL_NVD_ENDPOINT` for an internal mirror.
 
-## Packages are not scanned
+## Offline, and no vulnerability lookups
 
-`ubel-runtime` does not read the package databases of the machine or of a container, the application directories (`node_modules`, virtualenvs, `vendor/`, lockfiles) or any other list of installed packages, and it does not look packages up in a vulnerability database. What it does look up are the native components embedded in the executables and libraries the processes have mapped (`libraries`) and the Node.js release itself (`components`). `--no-lookups` makes those checks *not applicable*; a lookup that cannot be completed is *not assessed*.
+`ubel-runtime` makes no network request. It does not read the package databases of the machine or of a container, the application directories (`node_modules`, virtualenvs, `vendor/`, lockfiles) or any other list of installed packages, and it does not look packages, native libraries or the Node.js release up in a vulnerability database. The one version check it makes is Node.js end of life, against a date table embedded in the tool. For known vulnerabilities in the files themselves use `ubel-binary`, `ubel-docker` or the SCA CLIs.
 
 ## `--inspect` — what a Node.js process has really loaded
 
@@ -71,7 +69,7 @@ Effects the operator should know about: the target prints `Debugger listening on
 error, and the scanner needs the same user as the target (or root). An inspector the process already had open (`--inspect`) is used as it is
 and left open. Nothing is evaluated that changes state.
 
-With the result, `rt-insp-code-from-temp` and `rt-insp-stale-code` can see which script files the process has loaded, and `rt-comp-node-runtime-vulnerable` / `rt-comp-node-eol` use the Node.js release the process reports about itself.
+With the result, `rt-insp-code-from-temp` and `rt-insp-stale-code` can see which script files the process has loaded, and `rt-comp-node-eol` uses the Node.js release the process reports about itself.
 
 ## `--probe` — loopback only
 

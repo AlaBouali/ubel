@@ -1,5 +1,5 @@
 'use strict';
-import { rule, needLive, vulnSeverity, cveOf, short, vulnFacts, sortVulns } from './util.js';
+import { rule, needLive } from './util.js';
 import { na, unassessed } from '../../vm/lib/engine.js';
 import { procLabel, scopeOf, nodeEol } from '../lib/util.js';
 
@@ -15,31 +15,6 @@ async function nodeVersion(ctx, proc) {
 }
 
 export default [
-  rule({
-    id: 'rt-comp-node-runtime-vulnerable', area: 'components', severity: 'high', title: 'Node.js runtime (or a library it bundles) has a known vulnerability',
-    description: 'NVD lists a CVE whose CPE range covers the Node.js release a running process uses, or a library bundled in it (OpenSSL, zlib, nghttp2, c-ares). The release is read from the executable and, with --inspect, from process.versions of the live process.',
-    remediation: 'Upgrade Node.js to the latest patch release of a supported line and restart the process. If Node.js comes from a distribution package, install the distribution\'s update.',
-    cap: 200,
-    async evaluate(ctx) {
-      const n = needLive(ctx); if (n) return n;
-      if (!ctx.nodeTargets.length) return na('no Node.js process in scope');
-      if (ctx.opts.noLookups) return na('advisory lookups disabled (--no-lookups)');
-      if (ctx.opts.libs === 'none' && !ctx.opts.inspect) return na('needs executables to be read (--libs app) or --inspect');
-      const r = await ctx.componentAdvisories();
-      const out = [];
-      for (const dep of r.dependencies) {
-        if (dep.ecosystem !== 'Node.js runtime' || !dep.vulnerabilities || !dep.vulnerabilities.length) continue;
-        const src = (r.byKey.get(dep.cpe) || { sources: [] }).sources;
-        const pids = [...new Set(src.flatMap((s) => s.pids))];
-        for (const v of dep.vulnerabilities) {
-          out.push({ resource: `${dep.name} ${dep.version}: ${cveOf(v)}`, scope: 'host', severity: vulnSeverity(v), kev: v.is_kev === true,
-            title: `${dep.name} ${dep.version}: ${cveOf(v)}${v.summary ? ' — ' + short(v.summary) : ''}`,
-            detail: `Used by pid ${pids.slice(0, 6).join(', ')}${pids.length > 6 ? ', …' : ''}. ${vulnFacts(v)}` });
-        }
-      }
-      return out.sort(sortVulns);
-    },
-  }),
   rule({
     id: 'rt-comp-node-eol', area: 'components', severity: 'high', title: 'Node.js release line is past its end of life',
     description: 'The process runs a Node.js release line that no longer receives security fixes, so every newly found vulnerability in Node.js or its bundled libraries stays open. The end-of-life dates are embedded in the tool (from the Node.js release schedule), so they age; a release line that is not in the table is not judged.',
