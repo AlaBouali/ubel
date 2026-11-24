@@ -6,6 +6,9 @@
  * level with New / Existing / Fixed counts. A count opens a modal holding a small table (Title, Type) with a search box and
  * pagination. The per-framework compliance diffs are NOT handled here: they stay in each family's own code, unchanged.
  *
+ * The helper also reconciles the comparison with the report itself: for every level it shows how many valid findings the report holds
+ * (CANON.findings without observations and false positives), so New + Existing (+ Not compared) always adds up to the report's own count.
+ *
  * Self-contained on purpose (own escaping, own click handling, no dependency on a family's helpers), loaded before the family bundle. */
 (function () {
   'use strict';
@@ -53,18 +56,66 @@
     return out;
   }
 
+  // The findings the report itself holds, by level, as the comparison counts them: an observation (passed check, coverage gap, licence,
+  // exposure, behaviour …) is not a finding the modules compare, and a finding dismissed as a false positive is not a finding at all.
+  // null when the canonical report is not available (the helper then draws the plain severity view).
+  function reportCounts() {
+    if (typeof CANON === 'undefined' || !CANON || !Array.isArray(CANON.findings)) return null;
+    var c = { by: {}, total: 0, observations: 0, falsePositives: 0 };
+    CANON.findings.forEach(function (f) {
+      if (!f) return;
+      if (f.details && f.details.observation === true) { c.observations++; return; }
+      if (f.status === 'false positive') { c.falsePositives++; return; }
+      var k = (f.type === 'infection' || f.type === 'sc_infection') ? 'infection' : sevKey(f.severity);
+      c.by[k] = (c.by[k] || 0) + 1;
+      c.total++;
+    });
+    return c;
+  }
+
+  function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+
+  // One line above the cards: report total = new + existing (+ not compared), then the fixed ones and what is deliberately left out.
+  function summaryHtml(rep, buckets) {
+    if (!rep) return '';
+    var nNew = 0, nEx = 0, nFix = 0;
+    Object.keys(buckets).forEach(function (k) { nNew += buckets[k]['new'].length; nEx += buckets[k].existing.length; nFix += buckets[k].fixed.length; });
+    var gap = rep.total - nNew - nEx;
+    var b = function (n, cls) { return '<span class="mono font-bold ' + (cls || 'text-neutral-200') + '">' + n + '</span>'; };
+    var html = '<p class="text-xs text-neutral-400">This report holds ' + b(rep.total) + ' ' + (rep.total === 1 ? 'finding' : 'findings') + ' = ' + b(nNew, 'text-red-400') + ' new + ' + b(nEx, 'text-yellow-400') + ' existing';
+    if (gap > 0) html += ' + ' + b(gap, 'text-yellow-500') + ' not compared';
+    html += '; ' + b(nFix, 'text-green-400') + ' fixed ' + (nFix === 1 ? 'was' : 'were') + ' in the previous report only.</p>';
+    if (gap > 0) html += '<p class="text-[11px] text-neutral-500">Not compared: findings the comparison could not match with the previous report, typically because the two scans did not cover the same ground (scope, region or minimum severity) or only one of them ran that scan (secrets, for instance). They are not counted as new, existing or fixed.</p>';
+    if (gap < 0) html += '<p class="text-[11px] text-red-400">The comparison lists ' + plural(-gap, 'finding') + ' more than this report holds (entries that no longer exist in this report).</p>';
+    if (rep.observations) html += '<p class="text-[11px] text-neutral-500">The Findings tab also lists ' + plural(rep.observations, 'observation') + ' (passed checks, coverage, licences, exposure, behaviour): they are not findings and are not compared.</p>';
+    if (rep.falsePositives) html += '<p class="text-[11px] text-neutral-500">' + plural(rep.falsePositives, 'false positive') + ' dismissed by verification ' + (rep.falsePositives === 1 ? 'is' : 'are') + ' not counted.</p>';
+    return html;
+  }
+
+  // Under a level's three counts: what the report holds at that level, and the gap to New + Existing when there is one.
+  function footHtml(r, cmp) {
+    if (r == null) return '';
+    var d = r - cmp;
+    var html = '<p class="text-[11px] text-neutral-500">In this report <span class="mono text-neutral-300">' + r + '</span>';
+    if (d > 0) html += ' · <span class="text-yellow-500">' + d + ' not compared</span>';
+    else if (d < 0) html += ' · <span class="text-red-400">comparison lists ' + (-d) + ' more</span>';
+    return html + '</p>';
+  }
+
   // The "By severity" block: one card per level, each with three count buttons.
   function sectionHtml(lists, opts) {
     opts = opts || {};
     var buckets = bucketize(lists);
     state.lists = buckets;
+    var rep = reportCounts();
     var levels = LEVELS.slice();
     EXTRA_LEVELS.forEach(function (x) {
       var b = buckets[x[0]];
-      if (b['new'].length || b.existing.length || b.fixed.length) levels.push(x);
+      if (b['new'].length || b.existing.length || b.fixed.length || (rep && rep.by[x[0]])) levels.push(x);
     });
     var html = '<div class="space-y-3"><div><h3 class="text-lg font-bold">By severity</h3>' +
       '<p class="text-xs text-neutral-500">' + esc(opts.hint || 'Findings compared with the previous report, split by severity level. Select a count to list them.') + '</p></div>' +
+      summaryHtml(rep, buckets) +
       '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
     levels.forEach(function (lv) {
       html += '<div class="glass rounded-xl p-5 space-y-3"><div>' + badge(lv[0]) + '</div><div class="grid grid-cols-3 gap-2">';
@@ -75,7 +126,7 @@
           '<span class="block text-[9px] uppercase tracking-widest text-neutral-500 font-bold">' + l[1] + '</span>' +
           '<span class="block text-2xl font-bold mono ' + l[2] + '">' + n + '</span></button>';
       });
-      html += '</div></div>';
+      html += '</div>' + footHtml(rep ? (rep.by[lv[0]] || 0) : null, buckets[lv[0]]['new'].length + buckets[lv[0]].existing.length) + '</div>';
     });
     return html + '</div></div>';
   }

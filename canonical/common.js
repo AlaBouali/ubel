@@ -209,7 +209,7 @@ export function failOnPredicate(failOn) {
 
 // ── metadata ────────────────────────────────────────────────────────────────
 export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = null, runtime = {} }) {
-  const osm = getOSMetadata("/");   // returns the metadata object itself (it is not a factory)
+  const osm = getOSMetadata();   // returns the metadata object itself (it is not a factory)
   const machine_name = `${osm.os_name ?? 'unknown'}: ${osm.os_version ?? 'unknown'}`
   if (scan.scan_type === 'runtime' || scan.scan_scope === 'developer_platform') {
     scan.asset_id=scan.machine_id;
