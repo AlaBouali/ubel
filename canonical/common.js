@@ -208,9 +208,8 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
   const live = !!opts.live;
   const osm = os_meta || {};
   const g = git || {};
-  const getLinuxMeta = getLinux();
   if (live && !osm.os_id && os.platform() === 'linux') {
-    const lm = getLinuxMeta();
+    const lm = getLinux();   // returns the metadata object itself (it is not a factory)
     osm.os_id = lm.id ?? null;
     osm.os_name = lm.name ?? null;
     osm.os_version = lm.version ?? null;

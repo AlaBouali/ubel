@@ -3,11 +3,21 @@
 // Original keys used: profile, target, scan_options, coverage, stats, compliance_summary, compliance_posture,
 // checks[], findings[] {scope, area, check, severity, title, resource, description, remediation, compliance}, diffs, executive_summary.
 // `checks` (every evaluated baseline check, pass/fail/n-a/not-assessed) goes under policy.checks; `coverage` under stats.coverage.
+import { getLinux } from '../../sca/os_metadata.js';
 import { arr, first, mkFinding, mkInventory, makeRel, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, TYPES } from '../common.js';
 
 export const family = 'posture';
 
 const K8S_KIND = /^([A-Za-z]+)\//;
+
+// OS of the audited machine. A mounted disk image (--root) is NOT the machine ubel-vm runs on, so its os-release is read from that root
+// (like the SCA container-image scan does); for the live host buildMetadata falls back to this process's own OS.
+function vmOsMeta(t, opts) {
+  const base = { os_name: t.os ?? null };
+  if (!opts.live || t.mode !== 'offline-root' || !t.root) return base;
+  const m = getLinux(t.root);
+  return { os_id: m.os_id, os_name: m.os_name ?? base.os_name, os_version: m.os_version, os_release: m.os_release };
+}
 
 export function translate(p, opts, H) {
   const isK8s = (p.profile?.key || p.tool || '').toString().includes('k8s');
@@ -56,7 +66,7 @@ export function translate(p, opts, H) {
   }
 
   const meta = H.buildMetadata({
-    payload: p, opts, os_meta: isK8s ? null : { os_name: t.os ?? null }, git: p.git_metadata,
+    payload: p, opts, os_meta: isK8s ? null : vmOsMeta(t, opts), git: p.git_metadata,
     runtime: { arch: p.arch, node_version: p.runtime_version },
     scan: {
       generated_at: p.generated_at, status: p.coverage?.status === 'partial' ? 'partial' : 'completed',
