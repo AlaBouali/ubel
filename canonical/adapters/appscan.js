@@ -42,7 +42,7 @@ export function translate(p, opts, H) {
       rule_id: f.rule,
       title: f.title,
       component_id: cid == null ? null : R.rel(String(cid)),
-      component_name: name == null ? null : R.text(String(name)),
+      component_name: name == null ? null : R.text(String(cid)),
       component_type: 'application',
       severity: f.severity,
       confidence: f.confidence,
@@ -56,7 +56,7 @@ export function translate(p, opts, H) {
   for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
 
   for (const a of apps) {
-    out.inventory.push(mkInventory({ component_id: R.rel(String(appId(a))), component_name: R.text(String(first(a.name, a.id))), status: 'unknown', type: 'application', details: R.deep(a) }));
+    out.inventory.push(mkInventory({ component_id: R.rel(String(appId(a))), component_name: R.text(String(first(a.name, a.id) || appId(a))), status: 'unknown', type: 'application', details: R.deep(a) }));
     const hosts = first(a.remote_hosts?.hosts, a.remote_hosts?.items, a.remote_hosts?.list, a.native_hardening?.remote_hosts?.hosts, null);
     for (const h of arr(hosts)) {
       const v = typeof h === 'string' ? h : first(h.host, h.domain, h.ip, h.value);

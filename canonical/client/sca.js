@@ -232,8 +232,8 @@ function getPackageDisplay(purl) {
             return parts || purl;
         }
 
-function renderSequences(pkg) {
-            const container = document.getElementById('sequences-container');
+function renderSequences(pkg, containerEl) {
+            const container = containerEl || document.getElementById('sequences-container');
             if (!container) return;
 
             if (!pkg || !pkg.sequences || pkg.sequences.length === 0) {
@@ -874,6 +874,20 @@ function openInvModal(id) {
                 </div>
             `).join('') : '<p class="text-sm text-neutral-500 italic py-2">No vulnerabilities found.</p>';
 
+            // dependency sequences of this component: the ones carried by its vulnerabilities (deduplicated), else its own
+            const invSeqs = (function () {
+                const seen = new Set(), out = [];
+                const add = function (seq) {
+                    if (!Array.isArray(seq) || !seq.length) return;
+                    const k = seq.join('\u0001');
+                    if (seen.has(k)) return;
+                    seen.add(k); out.push(seq);
+                };
+                itemVulns.forEach(function (v) { (Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : []).forEach(add); });
+                if (!out.length && Array.isArray(item.sequences)) item.sequences.forEach(add);
+                return out;
+            })();
+
             const introRows = (item.introduced_by || []).length
                 ? (item.introduced_by).map(ib => invChip(ib, ib)).join('')
                 : '<span class="text-neutral-500 text-xs italic">Direct dependency</span>';
@@ -934,10 +948,13 @@ function openInvModal(id) {
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerable Transitive Dependencies (${(item.vulnerable_transitive_dependencies || []).length})</h4><div class="bg-neutral-900 rounded-lg p-3 border border-neutral-800">${renderVulnTransitiveTable(item.vulnerable_transitive_dependencies)}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Install Paths</h4><div class="space-y-1">${pathRows}</div></div>
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Suggested Fixes</h4>${renderSuggestedFixes(item.suggested_fixes, item.id)}</div>
+                    <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (${invSeqs.length})</h4><div id="inv-sequences-container" class="border border-neutral-700 rounded-xl bg-black/30 p-3 overflow-y-auto" style="max-height:16rem"></div></div>
                     ${renderComponentPolicyViolations(item)}
                     <div><h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Vulnerabilities (${itemVulns.length})</h4><div class="space-y-0">${vulnRows}</div></div>
                 </div>
             `;
+
+            renderSequences({ sequences: invSeqs }, document.getElementById('inv-sequences-container'));
 
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
@@ -1063,21 +1080,8 @@ function openVulnModal(key) {
                 </div>
             `;
 
-            mountVulnSequences(v);
-
             document.getElementById('modal-overlay').style.display = 'flex';
             document.body.style.overflow = 'hidden';
-        }
-
-// "Affected dependency sequences": SCA's own renderSequences(), mounted as a scrollable box at the bottom of the vulnerability modal.
-// It is part of the modal itself (not of the Findings tab's opener), so every way of opening the modal has the sequence-node links.
-function mountVulnSequences(v) {
-            const seqs = Array.isArray(v.affected_dependency_sequences) ? v.affected_dependency_sequences : [];
-            const wrap = document.createElement('div');
-            wrap.className = 'mt-6';
-            wrap.innerHTML = '<h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-400 mb-3">Affected Dependency Sequences (' + seqs.length + ')</h4><div id="sequences-container" class="border border-neutral-700 rounded-xl bg-black/30 p-3 overflow-y-auto" style="max-height:16rem"></div>';
-            document.getElementById('modal-body').appendChild(wrap);
-            renderSequences({ sequences: seqs });
         }
 
 function tiEsc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1297,4 +1301,19 @@ const FAMILY = {
   compliance: function () { renderCompliance(); },
   diffs: function () { renderDiffs(); },
   bind: bindModalRefs,
+  // Policy tab: SCA does not show policy violations there. shell.js cnRenderPolicy passes CANON.policy through this; every key
+  // that mentions a violation (violations, policy_violations, is_policy_violation, violated_rules …) is dropped at any depth.
+  prunePolicy: function (policy) {
+    const isViol = function (k) { return /violat/i.test(String(k)); };
+    const prune = function (v) {
+      if (Array.isArray(v)) return v.map(prune);
+      if (v && typeof v === 'object') {
+        const o = {};
+        Object.keys(v).forEach(function (k) { if (!isViol(k)) o[k] = prune(v[k]); });
+        return o;
+      }
+      return v;
+    };
+    return prune(policy || {});
+  },
 };

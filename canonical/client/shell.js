@@ -335,11 +335,13 @@ function cnRenderStats() {
 
 // ── policy ──────────────────────────────────────────────────────────────────────────────────────────
 function cnRenderPolicy() {
-  const p = CANON.policy || {}, sec = document.getElementById('section-policy');
+  const sec = document.getElementById('section-policy');
+  const p = FAMILY.prunePolicy ? FAMILY.prunePolicy(CANON.policy) : (CANON.policy || {});   // a module can prune what its Policy tab shows
   const blocks = [];
   Object.keys(p).forEach(function (k) {
     const v = p[k];
     if (v === null || v === undefined || k === 'checks' || k === 'profile') return;
+    if (FAMILY.prunePolicy && cnIsObj(v) && !Object.keys(v).length) return;   // a block emptied by prunePolicy
     if (Array.isArray(v) && !v.length) return;
     blocks.push(cnBlock(k === 'flags' ? 'Scan Options / Flags' : cnTitle(k), v));
   });

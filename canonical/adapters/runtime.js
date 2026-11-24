@@ -111,7 +111,7 @@ export function translate(p, opts, H) {
     scan: {
       generated_at: p.generated_at, status: p.coverage?.status === 'partial' ? 'partial' : 'completed', scan_type: 'runtime', scan_scope: t.mode ?? 'live',
       ecosystems: [], vulnerability_scan: false,
-      report_id: p.report_id, asset_id: p.asset_id, asset_name: p.asset_name, asset_type: p.asset_type, machine_id: p.machine_id, tool_version: p.tool_version,
+      report_id: p.report_id, asset_id: p.machine_id, asset_name: p?.environment?.os_name|| "", asset_type: p.asset_type, machine_id: p.machine_id, tool_version: p.tool_version,
     },
   });
   return {
