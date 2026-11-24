@@ -1137,7 +1137,7 @@ function renderExecutiveSummary() {
 
 // The module's finding diffs (misconfigurations, secrets, vulnerabilities per technology), as the three lists the severity view
 // (client/diffs.js) splits by severity. IPs, domains, ports and technologies have no severity and are no longer shown.
-var DIFF_KINDS = [['misconfigs', 'Misconfiguration'], ['secrets', 'Secret'], ['findings', 'Vulnerability']];
+var DIFF_KINDS = [['misconfigs', 'Misconfiguration'], ['secrets', 'Secret'], ['findings', 'sc_vuln']];
 var DIFF_LIST_MAP = [['new', 'new'], ['unchanged', 'existing'], ['removed', 'fixed']];
 
 function diffLists(d) {
@@ -1228,7 +1228,7 @@ function openComplianceDiffModal(fi, listKey) {
   if (!fw) return;
   var labels = { new: 'New', unchanged: 'Still existing', removed: 'Resolved' };
   var items = (fw[listKey] || []).map(function (e) {
-    return Object.assign({}, e, { kindLabel: e.kind === 'secret' ? 'Secret' : e.kind === 'misconfig' ? 'Misconfiguration' : 'Vulnerability' });
+    return Object.assign({}, e, { kindLabel: e.kind === 'secret' ? 'Secret' : e.kind === 'misconfig' ? 'Misconfiguration' : 'sc_vuln' });
   });
   openModal('<h3 class="text-lg font-bold mb-1">' + escH(fw.name) + ' — ' + labels[listKey] + '</h3>' +
     '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' +

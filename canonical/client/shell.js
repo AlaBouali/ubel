@@ -2,7 +2,8 @@
  * (sca/engine.js report template). Findings / inventory modals, executive summary, compliance and diffs come from the module
  * bundle (client/<family>.js) through FAMILY; everything below is only the part that is common to all modules.
  * Requires CANON and FAMILY. */
-const cnEsc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+const cnEsc = function (s) { if (s === null || s === undefined) { return ''; } if (typeof s === 'object') { if (s.status) { return escapeHtml(s.status); } return escapeHtml(JSON.stringify(s)); } return escapeHtml(s == null ? '' : s); };
 const cnIsObj = function (v) { return v !== null && typeof v === 'object' && !Array.isArray(v); };
 const cnTitle = function (k) { return String(k).replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); };
 const CN_SEV = ['critical', 'high', 'medium', 'low', 'info', 'unknown'];
@@ -279,7 +280,7 @@ function cnSetupScopes() {
       + by[t].slice(0, 500).map(function (i) {
         const s = S[i];
         const det = Object.keys(s).filter(function (k) { return k !== 'type' && k !== 'name' && k !== 'status' && s[k] !== null && typeof s[k] !== 'object'; }).slice(0, 4).map(function (k) { return k + '=' + s[k]; }).join(' · ');
-        return '<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-scope="' + i + '"><td class="px-6 py-4 mono text-xs break-all">' + cnEsc(s.name) + '</td><td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(s.status || '') + '</td><td class="px-6 py-4 text-xs text-neutral-500 break-all">' + cnEsc(det) + '</td></tr>';
+        return '<tr class="hover:bg-neutral-800/30 transition-colors cursor-pointer" data-scope="' + i + '"><td class="px-6 py-4 mono text-xs break-all">' + cnEsc(s.name) + '</td><td class="px-6 py-4 text-xs text-neutral-400">' + cnEsc(s.status || 'Scanned') + '</td><td class="px-6 py-4 text-xs text-neutral-500 break-all">' + cnEsc(det) + '</td></tr>';
       }).join('') + '</tbody></table></div></div>';
   }).join('');
   Array.prototype.forEach.call(sec.querySelectorAll('tr[data-scope]'), function (tr) { tr.onclick = function () { cnOpenScope(+tr.getAttribute('data-scope')); }; });

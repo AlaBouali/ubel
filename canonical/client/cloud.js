@@ -527,7 +527,7 @@ const DIFF_ROW_CAP = 500;
 // The module's finding diff, as the three lists the severity view (client/diffs.js) splits by severity. The per-service / provider
 // diffs have no severity and are no longer shown.
 function diffLists() {
-  const mk = f => ({ title: f.title, type: f.provider + '/' + f.service, severity: f.severity });
+  const mk = f => ({ title: f.title, type: "misconfiguration", severity: f.severity });
   return { new: diffFindingList('new').map(mk), existing: diffFindingList('existing').map(mk), fixed: diffFindingList('fixed').map(mk) };
 }
 
