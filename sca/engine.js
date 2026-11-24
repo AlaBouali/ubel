@@ -347,7 +347,8 @@ function diffVulns(report, byInstance) {
   if (byInstance) {
     for (const v of report.vulnerabilities || []) {
       const key = `${v.id}::${diffVulnComponent(v)}`;
-      if (!out.has(key)) out.set(key, { id: v.id, name: v.affected_dependency, ecosystem: v.ecosystem, version: v.affected_dependency_version });
+      // severity + title travel with the entry so a fixed vulnerability (present only in the previous report) can still be listed by severity
+      if (!out.has(key)) out.set(key, { id: v.id, name: v.affected_dependency, ecosystem: v.ecosystem, version: v.affected_dependency_version, title: v.title || v.summary || "", severity: v.is_infection ? "infection" : v.severity || "unknown" });
     }
   } else {
     const ids = Array.isArray(report.vulnerabilities_ids) ? report.vulnerabilities_ids : [];

@@ -1114,17 +1114,32 @@ function diffEsc(s) {
             return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
-var DIFF_TILES = [
-            { count: 'new_deps',       label: 'New dependencies',              group: 'deps',  list: 'new',       color: 'text-orange-400' },
-            { count: 'unchanged_deps', label: 'Unchanged dependencies',        group: 'deps',  list: 'unchanged', color: 'text-neutral-300' },
-            { count: 'removed_deps',   label: 'Removed dependencies',          group: 'deps',  list: 'removed',   color: 'text-blue-400' },
-            { count: 'new_vulns',      label: 'New vulnerabilities',           group: 'vulns', list: 'new',       color: 'text-red-400' },
-            { count: 'existing_vulns', label: 'Still existing vulnerabilities', group: 'vulns', list: 'existing',  color: 'text-yellow-400' },
-            { count: 'fixed_vulns',    label: 'Fixed vulnerabilities',         group: 'vulns', list: 'fixed',     color: 'text-green-400' },
-            { count: 'new_secrets',       label: 'New secrets',              group: 'secrets', list: 'new',       color: 'text-red-400' },
-            { count: 'unchanged_secrets', label: 'Still existing secrets',   group: 'secrets', list: 'unchanged', color: 'text-yellow-400' },
-            { count: 'removed_secrets',   label: 'Removed secrets',          group: 'secrets', list: 'removed',   color: 'text-green-400' }
-        ];
+// The module's vulnerability / secret diffs, as the three lists the severity view (client/diffs.js) splits by severity.
+// The dependency diff has no severity and is no longer shown. Vulnerability entries carry their own severity and title; entries
+// from a report written before that (id / package / version only) are looked up among this report's vulnerabilities, so the ones
+// still present keep their severity, and fixed ones from such a report land under "Unknown".
+function diffLists(d) {
+  var byKey = {};
+  (reportData.vulnerabilities || []).forEach(function (v) {
+    var k = v.id + '::' + v.affected_dependency + '@' + v.affected_dependency_version;
+    if (!(k in byKey)) byKey[k] = v;
+  });
+  var vuln = function (e) {
+    var cur = byKey[e.id + '::' + e.name + '@' + e.version] || {};
+    return {
+      title: e.title || cur.title || cur.summary || e.id,
+      type: 'Vulnerability',
+      severity: e.severity || (cur.is_infection ? 'infection' : cur.severity)
+    };
+  };
+  var secret = function (e) { return { title: e.title || e.id, type: 'Secret', severity: e.severity }; };
+  var pick = function (key) {
+    var v = (d.vulns && d.vulns[key]) || [];
+    var s = (d.secrets && d.secrets[key === 'existing' ? 'unchanged' : key === 'fixed' ? 'removed' : key]) || [];
+    return v.map(vuln).concat(s.map(secret));
+  };
+  return { 'new': pick('new'), existing: pick('existing'), fixed: pick('fixed') };
+}
 
 function renderDiffs() {
             var sec = document.getElementById('section-diffs');
@@ -1142,14 +1157,7 @@ function renderDiffs() {
                 sec.innerHTML = html;
                 return;
             }
-            html += '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
-            DIFF_TILES.forEach(function (t, i) {
-                if (t.group === 'secrets' && !d.secrets) return;
-                html += '<button type="button" onclick="openDiffModal(' + i + ')" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
-                    '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
-                    '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
-            });
-            html += '</div>';
+            html += UBEL_DIFFS.sectionHtml(diffLists(d), { hint: 'Vulnerabilities' + (d.secrets ? ' and secrets' : '') + ' compared with the previous report, split by severity level. Select a count to list them.' });
             if (!d.secrets) {
                 html += '<p class="text-xs text-neutral-500">Secrets changes are not shown: this report or the previous one did not scan for secrets.</p>';
             }
@@ -1172,44 +1180,6 @@ function renderDiffs() {
                 html += '</div>';
             }
             sec.innerHTML = html;
-        }
-
-function openDiffModal(i) {
-            var t = DIFF_TILES[i];
-            var d = reportData.diffs;
-            if (!t || !d) return;
-            var items = (d[t.group] && d[t.group][t.list]) || [];
-            var isVuln = t.group === 'vulns';
-            var isSecret = t.group === 'secrets';
-            var cols = isSecret ? ['Rule', 'Severity', 'Title', 'File', 'Line', 'Match']
-                     : isVuln ? ['ID', 'Name', 'Ecosystem', 'Version'] : ['Name', 'Ecosystem', 'Version'];
-            var body;
-            if (items.length === 0) {
-                body = '<p class="text-sm text-neutral-500 italic">None.</p>';
-            } else {
-                body = '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
-                    cols.map(function (c) { return '<th class="pb-2 pr-4 font-bold">' + c + '</th>'; }).join('') +
-                    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
-                    items.map(function (e) {
-                        if (isSecret) {
-                            return '<tr><td class="py-2 pr-4 mono">' + diffEsc(e.id) + '</td>' +
-                                '<td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + diffEsc((e.severity || 'unknown').toLowerCase()) + '">' + diffEsc(e.severity || 'unknown') + '</td>' +
-                                '<td class="py-2 pr-4 font-medium">' + diffEsc(e.title) + '</td>' +
-                                '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.file_path) + '</td>' +
-                                '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.line) + '</td>' +
-                                '<td class="py-2 pr-4 mono text-neutral-500">' + diffEsc(e.match_preview) + '</td></tr>';
-                        }
-                        return '<tr>' + (isVuln ? '<td class="py-2 pr-4 mono">' + diffEsc(e.id) + '</td>' : '') +
-                            '<td class="py-2 pr-4 font-medium">' + diffEsc(e.name) + '</td>' +
-                            '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.ecosystem) + '</td>' +
-                            '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.version) + '</td></tr>';
-                    }).join('') + '</tbody></table></div>';
-            }
-            document.getElementById('modal-body').innerHTML =
-                '<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
-                '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body;
-            document.getElementById('modal-overlay').style.display = 'flex';
-            document.body.style.overflow = 'hidden';
         }
 
 function openComplianceDiffModal(fi, list) {

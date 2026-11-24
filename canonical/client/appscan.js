@@ -97,23 +97,21 @@ function openComplianceModal(fwIdx, controlIdx) {
   openModal('<div class="space-y-4"><div><div class="flex items-center gap-3 mb-1 flex-wrap"><span class="mono text-red-400 text-sm">' + escH(control.id) + '</span><h2 class="text-lg font-semibold text-white">' + escH(control.title || control.id) + '</h2></div><p class="text-xs text-neutral-500">' + escH(fw.name) + (fw.version ? ' · ' + escH(fw.version) : '') + ' — ' + matches.length + ' issue' + (matches.length === 1 ? '' : 's') + '</p></div><div class="glass rounded-xl p-3 space-y-1">' + body + '</div></div>');
 }
 
-const DIFF_GROUPS = [
-  { key: 'vulnerabilities', title: 'Vulnerabilities', cards: [
-    { list: 'new', label: 'New vulnerabilities', count: 'new_vulnerabilities', color: 'text-red-400' },
-    { list: 'unchanged', label: 'Still existing vulnerabilities', count: 'unchanged_vulnerabilities', color: 'text-yellow-400' },
-    { list: 'removed', label: 'Fixed vulnerabilities', count: 'fixed_vulnerabilities', color: 'text-green-400' }
-  ]},
-  { key: 'secrets', title: 'Secrets', cards: [
-    { list: 'new', label: 'New secrets', count: 'new_secrets', color: 'text-red-400' },
-    { list: 'unchanged', label: 'Still existing secrets', count: 'unchanged_secrets', color: 'text-yellow-400' },
-    { list: 'removed', label: 'Removed secrets', count: 'removed_secrets', color: 'text-green-400' }
-  ]},
-  { key: 'misconfigs', title: 'Misconfigs', cards: [
-    { list: 'new', label: 'New misconfigurations', count: 'new_misconfigs', color: 'text-red-400' },
-    { list: 'unchanged', label: 'Still existing misconfigurations', count: 'unchanged_misconfigs', color: 'text-yellow-400' },
-    { list: 'removed', label: 'Fixed misconfigurations', count: 'fixed_misconfigs', color: 'text-green-400' }
-  ]}
-];
+// The module's diff groups, flattened into the three lists the severity view (client/diffs.js) splits by severity.
+const DIFF_KINDS = [['vulnerabilities', 'Vulnerability'], ['secrets', 'Secret'], ['misconfigs', 'Misconfiguration']];
+const DIFF_LIST_MAP = [['new', 'new'], ['unchanged', 'existing'], ['removed', 'fixed']];
+
+function diffLists(d) {
+  const out = { new: [], existing: [], fixed: [] };
+  DIFF_KINDS.forEach(function (kind) {
+    DIFF_LIST_MAP.forEach(function (m) {
+      ((d[kind[0]] && d[kind[0]][m[0]]) || []).forEach(function (item) {
+        out[m[1]].push({ title: item.title || item.rule || 'Untitled issue', type: kind[1], severity: item.severity });
+      });
+    });
+  });
+  return out;
+}
 
 function renderDiffs() {
   const section = document.getElementById('section-diffs');
@@ -123,16 +121,7 @@ function renderDiffs() {
     return;
   }
   let html = '<div class="flex flex-col md:flex-row gap-2 justify-between items-start md:items-center"><h2 class="text-xl font-bold">Diffs</h2><p class="text-xs text-neutral-500 mono">vs previous report ' + escH(d.previous.report_id || d.previous_file || 'previous report') + (d.previous.generated_at ? ' (' + escH(d.previous.generated_at) + ')' : '') + '</p></div>';
-  const renderDiffGroup = group => {
-    let groupHtml = '<h3 class="text-lg font-bold pt-4">' + group.title + '</h3><div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
-    group.cards.forEach(card => {
-      groupHtml += '<button type="button" onclick="openMobileDiffModal(&quot;' + group.key + '&quot;,&quot;' + card.list + '&quot;)" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between"><span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + card.label + '</span><span class="text-4xl font-bold mono ' + card.color + '">' + Number(d.counts[card.count] || 0) + '</span></button>';
-    });
-    return groupHtml + '</div>';
-  };
-  html += renderDiffGroup(DIFF_GROUPS[0]);
-  html += renderDiffGroup(DIFF_GROUPS[1]);
-  html += renderDiffGroup(DIFF_GROUPS[2]);
+  html += '<div class="pt-4">' + UBEL_DIFFS.sectionHtml(diffLists(d), { hint: 'Vulnerabilities, secrets and misconfigurations compared with the previous report, split by severity level. Select a count to list them.' }) + '</div>';
   const compliance = d.compliance && d.compliance.frameworks || [];
   if (compliance.length) {
     html += '<h3 class="text-lg font-bold pt-4">Compliance</h3><p class="text-xs text-neutral-500">Issues mapped to each framework, compared with the previous report.</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
@@ -146,16 +135,6 @@ function renderDiffs() {
     html += '</div>';
   }
   section.innerHTML = html;
-}
-
-function openMobileDiffModal(group, list) {
-  const d = reportData.diffs;
-  const items = d && d[group] && d[group][list] || [];
-  const labels = { new: 'New', unchanged: 'Still existing', removed: group === 'secrets' ? 'Removed' : 'Fixed' };
-  const groupLabels = { vulnerabilities: 'vulnerabilities', secrets: 'secrets', misconfigs: 'misconfigurations' };
-  const rows = items.map(item => '<tr><td class="py-2 pr-4 uppercase text-[10px] font-bold severity-' + escH(String(item.severity || 'unknown').toLowerCase()) + '">' + escH(item.severity || 'unknown') + '</td><td class="py-2 pr-4 font-medium">' + escH(item.title || item.rule || 'Untitled issue') + '</td><td class="py-2 pr-4 text-neutral-400">' + escH(item.app || '—') + '</td><td class="py-2 pr-4 mono text-neutral-400">' + escH(item.artifact || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.rule || '—') + '</td><td class="py-2 pr-4 mono text-neutral-500">' + escH(item.masvs || '—') + '</td></tr>').join('');
-  const body = rows ? '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' + ['Severity', 'Issue', IS_MCP ? 'Server' : IS_BINARY ? 'File' : 'App', 'Artifact', 'Rule', IS_BINARY ? 'Area' : 'MASVS'].map(label => '<th class="pb-2 pr-4 font-bold">' + label + '</th>').join('') + '</tr></thead><tbody class="divide-y divide-neutral-800">' + rows + '</tbody></table></div>' : '<p class="text-sm text-neutral-500 italic">None.</p>';
-  openModal('<h3 class="text-lg font-bold mb-1">' + labels[list] + ' ' + groupLabels[group] + '</h3><p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
 }
 
 function openMobileComplianceDiffModal(fwIdx, list) {

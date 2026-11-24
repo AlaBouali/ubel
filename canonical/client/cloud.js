@@ -524,31 +524,11 @@ function renderFindingDetail(f) {
 
 const DIFF_ROW_CAP = 500;
 
-const DIFF_TILES = [
-  { group: 'findings',  list: 'new',      count: 'new_findings',       label: 'New findings',             color: 'text-red-400' },
-  { group: 'findings',  list: 'existing', count: 'existing_findings',  label: 'Still existing findings',  color: 'text-yellow-400' },
-  { group: 'findings',  list: 'fixed',    count: 'fixed_findings',     label: 'Fixed findings',           color: 'text-green-400' },
-  { group: 'services',  list: 'new',      count: 'new_services',       label: 'Newly affected services',  color: 'text-red-400' },
-  { group: 'services',  list: 'existing', count: 'existing_services',  label: 'Still affected services',  color: 'text-yellow-400' },
-  { group: 'services',  list: 'resolved', count: 'resolved_services',  label: 'Resolved services',        color: 'text-green-400' },
-  { group: 'providers', list: 'new',      count: 'new_providers',      label: 'Newly affected providers', color: 'text-red-400' },
-  { group: 'providers', list: 'existing', count: 'existing_providers', label: 'Still affected providers', color: 'text-yellow-400' },
-  { group: 'providers', list: 'resolved', count: 'resolved_providers', label: 'Resolved providers',       color: 'text-green-400' },
-];
-
-const DIFF_GROUPS = [
-  { group: 'findings',  title: 'Findings',  hint: 'Matched on provider, service, check, resource and region.' },
-  { group: 'services',  title: 'Services',  hint: 'A service is "affected" when it has at least one finding.' },
-  { group: 'providers', title: 'Providers', hint: 'A provider is "affected" when it has at least one finding.' },
-];
-
-function diffDeltaHtml(n) {
-  if (!n) return '<span class="text-neutral-500">0</span>';
-  return n > 0 ? '<span class="text-red-400">+' + n + '</span>' : '<span class="text-green-400">' + n + '</span>';
-}
-
-function diffNameOf(group, e) {
-  return group === 'providers' ? String(e.provider).toUpperCase() : e.provider + '/' + e.service;
+// The module's finding diff, as the three lists the severity view (client/diffs.js) splits by severity. The per-service / provider
+// diffs have no severity and are no longer shown.
+function diffLists() {
+  const mk = f => ({ title: f.title, type: f.provider + '/' + f.service, severity: f.severity });
+  return { new: diffFindingList('new').map(mk), existing: diffFindingList('existing').map(mk), fixed: diffFindingList('fixed').map(mk) };
 }
 
 function diffFindingList(list) {
@@ -566,18 +546,6 @@ function diffFrameworkList(fw, list) {
 function diffControlsOf(f, fwId) {
   const fw = ((f.compliance && f.compliance.frameworks) || []).find(x => x.id === fwId);
   return fw ? (fw.controls || []).map(c => c.id).join(', ') : '';
-}
-
-function diffCountsTable(group, items) {
-  return '<div class="overflow-auto max-h-[60vh]"><table class="w-full text-left text-xs"><thead class="text-neutral-500 uppercase text-[10px] tracking-widest"><tr>' +
-    ['Name', 'Before', 'Now', 'Change'].map(c => '<th class="pb-2 pr-4 font-bold">' + c + '</th>').join('') +
-    '</tr></thead><tbody class="divide-y divide-neutral-800">' +
-    items.map(e =>
-      '<tr><td class="py-2 pr-4 mono">' + escH(diffNameOf(group, e)) + '</td>' +
-      '<td class="py-2 pr-4 mono text-neutral-400">' + e.previous + '</td>' +
-      '<td class="py-2 pr-4 mono text-neutral-200">' + e.current + '</td>' +
-      '<td class="py-2 pr-4 mono">' + diffDeltaHtml(e.delta) + '</td></tr>'
-    ).join('') + '</tbody></table></div>';
 }
 
 function diffFindingsTable(items, fwId) {
@@ -626,28 +594,7 @@ function renderDiffs() {
     html += '<p class="text-xs text-yellow-500/90 bg-neutral-900/50 p-3 rounded-lg border border-neutral-800">' + escH(n) + '</p>';
   });
 
-  DIFF_GROUPS.forEach(g => {
-    html += '<div class="space-y-3"><div><h3 class="text-lg font-bold">' + g.title + '</h3><p class="text-xs text-neutral-500">' + g.hint + '</p></div>' +
-      '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
-    DIFF_TILES.forEach((t, i) => {
-      if (t.group !== g.group) return;
-      html += '<button type="button" data-diff-tile="' + i + '" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
-        '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
-        '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
-    });
-    html += '</div>';
-
-    // Services / providers: before/now numbers for everything that changed.
-    if (g.group !== 'findings') {
-      const changed = [].concat(d[g.group].new, d[g.group].existing, d[g.group].resolved)
-        .filter(e => e.delta !== 0)
-        .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || diffNameOf(g.group, a).localeCompare(diffNameOf(g.group, b)));
-      html += changed.length
-        ? '<div class="glass rounded-xl p-4">' + diffCountsTable(g.group, changed) + '</div>'
-        : '<p class="text-xs text-neutral-500 italic">No change in finding counts for any ' + (g.group === 'services' ? 'service' : 'provider') + '.</p>';
-    }
-    html += '</div>';
-  });
+  html += UBEL_DIFFS.sectionHtml(diffLists(), { hint: 'Findings compared with the previous report, split by severity level. Select a count to list them.' });
 
   if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
     html += '<div class="space-y-3"><div><h3 class="text-lg font-bold">Compliance frameworks</h3>' +
@@ -683,17 +630,15 @@ function openComplianceDiffModal(fi, list) {
     (items.length ? diffFindingsTable(items, fw.id) : '<p class="text-sm text-neutral-500 italic">None.</p>'));
 }
 
-function openDiffModal(i) {
-  const t = DIFF_TILES[i];
-  const d = reportData.diffs;
-  if (!t || !d) return;
-  const items = t.group === 'findings' ? diffFindingList(t.list) : ((d[t.group] && d[t.group][t.list]) || []);
-  let body;
-  if (!items.length) body = '<p class="text-sm text-neutral-500 italic">None.</p>';
-  else if (t.group === 'findings') body = diffFindingsTable(items, null);
-  else body = diffCountsTable(t.group, items);
-  openModal('<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
-    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
+// The compliance-framework buttons (the severity cards are handled by client/diffs.js).
+function bindDiffs() {
+  const sec = document.getElementById('section-diffs');
+  if (!sec || sec.dataset.diffsBound) return;
+  sec.dataset.diffsBound = '1';
+  sec.addEventListener('click', e => {
+    const b = e.target.closest('[data-diff-fw]');
+    if (b) openComplianceDiffModal(parseInt(b.dataset.diffFw, 10), b.dataset.diffList);
+  });
 }
 
 // ── glue: canonical entry → module modal ──
@@ -702,5 +647,5 @@ const FAMILY = {
   openInventory: function () { return false; },   // the module has no inventory view
   executive: function () { renderExecutiveSummary(); },
   compliance: function () { renderCompliance(); },
-  diffs: function () { renderDiffs(); },
+  diffs: function () { renderDiffs(); bindDiffs(); },
 };

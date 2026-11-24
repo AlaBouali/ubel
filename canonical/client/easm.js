@@ -1135,21 +1135,22 @@ function renderExecutiveSummary() {
   root.innerHTML = html;
 }
 
-var DIFF_CATS = [
-  { key: 'ips',        label: 'IPs',                  cols: [['IP', 'ip'], ['Domains', 'domains'], ['Status', 'status']] },
-  { key: 'domains',    label: 'Domains',              cols: [['Domain', 'domain'], ['IPs', 'ips'], ['Status', 'status']] },
-  { key: 'ports',      label: 'IP ports',             cols: [['Host', 'host'], ['Port', 'port'], ['HTTP(S)', 'http']] },
-  { key: 'misconfigs', label: 'Misconfigurations',    cols: [['Rule', 'id'], ['Severity', 'severity'], ['Title', 'title'], ['Category', 'category'], ['Target', 'target']] },
-  { key: 'techs',      label: 'Technologies',         cols: [['Name', 'name'], ['Version', 'version'], ['Seen on', 'hosts']] },
-  { key: 'secrets',    label: 'Secrets',              cols: [['Rule', 'id'], ['Severity', 'severity'], ['Title', 'title'], ['URL', 'url'], ['Line', 'line'], ['Match', 'match_preview']] },
-  { key: 'findings',   label: 'Findings per technology', cols: [['Technology', 'tech'], ['Version', 'version'], ['ID', 'id'], ['Severity', 'severity'], ['Title', 'title']] }
-];
+// The module's finding diffs (misconfigurations, secrets, vulnerabilities per technology), as the three lists the severity view
+// (client/diffs.js) splits by severity. IPs, domains, ports and technologies have no severity and are no longer shown.
+var DIFF_KINDS = [['misconfigs', 'Misconfiguration'], ['secrets', 'Secret'], ['findings', 'Vulnerability']];
+var DIFF_LIST_MAP = [['new', 'new'], ['unchanged', 'existing'], ['removed', 'fixed']];
 
-var DIFF_LISTS = [
-  { key: 'new',       label: 'New',      color: 'text-red-400' },
-  { key: 'unchanged', label: 'Existing', color: 'text-yellow-400' },
-  { key: 'removed',   label: 'Removed',  color: 'text-green-400' }
-];
+function diffLists(d) {
+  var out = { 'new': [], existing: [], fixed: [] };
+  DIFF_KINDS.forEach(function (kind) {
+    DIFF_LIST_MAP.forEach(function (m) {
+      ((d[kind[0]] && d[kind[0]][m[0]]) || []).forEach(function (e) {
+        out[m[1]].push({ title: e.title || e.id, type: kind[1], severity: e.severity });
+      });
+    });
+  });
+  return out;
+}
 
 function diffTable(cols, items, sevKey) {
   if (!items.length) return '<p class="text-sm text-neutral-500 italic">None.</p>';
@@ -1193,21 +1194,11 @@ function renderDiffs() {
   }
   if (d.min_severity && d.min_severity.changed) {
     html += '<p class="text-xs text-yellow-400">The two reports used a different --min-severity (previous: ' + escH(d.min_severity.previous) +
-      ', this one: ' + escH(d.min_severity.current) + '). Vulnerability findings (Findings per technology and the Frameworks mapping) are compared at the stricter level, ' +
+      ', this one: ' + escH(d.min_severity.current) + '). Vulnerability findings (the vulnerabilities above and the Frameworks mapping) are compared at the stricter level, ' +
       escH(d.min_severity.applied) + ' and above, so a finding hidden by one filter is not shown as new or removed.</p>';
   }
-  html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
-  var skipped = [];
-  DIFF_CATS.forEach(function (cat) {
-    var g = d[cat.key];
-    if (!g) { skipped.push(cat.label); return; }
-    html += '<div class="glass rounded-xl p-5 space-y-3"><p class="font-semibold text-sm">' + escH(cat.label) + '</p><div class="grid grid-cols-3 gap-2">';
-    DIFF_LISTS.forEach(function (l) {
-      html += diffCountButton('data-diff-cat="' + cat.key + '" data-diff-list="' + l.key + '"', l.label, (g[l.key] || []).length, l.color);
-    });
-    html += '</div></div>';
-  });
-  html += '</div>';
+  html += UBEL_DIFFS.sectionHtml(diffLists(d), { hint: 'Misconfigurations, secrets and vulnerabilities compared with the previous report, split by severity level. Select a count to list them.' });
+  var skipped = DIFF_KINDS.filter(function (k) { return !d[k[0]]; }).map(function (k) { return k[0] === 'findings' ? 'vulnerabilities' : k[0] === 'misconfigs' ? 'misconfigurations' : 'secrets'; });
   if (skipped.length) {
     html += '<p class="text-xs text-neutral-500">Not compared: ' + escH(skipped.join(', ')) + ' (this report or the previous one did not include them, e.g. secrets were not scanned).</p>';
   }
@@ -1231,16 +1222,6 @@ function renderDiffs() {
   sec.innerHTML = html;
 }
 
-function openDiffModal(catKey, listKey) {
-  var d = reportData.diffs;
-  var cat = DIFF_CATS.filter(function (c) { return c.key === catKey; })[0];
-  var l = DIFF_LISTS.filter(function (x) { return x.key === listKey; })[0];
-  if (!d || !cat || !l || !d[catKey]) return;
-  var items = d[catKey][listKey] || [];
-  openModal('<h3 class="text-lg font-bold mb-1">' + escH(cat.label) + ' — ' + escH(l.label) + '</h3>' +
-    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + diffTable(cat.cols, items, 'severity'));
-}
-
 function openComplianceDiffModal(fi, listKey) {
   var d = reportData.diffs;
   var fw = d && d.compliance && d.compliance.frameworks[fi];
@@ -1258,10 +1239,8 @@ function bindDiffs() {
   var sec = document.getElementById('section-diffs');
   if (!sec) return;
   sec.addEventListener('click', function (e) {
-    var b = e.target.closest('button[data-diff-list]');
-    if (!b) return;
-    if (b.dataset.diffFw !== undefined) openComplianceDiffModal(parseInt(b.dataset.diffFw, 10), b.dataset.diffList);
-    else openDiffModal(b.dataset.diffCat, b.dataset.diffList);
+    var b = e.target.closest('button[data-diff-fw]');
+    if (b) openComplianceDiffModal(parseInt(b.dataset.diffFw, 10), b.dataset.diffList);
   });
 }
 

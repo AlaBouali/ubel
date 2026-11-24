@@ -755,14 +755,15 @@ function openComplianceModal(fwIdx, cIdx) {
   `);
 }
 
-var DIFF_TILES = [
-  { count: 'new_chunks',       label: 'New chunks',              group: 'chunks', list: 'new',       color: 'text-orange-400' },
-  { count: 'unchanged_chunks', label: 'Unchanged chunks',        group: 'chunks', list: 'unchanged', color: 'text-neutral-300' },
-  { count: 'removed_chunks',   label: 'Removed chunks',          group: 'chunks', list: 'removed',   color: 'text-blue-400' },
-  { count: 'new_vulns',        label: 'New findings',            group: 'vulns',  list: 'new',       color: 'text-red-400' },
-  { count: 'existing_vulns',   label: 'Still existing findings', group: 'vulns',  list: 'existing',  color: 'text-yellow-400' },
-  { count: 'fixed_vulns',      label: 'Fixed findings',          group: 'vulns',  list: 'fixed',     color: 'text-green-400' }
-];
+// The module's finding diff (diffs.vulns), as the three lists the severity view (client/diffs.js) splits by severity.
+// A SAST finding's type is its vulnerability class. The per-chunk diff has no severity and is no longer shown.
+function diffLists(d) {
+  var v = d.vulns || {};
+  var conv = function (arr) {
+    return (arr || []).map(function (e) { return { title: e.title || e.id, type: e.id, severity: e.severity }; });
+  };
+  return { 'new': conv(v['new']), existing: conv(v.existing), fixed: conv(v.fixed) };
+}
 
 var DIFF_GROUPS = ['new', 'unchanged', 'removed'];
 
@@ -795,13 +796,7 @@ function renderDiffs() {
     html += '<p class="text-xs text-yellow-400 bg-yellow-500/5 border border-yellow-500/20 rounded-lg px-3 py-2">' + diffEsc(d.scope_note) + '</p>';
   }
 
-  html += '<div class="grid grid-cols-2 md:grid-cols-3 gap-4">';
-  DIFF_TILES.forEach(function (t, i) {
-    html += '<button type="button" onclick="openDiffModal(' + i + ')" class="glass rounded-xl p-6 text-left hover:border-neutral-500 transition-colors aspect-square md:aspect-auto md:min-h-[9rem] flex flex-col justify-between">' +
-      '<span class="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">' + t.label + '</span>' +
-      '<span class="text-4xl font-bold mono ' + t.color + '">' + (d.counts[t.count] || 0) + '</span></button>';
-  });
-  html += '</div>';
+  html += UBEL_DIFFS.sectionHtml(diffLists(d), { hint: 'Findings compared with the previous report, split by severity level. Select a count to list them.' });
   html += '<p class="text-xs text-neutral-500">Findings dismissed as false positives by the verification pass are not counted, so clearing one shows up as fixed.</p>';
 
   if (d.compliance && d.compliance.frameworks && d.compliance.frameworks.length) {
@@ -835,36 +830,6 @@ function diffTable(cols, rowsHtml) {
 function diffSevCell(sev) {
   var s = String(sev || 'unknown').toLowerCase();
   return '<td class="py-2 pr-4"><span class="px-2 py-0.5 rounded border text-[10px] uppercase font-bold ' + sevClass(s) + '">' + diffEsc(s) + '</span></td>';
-}
-
-function openDiffModal(i) {
-  var t = DIFF_TILES[i];
-  var d = reportData.diffs;
-  if (!t || !d) return;
-  var items = (d[t.group] && d[t.group][t.list]) || [];
-  var body;
-  if (items.length === 0) {
-    body = '<p class="text-sm text-neutral-500 italic">None.</p>';
-  } else if (t.group === 'chunks') {
-    body = diffTable(['File', 'Function / Method', 'Type', 'Language'], items.map(function (e) {
-      return '<tr><td class="py-2 pr-4 mono text-neutral-400 break-all">' + diffEsc(e.file) + '</td>' +
-        '<td class="py-2 pr-4 font-medium">' + diffEsc(e.name) + '</td>' +
-        '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.type || '-') + '</td>' +
-        '<td class="py-2 pr-4 text-neutral-400">' + diffEsc(e.language || '-') + '</td></tr>';
-    }).join(''));
-  } else {
-    body = diffTable(['Severity', 'Vuln class', 'Title', 'File:Line', 'Function', 'Exploitable'], items.map(function (e) {
-      return '<tr>' + diffSevCell(e.severity) +
-        '<td class="py-2 pr-4 font-medium">' + diffEsc(e.id) + '</td>' +
-        '<td class="py-2 pr-4 text-neutral-300">' + diffEsc(e.title) + '</td>' +
-        '<td class="py-2 pr-4 mono text-neutral-400 break-all">' + diffEsc(e.file) + (e.line != null ? ':' + diffEsc(e.line) : '') + '</td>' +
-        '<td class="py-2 pr-4 mono text-neutral-400">' + diffEsc(e.name) + '</td>' +
-        '<td class="py-2 pr-4">' + (e.exploitable ? '<span class="text-red-400 font-bold">YES</span>' : '<span class="text-neutral-600">-</span>') + '</td></tr>';
-    }).join(''));
-  }
-  _currentComplianceMatches = null;
-  openModal('<h3 class="text-lg font-bold mb-1">' + t.label + '</h3>' +
-    '<p class="text-xs text-neutral-500 mb-6">' + items.length + ' item(s)</p>' + body);
 }
 
 function openComplianceDiffModal(fi, gi) {
