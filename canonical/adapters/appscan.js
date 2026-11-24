@@ -24,6 +24,50 @@ const BEHAVIOR_TITLE = {
 const HARDENING = /(^|[._-])(pie|relro|canary|fortify|nx|exec[_-]?stack|textrel|rpath|wx|stripped|hardening|bitcode|arc|stack[_-]?protector|no[_-]?gnu[_-]?stack)([._-]|$)/i;
 const BEHAVIOUR = /behavio|intent|exfil|beacon|c2\b|dynamic[_-]?load|obfusc|persist|anti[_-]?(debug|analysis)|self[_-]?modif/i;
 
+// Advisories of third-party components. The modules (binary/lib/advisories.js addAdvisoryFindings) also file each advisory as an ordinary
+// entry of their own vulnerabilities[] list so their native summary, counts and diffs include it. In the canonical report a dependency's
+// advisories exist ONCE, as sc_vuln / sc_infection findings of the dependency (built from dependencies[].vulnerabilities[] below), so those
+// module-level copies are dropped here: they would otherwise show up as extra "code" vulnerabilities.
+const DEP_ADVISORY_RULES = new Set(['binary.component.vulnerable', 'package.vulnerable', 'package.malicious', 'package.dep.vulnerable', 'package.dep.malicious']);
+export const isDepAdvisory = (f) => !!f && (isObj(f.component) && f.component.advisory != null || DEP_ADVISORY_RULES.has(f.rule));
+
+// One advisory on one component, in the shape of the SCA report's vulnerability records (what the SCA vulnerability modal, client/scvuln.js,
+// renders): the advisory as the module found it, plus the package it applies to. Fields the advisory already carries are kept.
+function scRecord(v, d, cid) {
+  return {
+    ...v,
+    affected_dependency: v.affected_dependency ?? d.name ?? null,
+    affected_dependency_version: v.affected_dependency_version ?? d.version ?? null,
+    affected_package_id: v.affected_package_id ?? cid,
+    ecosystem: v.ecosystem ?? d.ecosystem ?? null,
+    url: v.url ?? (v.id ? `https://osv.dev/vulnerability/${encodeURIComponent(v.id)}` : null),
+    affected_dependency_sequences: arr(v.affected_dependency_sequences),
+  };
+}
+
+// The module's diff against the previous run lists each dependency advisory as an ordinary vulnerability (the same module-level copy that is
+// left out of the findings above). The canonical diff keeps those entries, so it covers every finding of the report, but files them the way
+// the findings are filed: SCA title and rule id, type sc_vuln / sc_infection, the dependency as artifact. The component comes from the entry
+// itself (mobile/index.js diffReports) or, for an entry of an older report, from the matching current finding (same fingerprint).
+function dependencyDiffs(d, p) {
+  if (!isObj(d) || !isObj(d.vulnerabilities)) return d ?? null;
+  const current = new Map(arr(p.vulnerabilities).filter(isDepAdvisory).map((f) => [f.fingerprint, f]));
+  const entry = (e) => {
+    if (!isDepAdvisory(e)) return e;
+    const comp = e.component || current.get(e.fingerprint)?.component;
+    const infection = /\.malicious$/.test(e.rule || '');
+    const type = infection ? TYPES.SC_INFECTION : TYPES.SC_VULN;
+    if (!comp || comp.advisory == null) return { ...e, kind: 'dependency', type };   // identity unknown (older report): keep the module's own wording
+    const dname = depName(comp.name, comp.ecosystem, comp.version);
+    return { ...e, rule: `${comp.advisory}-${comp.ecosystem ?? 'unknown'}-${comp.name ?? 'unknown'}@${comp.version ?? ''}`, title: `${comp.advisory} affecting ${dname}`, artifact: dname, kind: 'dependency', type };
+  };
+  const list = (l) => { const seen = new Set(); return arr(l).map(entry).filter((e) => { if (e.kind !== 'dependency') return true; const k = `${e.type}|${e.rule}|${e.artifact}`; if (seen.has(k)) return false; seen.add(k); return true; }); };
+  const v = { new: list(d.vulnerabilities.new), unchanged: list(d.vulnerabilities.unchanged), removed: list(d.vulnerabilities.removed) };
+  const out = { ...d, vulnerabilities: v };
+  if (isObj(d.counts)) out.counts = { ...d.counts, new_vulnerabilities: v.new.length, unchanged_vulnerabilities: v.unchanged.length, fixed_vulnerabilities: v.removed.length };
+  return out;
+}
+
 export function translate(p, opts, H) {
   const R = makeRel(opts.cwd);
   const gate = p.gate || {};
@@ -51,7 +95,7 @@ export function translate(p, opts, H) {
       details: R.deep(f),
     }));
   };
-  for (const f of arr(p.vulnerabilities)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE);
+  for (const f of arr(p.vulnerabilities)) { if (isDepAdvisory(f)) continue; push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE); }
   for (const f of arr(p.secrets)) push(f, TYPES.SECRET);
   for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
 
@@ -66,21 +110,27 @@ export function translate(p, opts, H) {
     }
   }
 
+  // Third-party components: inventory type "dependency"; their advisories are sc_vuln / sc_infection findings titled and keyed exactly like the SCA report's.
+  const seenAdvisory = new Set();
   for (const d of arr(p.dependencies)) {
     const cid = first(d.purl, `${d.name}@${d.version ?? ''}`);
-    out.inventory.push(mkInventory({ component_id: cid, component_name: depName(d.name, d.ecosystem, d.version), status: d.lookup_status === 'not_queryable' ? 'not_queryable' : 'unknown', type: 'dependency', details: R.deep(d) }));
+    const dname = depName(d.name, d.ecosystem, d.version);
+    out.inventory.push(mkInventory({ component_id: cid, component_name: dname, status: d.lookup_status === 'not_queryable' ? 'not_queryable' : 'unknown', type: 'dependency', details: R.deep(d) }));
     for (const v of arr(d.vulnerabilities)) {
+      const key = `${cid}\u0000${v.id}`;
+      if (seenAdvisory.has(key)) continue;
+      seenAdvisory.add(key);
       out.findings.push(mkFinding({
-        rule_id: v.id,
-        title: first(v.summary, v.id),
+        rule_id: `${v.id}-${d.ecosystem ?? 'unknown'}-${d.name ?? 'unknown'}@${d.version ?? ''}`,   // advisory-ecosystem-pkgname@version (as in the SCA report)
+        title: `${v.id} affecting ${dname}`,
         component_id: cid,
-        component_name: depName(d.name, d.ecosystem, d.version),
+        component_name: dname,
         component_type: 'dependency',
         severity: v.severity,
-        confidence: d.confidence ?? "high",
+        confidence: d.confidence ?? 'high',
         violate_policy: v.is_policy_violation ?? violates(v.severity),
-        type: v.is_infection ? TYPES.INFECTION : TYPES.VULN,
-        details: R.deep(v),
+        type: v.is_infection ? TYPES.SC_INFECTION : TYPES.SC_VULN,
+        details: R.deep(scRecord(v, d, cid)),
       }));
     }
   }
@@ -162,7 +212,7 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { flags: { min_severity: p.min_severity ?? null, hidden_by_filter: p.hidden_by_filter ?? 0 }, gate: p.gate ?? null, limits: p.limits ?? null, analysis: p.analysis ?? null },
     ...out,
-    stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: p.diffs ?? null, notes: p.analysis_notes ?? null },
+    stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: dependencyDiffs(p.diffs, p), notes: p.analysis_notes ?? null },
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };
@@ -172,7 +222,7 @@ export function translate(p, opts, H) {
 // (mobile/lib/report.js buildHtml) for the executive-summary section, which that template renders on the server.
 export function restore(c) {
   const si = c.metadata?.scan_info || {}, st = c.stats || {}, src = st.source || {}, pol = c.policy || {};
-  const own = (f) => f.type !== TYPES.VULN && f.type !== TYPES.INFECTION;
+  const own = (f) => ![TYPES.VULN, TYPES.INFECTION, TYPES.SC_VULN, TYPES.SC_INFECTION].includes(f.type);
   const cat = (k) => arr(c.findings).filter((f) => own(f) && f.details?.category === k).map((f) => f.details);
   const t0 = arr(c.scopes).find((s) => s.type === 'artifact' || s.type === 'mcp') || {};
   const { type: _t, name, ...target } = t0;

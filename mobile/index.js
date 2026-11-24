@@ -305,6 +305,7 @@ export function diffReports(prev, current) {
     fingerprint: keyOf(f), rule: f.rule, severity: f.severity, title: f.title,
     artifact: f.artifact, line: f.line, app: f.app,
     masvs: f.masvs, cwe: f.cwe,
+    ...(f.component ? { component: f.component } : {}),          // the third-party component of a dependency advisory (binary/lib/advisories.js)
   });
   const compare = (before, after) => {
     const beforeMap = new Map(before.map(f => [keyOf(f), f]));

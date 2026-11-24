@@ -1200,7 +1200,7 @@ function diffLists(d) {
     var cur = byKey[e.id + '::' + e.name + '@' + e.version] || {};
     return {
       title: e.title || cur.title || cur.summary || e.id,
-      type: 'sc_vuln' + (cur.is_infection ? 'sc_infection' : ''),
+      type: cur.is_infection ? 'sc_infection' : 'sc_vuln',
       severity: e.severity || (cur.is_infection ? 'infection' : cur.severity)
     };
   };

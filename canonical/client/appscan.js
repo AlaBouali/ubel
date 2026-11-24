@@ -8,7 +8,7 @@
 
 const reportData = (function (C) {
   const st = C.stats || {};
-  const own = function (f) { return f.type !== 'vuln' && f.type !== 'infection'; };
+  const own = function (f) { return ['vuln', 'infection', 'sc_vuln', 'sc_infection'].indexOf(f.type) < 0; };   // dependency advisories (sc_vuln / sc_infection; vuln / infection in older files) are not module issues
   const byCat = function (cat) { return C.findings.filter(function (f) { return own(f) && f.details && f.details.category === cat; }).map(function (f) { return f.details; }); };
   return {
     vulnerabilities: byCat('vulnerability'), secrets: byCat('secret'), misconfigurations: byCat('misconfiguration'),
@@ -106,7 +106,7 @@ function diffLists(d) {
   DIFF_KINDS.forEach(function (kind) {
     DIFF_LIST_MAP.forEach(function (m) {
       ((d[kind[0]] && d[kind[0]][m[0]]) || []).forEach(function (item) {
-        out[m[1]].push({ title: item.title || item.rule || 'Untitled issue', type: kind[1], severity: item.severity });
+        out[m[1]].push({ title: item.title || item.rule || 'Untitled issue', type: item.type || kind[1], severity: item.type === 'sc_infection' ? 'infection' : item.severity });
       });
     });
   });
@@ -269,7 +269,9 @@ function openDependencyModal(index) {
 const FAMILY = {
   openFinding: function (i) {
     const f = CANON.findings[i];
-    if (f.type === 'vuln' || f.type === 'infection') {
+    if (f.type === 'sc_vuln' || f.type === 'sc_infection' || f.type === 'vuln' || f.type === 'infection') {
+      // the advisory on its own: the SCA vulnerability modal (client/scvuln.js), not the dependency's modal
+      if (window.UBEL_SC_VULN && f.details && window.UBEL_SC_VULN.open(f.details)) return true;
       const k = reportData.dependencies.findIndex(function (d) { return (d.purl || (d.name + '@' + (d.version || ''))) === f.affected_component_id; });
       if (k < 0) return false; openDependencyModal(k); return true;
     }

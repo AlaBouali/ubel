@@ -7,7 +7,8 @@
 // the part common to all modules (dashboard, lists with filters, scopes, stats, policy, system info). client/diffs.js is the Diffs tab's
 // severity view (cards per severity level; a searchable, paginated Title / Type table in the modal), shared by all families; the per-framework
 // compliance diffs stay in each family's own code. The vm / k8s / runtime reports (bundle
-// posture) also carry client/scvuln.js — the SCA vulnerability modal — when they hold sc_vuln / sc_infection findings or a package list (SCA package items).
+// posture) also carry client/scvuln.js — the SCA vulnerability modal — when they hold sc_vuln / sc_infection findings or a package list (SCA package items); so do the
+// app-scan reports (package / binary / mobile / mcp) when they hold sc_vuln / sc_infection findings: each opens on its own, not inside its dependency's modal.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,7 +115,7 @@ export async function generateCanonicalHtml(canon, opts = {}) {
         </div>
     </div>
     <script>const CANON = ${forScript(canon)};</script>
-    ${bundle === 'posture' && ((canon.findings || []).some((f) => f.type === 'sc_vuln' || f.type === 'sc_infection') || (canon.inventory || []).some((c) => c.type === 'dependency' && c.details && c.details.state && String(c.details.id || '').startsWith('pkg:'))) ? `<script>${read('scvuln.js')}</script>` : ''}
+    ${(bundle === 'appscan' && (canon.findings || []).some((f) => f.type === 'sc_vuln' || f.type === 'sc_infection')) || bundle === 'posture' && ((canon.findings || []).some((f) => f.type === 'sc_vuln' || f.type === 'sc_infection') || (canon.inventory || []).some((c) => c.type === 'dependency' && c.details && c.details.state && String(c.details.id || '').startsWith('pkg:'))) ? `<script>${read('scvuln.js')}</script>` : ''}
     <script>${read('diffs.js')}</script>
     <script>${read(`${bundle}.js`)}</script>
     <script>${read('shell.js')}</script>
