@@ -128,7 +128,7 @@ export function mkFinding(o) {
   f.rule_id = o.rule_id ?? null;
   f.title = o.title ?? o.rule_id ?? null;
   f.affected_component_id = o.component_id ?? null;
-  f.affected_component_name = o.component_name ?? null;
+  f.affected_component_name = o.component_name ?? o.component_id ?? null;
   f.affected_component_type = o.component_type ?? null;
   f.severity = sev(o.severity);
   f.confidence = o.confidence == null ? null : String(o.confidence).toLowerCase();

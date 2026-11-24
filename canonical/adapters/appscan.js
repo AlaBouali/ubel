@@ -140,7 +140,8 @@ export function translate(p, opts, H) {
   // ── observations (appended after the findings so those keep their positions) ──
   const LOWER = { critical: 'high', high: 'medium', medium: 'low', low: 'info', info: 'info' };
   for (const a of apps) {
-    const cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
+    let cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
+    if (cname == null || cname === '' || cname === 'null') cname = cid;   // fallback for a missing name
     const base = { component_id: cid, component_name: cname, component_type: 'application' };
     // what the code does: one finding per behavior category. Common capabilities are the normal case (info); the rest are rated by what
     // they let code do. Code that is only in third-party library code is rated one level lower.
