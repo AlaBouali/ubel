@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getLinux } from '../sca/os_metadata.js';
+import { getOSMetadata } from '../sca/os_metadata.js';
 
 export const SCHEMA_VERSION = '0.1.0';
 
@@ -204,9 +204,14 @@ export function failOnPredicate(failOn) {
 
 // ── metadata ────────────────────────────────────────────────────────────────
 export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = null, runtime = {} }) {
+  const osm = getOSMetadata("/");   // returns the metadata object itself (it is not a factory)
+  const machine_name = `${osm.os_name ?? 'unknown'}: ${osm.os_version ?? 'unknown'}`
+  if (scan.scan_type === 'runtime' || scan.scan_scope === 'developer_platform') {
+    scan.asset_id=scan.machine_id;
+    scan.asset_name=machine_name;
+  }
   const pkg = readPkg();
   const live = !!opts.live;
-  const osm = os_meta || {};
   const g = git || {};
   if (live && !osm.os_id && os.platform() === 'linux') {
     const lm = getLinux();   // returns the metadata object itself (it is not a factory)
@@ -230,6 +235,7 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
       asset_name: scan.asset_name ?? null,
       asset_type: scan.asset_type ?? null,
       machine_id: scan.machine_id ?? null,
+      machine_name: machine_name ?? null,
     },
     tool_info: {
       tool_name: pkg.name ?? '@arcane-spark/ubel-node',
