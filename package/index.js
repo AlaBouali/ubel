@@ -5,6 +5,8 @@
 // digest the registry published, and reads it without installing, building or running anything: install / build / import-time hooks, source
 // behavior, pinned versions of its dependencies, remote hosts, hardcoded secrets, bundled components, native binaries, archive integrity.
 // Reuses UBEL's findings, secret scanner, binary analyzer, report and --fail-on gate (the report is report.package.json + report.package.html).
+// Optional --sast (alias --no-llm): also runs the static rule engine of `ubel-sast --no-llm` over the package's source (no model, no network), with
+// --rules-dir for your own Semgrep-syntax rules and --max-chunks / --max-chunk-size for its limits (see lib/sast.js).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +14,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fetchPackage } from './lib/registry.js';
 import { ECOSYSTEMS, UNSUPPORTED, resolveEcosystem, ecosystemNames } from './lib/ecosystems.js';
-import { analyzePackage, resolveAdvisories, DEFAULTS } from './lib/scan.js';
+import { analyzePackage, resolveAdvisories, DEFAULTS, SAST_DEFAULTS } from './lib/scan.js';
 import './lib/rules.js';
 import { SEVERITY_RANK, SEVERITIES } from '../mobile/lib/rules.js';
 import { buildPayload, buildHtml, flattenFindings } from '../mobile/lib/report.js';
@@ -51,6 +53,14 @@ Options:
   --offline                  do not look anything up on OSV.dev / NVD (advisory checks are skipped and reported as an analysis gap)
   --max-size-mb <n>          largest archive to download (default 256) · --max-text-kb <n> largest text file read (default ${DEFAULTS.maxTextKb})
   --max-binary-mb <n>        largest native file analysed (default ${DEFAULTS.maxBinaryMb}) · --max-binaries <n> most native files analysed (default ${DEFAULTS.maxBinaries})
+  --sast | --no-llm          also run static application security testing (SAST) over the package's source: the deterministic rule engine of
+                             \`ubel-sast --no-llm\` (injection, unsafe deserialization, path traversal, weak crypto, … with data-flow checks). No model,
+                             no API key, no network; nothing leaves this machine. The package's source files are written to a private temporary
+                             directory for the analysis and deleted afterwards (without this flag nothing is ever written to disk)
+  --rules-dir <dir[,dir…]>   with --sast: also run YOUR Semgrep-syntax rules (*.yml / *.yaml with a top-level \`rules:\`) from these directories or
+                             files; repeatable. Unsupported rules are skipped, listed in the report and reported as an analysis gap
+  --max-chunks <n>           with --sast: most chunks of source (functions, classes, templates, config files) to analyse (default ${SAST_DEFAULTS.maxChunks})
+  --max-chunk-size <n>       with --sast: hard cap on characters per chunk; longer chunks / lines are split (default ${SAST_DEFAULTS.maxChunkSize})
   --working-dir <path>       where .ubel/ (reports, asset id) is written (default: the current directory)
   --min-severity critical|high|medium|low|info
   --fail-on critical|high|medium|low|info|none|<count>:<severity>     (default: critical)
@@ -67,6 +77,7 @@ Looks for:
   • declared dependencies with their pin class (pinned / minimum / range / unbounded / not from the registry), looked up on OSV.dev (known
     vulnerabilities and known-malicious MAL- advisories) by exact version; bundled copies of other packages
   • remote hosts named in the files (flagging paste sites, callback services, tunnels, bare IPs, clear text) · hardcoded secrets
+  • with --sast: vulnerabilities in the package's own source, found by the static rule engine (and your --rules-dir rules); tests and docs are skipped
   • native binaries inside the package (ELF / Mach-O / PE): scanned like ubel-binary
   • integrity: the archive against the registry's digest, the registry's manifest against the tarball's (npm manifest confusion), archive
     tricks (path traversal, links, setuid), disguised binaries, yanked / deprecated releases
@@ -83,7 +94,8 @@ Exit codes: 0 gate passed and analysis complete · 1 the package could not be fe
 const VALID_SEVERITIES = new Set(SEVERITIES);
 
 export function parseArgs(argv) {
-  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, allowPartial: false, offline: false, allowInsecure: false, maxSizeMb: 256, maxTextKb: DEFAULTS.maxTextKb, maxBinaryMb: DEFAULTS.maxBinaryMb, maxBinaries: DEFAULTS.maxBinaries, artifact: 'all', maxWheels: 2, headers: {}, positional: [], ecosystem: null, registry: null, file: null, token: process.env.UBEL_PACKAGE_TOKEN || null };
+  const args = { minSeverity: 'info', failOn: 'critical', verbose: false, quiet: false, allowPartial: false, offline: false, allowInsecure: false, maxSizeMb: 256, maxTextKb: DEFAULTS.maxTextKb, maxBinaryMb: DEFAULTS.maxBinaryMb, maxBinaries: DEFAULTS.maxBinaries, artifact: 'all', maxWheels: 2, headers: {}, positional: [], ecosystem: null, registry: null, file: null, token: process.env.UBEL_PACKAGE_TOKEN || null,
+    sast: false, rulesDir: [], maxChunks: SAST_DEFAULTS.maxChunks, maxChunkSize: SAST_DEFAULTS.maxChunkSize, sastLimitsSet: [] };
   const bad = msg => { console.error(`${msg}\n`); console.log(HELP); process.exit(2); };
   const value = (flag, i) => { const v = argv[i + 1]; if (v === undefined || (v.startsWith('--') && v.length > 2)) bad(`${flag} requires a value`); return v; };
   const num = (flag, i, min, max) => { const n = Number(value(flag, i)); if (!Number.isFinite(n) || n < min || n > max) bad(`${flag} must be a number between ${min} and ${max}`); return n; };
@@ -101,6 +113,10 @@ export function parseArgs(argv) {
     else if (a === '--max-text-kb') args.maxTextKb = num(a, i++, 16, 65536);
     else if (a === '--max-binary-mb') args.maxBinaryMb = num(a, i++, 1, 1024);
     else if (a === '--max-binaries') args.maxBinaries = num(a, i++, 0, 500);
+    else if (a === '--sast' || a === '--no-llm') args.sast = true;
+    else if (a === '--rules-dir') args.rulesDir.push(...value(a, i++).split(',').map(d => d.trim()).filter(Boolean));
+    else if (a === '--max-chunks') { args.maxChunks = Math.floor(num(a, i++, 1, 10_000_000)); args.sastLimitsSet.push(a); }
+    else if (a === '--max-chunk-size') { args.maxChunkSize = Math.floor(num(a, i++, 1_000, 100_000_000)); args.sastLimitsSet.push(a); }
     else if (a === '--working-dir') args.workingDir = value(a, i++);
     else if (a === '--min-severity') args.minSeverity = value(a, i++);
     else if (a === '--fail-on') args.failOn = value(a, i++);
@@ -137,6 +153,10 @@ export function parseArgs(argv) {
   if (!VALID_SEVERITIES.has(args.minSeverity)) bad(`--min-severity must be one of: ${SEVERITIES.join(', ')}`);
   args.failOnParsed = parseFailOn(args.failOn);
   if (!args.failOnParsed) bad(`--fail-on must be "none", one of: ${SEVERITIES.join(', ')}, or "<count>:<severity>" (got "${args.failOn}")`);
+  // SAST options: --rules-dir is refused without --sast (silently skipping a rule set would read as "checked, nothing found"); a limit is only warned about
+  if (args.rulesDir.length && !args.sast) bad('--rules-dir requires --sast (--no-llm): it loads Semgrep-syntax rules for the static source analysis');
+  if (args.sastLimitsSet.length && !args.sast) console.error(`[ubel-package] ${[...new Set(args.sastLimitsSet)].join(' ')} only applies with --sast (--no-llm); ignored.`);
+  for (const d of args.rulesDir) if (!fs.existsSync(path.resolve(d))) bad(`--rules-dir: "${d}" does not exist`);
   return args;
 }
 
@@ -169,6 +189,12 @@ async function writeReports(meta, scan, notes, args) {
   const build = diffs => buildPayload({ meta: base, target: scan.target, apps: scan.apps, findings: scan.findings, dependencies: scan.dependencies, dependencySummary: scan.dependencySummary, notes, diffs });
   let payload = build(null);
   payload = build(diffReports(loadPreviousReport(zipPath, TAG, jsonName, r => reportIdentity(r) === reportIdentity(payload)), payload));
+  // what the optional static source analysis ran with and what it covered (engine, rules, limits, counts); absent when --sast was not used
+  if (scan.stats?.sast) {
+    const sa = scan.stats.sast;
+    payload.sast = sa;
+    payload.limits = [...(payload.limits || []), `Static source analysis (--sast) is a deterministic rule engine, not a model: it follows data flow inside the package's own code and checks the rules it has (${sa.rules_loaded ?? '?'} built in${sa.custom_rules_loaded ? ` plus ${sa.custom_rules_loaded} of yours` : ''}). Weaknesses that need semantic review (${(sa.not_statically_decidable || []).slice(0, 4).join('; ') || 'business logic, authorization design'}) are not decided by it, and code in other languages or formats is not read. Findings are leads to verify, not proof of exploitability.`];
+  }
   const json = JSON.stringify(payload, null, 2);
   const html = await buildHtml(payload);
   const latestJson = path.join(latestDir, reportFileName('latest', TAG, 'json'));
@@ -197,7 +223,10 @@ export async function scanPackage(opts) {
       maxBytes: (opts.maxSizeMb || 256) * MB, artifact: opts.artifact || 'all', maxWheels: opts.maxWheels ?? 2, sumdb: opts.sumdb, log: opts.verbose ? log : undefined,
     });
   if (opts.verbose) log(`[ubel-package] ${pkg.ecosystem} ${pkg.name}@${pkg.version}: ${pkg.artifacts.map(a => `${a.filename} (${a.size} bytes, digest ${a.integrity.state})`).join('; ')}`);
-  const scan = await analyzePackage(pkg, { maxTextKb: opts.maxTextKb, maxBinaryMb: opts.maxBinaryMb, maxBinaries: opts.maxBinaries, local: Boolean(opts.file), log: opts.verbose ? log : undefined });
+  const scan = await analyzePackage(pkg, {
+    maxTextKb: opts.maxTextKb, maxBinaryMb: opts.maxBinaryMb, maxBinaries: opts.maxBinaries, local: Boolean(opts.file), log: opts.verbose ? log : undefined,
+    ...(opts.sast ? { sast: true, rulesDir: opts.rulesDir || [], maxChunks: opts.maxChunks ?? SAST_DEFAULTS.maxChunks, maxChunkSize: opts.maxChunkSize ?? SAST_DEFAULTS.maxChunkSize } : {}),
+  });
   scan.package = { ecosystem: pkg.ecosystem, name: pkg.name, version: pkg.version };
   return scan;
 }
@@ -234,6 +263,7 @@ export async function main() {
     const ds = payload.dependency_summary || {};
     const pk = scan.apps[0].package;
     console.log(`Hooks reaching consumers: ${pk.hooks.filter(h => h.consumer !== false).length} · Dependencies declared: ${pk.dependency_total} (${Object.entries(pk.pin_summary).map(([k, v]) => `${v} ${k}`).join(', ') || 'none'}) · Components checked: ${ds.queryable || 0}, with advisories: ${ds.vulnerable_dependencies || 0}`);
+    if (scan.stats?.sast) { const sa = scan.stats.sast; console.log(`SAST (static rules, no LLM): ${sa.findings} finding(s) · ${sa.chunks_scanned} chunk(s) in ${sa.files_staged} file(s) · ${sa.rules_loaded ?? '?'} rule(s)${sa.custom_rules_loaded ? ` (${sa.custom_rules_loaded} custom)` : ''}`); }
     for (const f of flattenFindings(payload).filter(x => x.severity !== 'info').slice(0, 40)) console.log(`  [${f.severity.toUpperCase()}] ${f.title} -- ${f.artifact}`);
     for (const n of payload.analysis_notes) console.log(`  note: ${n}`);
   }

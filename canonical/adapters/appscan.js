@@ -21,6 +21,9 @@ const BEHAVIOR_TITLE = {
   persistence: 'Persistence', input_capture: 'Input capture / sensitive devices', crypto: 'Cryptography', system_info: 'System fingerprinting', credentials: 'Credential / environment access', obfuscation: 'Obfuscation',
 };
 
+// ubel-package --sast (static source analysis): rule ids are `package.sast.<engine rule>`; user rules (--rules-dir) can have any id, including words
+// the BEHAVIOUR pattern below looks for ("exfil", "persist" …), so these are always code vulnerabilities, never behavior observations.
+const SAST_RULE = /^package\.sast\./;
 const HARDENING = /(^|[._-])(pie|relro|canary|fortify|nx|exec[_-]?stack|textrel|rpath|wx|stripped|hardening|bitcode|arc|stack[_-]?protector|no[_-]?gnu[_-]?stack)([._-]|$)/i;
 const BEHAVIOUR = /behavio|intent|exfil|beacon|c2\b|dynamic[_-]?load|obfusc|persist|anti[_-]?(debug|analysis)|self[_-]?modif/i;
 
@@ -98,7 +101,7 @@ export function translate(p, opts, H) {
       details: R.deep(f),
     }));
   };
-  for (const f of arr(p.vulnerabilities)) { if (isDepAdvisory(f)) continue; push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE); }
+  for (const f of arr(p.vulnerabilities)) { if (isDepAdvisory(f)) continue; push(f, !SAST_RULE.test(f.rule || '') && BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE); }
   for (const f of arr(p.secrets)) push(f, TYPES.SECRET);
   for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
 
@@ -140,8 +143,7 @@ export function translate(p, opts, H) {
   // ── observations (appended after the findings so those keep their positions) ──
   const LOWER = { critical: 'high', high: 'medium', medium: 'low', low: 'info', info: 'info' };
   for (const a of apps) {
-    let cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
-    if (cname == null || cname === '' || cname === 'null') cname = cid;   // fallback for a missing name
+    const cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
     const base = { component_id: cid, component_name: cname, component_type: 'application' };
     // what the code does: one finding per behavior category. Common capabilities are the normal case (info); the rest are rated by what
     // they let code do. Code that is only in third-party library code is rated one level lower.
@@ -214,7 +216,8 @@ export function translate(p, opts, H) {
   });
   return {
     metadata: meta,
-    policy: { flags: { min_severity: p.min_severity ?? null, hidden_by_filter: p.hidden_by_filter ?? 0 }, gate: p.gate ?? null, limits: p.limits ?? null, analysis: p.analysis ?? null },
+    // flags.sast: what the optional static source analysis (ubel-package --sast / --no-llm) ran with and covered: engine, rules, custom rule directories, limits, counts
+    policy: { flags: { min_severity: p.min_severity ?? null, hidden_by_filter: p.hidden_by_filter ?? 0, ...(p.sast ? { sast: R.deep(p.sast) } : {}) }, gate: p.gate ?? null, limits: p.limits ?? null, analysis: p.analysis ?? null },
     ...out,
     stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: dependencyDiffs(p.diffs, p), notes: p.analysis_notes ?? null },
     compliance_summary: p.compliance_summary ?? null,
@@ -238,7 +241,7 @@ export function restore(c) {
     dependencies: arr(c.inventory).filter((i) => i.type === 'dependency').map((i) => i.details),
     vulnerabilities: cat('vulnerability'), secrets: cat('secret'), misconfigurations: cat('misconfiguration'),
     summary: src.summary, stats: src.stats, dependency_summary: src.dependency_summary, analysis_notes: st.notes,
-    limits: pol.limits, analysis: pol.analysis, gate: pol.gate, min_severity: pol.flags?.min_severity, hidden_by_filter: pol.flags?.hidden_by_filter,
+    limits: pol.limits, analysis: pol.analysis, gate: pol.gate, min_severity: pol.flags?.min_severity, hidden_by_filter: pol.flags?.hidden_by_filter, ...(pol.flags?.sast ? { sast: pol.flags.sast } : {}),
     compliance_summary: c.compliance_summary, executive_summary: c.executive_summary, diffs: st.diffs,
   };
 }

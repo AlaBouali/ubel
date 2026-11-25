@@ -82,3 +82,14 @@ export const PACKAGE_RULES = {
 
 Object.assign(RULES, PACKAGE_RULES);
 export const PACKAGE_RULE_IDS = Object.keys(PACKAGE_RULES);
+
+// ── static source analysis (--sast / --no-llm) ────────────────────────────────────────────────────────────────────────────────
+// The engine of `ubel-sast --no-llm` has hundreds of rules of its own (and the user's, with --rules-dir), so they are not listed here: each rule
+// that fires is registered on first use as `package.sast.<engine rule id>` (custom rules: `package.sast.custom.<id>`), filed under PKG-CODE like
+// the other findings about what the package's source does. The severity and title are the engine's; the CWE comes from the vulnerability class.
+export const SAST_RULE_PREFIX = 'package.sast.';
+const SAST_REMEDIATION = 'Review the flagged line: fix the weakness in the package, or avoid the code path that reaches it. A finding here is a lead from static analysis, not proof that the package is exploitable in your use of it.';
+export function registerSastRule(id, { severity, title, cwe }) {
+  if (!RULES[id]) RULES[id] = R(severity, title, C, cwe ?? null, SAST_REMEDIATION);
+  return RULES[id];
+}

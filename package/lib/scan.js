@@ -25,6 +25,9 @@ import { addAdvisoryFindings } from '../../binary/lib/advisories.js';
 
 const MB = 1024 * 1024;
 export const DEFAULTS = { maxTextKb: 2048, maxBinaryMb: 64, maxBinaries: 25, maxTotalReadMb: 512 };
+// limits of the optional static source analysis (--sast / --no-llm): chunks of source code (functions, classes, templates, config files) and
+// characters per chunk. Kept apart from DEFAULTS, which library callers spread into their options.
+export const SAST_DEFAULTS = { maxChunks: 500_000, maxChunkSize: 1_000_000 };
 
 const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
 const sample = (list, n = 12) => list.slice(0, n);
@@ -49,7 +52,9 @@ function openArtifact(pkg, artifact, notes) {
 
 /**
  * @param {object} pkg  result of fetchPackage() (or the same shape for a local file): {ecosystem, name, version, registry, artifacts[], meta, notes}
- * @param {object} [opts] {maxTextKb, maxBinaryMb, maxBinaries, log}
+ * @param {object} [opts] {maxTextKb, maxBinaryMb, maxBinaries, log, sast, rulesDir, maxChunks, maxChunkSize}
+ *   sast: also run the static rule engine of `ubel-sast --no-llm` over the package's source (no LLM, no network); rulesDir: string[] of directories /
+ *   files of Semgrep-syntax rules for it; maxChunks / maxChunkSize: its limits (SAST_DEFAULTS).
  */
 export async function analyzePackage(pkg, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
@@ -152,6 +157,9 @@ export async function analyzePackage(pkg, opts = {}) {
   for (const { archive } of opened) for (const f of archive.files) { if (f.type !== 'file') continue; if (/\.py$/i.test(f.path)) pyStems.add(f.path.replace(/\.py$/i, '')); if (/\.(?:java|kt|scala)$/i.test(f.path)) javaStems.add(f.path.replace(/\.[a-z]+$/i, '')); }
   const multi = opened.length > 1;
   let readBudgetNoted = false;
+  // static source analysis (--sast): the text files the engine can read are written to a private temp directory as the walk goes by (see sast.js)
+  let sast = null, sastFinding = null;
+  if (o.sast) { const m = await import('./sast.js'); sast = new m.SastStage(); sastFinding = m.sastFinding; }
 
   for (const { artifact, archive } of opened) {
     for (const f of archive.files) {
@@ -228,6 +236,13 @@ export async function analyzePackage(pkg, opts = {}) {
       const text = buf.toString('utf8');
       const lines = text.split(/\r?\n/);
       const lockfile = isLockfile(f.path);
+      if (sast && !lockfile) {
+        const vendored = role.role === 'vendored';
+        sast.add(f, text, {
+          label, origin: vendored ? 'library' : 'app', exclude: !isInstall && (role.role === 'test' || role.role === 'docs'),
+          context: isInstall ? ` This file runs on the consumer's machine: ${installPaths.get(f.path).reason}.` : vendored ? ` The file is a bundled copy of ${role.owner}.` : '',
+        });
+      }
       // a type annotation (`private_key: CertificateIssuerPrivateKeyTypes,`) is not a key-value credential: blank those lines in typed source files (line numbers stay)
       const scanLines = TYPED_SRC.test(f.path) ? lines.map(l => (ANNOTATION.test(l) ? '' : l)) : lines;
       if (!lockfile) (role.role === 'code' ? appScanner : libScanner).add(label, scanLines);
@@ -255,6 +270,20 @@ export async function analyzePackage(pkg, opts = {}) {
   }
   if (appScanner.truncated || libScanner.truncated) gap(notes, 'More text than the secret scanner\'s line budget; the rest of the package was not scanned for secrets.');
   appScanner.run(); libScanner.run();
+
+  // ── 5b. static source analysis (SAST, no LLM) ──────────────────────────────────────────────────────────────────────────────────
+  let sastSummary = null;
+  if (sast) {
+    try {
+      const r = await sast.analyze({ rulesDirs: o.rulesDir, maxChunks: o.maxChunks ?? SAST_DEFAULTS.maxChunks, maxChunkSize: o.maxChunkSize ?? SAST_DEFAULTS.maxChunkSize, maxTextKb: o.maxTextKb });
+      for (const item of r.items) { const [rule, fields] = sastFinding(item); add(rule, fields); }
+      for (const g of r.gaps) gap(notes, g);
+      for (const n of r.notes) notes.push(n);
+      sastSummary = r.summary;
+    } catch (e) {
+      gap(notes, `Static source analysis (SAST) failed: ${e.message}; the package's source was not analysed by it.`);
+    } finally { sast.dispose(); }
+  }
   if (skippedBig) notes.push(`${skippedBig} text file(s) larger than ${o.maxTextKb} KB were not read for source behavior or secrets (--max-text-kb).`);
   for (const p of installPaths.keys()) if (!installSeen.has(p) && !natives.some(n => n.path === p)) notes.push(`Install-time file ${p} (${installPaths.get(p).reason}) is not in the archive or could not be read as text.`);
   if (compiled.length) { interest.push(...sample(compiled, 20).map(p => ({ kind: 'compiled code without source', path: p, detail: 'bytecode with no matching source in the archive' }))); add('package.files.compiled_code', { artifact: appName, key: 'compiled', description: `${compiled.length} compiled bytecode file(s) have no source file next to them in the archive, so they cannot be reviewed.`, evidence: sample(compiled, 15), evidence_total: compiled.length }); }
@@ -352,18 +381,19 @@ export async function analyzePackage(pkg, opts = {}) {
       archive_problems: archiveProblems.slice(0, 100), file_count: fileCount, unpacked_bytes: unpacked,
       published_at: m.published_at || null, publisher: m.published_by || null, maintainers: m.maintainers || [], yanked: Boolean(m.yanked), yanked_reason: m.yanked_reason || null, deprecated: m.deprecated || null,
       provenance: m.provenance ?? null, signatures: m.signatures ?? null, license: man.info.license ?? m.license ?? null,
+      ...(sastSummary ? { sast: sastSummary } : {}),
     },
   };
   if (!app.package.info.license && m.license) app.package.info.license = m.license;
   if (!app.package.info.repository && m.repository) app.package.info.repository = m.repository;
   if (!app.package.info.homepage && m.homepage) app.package.info.homepage = m.homepage;
-  notes.push('Scope: install / build / import-time hooks, source behavior, remote hosts, secrets, dependencies and their pinning, bundled components, native binaries and archive integrity. The package was never installed, built or run; a pattern match shows the code refers to something, not that it is reachable.');
+  notes.push(`Scope: install / build / import-time hooks, source behavior, remote hosts, secrets, dependencies and their pinning, bundled components, native binaries${sastSummary ? ', static source analysis (SAST, no LLM)' : ''} and archive integrity. The package was never installed, built or run; a pattern match shows the code refers to something, not that it is reachable.`);
 
   const sha = pkg.artifacts[0].sha256;
   return {
     findings, apps: [app, ...nativeApps], dependencies: records, dependencySummary: null, notes,
     target: { file: appName, kind: pkg.ecosystem, size_bytes: app.size_bytes, sha256: sha, registry: pkg.registry },
-    appName, stats: { files: fileCount, analysed: filesAnalysed, hooks: hooks.length },
+    appName, stats: { files: fileCount, analysed: filesAnalysed, hooks: hooks.length, ...(sastSummary ? { sast: sastSummary } : {}) },
   };
 }
 

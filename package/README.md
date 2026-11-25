@@ -9,6 +9,8 @@ ubel-package requests 2.31.0 pypi --registry https://pypi.example.com
 ubel-package serde_derive latest cargo
 ubel-package github.com/gorilla/mux v1.8.1 go --registry https://goproxy.example.com
 ubel-package x 1.0.0 npm --file ./x-1.0.0.tgz   # analyse a local archive
+ubel-package left-pad 1.3.0 npm --sast          # also run static source analysis (SAST): no LLM, no network
+ubel-package left-pad 1.3.0 npm --sast --rules-dir ./semgrep-rules   # … and your own Semgrep-syntax rules
 ```
 
 | Ecosystem | Names accepted | Archive | Default registry |
@@ -38,6 +40,7 @@ Everything is filed in the same report as the other UBEL scanners (`report.packa
 | Remote hosts | **Behavior → Remote hosts**, findings `package.install.remote_fetch`, `package.code.exfiltration` | Every host named in the package's files, with the file it is in, whether it is clear text, private, and flags: paste sites, callback services, tunnels, chat webhooks, dynamic DNS, URL shorteners, raw code hosts, bare public IPs. A host named in install-time code is a finding only when it is a hostile kind of host or the file can reach the network (a project URL in `setup.py` metadata is not a fetch). |
 | Behavior and other behaviors | **Behavior** tab | The same inventory as `ubel-binary` (process, network, file access, dynamic loading, credentials, persistence, obfuscation …), filled from the package's source and scripts, split by where the code runs (install-time, package code, bundled dependency, tests / docs). |
 | Secrets | **Secrets** tab | The shared secret scanner over every text file (the package's own code and bundled / test code are tagged separately), plus files that normally hold secrets (`.npmrc`, `.pypirc`, private keys, `.env`, `id_rsa` …). |
+| Vulnerabilities in the package's own source (opt-in: `--sast`) | **Vulnerabilities** tab, findings `package.sast.*` | The deterministic rule engine of `ubel-sast --no-llm` (injection, unsafe deserialization, path traversal, weak crypto, template / XSS, IaC and Dockerfile checks … with data-flow and sanitiser checks) plus your own rules from `--rules-dir`. See [Static source analysis](#static-source-analysis---sast---no-llm). |
 | Binaries inside the package | **Native binaries** tab | Every ELF / Mach-O / PE file is analysed like `ubel-binary` does (hardening, risky imports, behavior, secrets in strings, hosts, component banners). A native executable named like a text file or an image is a `package.files.disguised_binary` finding. |
 | Misconfigurations | **Misconfigurations** tab | Unbounded or non-registry dependencies, package-manager configuration shipped in the package, plain-`http` sources, compiled bytecode without source, nested archives, archive problems (path traversal, links that leave the package, setuid files, device files, duplicate entries), yanked / deprecated releases. |
 | Integrity | **Package Info → downloaded archive** | The archive is checked against the registry's own digest (npm `dist.integrity`, PyPI sha256, crates.io checksum, RubyGems sha, NuGet catalog `packageHash` when the catalog is reachable, Go `h1:` against `sum.golang.org` when the default proxy is used, Composer `shasum` when the metadata has one); a mismatch is critical, a missing digest is reported as *unverified*. npm **manifest confusion** (the registry says no scripts, the tarball has them) is a high finding. |
@@ -62,6 +65,33 @@ Dependency files inside `tests/`, `docs/`, `examples/`, fixtures and vendored di
 
 Dependencies are **listed, pinned and looked up — not downloaded**. Run `ubel-package` on any of them for the same analysis; platform-specific optional dependencies (for example esbuild's prebuilt binaries) are noted as such.
 
+## Static source analysis (`--sast` / `--no-llm`)
+
+Off by default. With `--sast` (or its alias `--no-llm`, the name the same engine has in `ubel-sast`) the package's own source is also run through the **static rule engine of `ubel-sast --no-llm`**: no model, no API key, no network, and no code leaves the machine. It looks for vulnerabilities in what the package ships (command / SQL / NoSQL / LDAP injection, path traversal, unsafe deserialization, SSRF, XSS and template injection, weak crypto, ReDoS, prototype pollution, memory-safety classes in C, Dockerfile / Compose / Terraform / Kubernetes / CloudFormation / Ansible mistakes …), following data from sources to sinks inside the code and checking for sanitisers. It complements the install-time and malware-pattern analysis above: that one asks *"what does installing this do?"*, this one asks *"is the code itself exploitable?"*.
+
+```
+ubel-package <name> <version> <ecosystem> --sast [--rules-dir <dir[,dir…]>] [--max-chunks <n>] [--max-chunk-size <n>]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--sast`, `--no-llm` | switch the analysis on |
+| `--rules-dir <dir[,dir…]>` | also run **your** Semgrep-syntax rules: directories (searched recursively) or single `*.yml` / `*.yaml` files with a top-level `rules:`, repeatable. Findings are filed as `package.sast.custom.<id>`. A rule that cannot be run with its exact meaning is skipped, never run weaker, and listed in the report and as an analysis gap. Refused without `--sast`, and the directory must exist (exit 2), so a rule set is never silently skipped |
+| `--max-chunks <n>` | most chunks of source (functions, classes, templates, config files) to analyse. Default **500000**. Chunks beyond it are counted and reported as an analysis gap |
+| `--max-chunk-size <n>` | hard cap on characters per chunk; an over-long chunk or line (a minified bundle) is split to honour it. Default **1000000** |
+
+What is analysed and what is not:
+
+- **Analysed:** the package's code, install-time files, HTML / template files, and Dockerfile / Compose / IaC files; minified files and build output folders (`dist`, `build`, `bin`, …) and dot-directories included, because in a package archive everything is the package. Languages: JavaScript / TypeScript, Python, PHP, Ruby, Go, Rust, Java, Kotlin, Dart, Swift, C#, C / C++.
+- **Bundled copies** of other packages (`node_modules/`, `vendor/`, `_vendor/`) are analysed too, but are reported as library code, one severity level lower.
+- **Not analysed:** test and documentation files (they do not run on a consumer's machine; the number is noted), lockfiles, text files over `--max-text-kb`, native binaries (they have their own analysis) and languages the engine has no rules for.
+- **Not repeated:** hardcoded secrets (the secret scanner of this tool already reports them, with the same rule set), and findings the engine itself dismissed as false positives or judged mitigated by a sanitiser on every path (both counted in the report's `sast` block).
+- **Weaknesses that need semantic review** (missing authorization, business logic, IDOR, …) are not decided by a rule engine; the report lists them under limits. A finding is a lead, not proof that the package is exploitable in your use of it.
+
+Reports: findings are rules named `package.sast.<engine rule id>` under the **Source behaviour** area, with the engine's severity and the CWE of its class; they take part in `--min-severity`, `--fail-on`, the diff against the previous run and the compliance mapping like every other finding. The JSON report (and the canonical report, under `policy.flags.sast`) carries a `sast` block with the engine version, the number of rules (and custom rules) that ran, the limits, and the counts of chunks, files and findings. Anything the engine could not cover (chunks over `--max-chunks`, files over the size limit, failed rule evaluations, custom rules that were skipped, files that could not be written) is an analysis gap, so exit code 3 applies unless `--allow-partial` is given.
+
+**Disk use.** The SAST engine reads files from a directory, while the rest of this tool reads the archive in memory. So, only with `--sast`, the text files that the engine can read are written to a private temporary directory (mode 0600 inside a directory created with `mkdtemp`), analysed, and deleted again, also on exit. Entries whose path escapes the package (`..`, absolute paths) are never written (they are reported as archive problems and as a SAST gap), no link is ever created, nothing is overwritten, and nothing that is written is executed, imported or installed. Without `--sast` nothing is written to disk at all.
+
 ## Options
 
 ```
@@ -74,6 +104,10 @@ Dependencies are **listed, pinned and looked up — not downloaded**. Run `ubel-
 --allow-insecure            allow an http:// link that the registry returns (an http:// --registry is always allowed)
 --offline                   skip OSV.dev / NVD; reported as an analysis gap (exit 3 unless --allow-partial)
 --max-size-mb / --max-text-kb / --max-binary-mb / --max-binaries   limits (defaults 256 MB / 2048 KB / 64 MB / 25)
+--sast | --no-llm           also run static source analysis (SAST) with the engine of `ubel-sast --no-llm`: no LLM, no network
+--rules-dir <dir[,dir…]>    with --sast: your own Semgrep-syntax rules (repeatable)
+--max-chunks <n>            with --sast: most chunks to analyse (default 500000)
+--max-chunk-size <n>        with --sast: hard cap on characters per chunk (default 1000000)
 --working-dir <path>        where .ubel/ is written
 --min-severity <sev>  --fail-on <sev|none|N:sev>  --allow-partial  --verbose  --quiet
 ```
@@ -82,7 +116,7 @@ Exit codes: 0 clean (or nothing at/above `--fail-on`), 1 the package could not b
 
 ## Safety
 
-- The archive is parsed in memory by a reader written for this tool; **nothing is extracted to disk**, so a hostile archive cannot write outside anything. Entry paths with `..`, absolute paths, links that leave the package, setuid files and device files are reported, not followed.
+- The archive is parsed in memory by a reader written for this tool; **nothing is extracted to disk** (the one exception is `--sast`, see [Disk use](#static-source-analysis---sast---no-llm): sanitised text files in a private temporary directory, deleted afterwards), so a hostile archive cannot write outside anything. Entry paths with `..`, absolute paths, links that leave the package, setuid files and device files are reported, not followed.
 - Limits: entry count, per-entry size and total unpacked size (a decompression bomb stops at 1 GB), and `--max-size-mb` for the download. Redirects to another host drop the registry credentials.
 - Pattern matching shows that code **refers** to something, not that it is reachable or what data it handles. Minified or packed files give coarser results. Treat low-confidence findings as leads.
 
