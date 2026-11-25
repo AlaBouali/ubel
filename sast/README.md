@@ -3,7 +3,7 @@
 
 Ubel chunks a codebase into semantically-bounded units, runs them through a three-pass LLM pipeline — **scan → verify → taint trace** — and cross-references findings against a structured, CWE-mapped vulnerability catalog to surface real, exploitable bugs instead of generic pattern-matches.
 
-Run it with an LLM, or — for SAST — fully offline with `--no-llm`, which swaps the three LLM passes for a built-in deterministic rule engine (no API key, no model, no network, no third-party dependency or binary; see [`--no-llm`](#--no-llm--the-offline-rule-engine)).
+Run it with an LLM, or fully offline with `--no-llm` — for both `ubel-sast` and `ubel-mal` — which swaps the LLM passes for a built-in deterministic rule engine (no API key, no model, no network, no third-party dependency or binary; see [`--no-llm`](#--no-llm--the-offline-rule-engine) and [`ubel-mal --no-llm`](#ubel-mal---no-llm--the-offline-malware-scan)).
 
 This document covers the **SAST / malware-scan** component (source-level code analysis, as opposed to the dependency/SCA firewall).
 
@@ -27,6 +27,7 @@ This document covers the **SAST / malware-scan** component (source-level code an
 - **Diffs against the previous report** — every report carries a **Diffs** tab (`diffs` in the JSON): the code units (chunks), findings and — per compliance framework — mapped findings that are new, unchanged or removed since the asset's previous report of the same type (see [Diffs against the previous report](#diffs-against-the-previous-report))
 - **Compliance framework mapping** — every *verified* finding (vulnerability or malicious-code) is mapped onto OWASP Top 10, PCI DSS, HIPAA, SOC 2, ISO/IEC 27001, NIST SP 800-53, GDPR, and CIS Controls v8, with a report-level per-framework/per-control finding-count summary, across JSON, HTML, and SARIF (see [Compliance Framework Mapping](#compliance-framework-mapping))
 - **`--no-llm` offline engine** — `ubel-sast --no-llm` runs a deterministic, dependency-free rule engine (own lexer, taint analysis and call-graph tracing, 295 rules over all 15 language families) in place of the LLM: same findings schema, reports, SARIF, gate and diffs; zero tokens, zero network, reproducible results (see [`--no-llm`](#--no-llm--the-offline-rule-engine))
+- **`ubel-mal --no-llm` offline malware scan** — the same engine with a separate, deliberately small set of high-precision malware signatures (reverse shells, decoded payloads passed to `eval`, C2 / exfiltration endpoints, miners, persistence, droppers, …) and your own Semgrep-syntax rules via `--rules-dir`; same reports and gate, no key, no network. A clean result means *no known signature matched*, never *safe* (see [`ubel-mal --no-llm`](#ubel-mal---no-llm--the-offline-malware-scan))
 - Zero external runtime dependencies (Node.js stdlib only)
 
 ---
@@ -231,6 +232,56 @@ rules:
 
 **In the results.** Findings carry `rule_id: custom.<id>` and, unless `metadata.vuln_class` is set, the class `Custom rule: <id>` (so each rule is its own SARIF rule). They are `is_valid: true` with **no taint verdict** — a pattern match is not a data-flow proof — so they gate under `--fail-on valid` and `--fail-on any`, not under `--fail-on exploitable`. Two custom rules matching the same line both report. The run summary shows `Custom rules : N loaded, M skipped, K finding(s)`, and the report records `scan_options.custom_rules_dirs` and the full load result. A pattern that backtracks pathologically hits a per-rule step budget and is counted under `Rule errors` (named in `last_rule_error`) instead of hanging the scan.
 
+### `ubel-mal --no-llm` — the offline malware scan
+
+`ubel-mal --no-llm` runs the malicious-code scan on the **same engine** as `ubel-sast --no-llm` (`src/static/`) with a **different rule set** (`src/static/rules/malware.js`, v1.0.0). Findings use the malware catalog's class names, the same record shape (`rule_id`, `line`, `severity`, `confidence`, `is_valid`, `code_snippet`, `fix`), the same reports (JSON, HTML, SARIF, canonical), the same diffs and the same gate. No provider, key, model or network is involved, and results are reproducible.
+
+```bash
+ubel-mal --no-llm                                         # scan the current directory, offline
+ubel-mal --no-llm --fail-on confirmed                     # CI gate, no secrets needed
+ubel-mal --no-llm --rules-dir ./my-malware-rules          # built-in signatures + your own rules
+ubel-mal ./node_modules/some-pkg --no-llm                 # vet one unpacked dependency offline
+```
+
+**Precision over coverage.** A rule is in the set only when the construct is hard to confuse with legitimate code — a decoded payload handed straight to `eval`, a `/dev/tcp` reverse shell, a `stratum+tcp://` URL, a Discord webhook used as a sink, a `curl … | sh` from a raw IP. Anything that needs a judgement of *intent* is deliberately not decided. Run over benign code — an installed Python `dist-packages` tree (17,500 code units), the Python 3.12 standard library (14,000) and npm's own packages — the rule set produced a single finding (`pygments` rewriting its own file); this repository matches only in files that *contain* signatures (security checks, the rule file, tests).
+
+| Class | What the built-in rules match |
+|---|---|
+| reverse shell / remote command execution backdoor | `/dev/tcp` shells, `nc -e` / `socat exec:` / `mkfifo` + netcat, sockets `dup2`'d onto fds 0–2 followed by a shell, `pty.spawn` on a connected socket, shell + outbound socket + piped streams (JS, Java, Kotlin, C#, Go, Rust, PHP, Ruby, Python), PHP web shells (`eval($_POST[…])`), request data passed to `exec` / `os.system` |
+| hardcoded command-and-control (C2) endpoint | `.onion` addresses, raw sockets to a hardcoded public IP, URLs with a public IP, request-capture hosts (Burp Collaborator, Interactsh, webhook.site, …), dev-tunnel hosts (low confidence) |
+| obfuscated or dynamically decoded payload execution | `exec`/`eval` of `base64`/`zlib`/`marshal`-decoded data (Python, JS, PHP, Ruby), .NET `Assembly.Load(FromBase64String)`, JVM `defineClass(Base64…)`, `… \| base64 -d \| sh`, PowerShell `-EncodedCommand`, Dean Edwards packer, `_0x…` obfuscator output (low), shellcode loaders, process-injection API sequences |
+| unauthorized data exfiltration | Discord / Telegram bot endpoints (token masked in the report), the whole environment serialised in code that also sends data, `curl -d @/etc/passwd`-style uploads |
+| hidden backdoor authentication bypass | only the web-shell password gate: a request value hashed and compared with a hardcoded hash |
+| malicious persistence mechanism | Run / RunOnce / Winlogon / IFEO registry keys, Startup folder, `schtasks /create`, cron and `rc.local` writes, `>> ~/.bashrc`, systemd units, launchd plists, `authorized_keys`, `/etc/ld.so.preload`, sudoers |
+| supply-chain implant in build/install scripts · unauthorized remote dynamic code loading | `curl \| sh` from a raw IP, paste/file-drop site, shortener, tunnel, `.onion` or free-TLD host; `exec`/`eval` of fetched content (Python, JS, PHP, Ruby), downloaded .NET assemblies, `URLClassLoader` on a remote URL, PowerShell download cradles |
+| cryptomining payload | `stratum+tcp://`, known pool hosts, miner program names / `--donate-level`, Monero addresses, in-browser miners |
+| anti-analysis / sandbox and debugger evasion | process blacklists naming several analysis tools |
+| logic bomb / time bomb | unconditional wipes: `rm -rf /`, `mkfs`, `dd` onto a disk, fork bomb, `rmtree("/")` |
+| disabling or tampering with security controls | Defender / firewall switched off, shadow copies / backups / event logs deleted, audit logs and shell history silenced |
+| credential or keystroke harvesting | code that references many credential stores (browser, wallets, chat apps, SSH / cloud / registry files), keyboard hooks in code that also sends data, browser key + password-field listeners that send data |
+| DNS tunneling / covert channel | `nslookup $(whoami).host`, lookups of host names built from hex / base64 data |
+| self-modifying or self-propagating code | a program copying itself to startup / temp / removable locations, `autorun.inf`, a program opening its own file for writing |
+
+**What it cannot decide** (listed in every report under `scan_stats.pipeline.classes_not_statically_decidable` and in the console): a hidden authentication bypass that looks like a feature, a logic bomb with a time condition, beacons that look like telemetry, payloads assembled across statements or files, and anything that is not source code (shell scripts, `package.json` lifecycle scripts, binaries, archives). **A run with no match means no known signature matched — it is not proof that the code is safe.** Use the LLM scan, or a human, for the classes above, and treat obfuscated or minified code you cannot read as suspect regardless of the result.
+
+**Verification (pass 2).** There is no model to ask, so the engine's own check only adjusts confidence from context. A match in a test / fixture / example path, or in a file that looks like a detection ruleset or indicator list, keeps `is_valid: true` but drops to `confidence: low`, with the reason in `verification_reason`. It is **never dismissed** by location: planted code is routinely hidden in test data, and a file can be named like a rule list on purpose. `--no-verify` leaves every finding unverified (`is_valid` unset), exactly as with the LLM scan. There is **no taint pass** for malware (as with the LLM scan) — no `taint` field is written.
+
+**Gate.** Same as the LLM malware scan: `--fail-on any` (default) fails on any finding; `--fail-on confirmed` fails on a finding that kept `is_valid: true` and on one that was not decided. With `--no-llm`, "confirmed" means *a rule matched and survived the engine's checks* — the console, the executive summary and the HTML report call these **signature matches**, not confirmed malice. A rule-engine failure on a chunk, files over `--max-file-size` and chunks dropped by the default limit fail the run like in `ubel-sast --no-llm`.
+
+**Custom rules.** `--rules-dir` works as described under [Custom rules](#custom-rules----rules-dir) (same Semgrep-syntax subset, same skipped-rule reporting, same `nosem`). For malware, set `metadata.vuln_class` to one of the 15 catalog class names to file a rule under it; without it the class is `Custom rule: <id>` (CWE-506 in the compliance mapping). Custom findings are `rule_id: custom.<id>`, `is_valid: true`, with no taint verdict.
+
+```yaml
+rules:
+  - id: campaign-2026-c2
+    languages: [python, javascript, go]
+    severity: ERROR
+    message: Host used by the 2026 campaign we are tracking
+    pattern-regex: "(?:evil-cdn|updates-check)\\.example"
+    metadata: {vuln_class: "hardcoded command-and-control (C2) endpoint"}
+```
+
+HTML / template files are scanned as with `ubel-sast --no-llm` (each inline `<script>` becomes a JavaScript chunk). Programmatic use: `main({ mode: 'malware', noLlm: true, rulesDir: [...] })` / `analyzeMalware(chunks, { noLlm: true })`. Reports record `scan_options.engine: "static"`, `llm: false`, provider `none (--no-llm, static rules)` and model `ubel-static-rules <engine> (malware ruleset <version>)`.
+
 ### Reports and CI
 
 Reports state the engine (`scan_options.engine: "static"`, `llm: false`, provider `none (--no-llm, static rules)`), and the executive summary and gate text describe a rule-based scan: no statement says code was sent to an AI. `scan_stats.usage` is all zeros. Programmatic use: `main({ mode: 'analyze', noLlm: true, … })` / `analyzeSast(chunks, { noLlm: true })`. `UBEL_STATIC_DEBUG=1` logs any chunk that takes over a second to analyze.
@@ -290,8 +341,8 @@ Runs the full scan → verify → taint-trace pipeline against accidental vulner
 
 | Flag | Type | Default | What it does |
 |---|---|---|---|
-| `--no-llm` | flag | off | `analyze` only. Use the built-in deterministic rule engine instead of an LLM — no API key, model, network or third-party dependency. LLM-only options (`--provider`, `--api-key`, `--model`, `--concurrency`, `--pack-size`, …) are ignored with a warning; `--no-verify` / `--no-taint` switch the engine's own verification / taint passes. `ubel-mal --no-llm` is rejected (exit 2). See [`--no-llm`](#--no-llm--the-offline-rule-engine) |
-| `--rules-dir` | path[,path…] | none | `analyze --no-llm` only. Also run your Semgrep-syntax rules (`*.yml` / `*.yaml` with a `rules:` list; a directory is searched recursively, a single file works) in the first pass. Exits 2 without `--no-llm`. Unsupported rules are skipped and listed. See [Custom rules](#custom-rules----rules-dir) |
+| `--no-llm` | flag | off | `analyze` and `malware`. Use the built-in deterministic rule engine instead of an LLM — no API key, model, network or third-party dependency. LLM-only options (`--provider`, `--api-key`, `--model`, `--concurrency`, `--pack-size`, …) are ignored with a warning; `--no-verify` / `--no-taint` switch the engine's own verification / taint passes (malware has no taint pass). With `ubel-mal` it runs the malware rule set, which matches known signatures only — a clean run is not proof of safety. See [`--no-llm`](#--no-llm--the-offline-rule-engine) and [`ubel-mal --no-llm`](#ubel-mal---no-llm--the-offline-malware-scan) |
+| `--rules-dir` | path[,path…] | none | `analyze --no-llm` and `malware --no-llm` only. Also run your Semgrep-syntax rules (`*.yml` / `*.yaml` with a `rules:` list; a directory is searched recursively, a single file works) in the first pass. Exits 2 without `--no-llm`. Unsupported rules are skipped and listed. For `ubel-mal`, `metadata.vuln_class` files a rule under a malware class. See [Custom rules](#custom-rules----rules-dir) |
 | `--no-verify` | flag | verify on | Skip Pass 2 — findings get `is_valid: undefined` |
 | `--no-taint` | flag | taint on | Skip Pass 3 — findings get no `taint` field |
 | `--include-signals` | flag | off (signals omitted by default) | Include the "Detect when you see" bullets from the vuln catalog in the scan prompt (Pass 1 only); class name, CWE, and scope rule are always kept regardless of this flag. Roughly 6–7× the catalog size |
@@ -357,6 +408,8 @@ ubel-sast --provider local --endpoint http://localhost:11434/v1/chat/completions
 
 Runs scan → verify against the 15-class intentional-malicious-code catalog. No taint-trace pass — reachability isn't the relevant question for code that's itself the payload. Writes an entirely separate report set (`*.malware.*`) so it never collides with `analyze` output.
 
+**Offline:** `ubel-mal --no-llm` replaces both passes with the built-in signature rules — see [`ubel-mal --no-llm`](#ubel-mal---no-llm--the-offline-malware-scan).
+
 **Flags:** identical to `analyze` above, **minus** everything taint-related (no `--no-taint`, `--taint-concurrency`, `--taint-max-tokens`, `--taint-chain-chars`). Mode-specific differences: the `--fail-on` value set below, and `*.min.js` / `*.bundle.js` are **scanned by default** (bundles are where planted code hides; `--include-generated` is implied). Like `analyze`, it hard-excludes `node_modules`, `dist`, `build`, `vendor`, `bin`, `packages` and the rest of the ignore list unless you pass `--include-folders`.
 
 | `--fail-on` | Fails the build when… |
@@ -370,6 +423,9 @@ ubel-mal /path/to/project
 
 # CI gate: only fail on confirmed malicious code
 ubel-mal --fail-on confirmed
+
+# Offline, no API key: built-in signatures plus your own Semgrep-syntax rules
+ubel-mal --no-llm --rules-dir ./my-malware-rules --fail-on confirmed
 
 # Sweep installed dependencies. node_modules is ignored by default, so name it explicitly
 ubel-mal --include-folders node_modules --provider local --concurrency 8

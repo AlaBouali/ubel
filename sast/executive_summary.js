@@ -368,6 +368,7 @@ function stageRan(setting, evidence) {
 // so Minimal cannot be given.
 function overallRisk(m) {
   const mal = m.mode === "malware";
+  const malNoun = m.staticEngine ? "rule-matched malicious-code finding" : "confirmed malicious-code finding";   // --no-llm: a rule match is a signature hit, not a judgement of intent
   const noun = mal ? "finding" : "issue";
   if (!m.assessed) {
     return {
@@ -386,13 +387,13 @@ function overallRisk(m) {
     return {
       level: "critical",
       rationale: (mal
-        ? `Includes ${count(n("critical"), "confirmed malicious-code finding")} rated Critical: code that appears written on purpose to harm or to give an outsider access.`
+        ? `Includes ${count(n("critical"), malNoun)} rated Critical: code that ${m.staticEngine ? "matches a known malicious signature" : "appears written on purpose to harm or to give an outsider access"}.`
         : `Includes ${count(n("critical"), "Critical-severity issue")} confirmed as exploitable: a weakness an attacker can reach, which could lead directly to data theft or loss of control of a system.`) + gapsOnRisk,
     };
   }
   if (n("high") > 0) {
     const bits = [];
-    if (L.high.confirmed) bits.push(mal ? `${count(L.high.confirmed, "confirmed malicious-code finding")}` : `${count(L.high.confirmed, "High-severity issue")} confirmed as exploitable`);
+    if (L.high.confirmed) bits.push(mal ? `${count(L.high.confirmed, malNoun)}` : `${count(L.high.confirmed, "High-severity issue")} confirmed as exploitable`);
     if (L.high.other) bits.push(mal ? `${count(L.high.other, "suspicious finding")} that could not be cleared` : `${count(L.high.other, "serious " + noun)} not confirmed as exploitable but not ruled out`);
     return {
       level: "high",
@@ -689,7 +690,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   for (const g of gapsScope) gaps.push(g);
 
   const mitigated = S.mitigated;
-  const m = { mode, assessed, units, unreadable, gaps, limits: gapsLimits, levels, mitigated, falsePositives: S.false_positive };
+  const m = { mode, assessed, units, unreadable, gaps, limits: gapsLimits, levels, mitigated, falsePositives: S.false_positive, staticEngine: staticEng };
   const risk = overallRisk(m);
   const rated = risk.level !== "not_assessed";
 
@@ -822,7 +823,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const parts = [];
   if (confirmedTotal > 0) {
     parts.push(mal
-      ? `${count(confirmedTotal, "confirmed malicious-code finding")}`
+      ? `${count(confirmedTotal, staticEng ? "rule-matched malicious-code finding" : "confirmed malicious-code finding")}`
       : `${count(confirmedTotal, "confirmed exploitable issue")}${sevSummary(sevConfirmed) ? " (" + sevSummary(sevConfirmed) + ")" : ""}`);
   }
   const unconfirmedOpen = openTotal - confirmedTotal;
@@ -1061,8 +1062,11 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const scope = {
     tool: toolName,
     scan_type: mode,
+    static_engine: staticEng,
     description: mal
-      ? "This report is an automated, AI-assisted review of source code for code that appears to have been written on purpose to do harm, such as backdoors, hidden remote connections and data theft."
+      ? (staticEng
+        ? "This report is an automated, rule-based (no AI) scan of source code for known malicious signatures, such as reverse shells, decoded payloads run on the spot, hidden remote connections, miners and persistence. A match is a signature hit, not a judgement of intent, and a scan with no match is not proof that the code is safe."
+        : "This report is an automated, AI-assisted review of source code for code that appears to have been written on purpose to do harm, such as backdoors, hidden remote connections and data theft.")
       : (staticEng
         ? "This report is an automated, rule-based (no AI) review of source code for security weaknesses, with each match then re-checked and traced for exploitability by static data-flow analysis."
         : "This report is an automated, AI-assisted review of source code for security weaknesses, with each candidate then double-checked and traced for exploitability."),
@@ -1107,14 +1111,16 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     { term: "Static analysis", meaning: "Reviewing source code without running it, as opposed to testing a live system." },
     { term: "Compliance framework", meaning: "A published set of security controls (for example OWASP Top 10 or PCI DSS) that audits and contracts often refer to." },
   ];
-  if (mal) glossary.splice(3, 1, { term: "Confirmed malicious", meaning: "Verification judged that the code was written on purpose to do something harmful or unauthorized, not merely that it is poorly written." });
+  if (mal) glossary.splice(3, 1, staticEng
+    ? { term: "Signature match", meaning: "The code matches a rule for a construct that is characteristic of malware (for example a decoded payload passed straight to eval). The rule engine cannot judge intent, so a match needs a human to confirm it." }
+    : { term: "Confirmed malicious", meaning: "Verification judged that the code was written on purpose to do something harmful or unauthorized, not merely that it is poorly written." });
 
   // Figures that depend on a pass that did not run are null ("not checked"),
   // never 0, so nobody reads them as a clean result.
   const na = (x) => (rated ? x : null);
   const confirmedKnown = mal ? verifyRan !== false : taintRan !== false;
   const confirmedVal = rated && confirmedKnown ? confirmedTotal : null;
-  const confirmedLabel = mal ? "Confirmed malicious" : "Confirmed exploitable";
+  const confirmedLabel = mal ? (staticEng ? "Signature matches" : "Confirmed malicious") : "Confirmed exploitable";
   const confirmedSkipNote = mal ? "Not checked: verification was skipped" : "Not checked: the exploitability check was skipped";
 
   const worstOpen = worstLevel(levelTotals);
@@ -1125,7 +1131,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
     : { label: "Policy result", value: null, sub: "The pass/fail setting was not recorded in this report", tone: "" };
 
   const figures = [
-    { label: confirmedLabel, value: confirmedVal, sub: !rated ? "Not checked in this scan" : !confirmedKnown ? confirmedSkipNote : (confirmedTotal ? (mal ? "Verified as intentionally harmful" : (sevSummary(sevConfirmed) || "")) : "None confirmed"), tone: figureTone(confirmedTotal ? (LEVEL_OF_RANK[Math.max(...open.filter((r) => isConfirmed(r.state, mode)).map((r) => LEVEL_RANK[r.level]))] || "high") : "high", confirmedVal) },
+    { label: confirmedLabel, value: confirmedVal, sub: !rated ? "Not checked in this scan" : !confirmedKnown ? confirmedSkipNote : (confirmedTotal ? (mal ? (staticEng ? "Matched a malware rule" : "Verified as intentionally harmful") : (sevSummary(sevConfirmed) || "")) : "None confirmed"), tone: figureTone(confirmedTotal ? (LEVEL_OF_RANK[Math.max(...open.filter((r) => isConfirmed(r.state, mode)).map((r) => LEVEL_RANK[r.level]))] || "high") : "high", confirmedVal) },
     { label: mal ? "Open findings" : "Open issues", value: na(openTotal), sub: rated ? (sevSummary(sevOpen) || "None open") : "Not checked in this scan", tone: figureTone(worstOpen || "medium", na(openTotal)) },
     { label: "Need human review", value: na(notCleared), sub: rated ? "Not cleared either way" : "Not checked in this scan", tone: figureTone("medium", na(notCleared)) },
     policyFigure,
@@ -1146,7 +1152,7 @@ export function buildSastExecutiveSummary(results, meta = {}) {
   const glanceCards = [
     { label: "Code units analyzed", value: units, sub: `in ${count(files, "file")}`, tone: units === 0 ? "high" : "" },
     { label: "Candidates raised", value: na(recs.length), sub: staticEng ? "Matched by the rules" : "Proposed by the AI", tone: "" },
-    { label: confirmedLabel, value: confirmedVal, sub: confirmedKnown ? (mal ? "Judged malicious by verification" : "Attacker can reach it") : confirmedSkipNote, tone: figureTone("critical", confirmedVal) },
+    { label: confirmedLabel, value: confirmedVal, sub: confirmedKnown ? (mal ? (staticEng ? "Matched a malware rule" : "Judged malicious by verification") : "Attacker can reach it") : confirmedSkipNote, tone: figureTone("critical", confirmedVal) },
     ...(mal ? [] : [{ label: "Confirmed real, reach not checked", value: na(S.valid), sub: "Not shown to be exploitable", tone: figureTone("high", na(S.valid)) }]),
     { label: "Not cleared", value: na(S.unresolved), sub: "A check failed or was inconclusive", tone: figureTone("medium", na(S.unresolved)) },
     { label: "Unverified", value: verifyRan === false ? null : na(S.unverified), sub: verifyRan === false ? "Verification was skipped" : "Never double-checked", tone: figureTone("medium", verifyRan === false ? null : na(S.unverified)) },

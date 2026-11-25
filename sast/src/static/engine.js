@@ -282,8 +282,8 @@ function taintFinding(f, fe) {
 }
 
 // ── driver ───────────────────────────────────────────────────────────────────
-function rulesFor(family, classSet, customRules = []) {
-  const builtin = ALL_RULES.filter(r => r.langs.includes(family) && (!classSet || classSet.has(r.cls.toLowerCase())));
+function rulesFor(family, classSet, customRules = [], ruleSet = ALL_RULES) {
+  const builtin = ruleSet.filter(r => r.langs.includes(family) && (!classSet || classSet.has(r.cls.toLowerCase())));
   // user rules (--rules-dir) run in the same first pass; the vuln-class selection does not apply to them
   return customRules.length ? builtin.concat(customRules.filter(r => r.langs.includes(family))) : builtin;
 }
@@ -291,10 +291,13 @@ function rulesFor(family, classSet, customRules = []) {
 /**
  * @param {object[]} toAnalyze     enriched chunks to scan
  * @param {object[]} contextChunks every chunk (call-graph context)
- * @param {object}   o             { vulnClasses, verify, taintTrace, log }
+ * @param {object}   o             { vulnClasses, verify, taintTrace, log, customRules, ruleSet, scanKind }
+ *                                 scanKind 'malware' (ubel-mal --no-llm) runs `ruleSet` (rules/malware.js) and never
+ *                                 traces taint: a planted payload is not "attacker input reaching a sink".
  * @returns {{ results: object[], pipeline: object }}
  */
-export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify = true, taintTrace = true, log = () => {}, customRules = [] } = {}) {
+export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify = true, taintTrace = true, log = () => {}, customRules = [], ruleSet = ALL_RULES, scanKind = 'sast' } = {}) {
+  const malwareScan = scanKind === 'malware';
   // HTML / template files: one markup chunk (template-engine rules) plus one JavaScript chunk per inline <script> and one for the
   // inline event handlers / javascript: URLs. A file that also maps to a code family (.erb .jsp .cshtml .phtml) keeps that chunk.
   const expand = (list) => {
@@ -319,7 +322,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
   const ruleCache = new Map();
   const results = [];
   const recById = new Map();
-  const pipeline = { engine: 'static', engine_version: STATIC_ENGINE_VERSION, rules_loaded: ALL_RULES.length + customRules.length, custom_rules_loaded: customRules.length, rules_errored: 0, chunks_unsupported_language: 0 };
+  const pipeline = { engine: 'static', engine_version: STATIC_ENGINE_VERSION, rules_loaded: ruleSet.length + customRules.length, ruleset: malwareScan ? 'malware' : 'sast', custom_rules_loaded: customRules.length, rules_errored: 0, chunks_unsupported_language: 0 };
   let done = 0;
   const total = toAnalyze.length;
 
@@ -334,7 +337,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
     let findings = [];
     if (!family) { pipeline.chunks_unsupported_language++; }
     else {
-      if (!ruleCache.has(family)) ruleCache.set(family, rulesFor(family, classSet, customRules));
+      if (!ruleCache.has(family)) ruleCache.set(family, rulesFor(family, classSet, customRules, ruleSet));
       let flow;
       try { flow = fe.flow(chunk); flow.absLine = (rel, needle) => resolveLine(chunk, rel, needle); }
       catch (e) { rec.error = { stage: 'scan', reason: 'static_analysis_failed', detail: `${e.message}` }; flow = null; }
@@ -356,6 +359,7 @@ export function runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verif
         }
         if (verify) findings.forEach(verifyFinding); else findings.forEach(f => { f.verification_skipped = true; });
         for (const f of findings) {
+          if (malwareScan) continue;                                  // no taint pass for malware: no field, no skipped-reason
           if (verify && f.is_valid !== true) continue;
           const isParam = f._cand.flowInfo?.kind === 'param';
           const needsFlow = requiresInput(f) && !f._cand.rule.noTaint;

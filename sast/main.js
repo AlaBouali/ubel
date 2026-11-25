@@ -7,6 +7,7 @@ import path from 'path';
 import { buildChunks }            from './src/chunker/index.js';
 import { analyzeSast, analyzeMalware } from './src/analyzer/index.js';
 import { STATIC_ENGINE_VERSION } from './src/static/engine.js';
+import { MALWARE_RULESET_VERSION } from './src/static/rules/malware.js';
 import { SastSarifBuilder }       from './sarif_report_generator.js';
 import { generateSastHTMLReport } from './html_report_generator.js';
 import { buildSastExecutiveSummary } from './executive_summary.js';
@@ -143,7 +144,7 @@ function scanOptionsFor(opts, mode, results) {
   const stats    = (results && results.scan_stats) || null;
   const coverage = stats ? stats.coverage : null;
   const tooLarge = coverage && Array.isArray(coverage.files_skipped_too_large) ? coverage.files_skipped_too_large : null;
-  const staticEngine = mode === 'analyze' && !!opts.noLlm;
+  const staticEngine = !!opts.noLlm;                       // both scans: ubel-sast --no-llm and ubel-mal --no-llm
   let options = {
     mode,
     engine:          staticEngine ? 'static' : 'llm',        // 'static' = --no-llm: deterministic rule engine, no model was used
@@ -236,7 +237,7 @@ async function collectMetadata(opts) {
     generated_at:    new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
     tool_version:    TOOL_VERSION,
     provider:        opts.noLlm ? 'none (--no-llm, static rules)' : (opts.provider || null),
-    model:           opts.noLlm ? `ubel-static-rules ${STATIC_ENGINE_VERSION}` : (opts.model || null),
+    model:           opts.noLlm ? `ubel-static-rules ${STATIC_ENGINE_VERSION}${opts.scanMode === 'malware' ? ` (malware ruleset ${MALWARE_RULESET_VERSION})` : ''}` : (opts.model || null),
     workingDir:      opts.workingDir,
     platform:        process.platform,
     arch:            process.arch,
@@ -472,7 +473,7 @@ async function writeMalwareReports(results, opts) {
   const latestHtml  = path.join(latestDir, reportFileName('latest', tag, 'html'));
   const latestSarif = path.join(latestDir, reportFileName('latest', tag, 'sarif.json'));
 
-  const meta = await collectMetadata({ ...opts, workingDir });
+  const meta = await collectMetadata({ ...opts, workingDir, scanMode: 'malware' });
   meta.report_id    = generateReportId(tag, asset.asset_id);
   meta.asset_id     = asset.asset_id;
   meta.asset_name   = asset.asset_name;
@@ -546,13 +547,19 @@ async function writeMalwareReports(results, opts) {
   const confirmed      = allFindings.filter(f => f.is_valid === true);
   const unresolved      = allFindings.filter(f => f.is_valid !== true && f.is_valid !== false);
 
+  // --no-llm: a "confirmed" finding is a rule match that survived the engine's own checks. It is a signature hit, not a judgement of
+  // intent, and a run with no match only means no known signature matched.
+  const staticRun = meta.scan_options?.engine === 'static';
+
   if (confirmed.length > 0) {
-    console.log('\n── 🚨 Confirmed malicious-code findings ─────────────────────────');
+    console.log(staticRun
+      ? '\n── 🚨 Malicious-code rule matches (static rules: a signature hit, not a verdict on intent) ──'
+      : '\n── 🚨 Confirmed malicious-code findings ─────────────────────────');
     for (const result of results) {
       for (const f of result.findings.filter(f => f.is_valid === true)) {
         console.log(`\n  🚨 [${f.severity ? upper(f.severity) : upper(f.confidence)}] ${f.vuln_name}`);
         console.log(`  Chunk : ${result.id}`);
-        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
+        console.log(`  Lines : ${f.detection === 'static' && f.line ? f.line : `${result.startLine}–${result.endLine}`}`);
         console.log(`  Issue : ${f.description}`);
         console.log(`  Snip  : ${clip(f.code_snippet, 100)}`);
         console.log(`  Fix   : ${clip(f.fix, 120)}`);
@@ -560,7 +567,9 @@ async function writeMalwareReports(results, opts) {
       }
     }
   } else if (unresolved.length === 0) {
-    console.log('\n[ubel-malware] No malicious code found.');
+    console.log(staticRun
+      ? '\n[ubel-malware] No known malware signature matched. That is not proof the code is safe: the classes listed under "not statically decidable" (and anything obfuscated beyond the rules) need the LLM scan or a human review.'
+      : '\n[ubel-malware] No malicious code found.');
   } else {
     console.log(`\n[ubel-malware] No CONFIRMED malicious code — but ${unresolved.length} finding(s) could not be resolved either way (verify pass failed/skipped). Review them before treating this run as clean.`);
   }
@@ -571,7 +580,7 @@ async function writeMalwareReports(results, opts) {
       for (const f of result.findings.filter(f => f.is_valid !== true && f.is_valid !== false && !f._parse_error)) {
         console.log(`\n  ❓ [${upper(f.confidence)}] ${f.vuln_name}`);
         console.log(`  Chunk : ${result.id}`);
-        console.log(`  Lines : ${result.startLine}–${result.endLine}`);
+        console.log(`  Lines : ${f.detection === 'static' && f.line ? f.line : `${result.startLine}–${result.endLine}`}`);
         console.log(`  Issue : ${f.description}`);
       }
     }
@@ -749,17 +758,31 @@ function runAnalyzeCommand(args) {
 function runMalwareCommand(args) {
   const { flags, positional } = parseArgs(args);
 
-  if (flags['no-llm']) {
-    console.error('Error: --no-llm is only available for the SAST analysis (ubel-sast / analyze). The malware scan has no static engine; run it with an LLM provider.');
-    process.exit(2);
-  }
-
-  if (flags['rules-dir'] !== undefined) {
-    console.error('Error: --rules-dir is only available for the SAST analysis with --no-llm (ubel-sast --no-llm --rules-dir <dir>). The malware scan has no static engine.');
-    process.exit(2);
-  }
-
   const opts = {};
+
+  // --no-llm: the deterministic rule engine with the malware rule set (src/static/rules/malware.js). No provider, key, model or
+  // network. There is no taint pass for malware, so --no-taint and the taint options do not exist here at all.
+  if (flags['no-llm']) {
+    opts.noLlm = true;
+    const ignored = ['provider', 'api-key', 'api-key-header', 'api-key-prefix', 'endpoint', 'model', 'concurrency', 'temperature',
+      'max-tokens', 'timeout', 'max-retries', 'no-retry', 'include-signals', 'pack-size', 'pack-max-chunks', 'no-pack',
+      'verify-concurrency', 'verification-max-tokens'].filter(k => flags[k] !== undefined);
+    if (ignored.length) console.warn(`[ubel-malware] --no-llm: ignoring LLM-only option(s): ${ignored.map(k => '--' + k).join(' ')}`);
+  }
+
+  // --rules-dir: your own Semgrep-syntax rules, run next to the built-in malware rules. Refused (not ignored) without --no-llm.
+  if (flags['rules-dir'] !== undefined) {
+    if (!flags['no-llm']) {
+      console.error('Error: --rules-dir requires --no-llm (it loads Semgrep-syntax rules for the built-in rule engine; the LLM passes do not use them).');
+      process.exit(2);
+    }
+    const dirs = flags['rules-dir'] === true ? [] : csvFlag(flags['rules-dir']);
+    if (!dirs.length) {
+      console.error('Error: --rules-dir needs a directory (or rule file): --rules-dir ./malware-rules');
+      process.exit(2);
+    }
+    opts.rulesDir = dirs;
+  }
 
   if (flags['provider'])       opts.provider        = String(flags['provider']);
   if (flags['api-key'])        opts.apiKey          = String(flags['api-key']);
@@ -860,18 +883,22 @@ PROVIDER / REQUEST OPTIONS  (analyze, malware)
   --no-retry                     Disable the parse-error-triggered retry
 
 PIPELINE CONTROLS  (analyze, malware)
-  --no-llm                       analyze only: use the built-in deterministic rule engine instead of an LLM. No API key, no
-                                 model, no network, no code leaves the machine, no 3rd-party dependency or binary.
-                                 LLM-only options are ignored; --no-verify / --no-taint switch the engine's own static
-                                 verification / taint passes. See the README ("--no-llm") for what it can and cannot find.
-  --rules-dir <dir[,dir…]>       analyze with --no-llm only: also run YOUR Semgrep-syntax rules (*.yml / *.yaml with a top-level
+  --no-llm                       Use the built-in deterministic rule engine instead of an LLM. No API key, no model, no
+                                 network, no code leaves the machine, no 3rd-party dependency or binary. LLM-only options are
+                                 ignored; --no-verify / --no-taint switch the engine's own static verification / taint passes
+                                 (malware has no taint pass). analyze: the SAST rules. malware: a smaller rule set of
+                                 high-precision malware signatures (reverse shells, decoded payloads run by eval, C2 / exfil
+                                 endpoints, miners, persistence, droppers, ...); classes that need judgement of intent are not
+                                 decided. A clean static malware run is NOT proof of safety. See the README ("--no-llm").
+  --rules-dir <dir[,dir…]>       with --no-llm only (analyze and malware): also run YOUR Semgrep-syntax rules (*.yml / *.yaml with a top-level
                                  'rules:' list; a single rule file works too) in the first pass, next to the built-in rules.
                                  Supported: pattern, patterns, pattern-either, pattern-not, pattern-inside, pattern-not-inside,
                                  pattern-regex, pattern-not-regex, metavariable-regex / -pattern / -comparison, focus-metavariable,
                                  paths, fix, 'nosem'. Matching is token-based (no AST). Taint mode, join / extract mode, typed
                                  metavariables and languages ubel-sast does not scan are NOT supported: such a rule is skipped and
                                  listed with the reason. Findings are rule_id custom.<id>, carry no taint verdict, and gate under
-                                 --fail-on valid|any.
+                                 --fail-on valid|any (malware: confirmed|any). For malware, set metadata.vuln_class on a rule to
+                                 file it under one of the malware classes (default: "Custom rule: <id>").
   --no-verify                    Skip Pass 2 (verification) — findings get is_valid: undefined
   --no-taint                     Skip Pass 3 (taint-trace) — analyze only; findings get no taint field
   --include-signals              Include catalog "detect when you see" bullets in Pass 1 (omitted by default; ~6x the catalog size)
@@ -919,6 +946,7 @@ EXAMPLES
   ubel-sast --no-llm                                         # offline, deterministic, free
   ubel-sast --no-llm --only-diff --fail-on exploitable       # CI gate with no secrets needed
   ubel-mal --fail-on confirmed
+  ubel-mal --no-llm --rules-dir ./my-malware-rules          # offline signature scan + your own rules, no API key
   ubel-mal ./project --include-folders node_modules,dist     # sweep a dependency tree / build output
   ubel-sast --skip-tests --pack-size 16000
   ubel-chunk /path/to/project --max-chunk-size 8000
@@ -967,8 +995,6 @@ export async function main(programmaticOptions) {
     if (save_reports) { ensureUbelIgnoreFiles(opts.workingDir); provisionAssetAt(opts.workingDir); }
 
     if (mode === "malware") {
-      if (opts.noLlm) throw new Error('noLlm is only available for mode "analyze"; the malware scan has no static engine.');
-      if (opts.rulesDir) throw new Error('rulesDir is only available for mode "analyze" with noLlm; the malware scan has no static engine.');
       const results = await analyzeMalware([], opts);
       const report  = save_reports ? await writeMalwareReports(results, opts) : {};
       return { mode, results, ...report };

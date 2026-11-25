@@ -310,7 +310,7 @@ function renderExecutiveSummary() {
   const cover = es.cover || {};
   const sc = es.scope || {};
   const isMal = sc.scan_type === 'malware';
-  const confirmedLabel = isMal ? 'Confirmed malicious' : 'Confirmed exploitable';
+  const confirmedLabel = isMal ? (sc.static_engine ? 'Signature matches' : 'Confirmed malicious') : 'Confirmed exploitable';
   const riskColor = col(risk.level);
   let html = '';
 

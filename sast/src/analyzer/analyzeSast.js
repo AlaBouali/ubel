@@ -14,6 +14,7 @@ import { runStaticAnalysis, STATIC_ENGINE_VERSION } from '../static/engine.js';
 import { loadCustomRules, summarizeCustomRules } from '../static/custom_rules.js';
 import { discoverMarkupChunks, fileKey } from '../static/markup_files.js';
 import { ALL_RULES, STATIC_UNSUPPORTED_CLASSES } from '../static/rules/index.js';
+import { MALWARE_RULES, MALWARE_STATIC_UNSUPPORTED_CLASSES, MALWARE_RULESET_VERSION } from '../static/rules/malware.js';
 
 // ─── Extension → display language label ───────────────────────────────────────
 
@@ -488,12 +489,18 @@ async function analyzeSast(chunks, opts = {}) {
 // report / SARIF / gate / diff code downstream does not know which engine ran.
 // Nothing here touches a provider, an API key or the network.
 
-async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope = {}, rulesDirs = [] }) {
-  log(`[ubel-sast] Engine      : static rules (--no-llm), engine v${STATIC_ENGINE_VERSION}, ${ALL_RULES.length} rules`);
+// `kind` 'malware' is `ubel-mal --no-llm`: the same engine with the malware rule set (rules/malware.js) and no taint pass.
+async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verify, taintTrace, onlyDiff, diffBase, workingDir, log, markupScope = {}, rulesDirs = [], kind = 'sast' }) {
+  const mal = kind === 'malware';
+  const ruleSet = mal ? MALWARE_RULES : ALL_RULES;
+  const notDecidable = mal ? MALWARE_STATIC_UNSUPPORTED_CLASSES : STATIC_UNSUPPORTED_CLASSES;
+  const logOut = log;
+  if (mal) { log = (m) => logOut(String(m).replace('[ubel-sast]', '[ubel-malware]')); taintTrace = false; }
+  log(`[ubel-sast] Engine      : static rules (--no-llm), engine v${STATIC_ENGINE_VERSION}${mal ? `, malware ruleset v${MALWARE_RULESET_VERSION}` : ''}, ${ruleSet.length} rules`);
   log(`[ubel-sast] Privacy     : no model is called and no source code leaves this machine`);
   if (onlyDiff)   log(`[ubel-sast] Diff mode   : enabled (base: ${diffBase})`);
   log(`[ubel-sast] Verification: ${verify ? 'enabled (static false-positive checks)' : 'disabled'}`);
-  log(`[ubel-sast] Taint trace : ${taintTrace ? 'enabled (static data-flow + call-graph)' : 'disabled'}`);
+  if (!mal) log(`[ubel-sast] Taint trace : ${taintTrace ? 'enabled (static data-flow + call-graph)' : 'disabled'}`);
 
   const enrich = c => ({
     ...c,
@@ -542,7 +549,7 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   const toAnalyze = enriched.filter(c => (diffFileSet !== null ? diffFileSet.has(path.resolve(c.file)) : true));
   log(`[ubel-sast] Chunks      : ${toAnalyze.length} to analyze\n`);
 
-  const knownClasses = new Set(ALL_RULES.map(r => r.cls.toLowerCase()));
+  const knownClasses = new Set(ruleSet.map(r => r.cls.toLowerCase()));
   const noRules = vulnClasses.filter(v => !knownClasses.has(String(v.name).toLowerCase())).map(v => v.name);
 
   // user rules (--rules-dir): loaded before the scan so a bad directory fails fast, run in the same first pass as the built-in rules
@@ -558,10 +565,11 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   }
 
   const startTime = Date.now();
-  const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log, customRules: custom ? custom.rules : [] });
+  const { results, pipeline } = runStaticAnalysis(toAnalyze, contextChunks, { vulnClasses, verify, taintTrace, log, customRules: custom ? custom.rules : [], ruleSet, scanKind: kind });
   if (custom) pipeline.custom_rules = summarizeCustomRules(custom);
   pipeline.classes_without_static_rules = noRules;
-  pipeline.classes_not_statically_decidable = STATIC_UNSUPPORTED_CLASSES;
+  pipeline.classes_not_statically_decidable = notDecidable;
+  if (mal) pipeline.ruleset_version = MALWARE_RULESET_VERSION;
   if (markup) {
     pipeline.markup_files_found = markup.stats.found;
     pipeline.markup_files_scanned = markup.chunks.filter(c => diffFileSet === null || diffFileSet.has(path.resolve(c.file))).length;
@@ -569,12 +577,12 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
 
   const all = results.flatMap(r => r.findings);
   const unresolved = all.filter(f => f.taint && f.taint.exploitable === null).length;
-  log('\n── Analysis complete ─────────────────────────────────────────────');
+  log(mal ? '\n── Malware scan complete ─────────────────────────────────────────' : '\n── Analysis complete ─────────────────────────────────────────────');
   log(`   Engine          : static rules (no LLM)`);
   log(`   Chunks analyzed : ${toAnalyze.length}`);
   log(`   Total findings  : ${all.length}  (high: ${all.filter(f => f.confidence === 'high').length}  medium: ${all.filter(f => f.confidence === 'medium').length}  low: ${all.filter(f => f.confidence === 'low').length})`);
   if (verify) {
-    log(`   Verified valid  : ${all.filter(f => f.is_valid === true).length}`);
+    log(`   ${mal ? 'Rule matches kept' : 'Verified valid '} : ${all.filter(f => f.is_valid === true).length}`);
     log(`   False positives : ${all.filter(f => f.is_valid === false).length}`);
   }
   if (taintTrace) {
@@ -591,7 +599,8 @@ async function analyzeSastStatic(resolvedChunks, { chunkInfo, vulnClasses, verif
   log(`   Elapsed         : ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
   log(`   LLM calls       : 0`);
   if (noRules.length) log(`   ⚠️ No static rules for ${noRules.length} requested class(es): ${noRules.join(', ')}`);
-  log(`   ⚠️ Not statically decidable (need semantic review): ${STATIC_UNSUPPORTED_CLASSES.join('; ')}`);
+  log(`   ⚠️ Not statically decidable (need semantic review): ${notDecidable.join('; ')}`);
+  if (mal) log('   ⚠️ A clean static result means none of the known signatures matched — it is not proof the code is safe.');
   if (chunkInfo?.truncated) log(`   ⚠️ NOT SCANNED   : ${chunkInfo.chunks_dropped_by_cap} chunk(s) beyond --max-chunks ${chunkInfo.max_chunks}`);
   if (chunkInfo?.files_skipped_too_large?.length) log(`   ⚠️ NOT SCANNED   : ${chunkInfo.files_skipped_too_large.length} file(s) over ${chunkInfo.max_file_size} chars`);
 
@@ -632,3 +641,4 @@ function buildCoverage(info, { analyzed, importSkipped, diffMode, results }) {
 export { buildCoverage };
 
 export { analyzeSast, EXT_LANG };
+export { analyzeSastStatic as analyzeStaticScan };
