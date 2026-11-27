@@ -4,7 +4,7 @@
 // providers[], regions{}, accounts{}, provider_status[], scan_options, stats, compliance_summary, executive_summary, diffs.
 // The original has no inventory: it is derived from the resources / regions the findings point at.
 import { arr, isObj, first, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
-
+import { sha } from '../common.js';
 export const family = 'cloud';
 
 const lastSeg = (r) => { const s = String(r ?? ''); const m = s.split(/[/:]/).filter(Boolean); return m.length ? m[m.length - 1] : s; };
@@ -15,10 +15,11 @@ export function translate(p, opts, H) {
 
   for (const f of arr(p.findings)) {
     out.findings.push(mkFinding({
+      finding_id: sha(f.check, f.provider ?? '',f.region ?? '', f.resource ?? '', f.service ?? ''),
       rule_id: f.check,
       title: f.title,
-      component_id: f.resource ?? null,
-      component_name: f.resource ? lastSeg(f.resource) : null,
+      component_id: `${f.provider ?? 'unknown'}:${f.region ?? 'unknown'}:${f.resource ?? 'unknown'}:${f.service ?? 'unknown'}`,
+      component_name: `${f.provider ?? 'unknown'}: ${lastSeg(f.resource)} (${f.region ?? 'unknown'}) => ${f.service ?? 'unknown'}`,
       component_type: 'cloud_resource',
       severity: f.severity,
       confidence: f.confidence ?? "high",

@@ -3,6 +3,7 @@
 // Original keys used: vulnerabilities[], inventory[], secrets.findings[], policy, decision, scan_info, tool_info,
 // os_metadata, git_metadata, runtime, stats, compliance_summary, executive_summary, diffs, threat_intel.
 import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, TYPES } from '../common.js';
+import { sha } from '../common.js';
 
 export const family = 'sca';
 
@@ -26,6 +27,7 @@ export function translate(p, opts, H) {
     const cid = first(v.affected_package_id, `${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`);
     out.findings.push(mkFinding({
       rule_id: `${v.id}-${v.ecosystem ?? 'unknown'}-${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`,   // advisory-ecosystem-pkgname@version
+      finding_id: sha(`${v.id}-${v.ecosystem ?? 'unknown'}-${v.affected_dependency ?? 'unknown'}@${v.affected_dependency_version ?? ''}`),
       title: `${v.id} affecting ${depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version)}`,
       component_id: cid,
       component_name: depName(v.affected_dependency, v.ecosystem, v.affected_dependency_version),
@@ -40,6 +42,7 @@ export function translate(p, opts, H) {
 
   for (const s of arr(p.secrets?.findings)) {
     out.findings.push(mkFinding({
+      finding_id: sha(s.rule_id, s.match_preview), // secrets also hash a fingerprint (the original has none: derive it from line + snippet, never storing the secret)
       rule_id: s.id,
       title: s.title || s.secret_type || s.id,
       component_id: R.rel(s.file_path),
@@ -75,6 +78,7 @@ export function translate(p, opts, H) {
     const cid = c.id ?? `${c.name}@${c.version}`;
     const lic = first(li.spdx, typeof c.license === 'string' ? c.license : null, 'no license declared');
     out.findings.push(observe({
+      finding_id: sha(cid, `license.${risk}`, lic),
       rule_id: `license.${risk}`,
       title: `${risk === 'unknown' ? 'Unrecognised or missing license' : `${risk === 'high' ? 'Strong-copyleft / proprietary' : 'Weak-copyleft'} license`}: ${lic}`,
       component_id: cid,

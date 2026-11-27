@@ -1092,6 +1092,7 @@ async function runCloudTrailChecks(regions, creds, reporter, log) {
       action: 'cloudtrail-enable-multiregion',
       title: 'No active multi-region CloudTrail trail found',
       resource: 'account',
+      region: regions.join(' , '),
       description: allTrails.length === 0
         ? 'No CloudTrail trails were found in any scanned region.'
         : 'None of the trails found are both multi-region and actively logging, so API activity in unmonitored regions may go unrecorded.',
@@ -1157,6 +1158,7 @@ async function runGuardDutyChecks(regions, creds, reporter, log) {
       action: 'guardduty-enable',
       title: 'GuardDuty threat detection is not enabled in any scanned region',
       resource: 'account',
+      region: regions.join(' , '),
       description: anyDetectorSeen
         ? 'GuardDuty detector(s) exist but none are enabled in any scanned region, so there is no automated threat detection (compromised credentials, unusual API activity, C2 traffic, etc.) currently running.'
         : 'No GuardDuty detector was found in any scanned region — threat detection has never been turned on.',

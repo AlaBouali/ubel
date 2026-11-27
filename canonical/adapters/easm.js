@@ -7,6 +7,7 @@
 // component_id = detected product name (+version) → "name@version" ("name" when no version is known).
 // A grouped misconfiguration is split per target, so every canonical finding points at one component (a host / URL).
 import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, portRisk, TYPES } from '../common.js';
+import { sha } from '../common.js';
 
 export const family = 'easm';
 
@@ -34,6 +35,7 @@ export function translate(p, opts, H) {
     const pver = hit ? hit.version : v.affected_dependency_version;
     out.findings.push(mkFinding({
       rule_id: `${v.id}-${pname}${pver ? `@${pver}` : ''}`,   // advisory-componentname@version
+      findVulning_id: sha(`${v.id}-${pname}${pver ? `@${pver}` : ''}`),
       title: `${v.id} affecting ${cname}`,//first(v.summary, v.id),
       component_id: cid, component_name: cname, component_type: 'application',
       confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),
@@ -47,6 +49,7 @@ export function translate(p, opts, H) {
     const targets = uniq([...arr(g.occurrences).map((o) => o.target), ...arr(g.targets)]);
     const t = targets[0] ?? null;               // a group can span several targets: it is one finding, anchored on the first
     out.findings.push(mkFinding({
+      finding_id: sha(g.id, t),
       rule_id: g.id, title: g.title, component_id: t, component_name: t, component_type: 'url',
       severity: g.severity, confidence: null, violate_policy: null, type: TYPES.MISCONFIG, details: R.deep(g),
     }));
@@ -55,7 +58,8 @@ export function translate(p, opts, H) {
   for (const s of arr(p.secrets)) {
     const t = first(s.target, s.url, s.file, s.source);
     out.findings.push(mkFinding({
-      rule_id: first(s.id, s.rule_id, s.rule), title: first(s.title, s.secret_type, s.id), component_id: t, component_name: t, component_type: 'url',
+      finding_id: sha(s.id, s.match_preview), // secrets also hash a fingerprint (the original has none: derive it from line + snippet, never storing the secret)
+      rule_id: s.id, title: `${s.title} in ${s.url}`, component_id: s.url, component_name: s.url, component_type: 'url',
       severity: s.severity, confidence: s.confidence ?? null, violate_policy: null, type: TYPES.SECRET, details: R.deep(s),
     }));
   }
@@ -78,6 +82,7 @@ export function translate(p, opts, H) {
       const { service, severity } = portRisk(port);
       out.findings.push(observe({
         rule_id: `exposure.port.${port}`,
+        finding_id: sha(`exposure.port.${port}`),
         title: `Port ${port}/tcp open${service ? ` (${service})` : web.has(String(port)) ? ' (HTTP)' : ''}`,
         component_id: row.name, component_name: row.name, component_type: row.type === 'ip' ? 'ip' : 'domain', severity, type: TYPES.EXPOSURE,
         details: R.deep({ target: row.name, port, protocol: 'tcp', service: service ?? (web.has(String(port)) ? 'HTTP(S)' : null), http: web.has(String(port)),

@@ -65,9 +65,10 @@ export function translate(p, opts, H) {
       // malware findings are always "mal" (a "credential theft" class is malicious code, not a hardcoded secret)
       const isSecret = !malware && /secret|credential/i.test(`${f.vuln_class || ''} ${ruleId}`);
       // secrets also hash a fingerprint (the original has none: derive it from line + snippet, never storing the secret)
-      const fp = isSecret ? first(f.fingerprint, sha(f.line, f.code_snippet)) : '';
+      const fp = f.code_snippet;
+
       out.findings.push(mkFinding({
-        finding_id: sha(cid, ruleId, fp),
+        finding_id: sha(ruleId, fp),
         rule_id: ruleId,
         title: first(f.vuln_name, f.vuln_class, ruleId),
         component_id: cid,
