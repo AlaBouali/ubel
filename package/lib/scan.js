@@ -25,16 +25,13 @@ import { addAdvisoryFindings } from '../../binary/lib/advisories.js';
 
 const MB = 1024 * 1024;
 export const DEFAULTS = { maxTextKb: 2048, maxBinaryMb: 64, maxBinaries: 25, maxTotalReadMb: 512 };
-// limits of the optional static source analysis (--sast / --no-llm): chunks of source code (functions, classes, templates, config files) and
+// limits of the static source analysis (the SAST and malware engines, both without a model): chunks of source code (functions, classes, templates, config files) and
 // characters per chunk. Kept apart from DEFAULTS, which library callers spread into their options.
 export const SAST_DEFAULTS = { maxChunks: 500_000, maxChunkSize: 1_000_000 };
 
 const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
 const sample = (list, n = 12) => list.slice(0, n);
 
-// install-time risk id → rule suffix; the same ids outside install-time files map to package.code.* (only those listed there)
-const INSTALL_RULE = { obfuscated: 'obfuscated', reverse_shell: 'reverse_shell', credential_access: 'credential_access', persistence: 'persistence', download_exec: 'download_exec', insecure_tls: 'insecure_tls', crypto_mining: 'crypto_mining', destructive: 'destructive', exfiltration: 'exfiltration', runtime_install: 'runtime_install', remote_fetch: 'remote_fetch', privilege: 'privilege', shell_inline: 'shell_exec' };
-const CODE_RULE = new Set(['obfuscated', 'reverse_shell', 'credential_access', 'persistence', 'download_exec', 'insecure_tls', 'crypto_mining', 'destructive', 'exfiltration']);
 const SIGNAL_RULE = { reverse_shell: 'reverse_shell', crypto_mining: 'crypto_mining', download_exec: 'download_exec', fetch: 'remote_fetch', runtime_install: 'runtime_install', shell_inline: 'shell_exec', obfuscated_inline: 'obfuscated', credential_access: 'credential_access', persistence: 'persistence', destructive: 'destructive', privilege: 'privilege', native_build: 'native_build' };
 const TYPED_SRC = /\.(?:pyi?|tsx?|dart|kt|swift|cs|java|rs|go)$/i;
 const ANNOTATION = /^\s*(?:\*\s*)?[A-Za-z_]\w*\s*:\s*(?:[A-Za-z_][\w.]*(?:\[[^\]'"=]*\])?(?:\s*\|\s*[A-Za-z_][\w.]*(?:\[[^\]'"=]*\])?)*)\??\s*[,;)=]?\s*(?:#.*|\/\/.*)?$/;
@@ -52,9 +49,10 @@ function openArtifact(pkg, artifact, notes) {
 
 /**
  * @param {object} pkg  result of fetchPackage() (or the same shape for a local file): {ecosystem, name, version, registry, artifacts[], meta, notes}
- * @param {object} [opts] {maxTextKb, maxBinaryMb, maxBinaries, log, sast, rulesDir, maxChunks, maxChunkSize}
- *   sast: also run the static rule engine of `ubel-sast --no-llm` over the package's source (no LLM, no network); rulesDir: string[] of directories /
- *   files of Semgrep-syntax rules for it; maxChunks / maxChunkSize: its limits (SAST_DEFAULTS).
+ * @param {object} [opts] {maxTextKb, maxBinaryMb, maxBinaries, log, rulesDir, maxChunks, maxChunkSize}
+ *   The package's source is always analysed by the static engines of `ubel-sast --no-llm` (vulnerabilities, filed as `package.sast.*`) and
+ *   `ubel-mal --no-llm` (malicious code, filed as `package.mal.*`): no LLM, no network. rulesDir: string[] of directories / files of
+ *   Semgrep-syntax rules for the SAST engine; maxChunks / maxChunkSize: the limits of both (SAST_DEFAULTS).
  */
 export async function analyzePackage(pkg, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
@@ -157,9 +155,9 @@ export async function analyzePackage(pkg, opts = {}) {
   for (const { archive } of opened) for (const f of archive.files) { if (f.type !== 'file') continue; if (/\.py$/i.test(f.path)) pyStems.add(f.path.replace(/\.py$/i, '')); if (/\.(?:java|kt|scala)$/i.test(f.path)) javaStems.add(f.path.replace(/\.[a-z]+$/i, '')); }
   const multi = opened.length > 1;
   let readBudgetNoted = false;
-  // static source analysis (--sast): the text files the engine can read are written to a private temp directory as the walk goes by (see sast.js)
-  let sast = null, sastFinding = null;
-  if (o.sast) { const m = await import('./sast.js'); sast = new m.SastStage(); sastFinding = m.sastFinding; }
+  // static source analysis (SAST + malware): the text files the engines can read are written to a private temp directory as the walk goes by (see sast.js)
+  const { SastStage, sastFinding } = await import('./sast.js');
+  const sast = new SastStage();
 
   for (const { artifact, archive } of opened) {
     for (const f of archive.files) {
@@ -236,7 +234,7 @@ export async function analyzePackage(pkg, opts = {}) {
       const text = buf.toString('utf8');
       const lines = text.split(/\r?\n/);
       const lockfile = isLockfile(f.path);
-      if (sast && !lockfile) {
+      if (!lockfile) {
         const vendored = role.role === 'vendored';
         sast.add(f, text, {
           label, origin: vendored ? 'library' : 'app', exclude: !isInstall && (role.role === 'test' || role.role === 'docs'),
@@ -258,32 +256,23 @@ export async function analyzePackage(pkg, opts = {}) {
       const r = lang === 'msbuild' ? analyzeMsbuild(text) : analyzeSource(text, lang);
       for (const b of r.behaviors.values()) behavior.add(b.cat, b.label, originName, 'source', b.count, 'refs');
       if (isInstall && [...r.behaviors.values()].some(b => b.cat === 'network')) installNet.add(where);
-      const fileOrigin = role.role === 'code' ? 'app' : 'library';
-      for (const rk of r.risks) {
-        const ruleSuffix = isInstall ? INSTALL_RULE[rk.id] : CODE_RULE.has(rk.id) ? rk.id : null;
-        if (!ruleSuffix) continue;
-        const rule = `package.${isInstall ? 'install' : 'code'}.${ruleSuffix}`;
-        const ctxText = isInstall ? ` This file runs on the consumer's machine: ${installPaths.get(f.path).reason}.` : role.role === 'vendored' ? ` The file is a bundled copy of ${role.owner}.` : role.role === 'test' ? ' The file is a test / example file.' : '';
-        add(rule, { artifact: label, line: rk.line || undefined, key: `${rule}|${label}|${rk.label}|${rk.line}`, description: `${rk.label}${rk.line ? ` (line ${rk.line})` : ''}.${ctxText}`, evidence: [rk.snippet], confidence: rk.confidence, origin: fileOrigin });
-      }
+      // what the source does is judged by the static engines (5b), not by pattern rules of this tool; only the capabilities above are recorded here
     }
   }
   if (appScanner.truncated || libScanner.truncated) gap(notes, 'More text than the secret scanner\'s line budget; the rest of the package was not scanned for secrets.');
   appScanner.run(); libScanner.run();
 
-  // ── 5b. static source analysis (SAST, no LLM) ──────────────────────────────────────────────────────────────────────────────────
+  // ── 5b. static source analysis (SAST + malware, no LLM) ──────────────────────────────────────────────────────────────────────────────────
   let sastSummary = null;
-  if (sast) {
-    try {
-      const r = await sast.analyze({ rulesDirs: o.rulesDir, maxChunks: o.maxChunks ?? SAST_DEFAULTS.maxChunks, maxChunkSize: o.maxChunkSize ?? SAST_DEFAULTS.maxChunkSize, maxTextKb: o.maxTextKb });
-      for (const item of r.items) { const [rule, fields] = sastFinding(item); add(rule, fields); }
-      for (const g of r.gaps) gap(notes, g);
-      for (const n of r.notes) notes.push(n);
-      sastSummary = r.summary;
-    } catch (e) {
-      gap(notes, `Static source analysis (SAST) failed: ${e.message}; the package's source was not analysed by it.`);
-    } finally { sast.dispose(); }
-  }
+  try {
+    const r = await sast.analyze({ rulesDirs: o.rulesDir, maxChunks: o.maxChunks ?? SAST_DEFAULTS.maxChunks, maxChunkSize: o.maxChunkSize ?? SAST_DEFAULTS.maxChunkSize, maxTextKb: o.maxTextKb });
+    for (const item of r.items) { const [rule, fields] = sastFinding(item); add(rule, fields); }
+    for (const g of r.gaps) gap(notes, g);
+    for (const n of r.notes) notes.push(n);
+    sastSummary = r.summary;
+  } catch (e) {
+    gap(notes, `Static source analysis (SAST and malware) failed: ${e.message}; the package's source was not analysed by it.`);
+  } finally { sast.dispose(); }
   if (skippedBig) notes.push(`${skippedBig} text file(s) larger than ${o.maxTextKb} KB were not read for source behavior or secrets (--max-text-kb).`);
   for (const p of installPaths.keys()) if (!installSeen.has(p) && !natives.some(n => n.path === p)) notes.push(`Install-time file ${p} (${installPaths.get(p).reason}) is not in the archive or could not be read as text.`);
   if (compiled.length) { interest.push(...sample(compiled, 20).map(p => ({ kind: 'compiled code without source', path: p, detail: 'bytecode with no matching source in the archive' }))); add('package.files.compiled_code', { artifact: appName, key: 'compiled', description: `${compiled.length} compiled bytecode file(s) have no source file next to them in the archive, so they cannot be reviewed.`, evidence: sample(compiled, 15), evidence_total: compiled.length }); }
@@ -387,7 +376,7 @@ export async function analyzePackage(pkg, opts = {}) {
   if (!app.package.info.license && m.license) app.package.info.license = m.license;
   if (!app.package.info.repository && m.repository) app.package.info.repository = m.repository;
   if (!app.package.info.homepage && m.homepage) app.package.info.homepage = m.homepage;
-  notes.push(`Scope: install / build / import-time hooks, source behavior, remote hosts, secrets, dependencies and their pinning, bundled components, native binaries${sastSummary ? ', static source analysis (SAST, no LLM)' : ''} and archive integrity. The package was never installed, built or run; a pattern match shows the code refers to something, not that it is reachable.`);
+  notes.push(`Scope: install / build / import-time hooks, source behavior, remote hosts, secrets, dependencies and their pinning, bundled components, native binaries, static source analysis (SAST for vulnerabilities and a malware pass for malicious code, no LLM) and archive integrity. The package was never installed, built or run; a pattern match shows the code refers to something, not that it is reachable.`);
 
   const sha = pkg.artifacts[0].sha256;
   return {

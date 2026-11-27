@@ -57,6 +57,7 @@
     sc_infection: function (f, d) {
       return '<div class="mb-4 p-3 rounded-lg border border-purple-500/40 text-sm" style="color:#c084fc">This package is flagged as malicious / compromised (supply-chain infection), not as an ordinary vulnerability.</div>' + FIND.sc_vulnerability(f, d);
     },
+    // SAST findings: 'mal' (malware scan) and 'vuln' (everything else); 'code' is what canonical files written earlier used
     code: function (f, d) {
       var loc = (d.file || d.artifact || '') + (d.line != null ? ':' + d.line : '') + (d.startLine != null && d.line == null ? ':' + d.startLine : '');
       var t = d.taint || null;
@@ -97,6 +98,9 @@
         + section('Remediation', para(d.remediation));
     }
   };
+  FIND.mal = FIND.code;
+  // 'vuln' is a SAST weakness (code layout) or, in canonical files written earlier, a package advisory
+  FIND.vuln = function (f, d) { return ('affected_dependency' in d || d.aliases || d.fixed_versions || d.severity_score != null) ? FIND.sc_vulnerability(f, d) : FIND.code(f, d); };
 
   var INV_BY_ID = {}; INV.forEach(function (c) { if (!(c.component_id in INV_BY_ID)) INV_BY_ID[c.component_id] = c; });
   function nodeName(id) {

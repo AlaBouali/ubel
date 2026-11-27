@@ -6,6 +6,7 @@
 //             LLM engine     → a rule derived from the vulnerability class   ("llm.<class-slug>")
 //             malware        → a rule derived from the malware class         ("mal.<class-slug>")
 // finding_id: sha256(chunk_id + rule_id [+ fingerprint for secrets])  — the only family that has one.
+// type:       malware → "mal"; hardcoded secrets → "secret"; every other SAST finding → "vuln"
 // component:  id = chunk id (relative path); name = "<file name>: (<class>.)<function>".
 import path from 'node:path';
 import { arr, first, mkFinding, observe, mkInventory, makeRel, sha, slug, uniq, TYPES } from '../common.js';
@@ -61,7 +62,8 @@ export function translate(p, opts, H) {
     for (const f of fl) {
       // static engine findings carry their own rule_id; LLM findings get a derived one
       const ruleId = f.rule_id || llmRuleId(f.vuln_class || f.vuln_name, malware);
-      const isSecret = /secret|credential/i.test(`${f.vuln_class || ''} ${ruleId}`);
+      // malware findings are always "mal" (a "credential theft" class is malicious code, not a hardcoded secret)
+      const isSecret = !malware && /secret|credential/i.test(`${f.vuln_class || ''} ${ruleId}`);
       // secrets also hash a fingerprint (the original has none: derive it from line + snippet, never storing the secret)
       const fp = isSecret ? first(f.fingerprint, sha(f.line, f.code_snippet)) : '';
       out.findings.push(mkFinding({
@@ -74,7 +76,7 @@ export function translate(p, opts, H) {
         severity: f.severity,
         confidence: f.confidence,
         violate_policy: violates(f),
-        type: isSecret ? TYPES.SECRET : TYPES.CODE,
+        type: malware ? TYPES.MAL : (isSecret ? TYPES.SECRET : TYPES.VULN),
         details: R.deep(f),
       }));
     }

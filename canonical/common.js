@@ -68,14 +68,16 @@ export function makeRel(root) {
 
 // ── finding types (short names) ─────────────────────────────────────────────
 // One vocabulary for every module. A finding's `type` says what KIND of thing it is, not which scanner produced it.
-//   vuln        known advisory on a package / product (CVE, GHSA, OSV …)          infection   package flagged as malicious / compromised
-//   sc_vuln / sc_infection   the same two kinds, as reported for a third-party dependency (SCA, EASM, and the package / binary / mobile app scans); `vuln` / `infection` are only read for canonical files written earlier
-//   secret      hardcoded credential                                             code        weakness in source / bytecode (SAST, malware)
+//   vuln        weakness found in source code by the static analysis (SAST, and   infection   package flagged as malicious / compromised
+//               the SAST pass of ubel-package); canonical files written earlier also used it for a package advisory
+//   sc_vuln / sc_infection   the same two kinds, as reported for a third-party dependency (SCA, EASM, and the package / binary / mobile app scans); `infection` is only read for canonical files written earlier
+//   secret      hardcoded credential                                             mal         malicious code found in source (ubel-mal, and the malware pass of ubel-package)
+//   code        weakness in source / bytecode reported by the app scanners (mobile, binary, mcp, and package's own checks)
 //   misconfig   insecure configuration (cloud, k8s, manifests, headers …)        hardening   missing / present host or binary protection (passed checks too)
 //   behavior    what the software does or runs (capabilities, processes, tools)  exposure    reachable network surface (open ports, listeners, remote hosts)
 //   license     license obligation / risk of a component                         coverage    part of the scan that could not be (fully) assessed
 export const TYPES = {
-  VULN: 'vuln', INFECTION: 'infection', SC_VULN: 'sc_vuln', SC_INFECTION: 'sc_infection', SECRET: 'secret', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
+  VULN: 'vuln', INFECTION: 'infection', SC_VULN: 'sc_vuln', SC_INFECTION: 'sc_infection', SECRET: 'secret', MAL: 'mal', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
   BEHAVIOR: 'behavior', EXPOSURE: 'exposure', LICENSE: 'license', COVERAGE: 'coverage',
 };
 
@@ -304,7 +306,7 @@ export function applyFindingStatus(inventory, findings, { vulnerable = 'vulnerab
   for (const c of inventory) {
     const fs_ = by.get(c.component_id);
     if (!fs_ || !fs_.length) { if (c.status === 'unknown' || c.status === undefined) c.status = clean; continue; }
-    c.status = fs_.some((f) => f.type === TYPES.INFECTION || f.type === TYPES.SC_INFECTION) ? infected : vulnerable;
+    c.status = fs_.some((f) => f.type === TYPES.INFECTION || f.type === TYPES.SC_INFECTION || f.type === TYPES.MAL) ? infected : vulnerable;
     c.violate_policy = fs_.some((f) => f.violate_policy === true) ? true : (fs_.every((f) => f.violate_policy === false) ? false : c.violate_policy);
   }
   return inventory;

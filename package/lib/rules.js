@@ -4,7 +4,7 @@
 //
 // masvs = the AREA the finding is filed under in the report (there is no MASVS control for a dependency package):
 //   PKG-INSTALL    code that runs on the consumer's machine because the package was installed, built against or imported
-//   PKG-CODE       what the package's source does (malware patterns)
+//   PKG-CODE       what the package's source does (static analysis findings: vulnerabilities and malicious code)
 //   PKG-DEPS       dependencies: pinning, source, advisories, bundled copies
 //   PKG-INTEGRITY  was the archive the registry's archive, is the metadata the archive's metadata, is the archive safe to unpack
 //   PKG-CONTENT    files that do not belong in a package; build / tool configuration
@@ -35,16 +35,10 @@ export const PACKAGE_RULES = {
   'package.install.insecure_tls':       R('high',     'Install-time code switches TLS certificate verification off', I, 295, 'Never disable certificate verification in an installer; fix the trust problem instead.'),
   'package.install.pth_file':           R('high',     'Python .pth / sitecustomize file runs code at every interpreter start', I, 506, 'Only a path list belongs in a .pth file. Remove `import` lines and sitecustomize modules, or avoid this package.'),
 
-  // ── source behaviour (outside install-time code) ──────────────────────────────────────────────────────────────────────────────
-  'package.code.obfuscated':            R('medium',   'Source contains encoded, packed or obfuscated code', C, 506, 'Ask for readable source or build the package from its repository; obfuscation in a dependency hides what it does.'),
-  'package.code.reverse_shell':         R('critical', 'Source contains a reverse-shell construct', C, 506, REVIEW),
-  'package.code.credential_access':     R('high',     'Source reads credential stores or the whole environment', C, 522, 'A library has no reason to read SSH keys, cloud tokens, browser profiles or every environment variable. Review where the data goes.'),
+  // ── source behaviour ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  // What the package's source does is judged by the static engines (package.sast.* and package.mal.*, registered below as they fire), not by
+  // rules of this catalog. Only the remote-host finding stays here: it comes from the hosts the files name, not from a source pattern.
   'package.code.exfiltration':          R('high',     'Source collects secrets and has network access in the same file', C, 200, 'Review the file: it can read credentials and send data out. Treat as malicious until shown otherwise.'),
-  'package.code.persistence':           R('medium',   'Source refers to autostart, scheduler or shell-profile locations', C, 506, 'A library should not write to startup locations. Review the code that does.'),
-  'package.code.download_exec':         R('high',     'Source downloads and runs a program', C, 494, 'Remove run-time download-and-execute, or pin the download to a digest.'),
-  'package.code.insecure_tls':          R('medium',   'Source switches TLS certificate verification off', C, 295, 'Enable certificate verification.'),
-  'package.code.crypto_mining':         R('high',     'Source refers to a cryptocurrency miner', C, 506, REVIEW),
-  'package.code.destructive':           R('medium',   'Source contains a destructive command', C, 912, 'Review the command and the path it can reach.'),
 
   // ── dependencies ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
   'package.dep.unpinned':               R('low',      'Dependencies are not bounded to a version', D, 1357, 'Declare a bounded range or an exact version; pin the resolved versions in a lockfile that is checked in.'),
@@ -83,13 +77,19 @@ export const PACKAGE_RULES = {
 Object.assign(RULES, PACKAGE_RULES);
 export const PACKAGE_RULE_IDS = Object.keys(PACKAGE_RULES);
 
-// ── static source analysis (--sast / --no-llm) ────────────────────────────────────────────────────────────────────────────────
-// The engine of `ubel-sast --no-llm` has hundreds of rules of its own (and the user's, with --rules-dir), so they are not listed here: each rule
-// that fires is registered on first use as `package.sast.<engine rule id>` (custom rules: `package.sast.custom.<id>`), filed under PKG-CODE like
-// the other findings about what the package's source does. The severity and title are the engine's; the CWE comes from the vulnerability class.
+// ── static source analysis (always on: the SAST and the malware engines, both without a model) ───────────────────────────────────
+// The engines of `ubel-sast --no-llm` and `ubel-mal --no-llm` have hundreds of rules of their own (and the user's, with --rules-dir, for the SAST
+// engine), so they are not listed here: each rule that fires is registered on first use as `package.sast.<engine rule id>` (a vulnerability;
+// custom rules: `package.sast.custom.<id>`) or `package.mal.<engine rule id>` (malicious code), filed under PKG-CODE. The severity and title
+// are the engine's; the CWE of a vulnerability comes from its class.
 export const SAST_RULE_PREFIX = 'package.sast.';
+export const MAL_RULE_PREFIX = 'package.mal.';
 const SAST_REMEDIATION = 'Review the flagged line: fix the weakness in the package, or avoid the code path that reaches it. A finding here is a lead from static analysis, not proof that the package is exploitable in your use of it.';
 export function registerSastRule(id, { severity, title, cwe }) {
   if (!RULES[id]) RULES[id] = R(severity, title, C, cwe ?? null, SAST_REMEDIATION);
+  return RULES[id];
+}
+export function registerMalRule(id, { severity, title, cwe }) {
+  if (!RULES[id]) RULES[id] = R(severity, title, C, cwe ?? 506, REVIEW);
   return RULES[id];
 }

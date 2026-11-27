@@ -21,9 +21,11 @@ const BEHAVIOR_TITLE = {
   persistence: 'Persistence', input_capture: 'Input capture / sensitive devices', crypto: 'Cryptography', system_info: 'System fingerprinting', credentials: 'Credential / environment access', obfuscation: 'Obfuscation',
 };
 
-// ubel-package --sast (static source analysis): rule ids are `package.sast.<engine rule>`; user rules (--rules-dir) can have any id, including words
-// the BEHAVIOUR pattern below looks for ("exfil", "persist" …), so these are always code vulnerabilities, never behavior observations.
+// ubel-package's static source analysis (always on): the SAST engine files `package.sast.<engine rule>` (type vuln), the malware engine files
+// `package.mal.<engine rule>` (type mal), exactly the types ubel-sast / ubel-mal give their findings. User rules (--rules-dir) can have any id,
+// including words the BEHAVIOUR pattern below looks for ("exfil", "persist" …), so these are never behavior observations.
 const SAST_RULE = /^package\.sast\./;
+const MAL_RULE = /^package\.mal\./;
 const HARDENING = /(^|[._-])(pie|relro|canary|fortify|nx|exec[_-]?stack|textrel|rpath|wx|stripped|hardening|bitcode|arc|stack[_-]?protector|no[_-]?gnu[_-]?stack)([._-]|$)/i;
 const BEHAVIOUR = /behavio|intent|exfil|beacon|c2\b|dynamic[_-]?load|obfusc|persist|anti[_-]?(debug|analysis)|self[_-]?modif/i;
 
@@ -101,7 +103,11 @@ export function translate(p, opts, H) {
       details: R.deep(f),
     }));
   };
-  for (const f of arr(p.vulnerabilities)) { if (isDepAdvisory(f)) continue; push(f, !SAST_RULE.test(f.rule || '') && BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : TYPES.CODE); }
+  for (const f of arr(p.vulnerabilities)) {
+    if (isDepAdvisory(f)) continue;
+    const rule = f.rule || '';
+    push(f, SAST_RULE.test(rule) ? TYPES.VULN : MAL_RULE.test(rule) ? TYPES.MAL : BEHAVIOUR.test(rule) ? TYPES.BEHAVIOR : TYPES.CODE);
+  }
   for (const f of arr(p.secrets)) push(f, TYPES.SECRET);
   for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
 
@@ -216,7 +222,7 @@ export function translate(p, opts, H) {
   });
   return {
     metadata: meta,
-    // flags.sast: what the optional static source analysis (ubel-package --sast / --no-llm) ran with and covered: engine, rules, custom rule directories, limits, counts
+    // flags.sast: what the static source analysis of ubel-package (SAST + malware engines) ran with and covered: engines, rules, custom rule directories, limits, counts
     policy: { flags: { min_severity: p.min_severity ?? null, hidden_by_filter: p.hidden_by_filter ?? 0, ...(p.sast ? { sast: R.deep(p.sast) } : {}) }, gate: p.gate ?? null, limits: p.limits ?? null, analysis: p.analysis ?? null },
     ...out,
     stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: dependencyDiffs(p.diffs, p), notes: p.analysis_notes ?? null },
@@ -229,7 +235,8 @@ export function translate(p, opts, H) {
 // (mobile/lib/report.js buildHtml) for the executive-summary section, which that template renders on the server.
 export function restore(c) {
   const si = c.metadata?.scan_info || {}, st = c.stats || {}, src = st.source || {}, pol = c.policy || {};
-  const own = (f) => ![TYPES.VULN, TYPES.INFECTION, TYPES.SC_VULN, TYPES.SC_INFECTION].includes(f.type);
+  // the module's own findings: not a dependency's advisory (`vuln` is a source vulnerability here; only canonical files written long ago used it for an advisory)
+  const own = (f) => ![TYPES.INFECTION, TYPES.SC_VULN, TYPES.SC_INFECTION].includes(f.type);
   const cat = (k) => arr(c.findings).filter((f) => own(f) && f.details?.category === k).map((f) => f.details);
   const t0 = arr(c.scopes).find((s) => s.type === 'artifact' || s.type === 'mcp') || {};
   const { type: _t, name, ...target } = t0;
