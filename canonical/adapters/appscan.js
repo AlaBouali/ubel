@@ -3,7 +3,12 @@
 // They all share one payload (mobile/lib/report.js buildPayload; mcp/lib/report.js reuses it).
 // Original keys used: schema, tool, target, apps[], vulnerabilities[], secrets[], misconfigurations[], dependencies[]
 // (each with vulnerabilities[]), gate, min_severity, analysis, summary, stats, compliance_summary, executive_summary, diffs.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
+// A finding's canonical `type` is not guessed from its rule's name: the rule catalogs (mobile/lib/rules.js, package/lib/rules.js, mcp/lib/rules.js)
+// give every rule its type and the finding carries it as `finding_type`; see resolveType below for the order and for what is left of the old guess.
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES, isFindingType } from '../common.js';
+import { catalogType } from '../../mobile/lib/rules.js';
+import '../../package/lib/rules.js';   // the package and MCP catalogs register their rules in the shared table (mobile/lib/rules.js) when imported
+import '../../mcp/lib/rules.js';
 
 export const family = 'appscan';
 
@@ -24,15 +29,37 @@ const BEHAVIOR_TITLE = {
 // ubel-package's static source analysis (always on): the SAST engine files `package.sast.<engine rule>` (type vuln), the malware engine files
 // `package.mal.<engine rule>` (type mal), exactly the types ubel-sast / ubel-mal give their findings. User rules (--rules-dir) can have any id,
 // including words the BEHAVIOUR pattern below looks for ("exfil", "persist" …), so these are never behavior observations.
+// SAST_RULE, MAL_RULE, HARDENING and BEHAVIOUR are what remains of the old guess from a rule's name: resolveType uses them only for a rule no catalog knows.
 const SAST_RULE = /^package\.sast\./;
 const MAL_RULE = /^package\.mal\./;
 const HARDENING = /(^|[._-])(pie|relro|canary|fortify|nx|exec[_-]?stack|textrel|rpath|wx|stripped|hardening|bitcode|arc|stack[_-]?protector|no[_-]?gnu[_-]?stack)([._-]|$)/i;
 const BEHAVIOUR = /behavio|intent|exfil|beacon|c2\b|dynamic[_-]?load|obfusc|persist|anti[_-]?(debug|analysis)|self[_-]?modif/i;
 
+/**
+ * The canonical type of one finding of the module's vulnerabilities[] / secrets[] / misconfigurations[] list, and how it was found:
+ *   field     the finding says it itself (`finding_type`, written by Findings.add from the rule's catalog entry, or the finding's own override)
+ *   catalog   a report written before that field existed: the catalog's type for the rule id
+ *   prefix    package.sast.* / package.mal.* rules, which the package scanner registers only when the engine fires
+ *   fallback  a rule no catalog knows (a scanner newer than this file, a user's rule id): the old guess from the list and the rule's name.
+ *             This is the only way to `code`, and tests/finding-types.test.js proves no catalog rule ever gets here.
+ */
+export function resolveType(f, list) {
+  const rule = String(f?.rule || '');
+  if (isFindingType(f?.finding_type)) return { type: f.finding_type, via: 'field' };
+  const known = catalogType(rule);
+  if (known) return { type: known, via: 'catalog' };
+  if (SAST_RULE.test(rule)) return { type: TYPES.VULN, via: 'prefix' };
+  if (MAL_RULE.test(rule)) return { type: TYPES.MAL, via: 'prefix' };
+  if (list === 'secrets') return { type: TYPES.SECRET, via: 'fallback' };
+  if (BEHAVIOUR.test(rule)) return { type: TYPES.BEHAVIOR, via: 'fallback' };
+  if (list === 'misconfigurations') return { type: HARDENING.test(rule) ? TYPES.HARDENING : TYPES.MISCONFIG, via: 'fallback' };
+  return { type: TYPES.CODE, via: 'fallback' };
+}
+
 // Advisories of third-party components. The modules (binary/lib/advisories.js addAdvisoryFindings) also file each advisory as an ordinary
 // entry of their own vulnerabilities[] list so their native summary, counts and diffs include it. In the canonical report a dependency's
 // advisories exist ONCE, as sc_vuln / sc_infection findings of the dependency (built from dependencies[].vulnerabilities[] below), so those
-// module-level copies are dropped here: they would otherwise show up as extra "code" vulnerabilities.
+// module-level copies are dropped here: they would otherwise show up as extra vulnerabilities of the module.
 const DEP_ADVISORY_RULES = new Set(['binary.component.vulnerable', 'package.vulnerable', 'package.malicious', 'package.dep.vulnerable', 'package.dep.malicious']);
 export const isDepAdvisory = (f) => !!f && (isObj(f.component) && f.component.advisory != null || DEP_ADVISORY_RULES.has(f.rule));
 
@@ -105,11 +132,10 @@ export function translate(p, opts, H) {
   };
   for (const f of arr(p.vulnerabilities)) {
     if (isDepAdvisory(f)) continue;
-    const rule = f.rule || '';
-    push(f, SAST_RULE.test(rule) ? TYPES.VULN : MAL_RULE.test(rule) ? TYPES.MAL : BEHAVIOUR.test(rule) ? TYPES.BEHAVIOR : TYPES.CODE);
+    push(f, resolveType(f, 'vulnerabilities').type);
   }
-  for (const f of arr(p.secrets)) push(f, TYPES.SECRET);
-  for (const f of arr(p.misconfigurations)) push(f, BEHAVIOUR.test(f.rule || '') ? TYPES.BEHAVIOR : (HARDENING.test(f.rule || '') ? TYPES.HARDENING : TYPES.MISCONFIG));
+  for (const f of arr(p.secrets)) push(f, resolveType(f, 'secrets').type);
+  for (const f of arr(p.misconfigurations)) push(f, resolveType(f, 'misconfigurations').type);
 
   for (const a of apps) {
     out.inventory.push(mkInventory({ component_id: R.rel(String(appId(a))), component_name: R.text(String(first(a.name, a.id) || appId(a))), status: 'unknown', type: 'application', details: R.deep(a) }));

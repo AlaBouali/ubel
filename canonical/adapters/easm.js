@@ -35,7 +35,7 @@ export function translate(p, opts, H) {
     const pver = hit ? hit.version : v.affected_dependency_version;
     out.findings.push(mkFinding({
       rule_id: `${v.id}-${pname}${pver ? `@${pver}` : ''}`,   // advisory-componentname@version
-      findVulning_id: sha(`${v.id}-${pname}${pver ? `@${pver}` : ''}`),
+      finding_id: sha(`${v.id}-${pname}${pver ? `@${pver}` : ''}`),
       title: `${v.id} affecting ${cname}`,//first(v.summary, v.id),
       component_id: cid, component_name: cname, component_type: 'application',
       confidence: "high", //first(v.release_confidence?.level, v.release_confidence, null),

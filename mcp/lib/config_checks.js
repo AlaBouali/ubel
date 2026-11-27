@@ -8,6 +8,7 @@ import path from 'node:path';
 import { analyzeCommand } from '../../package/lib/installscripts.js';
 import { scanText } from '../../sca/secrets.js';
 import { mask } from '../../mobile/lib/findings.js';
+import { TYPES } from '../../canonical/types.js';
 import { isLoopbackHost } from './net.js';
 
 const SECRET_NAME = /(?:token|secret|passw(?:or)?d|passwd|pwd|api[_-]?key|apikey|auth|bearer|credential|private[_-]?key|access[_-]?key|session|cookie|signature)/i;
@@ -135,9 +136,10 @@ export function checkServerConfig(server, launch, ctx) {
     if (sig('obfuscated_inline')) add('mcp.launch.obfuscated', { artifact: where, key: 'obfuscated', description: `The command that starts the server "${server.name}" ${sig('obfuscated_inline').detail}.`, evidence: sig('obfuscated_inline').commands });
     for (const [id, sev] of [['reverse_shell', 'critical'], ['crypto_mining', 'critical'], ['persistence', 'high'], ['destructive', 'high'], ['credential_access', 'medium'], ['privilege', 'medium']]) {
       const s = sig(id);
-      if (s) add('mcp.launch.suspicious_command', { artifact: where, key: id, severity: sev, title: `Server command ${s.detail}`, description: `The command that starts the server "${server.name}" ${s.detail}.`, evidence: s.commands });
+      // the rule's type is `mal`; a command that only asks for more privileges (sudo, chmod +s) is a setting to review, not hostile code
+      if (s) add('mcp.launch.suspicious_command', { artifact: where, key: id, severity: sev, ...(id === 'privilege' ? { finding_type: TYPES.MISCONFIG } : {}), title: `Server command ${s.detail}`, description: `The command that starts the server "${server.name}" ${s.detail}.`, evidence: s.commands });
     }
-    if (launch.privilegedPrefix && !sig('privilege')) add('mcp.launch.suspicious_command', { artifact: where, key: 'sudo', severity: 'medium', title: 'Server is started with elevated privileges', description: `The server "${server.name}" is started through sudo/doas, so a tool call that is steered by a poisoned prompt runs as root.`, evidence: [snippet(launch.commandLine)] });
+    if (launch.privilegedPrefix && !sig('privilege')) add('mcp.launch.suspicious_command', { artifact: where, key: 'sudo', severity: 'medium', finding_type: TYPES.MISCONFIG, title: 'Server is started with elevated privileges', description: `The server "${server.name}" is started through sudo/doas, so a tool call that is steered by a poisoned prompt runs as root.`, evidence: [snippet(launch.commandLine)] });
     if (launch.wrapper) {
       add('mcp.launch.shell_wrapper', {
         artifact: where, key: 'shell_wrapper', severity: launch.wrapper.complex ? 'medium' : 'low',

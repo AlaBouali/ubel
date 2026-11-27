@@ -1,6 +1,7 @@
 'use strict';
 import crypto from 'crypto';
 import { ruleMeta, SEVERITY_RANK, SEVERITIES, lowerSeverity } from './rules.js';
+import { isFindingType } from '../../canonical/types.js';
 
 /** Masks a value for reports: never writes key material or secrets into an artifact. */
 export function mask(value, keep = 3) {
@@ -25,9 +26,11 @@ export class Findings {
    * @param {string} [f.confidence]  'high' | 'medium' | 'low' — 'low' lowers the severity one level (floor: low), except for origin 'unknown'
    * @param {boolean} [f.confidenceCap] set to false to keep the severity of a low-confidence finding
    * @param {string} [f.app]         package / bundle id the finding belongs to
+   * @param {string} [f.finding_type] canonical finding type (canonical/types.js); overrides the rule's own when one rule covers two kinds of thing
    */
   add(rule, f) {
     const meta = ruleMeta(rule);
+    if (f.finding_type !== undefined && !isFindingType(f.finding_type)) throw new Error(`rule ${rule}: unknown finding type "${f.finding_type}"`);
     let severity = f.severity || meta.severity;
     let description = f.description;
     if (f.origin === 'library') severity = lowerSeverity(severity);
@@ -49,6 +52,7 @@ export class Findings {
     this._seen.add(fingerprint);
     const out = {
       rule,
+      finding_type: f.finding_type || meta.type,   // what the canonical report files the finding under: set where the rule is defined, not guessed from its name
       severity,
       title: f.title || meta.title,
       description,

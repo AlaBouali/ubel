@@ -6,9 +6,17 @@
 
 // ── data: the module report shape, rebuilt from the canonical report ──
 
+// A dependency's advisory: an sc_vuln / sc_infection finding, or in canonical files written long ago an `infection` / a `vuln` whose details are an advisory record.
+// A plain `vuln` is a weakness the module found in code (weak cipher, unsafe call, a package's source-analysis hit) and opens the module's own finding modal.
+const isAdvisory = function (f) {
+  if (f.type === 'sc_vuln' || f.type === 'sc_infection' || f.type === 'infection') return true;
+  const d = f.details || {};
+  return f.type === 'vuln' && ('affected_dependency' in d || d.aliases != null || d.fixed_versions != null || d.severity_score != null || (!!d.component && d.component.advisory != null));
+};
+
 const reportData = (function (C) {
   const st = C.stats || {};
-  const own = function (f) { return ['vuln', 'infection', 'sc_vuln', 'sc_infection'].indexOf(f.type) < 0; };   // dependency advisories (sc_vuln / sc_infection; vuln / infection in older files) are not module issues
+  const own = function (f) { return !isAdvisory(f); };   // dependency advisories are not module issues
   const byCat = function (cat) { return C.findings.filter(function (f) { return own(f) && f.details && f.details.category === cat; }).map(function (f) { return f.details; }); };
   return {
     vulnerabilities: byCat('vulnerability'), secrets: byCat('secret'), misconfigurations: byCat('misconfiguration'),
@@ -269,7 +277,7 @@ function openDependencyModal(index) {
 const FAMILY = {
   openFinding: function (i) {
     const f = CANON.findings[i];
-    if (f.type === 'sc_vuln' || f.type === 'sc_infection' || f.type === 'vuln' || f.type === 'infection') {
+    if (isAdvisory(f)) {
       // the advisory on its own: the SCA vulnerability modal (client/scvuln.js), not the dependency's modal
       if (window.UBEL_SC_VULN && f.details && window.UBEL_SC_VULN.open(f.details)) return true;
       const k = reportData.dependencies.findIndex(function (d) { return (d.purl || (d.name + '@' + (d.version || ''))) === f.affected_component_id; });

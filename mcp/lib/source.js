@@ -19,6 +19,7 @@ import path from 'node:path';
 import { detectLang, analyzeSource, snip } from '../../package/lib/sourcebehavior.js';
 import { scanText } from '../../sca/secrets.js';
 import { mask } from '../../mobile/lib/findings.js';
+import { TYPES } from '../../canonical/types.js';
 import { parseUnits, taintedIdents, segmentAt, usesAny } from './handlers.js';
 import { analyzeDefinitions } from './defs.js';
 import { isPlaceholder } from './config_checks.js';
@@ -28,12 +29,13 @@ const ROOT_MARKERS = ['package.json', 'pyproject.toml', 'setup.py', 'setup.cfg',
 const TEST_PATH = /(?:^|\/)(?:tests?|__tests__|spec|fixtures?|examples?|docs?|mocks?)\//i;
 const PER_RULE_CAP = 40;                 // findings of one rule listed individually; the rest are summarised in one
 
-// risk id (from analyzeSource) → [severity, headline]
+// risk id (from analyzeSource) → [severity, headline, finding type]. The rule (mcp.source.risky_code) is `mal`; reading secret-named environment
+// variables is something a server does legitimately (behavior), and switching TLS verification off is a weakness in the code (vuln).
 const RISK = {
   reverse_shell: ['critical', 'opens a reverse shell'], crypto_mining: ['critical', 'refers to a cryptocurrency miner'], download_exec: ['high', 'downloads and runs code'],
   exfiltration: ['high', 'collects secrets and has network access in the same file'], obfuscated: ['medium', 'contains obfuscated or encoded code'],
-  credential_access: ['medium', 'reads credentials or secret-named environment variables'], persistence: ['medium', 'refers to autostart or scheduler locations'],
-  destructive: ['medium', 'contains a destructive command'], insecure_tls: ['medium', 'turns TLS certificate verification off'],
+  credential_access: ['medium', 'reads credentials or secret-named environment variables', TYPES.BEHAVIOR], persistence: ['medium', 'refers to autostart or scheduler locations'],
+  destructive: ['medium', 'contains a destructive command'], insecure_tls: ['medium', 'turns TLS certificate verification off', TYPES.VULN],
 };
 
 /** The nearest directory above `file` (within 4 levels, never the home directory or the filesystem root) that has a project marker; null when there is none. */
@@ -122,7 +124,7 @@ function makeEmitter(findings, app, label) {
       findings.add(rule, { app, origin: 'app', artifact: `${label} → ${file}`, key: `${key}:${file}`, ...f });
     },
     flush() {
-      for (const [rule, o] of overflow) findings.add(rule, { app, origin: 'app', artifact: label, key: `overflow:${rule}`, severity: o.first.severity, confidence: o.first.confidence, title: o.first.title, description: `${o.files.size} more file(s) in ${label} have the same finding as the ${PER_RULE_CAP} listed above.`, evidence: [...o.files].slice(0, 20) });
+      for (const [rule, o] of overflow) findings.add(rule, { app, origin: 'app', artifact: label, key: `overflow:${rule}`, severity: o.first.severity, finding_type: o.first.finding_type, confidence: o.first.confidence, title: o.first.title, description: `${o.files.size} more file(s) in ${label} have the same finding as the ${PER_RULE_CAP} listed above.`, evidence: [...o.files].slice(0, 20) });
     },
   };
 }
@@ -165,8 +167,8 @@ export function analyzeLocalSource(root, o) {
       const a = analyzeSource(text, lang);
       for (const r of a.risks) {
         if (!RISK[r.id]) continue;
-        const [sev, headline] = RISK[r.id];
-        emit('mcp.source.risky_code', { file: rel, key: `risk:${r.id}`, severity: sev, confidence: r.confidence || 'medium', title: `Server source ${headline}`, description: `${rel} ${headline}.`, evidence: [`${rel}${r.line ? `:${r.line}` : ''} ${r.label}${r.snippet ? ` — ${r.snippet}` : ''}`] });
+        const [sev, headline, type] = RISK[r.id];
+        emit('mcp.source.risky_code', { file: rel, key: `risk:${r.id}`, severity: sev, ...(type ? { finding_type: type } : {}), confidence: r.confidence || 'medium', title: `Server source ${headline}`, description: `${rel} ${headline}.`, evidence: [`${rel}${r.line ? `:${r.line}` : ''} ${r.label}${r.snippet ? ` — ${r.snippet}` : ''}`] });
       }
     } catch { /* an unparsable file is skipped, not fatal */ }
 

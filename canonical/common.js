@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getOSMetadata } from '../sca/os_metadata.js';
+import { TYPES, TYPE_QUESTIONS, isFindingType } from './types.js';
 
 export const SCHEMA_VERSION = '0.1.0';
 
@@ -67,19 +68,23 @@ export function makeRel(root) {
 }
 
 // ── finding types (short names) ─────────────────────────────────────────────
-// One vocabulary for every module. A finding's `type` says what KIND of thing it is, not which scanner produced it.
-//   vuln        weakness found in source code by the static analysis (SAST, and   infection   package flagged as malicious / compromised
-//               the SAST pass of ubel-package); canonical files written earlier also used it for a package advisory
-//   sc_vuln / sc_infection   the same two kinds, as reported for a third-party dependency (SCA, EASM, and the package / binary / mobile app scans); `infection` is only read for canonical files written earlier
-//   secret      hardcoded credential                                             mal         malicious code found in source (ubel-mal, and the malware pass of ubel-package)
-//   code        weakness in source / bytecode reported by the app scanners (mobile, binary, mcp, and package's own checks)
-//   misconfig   insecure configuration (cloud, k8s, manifests, headers …)        hardening   missing / present host or binary protection (passed checks too)
-//   behavior    what the software does or runs (capabilities, processes, tools)  exposure    reachable network surface (open ports, listeners, remote hosts)
-//   license     license obligation / risk of a component                         coverage    part of the scan that could not be (fully) assessed
-export const TYPES = {
-  VULN: 'vuln', INFECTION: 'infection', SC_VULN: 'sc_vuln', SC_INFECTION: 'sc_infection', SECRET: 'secret', MAL: 'mal', CODE: 'code', MISCONFIG: 'misconfig', HARDENING: 'hardening',
-  BEHAVIOR: 'behavior', EXPOSURE: 'exposure', LICENSE: 'license', COVERAGE: 'coverage',
-};
+// One vocabulary for every module, defined in ./types.js (dependency-free, so rule catalogs can use it). A finding's `type` says what
+// KIND of thing it is, not which scanner produced it; each type answers one question (TYPE_QUESTIONS in ./types.js):
+//   vuln        weakness in code a developer could fix (SAST; the app scanners' crypto, unsafe-call, storage and logging rules)
+//   mal         something only hostile code does (ubel-mal; the malware pass of ubel-package; install-time reverse shells, miners,
+//               credential theft, download-and-run; tool poisoning)
+//   secret      credential or key that ships in the artifact
+//   behavior    capability that is not a defect in itself (what the software does or runs: capabilities, processes, tools, install hooks)
+//   misconfig   setting, or file that should not ship (cloud, k8s, manifests, headers, debug builds, bundled backups …)
+//   hardening   protection that is missing or present (PIE, RELRO, ASLR, hardened runtime, pinning; passed checks too)
+//   integrity   the artifact or its metadata is not what the publisher declared, or changed unapproved (digest / manifest mismatch)
+//   sc_vuln / sc_infection   known advisory / known-malicious state of a third-party dependency (SCA, EASM, and the package / binary / mobile
+//               app scans); `infection` is only read for canonical files written earlier, and so is `vuln` for a package advisory
+//   exposure    reachable network surface (open ports, listeners, remote hosts)
+//   license     license obligation / risk of a component
+//   coverage    part of the scan that could not be (fully) assessed
+//   code        retired: the fallback for an app-scanner rule no catalog knows, and what canonical files written earlier hold
+export { TYPES, TYPE_QUESTIONS, isFindingType };
 
 // ── finding status ───────────────────────────────────────────────────────────
 // `status` (root of every finding) replaces the old `reachable` boolean. One of:
