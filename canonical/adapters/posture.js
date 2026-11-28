@@ -32,6 +32,7 @@ export function translate(p, opts, H) {
     const cid = res == null ? null : (isK8s && f.scope ? `${f.scope}/${res}` : res);
     const kind = isK8s ? 'kubernetes_resource' : (typeof res === 'string' && res.startsWith('/') ? 'filesystem' : 'host_object');
     out.findings.push(mkFinding({
+      finding_id: f.check + (cid ? `-${cid}` : ''),
       rule_id: f.check,
       title: f.title,
       component_id: cid,

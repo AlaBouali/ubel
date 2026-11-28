@@ -5,6 +5,12 @@
 // (each with vulnerabilities[]), gate, min_severity, analysis, summary, stats, compliance_summary, executive_summary, diffs.
 // A finding's canonical `type` is not guessed from its rule's name: the rule catalogs (mobile/lib/rules.js, package/lib/rules.js, mcp/lib/rules.js)
 // give every rule its type and the finding carries it as `finding_type`; see resolveType below for the order and for what is left of the old guess.
+//
+// finding_id (every finding, so a dashboard can follow, assign and close one from one scan to the next):
+//   module findings (vulnerabilities[] / secrets[] / misconfigurations[], any type)
+//                              sha256(rule + app + where in the app [+ the secret's fingerprint / redacted preview]); see findingId below
+//   dependency advisories      sha256("advisory-ecosystem-pkgname@version"), exactly as the SCA report keys them
+//   observations               sha256 of what they are about (app + artifact [+ origin]), never a pid or a count (see below)
 import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, listenerRisk, isLoopback, sha, TYPES, isFindingType } from '../common.js';
 import { catalogType } from '../../mobile/lib/rules.js';
 import '../../package/lib/rules.js';   // the package and MCP catalogs register their rules in the shared table (mobile/lib/rules.js) when imported
@@ -74,6 +80,10 @@ export function resolveType(f, list) {
 const DEP_ADVISORY_RULES = new Set(['binary.component.vulnerable', 'package.vulnerable', 'package.malicious', 'package.dep.vulnerable', 'package.dep.malicious']);
 export const isDepAdvisory = (f) => !!f && (isObj(f.component) && f.component.advisory != null || DEP_ADVISORY_RULES.has(f.rule));
 
+// The rule id of one advisory on one component: advisory-ecosystem-pkgname@version (as in the SCA report). Its sha256 is the finding_id, so the
+// same advisory on the same package has the same id here and in the SCA report, scan after scan.
+const advisoryRule = (adv, d) => `${adv}-${d.ecosystem ?? 'unknown'}-${d.name ?? 'unknown'}@${d.version ?? ''}`;
+
 // One advisory on one component, in the shape of the SCA report's vulnerability records (what the SCA vulnerability modal, client/scvuln.js,
 // renders): the advisory as the module found it, plus the package it applies to. Fields the advisory already carries are kept.
 function scRecord(v, d, cid) {
@@ -95,6 +105,7 @@ function scRecord(v, d, cid) {
 // left out of the findings above). The canonical diff keeps those entries, so it covers every finding of the report, but files them the way
 // the findings are filed: SCA title and rule id, type sc_vuln / sc_infection, the dependency as artifact. The component comes from the entry
 // itself (mobile/index.js diffReports) or, for an entry of an older report, from the matching current finding (same fingerprint).
+// An entry whose dependency is known also carries the finding_id of the canonical finding it stands for.
 function dependencyDiffs(d, p) {
   if (!isObj(d) || !isObj(d.vulnerabilities)) return d ?? null;
   const current = new Map(arr(p.vulnerabilities).filter(isDepAdvisory).map((f) => [f.fingerprint, f]));
@@ -105,7 +116,8 @@ function dependencyDiffs(d, p) {
     const type = infection ? TYPES.SC_INFECTION : TYPES.SC_VULN;
     if (!comp || comp.advisory == null) return { ...e, kind: 'dependency', type };   // identity unknown (older report): keep the module's own wording
     const dname = depName(comp.name, comp.ecosystem, comp.version);
-    return { ...e, rule: `${comp.advisory}-${comp.ecosystem ?? 'unknown'}-${comp.name ?? 'unknown'}@${comp.version ?? ''}`, title: `${comp.advisory} affecting ${dname}`, artifact: dname, kind: 'dependency', type };
+    const rule = advisoryRule(comp.advisory, comp);
+    return { ...e, rule, finding_id: sha(rule), title: `${comp.advisory} affecting ${dname}`, artifact: dname, kind: 'dependency', type };
   };
   const list = (l) => { const seen = new Set(); return arr(l).map(entry).filter((e) => { if (e.kind !== 'dependency') return true; const k = `${e.type}|${e.rule}|${e.artifact}`; if (seen.has(k)) return false; seen.add(k); return true; }); };
   const v = { new: list(d.vulnerabilities.new), unchanged: list(d.vulnerabilities.unchanged), removed: list(d.vulnerabilities.removed) };
@@ -124,29 +136,54 @@ export function translate(p, opts, H) {
   const appId = (a) => first(a.id, a.key, a.package, a.bundle_id, a.name);
   const appFor = (ref) => apps.find((a) => [a.id, a.key, a.name, a.package, a.bundle_id].includes(ref)) || null;
 
-  const push = (f, type) => {
+  // finding_id of one module finding (vulnerabilities[] / secrets[] / misconfigurations[], whatever its type): what it is and where it is.
+  //   rule      the check that fired
+  //   app       the application it is about (the relative path / id the inventory uses)
+  //   where     the entry / file inside the app the module points at (artifact, file, path, location), made relative: never a line number,
+  //             an offset, a pid or a count, which move between scans of the same code
+  //   secret    a secret also adds the scanner's fingerprint (itself a hash: the secret is never part of the id) or, without one, its redacted
+  //             preview, as in the SCA report: two secrets of one rule in one file are two findings
+  // Findings that still share all of these (the same rule firing twice at the same place) are numbered in report order, so every finding of a
+  // report has an id of its own; the first one keeps the plain hash, which is the one a fixed duplicate leaves behind.
+  const idCount = new Map();
+  const whereOf = (f) => {
+    const loc = isObj(f.location) ? first(f.location.file, f.location.path, f.location.entry) : f.location;
+    const w = first(f.artifact, f.file, f.path, f.file_path, f.entry, loc);
+    return w == null || isObj(w) ? '' : R.rel(String(w));
+  };
+  const findingId = (f, list, cid) => {
+    const secret = list === 'secrets' ? String(first(f.fingerprint, f.match_preview, f.redacted) ?? '') : '';
+    const base = sha(String(f.rule ?? ''), cid ?? '', whereOf(f), secret);
+    const n = idCount.get(base) ?? 0;
+    idCount.set(base, n + 1);
+    return n ? sha(base, n) : base;
+  };
+
+  const push = (f, list) => {
     const a = appFor(f.app);
     const cid = a ? appId(a) : first(f.app, f.artifact);
     const name = a ? first(a.name, a.id) : first(f.app, f.artifact);
+    const compId = cid == null ? null : R.rel(String(cid));
     out.findings.push(mkFinding({
+      finding_id: findingId(f, list, compId),
       rule_id: f.rule,
       title: f.title,
-      component_id: cid == null ? null : R.rel(String(cid)),
+      component_id: compId,
       component_name: name == null ? null : R.text(String(cid)),
       component_type: 'application',
       severity: f.severity,
       confidence: f.confidence,
       violate_policy: violates(f.severity),
-      type,
+      type: resolveType(f, list).type,
       details: R.deep(f),
     }));
   };
   for (const f of arr(p.vulnerabilities)) {
     if (isDepAdvisory(f)) continue;
-    push(f, resolveType(f, 'vulnerabilities').type);
+    push(f, 'vulnerabilities');
   }
-  for (const f of arr(p.secrets)) push(f, resolveType(f, 'secrets').type);
-  for (const f of arr(p.misconfigurations)) push(f, resolveType(f, 'misconfigurations').type);
+  for (const f of arr(p.secrets)) push(f, 'secrets');
+  for (const f of arr(p.misconfigurations)) push(f, 'misconfigurations');
 
   // Remote hosts the files name: the module keeps the list under one of these keys, depending on its version. A host is one inventory entry
   // however many apps name it (`referenced_by` lists them); each reference is an observation of its own, below.
@@ -179,8 +216,10 @@ export function translate(p, opts, H) {
       const key = `${cid}\u0000${v.id}`;
       if (seenAdvisory.has(key)) continue;
       seenAdvisory.add(key);
+      const rule = advisoryRule(v.id, d);
       out.findings.push(mkFinding({
-        rule_id: `${v.id}-${d.ecosystem ?? 'unknown'}-${d.name ?? 'unknown'}@${d.version ?? ''}`,   // advisory-ecosystem-pkgname@version (as in the SCA report)
+        rule_id: rule,
+        finding_id: sha(rule),
         title: `${v.id} affecting ${dname}`,
         component_id: cid,
         component_name: dname,
