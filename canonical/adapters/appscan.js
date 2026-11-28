@@ -5,12 +5,23 @@
 // (each with vulnerabilities[]), gate, min_severity, analysis, summary, stats, compliance_summary, executive_summary, diffs.
 // A finding's canonical `type` is not guessed from its rule's name: the rule catalogs (mobile/lib/rules.js, package/lib/rules.js, mcp/lib/rules.js)
 // give every rule its type and the finding carries it as `finding_type`; see resolveType below for the order and for what is left of the old guess.
-import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES, isFindingType } from '../common.js';
+import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, listenerRisk, isLoopback, sha, TYPES, isFindingType } from '../common.js';
 import { catalogType } from '../../mobile/lib/rules.js';
 import '../../package/lib/rules.js';   // the package and MCP catalogs register their rules in the shared table (mobile/lib/rules.js) when imported
 import '../../mcp/lib/rules.js';
 
 export const family = 'appscan';
+
+// Observations (type behavior / exposure / coverage) are filed ONE PER THING OBSERVED, and the thing observed is an inventory entry of its own, so a
+// dashboard can triage, assign and close each one separately and a component's page lists exactly what was seen on it:
+//   behavior.<category>        one per API / function the code references, per origin (app code, library …) → inventory `api`
+//   exposure.remote_host       one per remote host the files name → inventory `domain` / `ip` (shared by every app that names it)
+//   behavior.mcp.tool[.<cap>]  one per capability of each tool an MCP server exposes (one per tool when it has none) → inventory `tool`
+//   behavior.mcp.process       one per server process seen running → inventory `process`
+//   exposure.listener.<port>   one per socket such a process listens on → inventory `network_service`
+//   coverage.*                 one per part of the artifact the scan could not read, or list the module cut off; tied to the app when there is one
+// Every observation has a finding_id derived from what it is about (app + artifact [+ origin]), never from a pid or a count, so it is the same
+// observation in the next scan.
 
 // Behavior categories (mobile/lib/behavior.js, binary/lib/behavior.js, package/lib/sourcebehavior.js) → severity of the capability.
 // info: what nearly every program does · low: needs a reason · medium: powers that fit surveillance, persistence or evasion · high: attacks other processes.
@@ -137,14 +148,24 @@ export function translate(p, opts, H) {
   for (const f of arr(p.secrets)) push(f, resolveType(f, 'secrets').type);
   for (const f of arr(p.misconfigurations)) push(f, resolveType(f, 'misconfigurations').type);
 
+  // Remote hosts the files name: the module keeps the list under one of these keys, depending on its version. A host is one inventory entry
+  // however many apps name it (`referenced_by` lists them); each reference is an observation of its own, below.
+  const hostsOf = (a) => [a.remote_hosts?.hosts, a.remote_hosts?.items, a.remote_hosts?.list, a.native_hardening?.remote_hosts?.hosts].find((l) => arr(l).length) ?? [];
+  const hostValue = (h) => (typeof h === 'string' ? h : first(h?.host, h?.domain, h?.ip, h?.value));
+  const isIpHost = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || (v.includes(':') && /^[0-9a-f:]+$/i.test(v));
+  const hostInv = new Map();
+
   for (const a of apps) {
     out.inventory.push(mkInventory({ component_id: R.rel(String(appId(a))), component_name: R.text(String(first(a.name, a.id) || appId(a))), status: 'unknown', type: 'application', details: R.deep(a) }));
-    const hosts = first(a.remote_hosts?.hosts, a.remote_hosts?.items, a.remote_hosts?.list, a.native_hardening?.remote_hosts?.hosts, null);
-    for (const h of arr(hosts)) {
-      const v = typeof h === 'string' ? h : first(h.host, h.domain, h.ip, h.value);
+    const appName = R.text(String(first(a.name, a.id) || appId(a)));
+    for (const h of hostsOf(a)) {
+      const v = hostValue(h);
       if (!v) continue;
-      const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || v.includes(':') && /^[0-9a-f:]+$/i.test(v);
-      out.inventory.push(mkInventory({ component_id: v, component_name: v, status: 'observed', type: isIp ? 'ip' : 'domain', details: typeof h === 'string' ? { host: h } : R.deep(h) }));
+      const seen = hostInv.get(v);
+      if (seen) { if (!seen.details.referenced_by.includes(appName)) seen.details.referenced_by.push(appName); continue; }
+      const entry = mkInventory({ component_id: v, component_name: v, status: 'observed', type: isIpHost(v) ? 'ip' : 'domain', details: { ...(typeof h === 'string' ? { host: h } : R.deep(h)), referenced_by: [appName] } });
+      hostInv.set(v, entry);
+      out.inventory.push(entry);
     }
   }
 
@@ -173,60 +194,139 @@ export function translate(p, opts, H) {
     }
   }
   // ── observations (appended after the findings so those keep their positions) ──
+  // One finding per thing observed; the thing observed is an inventory entry (see the header of this file). `artifact()` adds an entry once.
   const LOWER = { critical: 'high', high: 'medium', medium: 'low', low: 'info', info: 'info' };
+  const catLabel = (cat) => BEHAVIOR_TITLE[cat] ?? cat.replace(/_/g, ' ');
+  const seenInv = new Map();
+  const artifact = (entry) => {
+    const k = `${entry.type}\u0000${entry.component_id}`;
+    if (!seenInv.has(k)) { seenInv.set(k, entry); out.inventory.push(entry); }
+    return seenInv.get(k);
+  };
+  const TOOL_CAP_SEV = (c) => (c === 'exec' ? 'medium' : ['file_write', 'sql', 'secrets', 'messaging'].includes(c) ? 'low' : 'info');
+
   for (const a of apps) {
     const cid = R.rel(String(appId(a))), cname = R.text(String(first(a.name, a.id)));
-    const base = { component_id: cid, component_name: cname, component_type: 'application' };
-    // what the code does: one finding per behavior category. Common capabilities are the normal case (info); the rest are rated by what
-    // they let code do. Code that is only in third-party library code is rated one level lower.
+    const aref = a.id ?? a.package ?? a.name;
+    const appBase = { component_id: cid, component_name: cname, component_type: 'application' };
+
+    // What the code does: one finding per API / function, per origin. Common capabilities are the normal case (info); the rest are rated by
+    // what they let code do. An API that only third-party library code references is rated one level lower.
     for (const [cat, byOrigin] of Object.entries(a.behavior?.categories || {})) {
-      const origins = Object.keys(byOrigin || {});
-      if (!origins.length) continue;
-      const own = origins.some((o) => o !== 'library');
       const sevFull = BEHAVIOR_SEV[cat] ?? 'info';
-      const severity = own ? sevFull : LOWER[sevFull];
-      const functions = origins.reduce((n, o) => n + (byOrigin[o].functions ?? Object.keys(byOrigin[o].apis || {}).length), 0);
-      const calls = origins.reduce((n, o) => n + (byOrigin[o].calls ?? 0), 0);
-      const apis = origins.flatMap((o) => Object.entries(byOrigin[o].apis || {}).map(([k, n]) => `${o}: ${k}${n > 1 ? ` ×${n}` : ''}`)).slice(0, 25);
+      for (const [origin, o] of Object.entries(byOrigin || {})) {
+        const library = origin === 'library';
+        const severity = library ? LOWER[sevFull] : sevFull;
+        const apis = Object.entries(o?.apis || {});
+        for (const [api, n] of apis) {
+          const aid = `${cid}::${cat}::${api}`;
+          const inv = artifact(mkInventory({ component_id: aid, component_name: R.text(api), status: 'observed', type: 'api', details: R.deep({ app: cid, application: cname, behavior_category: cat, behavior_label: catLabel(cat), api, origins: {} }) }));
+          inv.details.origins[origin] = { calls: n };
+          out.findings.push(observe({
+            component_id: aid, component_name: R.text(api), component_type: 'api',
+            rule_id: `behavior.${cat}`, finding_id: sha('behavior', cid, cat, origin, api),
+            title: `Behavior: ${catLabel(cat)} — ${api} (${origin} code)`, severity, confidence: library ? 'medium' : 'high', type: TYPES.BEHAVIOR,
+            details: R.deep({ app: aref, application: cname, behavior_category: cat, origin, api, calls: n, basis: o.basis ?? null, evidence: [`${origin}: ${api}${n > 1 ? ` ×${n}` : ''}`], artifact: api,
+              description: `The ${origin} code references ${api} (${catLabel(cat).toLowerCase()})${n > 1 ? `, ${n} times` : ''}. ${severity === 'info' ? 'This is ordinary behavior for software of this kind.' : 'Check that this capability is needed and cannot be abused.'}` }),
+          }));
+        }
+        // the module lists at most N entries per category and origin: say so rather than let the list read as complete
+        const total = o?.functions ?? apis.length;
+        if (total > apis.length) {
+          out.findings.push(observe({
+            ...appBase, rule_id: 'coverage.behavior_apis', finding_id: sha('coverage.behavior_apis', cid, cat, origin),
+            title: `Behavior: ${catLabel(cat)} — ${total - apis.length} more not listed (${origin} code)`, severity: 'info', type: TYPES.COVERAGE,
+            details: R.deep({ app: aref, behavior_category: cat, origin, functions: total, listed: apis.length, artifact: cname,
+              description: `The ${origin} code references ${total} ${catLabel(cat).toLowerCase()} function(s); the report lists the ${apis.length} most used. The others are not in this report.` }),
+          }));
+        }
+      }
+    }
+
+    // Remote hosts the files name: one finding per host. A clear-text scheme, or a flag the module put on the host, is worth a look (low).
+    const hosts = hostsOf(a);
+    for (const h of hosts) {
+      const v = hostValue(h);
+      if (!v) continue;
+      const rec = typeof h === 'string' ? { host: h } : h;
+      const flags = arr(rec.flags);
+      const severity = rec.cleartext || flags.length ? 'low' : 'info';
       out.findings.push(observe({
-        ...base, rule_id: `behavior.${cat}`, title: `Behavior: ${BEHAVIOR_TITLE[cat] ?? cat.replace(/_/g, ' ')}`, severity, confidence: own ? 'high' : 'medium', type: TYPES.BEHAVIOR,
-        details: R.deep({ app: a.id ?? a.package ?? a.name, behavior_category: cat, origins: byOrigin, functions, calls, evidence: apis, artifact: a.name ?? '',
-          description: `The code references ${functions} ${BEHAVIOR_TITLE[cat] ? BEHAVIOR_TITLE[cat].toLowerCase() : cat.replace(/_/g, ' ')} function(s)${calls ? ` (${calls} call site(s))` : ''} in ${origins.join(', ')} code. ${severity === 'info' ? 'This is ordinary behavior for software of this kind.' : 'Check that this capability is needed and cannot be abused.'}` }),
+        component_id: v, component_name: v, component_type: isIpHost(v) ? 'ip' : 'domain',
+        rule_id: 'exposure.remote_host', finding_id: sha('exposure.remote_host', cid, v),
+        title: `Remote host referenced: ${v}`, severity, type: TYPES.EXPOSURE,
+        details: R.deep({ app: aref, application: cname, ...rec, host: v, evidence: [...arr(rec.seen_in).map((x) => `seen in ${x}`), ...arr(rec.examples).map(String)].slice(0, 20), artifact: v,
+          description: `${cname} names ${v}${rec.refs ? ` (${rec.refs} reference${rec.refs === 1 ? '' : 's'})` : ''}${rec.cleartext ? ' over a clear-text scheme' : ''}${rec.private ? '; it is a private or local address' : ''}${flags.length ? `; flagged: ${flags.join(', ').replace(/_/g, ' ')}` : ''}. The scan cannot tell whether it is contacted: check that it is expected.` }),
       }));
     }
-    // remote hosts the files name
-    const rh = a.remote_hosts;
-    if (rh && arr(rh.hosts).length) {
-      const hosts = rh.hosts.map((h) => (typeof h === 'string' ? h : first(h.host, h.domain, h.ip, h.value))).filter(Boolean);
+    const knownHosts = a.remote_hosts?.total ?? hosts.length;
+    if (knownHosts > hosts.length) {
       out.findings.push(observe({
-        ...base, rule_id: 'exposure.remote_hosts', title: `Remote hosts referenced (${rh.total ?? hosts.length})`, severity: 'info', type: TYPES.EXPOSURE,
-        details: R.deep({ app: a.id ?? a.package ?? a.name, total: rh.total ?? hosts.length, domains: rh.domains ?? null, ips: rh.ips ?? null, evidence: hosts.slice(0, 40), artifact: a.name ?? '',
-          description: `${rh.total ?? hosts.length} remote host(s) are named in the files (${hosts.slice(0, 5).join(', ')}${hosts.length > 5 ? ', …' : ''}). Check that each is expected.` }),
+        ...appBase, rule_id: 'coverage.remote_hosts', finding_id: sha('coverage.remote_hosts', cid),
+        title: `Remote hosts: ${knownHosts - hosts.length} more not listed`, severity: 'info', type: TYPES.COVERAGE,
+        details: R.deep({ app: aref, total: knownHosts, listed: hosts.length, artifact: cname,
+          description: `The files name ${knownHosts} remote host(s); the report lists the ${hosts.length} most referenced. The others are not in this report.` }),
       }));
     }
-    // MCP: what each tool the server exposes can do, and what was seen of the live server
+
+    // MCP: what each tool the server exposes can do, one finding per capability (one per tool when it declares none)
     for (const tl of arr(a.definitions?.tools)) {
+      const tname = String(tl.name ?? 'unnamed');
       const caps = arr(tl.capabilities);
-      const severity = caps.includes('exec') ? 'medium' : caps.some((c) => ['file_write', 'sql', 'secrets', 'messaging'].includes(c)) ? 'low' : 'info';
-      out.findings.push(observe({
-        ...base, rule_id: 'behavior.mcp.tool', title: `Tool exposed: ${tl.name}${caps.length ? ` (${caps.join(', ')})` : ''}`, severity, type: TYPES.BEHAVIOR,
-        details: R.deep({ app: a.id ?? a.name, tool: tl.name, capabilities: caps, params: tl.params ?? [], annotations: tl.annotations ?? null, artifact: `tools.${tl.name}`,
-          description: `${tl.description || 'The server registers this tool.'} ${caps.length ? `It can: ${caps.join(', ')}.` : ''}`.trim() }),
-      }));
+      const tid = `${cid}::tool::${tname}`;
+      artifact(mkInventory({ component_id: tid, component_name: tname, status: 'observed', type: 'tool', details: R.deep({ app: cid, application: cname, name: tname, description: tl.description ?? null, capabilities: caps, params: tl.params ?? [], annotations: tl.annotations ?? null }) }));
+      for (const cap of (caps.length ? caps : [null])) {
+        out.findings.push(observe({
+          component_id: tid, component_name: tname, component_type: 'tool',
+          rule_id: cap ? `behavior.mcp.tool.${cap}` : 'behavior.mcp.tool', finding_id: sha('behavior.mcp.tool', cid, tname, cap ?? ''),
+          title: cap ? `Tool ${tname} can: ${cap}` : `Tool exposed: ${tname}`, severity: cap ? TOOL_CAP_SEV(cap) : 'info', type: TYPES.BEHAVIOR,
+          details: R.deep({ app: aref, application: cname, tool: tname, capability: cap, params: tl.params ?? [], annotations: tl.annotations ?? null, artifact: `tools.${tname}`,
+            description: `${tl.description || 'The server registers this tool.'}${cap ? ` It can: ${cap}.` : ''}`.trim() }),
+        }));
+      }
     }
+
+    // MCP: the server processes seen running, and each socket they listen on
+    const nth = new Map();
     for (const o of arr(a.observed)) {
+      const cmd = Array.isArray(o.cmdline) ? o.cmdline.join(' ') : String(o.cmdline ?? '');
+      const key = sha(cmd).slice(0, 12), i = nth.get(key) ?? 0;
+      nth.set(key, i + 1);
+      const pid = `${cid}::process::${key}${i ? `#${i}` : ''}`;
+      const listening = arr(o.listening).filter((l) => isObj(l) && l.port != null);
+      artifact(mkInventory({ component_id: pid, component_name: `${cmd || 'process'} (pid ${o.pid})`, status: 'running', type: 'process', details: R.deep({ app: cid, application: cname, pid: o.pid, uid: o.uid, cmdline: o.cmdline, listening: listening.map((l) => `${l.addr}:${l.port}`) }) }));
       out.findings.push(observe({
-        ...base, rule_id: 'behavior.mcp.process', title: `Server process observed (pid ${o.pid})`, severity: o.uid === 0 ? 'low' : 'info', type: TYPES.BEHAVIOR,
-        details: R.deep({ app: a.id ?? a.name, pid: o.pid, uid: o.uid, cmdline: o.cmdline, listening: o.listening ?? [], artifact: a.name ?? '',
-          description: `The server runs as uid ${o.uid}${arr(o.listening).length ? ` and listens on ${o.listening.map((l) => `${l.addr}:${l.port}`).join(', ')}` : ''}.` }),
+        component_id: pid, component_name: `${cmd || 'process'} (pid ${o.pid})`, component_type: 'process',
+        rule_id: 'behavior.mcp.process', finding_id: sha('behavior.mcp.process', cid, cmd, i),
+        title: `Server process observed (pid ${o.pid})`, severity: o.uid === 0 ? 'low' : 'info', type: TYPES.BEHAVIOR,
+        details: R.deep({ app: aref, application: cname, pid: o.pid, uid: o.uid, cmdline: o.cmdline, listening: listening.map((l) => `${l.addr}:${l.port}`), artifact: cname,
+          description: `The server runs as uid ${o.uid}${listening.length ? ` and listens on ${listening.map((l) => `${l.addr}:${l.port}`).join(', ')}` : ''}.` }),
       }));
+      for (const l of listening) {
+        const lid = `${l.addr}:${l.port}`;
+        const { service, severity } = listenerRisk(l.addr, l.port);
+        artifact(mkInventory({ component_id: lid, component_name: lid, status: 'listening', type: 'network_service', details: { address: l.addr, port: l.port, program: cmd, scope: cname, service } }));
+        out.findings.push(observe({
+          component_id: lid, component_name: lid, component_type: 'network_service',
+          rule_id: `exposure.listener.${l.port}`, finding_id: sha('exposure.listener', cid, l.addr, l.port),
+          title: `Listening on ${lid}${service ? ` (${service})` : ''}`, severity, type: TYPES.EXPOSURE,
+          details: R.deep({ app: aref, application: cname, address: l.addr, port: l.port, service, program: cmd, pid: o.pid, artifact: lid,
+            description: `${cname} accepts connections on ${lid}${isLoopback(l.addr) ? ' (loopback only)' : severity === 'info' ? '' : '; this port is reachable from the network and normally hosts a service that should not be exposed unauthenticated'}.` }),
+        }));
+      }
     }
   }
-  // parts of the artifact the scan could not look at: a clean list over incomplete coverage must not read as "all clear"
+
+  // Parts of the artifact the scan could not look at: a clean list over incomplete coverage must not read as "all clear". One finding per gap, on
+  // the app when the report has exactly one (a gap names no app, so with several it stays unattached).
+  const gapApp = apps.length === 1 ? apps[0] : null;
+  const gapId = gapApp ? R.rel(String(appId(gapApp))) : null, gapName = gapApp ? R.text(String(first(gapApp.name, gapApp.id))) : null;
   for (const gap of arr(p.analysis?.gaps)) {
+    const text = String(typeof gap === 'string' ? gap : JSON.stringify(gap));
     out.findings.push(observe({
-      component_id: null, component_name: null, component_type: 'application', rule_id: 'coverage.gap', title: 'Part of the artifact could not be analysed', severity: 'low', type: TYPES.COVERAGE,
-      details: R.deep({ description: String(typeof gap === 'string' ? gap : JSON.stringify(gap)), artifact: '' }),
+      component_id: gapId, component_name: gapName, component_type: 'application', rule_id: 'coverage.gap', finding_id: sha('coverage.gap', gapId ?? '', text),
+      title: `Part of the artifact could not be analysed: ${text.length > 90 ? `${text.slice(0, 87)}…` : text}`, severity: 'low', type: TYPES.COVERAGE,
+      details: R.deep({ description: text, artifact: gapName ?? '' }),
     }));
   }
 

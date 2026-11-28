@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { getOSMetadata } from '../sca/os_metadata.js';
 import { TYPES, TYPE_QUESTIONS, isFindingType } from './types.js';
 import { STATUS, buildCounts } from './counts.js';
+import { getLinux } from '../sca/os_metadata.js';
 
 export const SCHEMA_VERSION = '0.1.0';
 
@@ -123,6 +124,14 @@ export function portRisk(port) {
   return e ? { service: e[0], severity: e[1] } : { service: null, severity: 'info' };
 }
 
+// A socket bound to loopback is not reachable from the network: whatever listens there is the normal case (info), whatever the port.
+const LOOPBACK = /^(127\.|::1$|localhost)/i;
+export const isLoopback = (address) => LOOPBACK.test(String(address ?? ''));
+export function listenerRisk(address, port) {
+  const r = portRisk(port);
+  return isLoopback(address) ? { service: r.service, severity: 'info', loopback: true } : { ...r, loopback: false };
+}
+
 // ── finding / inventory builders ────────────────────────────────────────────
 // finding_id is NOT part of the canonical finding by default; only SAST supplies one (see adapters/sast.js).
 // An *observation* (observe() below) is a finding for something that is normal or merely informative: a passed check, a capability,
@@ -172,7 +181,8 @@ export function checkObservations(checks, { passType, component_id, component_na
     if (!isObj(k) || (k.status !== 'pass' && k.status !== 'unassessed')) continue;
     const pass = k.status === 'pass';
     out.push(observe({
-      rule_id: k.check, title: pass ? `${k.title ?? k.check}: passed` : `${k.title ?? k.check}: could not be assessed`,
+      rule_id: k.check, finding_id: sha('check', k.check, component_id ?? component_name ?? resource ?? ''),
+      title: pass ? `${k.title ?? k.check}: passed` : `${k.title ?? k.check}: could not be assessed`,
       component_id: component_id ?? null, component_name: component_name ?? null, component_type: component_type ?? null,
       severity: pass ? 'info' : 'low', type: pass ? passType : TYPES.COVERAGE,
       details: {

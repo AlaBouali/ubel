@@ -49,9 +49,14 @@ export function translate(p, opts, H) {
   }
   // Passed / not-assessed checks (observations, appended after the findings so those keep their positions).
   const subject = isK8s ? (t.subject ?? 'cluster') : (t.hostname ?? 'vm');
-  out.findings.push(...checkObservations(p.checks, { passType: isK8s ? TYPES.MISCONFIG : TYPES.HARDENING, component_id: isK8s ? null : subject, component_name: subject, component_type: isK8s ? 'kubernetes_cluster' : 'host', resource: subject }));
-  if (!isK8s) {
-    out.inventory.unshift(mkInventory({ component_id: t.hostname ?? 'vm', component_name: t.hostname ?? 'vm', status: p.coverage?.status === 'partial' ? 'partially_assessed' : 'assessed', type: 'host', details: R.deep(t) }));
+  out.findings.push(...checkObservations(p.checks, { passType: isK8s ? TYPES.MISCONFIG : TYPES.HARDENING, component_id: subject, component_name: subject, component_type: isK8s ? 'kubernetes_cluster' : 'host', resource: subject }));
+  // The artifact a passed / not-assessed check is about: the audited host (vm) or the audited cluster / manifest set (k8s). Findings of a failed
+  // check point at the offending resource instead; these observations have no resource, so they point at the subject, which is listed here.
+  const assessed = p.coverage?.status === 'partial' ? 'partially_assessed' : 'assessed';
+  if (isK8s) {
+    out.inventory.unshift(mkInventory({ component_id: subject, component_name: subject, status: assessed, type: 'kubernetes_cluster', details: R.deep({ subject, source: t.source ?? 'manifests', paths: arr(t.paths), scopes_scanned: arr(t.scopes_scanned) }) }));
+  } else {
+    out.inventory.unshift(mkInventory({ component_id: t.hostname ?? 'vm', component_name: t.hostname ?? 'vm', status: assessed, type: 'host', details: R.deep(t) }));
   }
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'non_compliant', clean: 'compliant' });

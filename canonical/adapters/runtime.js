@@ -11,8 +11,12 @@
 // Observations (info unless noted, appended after the findings): passed checks (hardening), checks that could not run (coverage, low),
 // every running program / loaded Node.js inspection / container (behavior) and every listening socket (exposure; a non-loopback port
 // is rated by what normally listens there).
-// inventory:  processes → application, listening sockets → network_service, containers → container.
-import { arr, isObj, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, portRisk, TYPES } from '../common.js';
+// inventory:  the audited host → host, processes → application, listening sockets → network_service, containers → container,
+//             the container engine → container_engine. Every observation points at an inventory entry (the artifact it is about) and carries a
+//             finding_id derived from what it is about, so a dashboard can follow it from one scan to the next.
+// One observation per artifact: one per program (a program with several instances is still one program: the payload keeps no per-instance
+// attributes beyond the pid list, and a pid does not survive to the next scan), one per listening socket, one per container, one per inspection.
+import { arr, isObj, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, checkObservations, listenerRisk, isLoopback, sha, TYPES } from '../common.js';
 
 export const family = 'runtime';
 
@@ -56,39 +60,46 @@ export function translate(p, opts, H) {
   }
   // ── observations ──
   const t0 = p.target || {};
-  out.findings.push(...checkObservations(p.checks, { passType: TYPES.HARDENING, component_id: t0.hostname ?? t0.subject ?? 'host', component_name: t0.hostname ?? t0.subject ?? 'host', component_type: 'host', resource: t0.hostname ?? t0.subject ?? 'host' }));
+  const hostId = t0.hostname ?? t0.subject ?? 'host';
+  // the audited machine: what a passed / not-assessed check is about
+  out.inventory.unshift(mkInventory({ component_id: hostId, component_name: hostId, status: p.coverage?.status === 'partial' ? 'partially_assessed' : 'assessed', type: 'host',
+    details: { hostname: t0.hostname ?? null, subject: t0.subject ?? null, os: t0.os ?? null, arch: t0.arch ?? null, mode: t0.mode ?? 'live', processes_assessed: t0.processes_assessed ?? null } }));
+  out.findings.push(...checkObservations(p.checks, { passType: TYPES.HARDENING, component_id: hostId, component_name: hostId, component_type: 'host', resource: hostId }));
   const obs = (o) => out.findings.push(observe({ component_type: 'application', ...o, details: { severity: o.severity ?? 'info', scope: o.details?.scope ?? '', area: o.area, check: o.rule_id, resource: o.component_name, title: o.title, remediation: '', compliance: null, ...o.details } }));
   for (const pr of arr(rt.processes)) {
     const listens = arr(pr.listening);
     obs({
+      finding_id: sha('behavior.process', pr.scope ?? 'host', pr.label),
       rule_id: 'behavior.process', area: 'processes', title: `Process running: ${pr.label}${pr.count > 1 ? ` (${pr.count} instances)` : ''}`, component_id: pr.label, component_name: pr.label, type: TYPES.BEHAVIOR,
       details: { ...pr, description: `${pr.label} runs as ${pr.root ? 'root' : pr.user}${listens.length ? ` and listens on ${listens.slice(0, 5).join(', ')}` : ''}${pr.node ? '; it is a Node.js process' : ''}.` },
     });
   }
-  const LOOP = /^(127\.|::1$|localhost)/i;
   for (const l of arr(rt.listeners)) {
     const id = `${l.address}:${l.port}`;
-    const { service, severity } = LOOP.test(String(l.address)) ? { service: portRisk(l.port).service, severity: 'info' } : portRisk(l.port);
+    const { service, severity } = listenerRisk(l.address, l.port);
     obs({
+      finding_id: sha('exposure.listener', l.address, l.port, l.scope ?? 'host', l.program ?? ''),
       rule_id: `exposure.listener.${l.port}`, area: 'exposure', title: `Listening on ${id}${service ? ` (${service})` : ''}${l.program ? `: ${l.program}` : ''}`, component_id: id, component_name: id,
       component_type: 'network_service', severity, type: TYPES.EXPOSURE,
-      details: { ...l, service, description: `${l.program || 'A process'} accepts connections on ${id}${LOOP.test(String(l.address)) ? ' (loopback only)' : severity === 'info' ? '' : '; this port is reachable from the network and normally hosts a service that should not be exposed unauthenticated'}.` },
+      details: { ...l, service, description: `${l.program || 'A process'} accepts connections on ${id}${isLoopback(l.address) ? ' (loopback only)' : severity === 'info' ? '' : '; this port is reachable from the network and normally hosts a service that should not be exposed unauthenticated'}.` },
     });
   }
   for (const c of arr(rt.containers?.items)) {
     obs({
+      finding_id: sha('behavior.container', c.name),
       rule_id: 'behavior.container', area: 'containers', title: `Container running: ${c.name}`, component_id: c.name, component_name: c.name, component_type: 'container', type: TYPES.BEHAVIOR,
       details: { ...c, description: `Container ${c.name} runs image ${c.image} as ${c.user}${arr(c.published_ports).length ? `, publishing ${c.published_ports.slice(0, 4).join(', ')}` : ''}.` },
     });
   }
   if (rt.containers && rt.containers.status && rt.containers.status !== 'ok') {
-    obs({ rule_id: 'coverage.containers', area: 'containers', title: 'Container engine not inspected', component_id: rt.containers.socket ?? 'container engine', component_name: 'container engine', component_type: 'container_engine', severity: 'low', type: TYPES.COVERAGE,
+    out.inventory.push(mkInventory({ component_id: rt.containers.socket ?? 'container engine', component_name: 'container engine', status: rt.containers.status, type: 'container_engine', details: { socket: rt.containers.socket ?? null, status: rt.containers.status, reason: rt.containers.reason ?? null } }));
+    obs({ finding_id: sha('coverage.containers', rt.containers.socket ?? 'container engine'), rule_id: 'coverage.containers', area: 'containers', title: 'Container engine not inspected', component_id: rt.containers.socket ?? 'container engine', component_name: 'container engine', component_type: 'container_engine', severity: 'low', type: TYPES.COVERAGE,
       details: { description: `Containers could not be inspected (${rt.containers.status}${rt.containers.reason ? `: ${rt.containers.reason}` : ''}).`, status: rt.containers.status, reason: rt.containers.reason ?? null } });
   }
   for (const i of arr(rt.inspections)) {
-    if (i.ok) obs({ rule_id: 'behavior.inspection', area: 'inspection', title: `Node.js process inspected: ${i.label}`, component_id: i.label, component_name: i.label, type: TYPES.BEHAVIOR,
+    if (i.ok) obs({ finding_id: sha('behavior.inspection', i.scope ?? 'host', i.label), rule_id: 'behavior.inspection', area: 'inspection', title: `Node.js process inspected: ${i.label}`, component_id: i.label, component_name: i.label, type: TYPES.BEHAVIOR,
       details: { ...i, description: `${i.loaded_files ?? 0} script file(s) loaded by the running process were read through the V8 inspector${i.left_open ? ' (the inspector was left open)' : ''}.` } });
-    else obs({ rule_id: 'coverage.inspection', area: 'inspection', title: `Node.js process could not be inspected: ${i.label}`, component_id: i.label, component_name: i.label, severity: 'low', type: TYPES.COVERAGE,
+    else obs({ finding_id: sha('coverage.inspection', i.scope ?? 'host', i.label), rule_id: 'coverage.inspection', area: 'inspection', title: `Node.js process could not be inspected: ${i.label}`, component_id: i.label, component_name: i.label, severity: 'low', type: TYPES.COVERAGE,
       details: { ...i, description: `The V8 inspector could not be used on this process${i.reason ? ` (${i.reason})` : ''}; what it has loaded is not in this report.` } });
   }
 

@@ -5,7 +5,8 @@
 // executive_summary, diffs, threat_intel.
 //
 // component_id = detected product name (+version) → "name@version" ("name" when no version is known).
-// A grouped misconfiguration is split per target, so every canonical finding points at one component (a host / URL).
+// A grouped misconfiguration is anchored on the first of its targets (all of its occurrences stay in `details`: the EASM report rebuilds its
+// grouped table from them). Open ports are observations: one finding per host and port, each port an inventory `network_service`.
 import { arr, isObj, first, mkFinding, observe, mkInventory, depName, makeRel, uniq, applyFindingStatus, dedupeInventory, portRisk, TYPES } from '../common.js';
 import { sha } from '../common.js';
 
@@ -73,19 +74,25 @@ export function translate(p, opts, H) {
   for (const a of arr(p.assets)) out.scopes.push({ type: 'url', name: a.target, status: a.status ?? null, ...R.deep(a) });
   for (const h of arr(p.hosts)) out.scopes.push({ type: 'host', name: h.host, ...R.deep(h) });
 
-  // Network surface (observations, appended after the findings): every port known open on a scanned address / host name. Web and mail
-  // ports are the normal case (info); administration, database and clear-text service ports are rated by what listens there.
+  // Network surface (observations, appended after the findings): one finding per open port per scanned address / host name, and each port is an
+  // inventory entry of its own (network_service, `host:port`), so a dashboard can follow, assign and close a single port. Web and mail ports are
+  // the normal case (info); administration, database and clear-text service ports are rated by what listens there.
   for (const row of arr(p.scope)) {
     if (row.status === 'skipped') continue;
     const web = new Set(arr(row.http_ports).map(String));
+    const hostRef = String(row.name).includes(':') ? `[${row.name}]` : String(row.name);   // an IPv6 literal is bracketed so the port stays readable
     for (const port of uniq([...arr(row.open_ports), ...arr(row.scanned_ports)])) {
       const { service, severity } = portRisk(port);
+      const id = `${hostRef}:${port}`;
+      const svc = service ?? (web.has(String(port)) ? 'HTTP(S)' : null);
+      out.inventory.push(mkInventory({ component_id: id, component_name: id, status: 'open', type: 'network_service',
+        details: R.deep({ address: row.name, host: row.name, host_type: row.type === 'ip' ? 'ip' : 'domain', port: Number(port), protocol: 'tcp', service: svc, http: web.has(String(port)) }) }));
       out.findings.push(observe({
         rule_id: `exposure.port.${port}`,
-        finding_id: sha(`exposure.port.${port}`),
-        title: `Port ${port}/tcp open${service ? ` (${service})` : web.has(String(port)) ? ' (HTTP)' : ''}`,
-        component_id: row.name, component_name: row.name, component_type: row.type === 'ip' ? 'ip' : 'domain', severity, type: TYPES.EXPOSURE,
-        details: R.deep({ target: row.name, port, protocol: 'tcp', service: service ?? (web.has(String(port)) ? 'HTTP(S)' : null), http: web.has(String(port)),
+        finding_id: sha('exposure.port', row.name, port),   // per host AND port: the same port open on two hosts is two observations
+        title: `Port ${port}/tcp open${service ? ` (${service})` : web.has(String(port)) ? ' (HTTP)' : ''} on ${row.name}`,
+        component_id: id, component_name: id, component_type: 'network_service', severity, type: TYPES.EXPOSURE,
+        details: R.deep({ target: row.name, port, protocol: 'tcp', service: svc, http: web.has(String(port)), artifact: id,
           description: `${row.name} accepts TCP connections on port ${port}${service ? ` (${service})` : ''}. ${severity === 'info' ? 'This is an expected, publicly reachable service.' : 'Make sure this service is meant to be reachable from the network it was scanned from.'}` }),
       }));
     }
