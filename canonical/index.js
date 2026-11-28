@@ -8,7 +8,7 @@
 // Adapters live in ./adapters (one per payload family); see each file's header for the field mapping.
 import fs from 'node:fs';
 import path from 'node:path';
-import { SCHEMA_VERSION, buildMetadata, buildStats, isObj, clone, makeRel } from './common.js';
+import { SCHEMA_VERSION, buildMetadata, buildStats, isBlocked, isObj, clone, makeRel } from './common.js';
 import * as sca from './adapters/sca.js';
 import * as sast from './adapters/sast.js';
 import * as cloud from './adapters/cloud.js';
@@ -48,6 +48,7 @@ export function toCanonical(payload, opts = {}) {
   const t = ADAPTERS[family].translate(payload, opts, { buildMetadata });
   const findings = t.findings;
   const inventory = t.inventory;
+  t.metadata.scan_info.is_blocked = isBlocked(t.policy, findings);
   const stats = buildStats(findings, inventory, t.stats_extra?.source ?? null);
   for (const [k, v] of Object.entries(t.stats_extra || {})) if (k !== 'source' && v != null) stats[k] = v;
 

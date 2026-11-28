@@ -215,6 +215,14 @@ export function failOnPredicate(failOn) {
 }
 
 // ── metadata ────────────────────────────────────────────────────────────────
+// Whether the scan's policy blocks it (what a CI gate would fail on). The rule the HTML report already uses for "Status: Blocked": the
+// decision of the payload when it has one (SCA: policy.decision.allowed), otherwise any finding that violates the run's gate (fail_on).
+export function isBlocked(policy, findings) {
+  const dec = policy?.decision;
+  if (isObj(dec)) return dec.allowed === false;
+  return arr(findings).some((f) => f.violate_policy === true);
+}
+
 export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = null, runtime = {} }) {
   const osm = getOSMetadata();   // returns the metadata object itself (it is not a factory)
   const machine_name = `${osm.os_name ?? 'unknown'}: ${osm.os_version ?? 'unknown'}`
@@ -237,6 +245,7 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
     scan_info: {
       generated_at: scan.generated_at ?? null,
       status: scan.status ?? 'completed',
+      is_blocked: scan.is_blocked ?? null,   // a placeholder that keeps the key next to status: toCanonical() sets it once the findings are known
       called_via: opts.called_via || scan.called_via || 'cli',
       scan_type: scan.scan_type ?? null,
       scan_scope: scan.scan_scope ?? null,

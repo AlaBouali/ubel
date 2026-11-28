@@ -42,15 +42,19 @@ export function translate(p, opts, H) {
 
   for (const s of arr(p.secrets?.findings)) {
     out.findings.push(mkFinding({
-      finding_id: sha(s.rule_id, s.match_preview), // secrets also hash a fingerprint (the original has none: derive it from line + snippet, never storing the secret)
+      // rule + file + the scanner's own fingerprint (itself a hash of rule, path and secret: the secret is never stored). Without a fingerprint the
+      // redacted preview stands in. Same granularity as the engine's own de-duplication (rule, file, preview).
+      finding_id: sha(s.id, R.rel(s.file_path), s.fingerprint ?? s.match_preview),
       rule_id: s.id,
       title: s.title || s.secret_type || s.id,
       component_id: R.rel(s.file_path),
       component_name: s.line != null ? `${R.rel(s.file_path)}:${s.line}` : R.rel(s.file_path),
       component_type: 'code',
       severity: s.severity,
-      confidence: null,
-      violate_policy: null,
+      // The scanner emits no confidence of its own. Its generic rules (category "Generic": generic-fallback, generic-key-value-credential) are
+      // heuristic (a key name next to a value), every other rule matches a vendor-specific format: those are the two levels.
+      confidence: s.confidence ?? (s.category === 'Generic' ? 'medium' : 'high'),
+      violate_policy: true,   // secrets are always blocked, no policy toggle (sca/policy.js evaluatePolicy, "secrets detected (always enforced)")
       type: TYPES.SECRET,
       details: R.deep(s),
     }));
@@ -62,11 +66,15 @@ export function translate(p, opts, H) {
       component_id: c.id ?? `${c.name}@${c.version}`,
       component_name: depName(c.name, c.ecosystem, c.version),
       status: 'unknown',
+      violate_policy: c.is_policy_violation,   // engine verdict (also covers violations inherited through the dependency graph)
       type: isPkg ? 'dependency' : 'application',
       details: R.deep(c),
     }));
   }
   applyFindingStatus(out.inventory, out.findings);
+  // A component with no findings was evaluated and cannot violate the policy: "ok", not "not evaluated" (null). Only reached when
+  // the payload's inventory item carries no is_policy_violation of its own.
+  for (const c of out.inventory) if (c.status === 'clean' && c.violate_policy == null) c.violate_policy = false;
 
   // Licenses that need a decision (observations: appended after the advisories / secrets so those keep their positions).
   // Permissive licenses are the normal case and are not listed; copyleft / proprietary / unrecognised ones are.
