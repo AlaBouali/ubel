@@ -158,15 +158,14 @@ function cnOpenScope(i) { const s = CANON.scopes[i]; cnGenericModal('scope', s.t
 // ── dashboard ───────────────────────────────────────────────────────────────────────────────────────
 function cnRenderDashboard() {
   const st = CANON.stats || {}, fs = st.findings || {}, is = st.inventory || {}, bs = fs.by_severity || {};
-  const reachable = CANON.findings.filter(function (f) { return f.status === 'reachable' && f.severity !== 'info'; }).length;   // informational findings (normal behaviors) are not counted
   document.getElementById('report-id').textContent = 'GENERATED_AT: ' + (CANON.metadata.scan_info.generated_at || '');
   document.getElementById('stat-total').textContent = fs.total || 0;
   document.getElementById('stat-critical-high').textContent = (bs.critical || 0) + ' / ' + (bs.high || 0);
-  document.getElementById('stat-reachable').textContent = reachable;
+  document.getElementById('stat-reachable').textContent = fs.reachable_actionable || 0;   // reachable and not informational (counts.js)
   document.getElementById('stat-inventory').textContent = is.total || 0;
   const pol = CANON.policy || {}, dec = pol.decision, si = CANON.metadata.scan_info;
   const statusEl = document.getElementById('overall-status');
-  const violating = fs.violating_policy || 0;
+  const violating = (fs.by_policy || {}).violates_policy || 0;
   const blocked = dec && dec.allowed === false || (!dec && violating > 0);
   statusEl.textContent = blocked ? 'Status: Blocked' : (dec || violating === 0 ? 'Status: Allowed' : 'Status');
   statusEl.className = 'px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider ' + (blocked ? 'bg-red-500/20 text-red-400 border border-red-500/50' : 'bg-green-500/20 text-green-400 border border-green-500/50');
@@ -299,38 +298,81 @@ function cnSetupScopes() {
 }
 
 // ── detailed stats ──────────────────────────────────────────────────────────────────────────────────
+// Renders CANON.stats.findings / CANON.stats.inventory exactly as canonical/counts.js wrote them (fixed keys first, always present, then
+// every other value found). Nothing here counts findings or inventory: the Dashboard reads the same numbers.
+const CN_PAL = ['#ef4444', '#60a5fa', '#fb923c', '#10b981', '#a78bfa', '#facc15', '#f472b6', '#94a3b8'];
+const CN_NEUTRAL = '#737373';
+const CN_COUNT_COLORS = {
+  status: { 'reachable': '#ef4444', 'non reachable': '#10b981', 'false positive': '#facc15' },
+  verification: { verified: '#fb923c', false_positive: '#facc15', unverified: CN_NEUTRAL },
+  policy: { violates_policy: '#ef4444', policy_safe: '#10b981', not_evaluated: CN_NEUTRAL },
+  kev: { kev: '#ef4444', non_kev: '#10b981', unknown: CN_NEUTRAL },
+  state: { vulnerable: '#fb923c', infected: '#c084fc', not_queried: '#60a5fa', safe: '#10b981' },
+  confidence: { high: '#60a5fa', medium: '#94a3b8', low: '#525252', unknown: CN_NEUTRAL }
+};
+const CN_ROW_COLORS = {
+  status: { 'reachable': 'text-red-400', 'non reachable': 'text-green-400', 'false positive': 'text-yellow-400' },
+  verification: { verified: 'text-orange-400', false_positive: 'text-yellow-400' },
+  policy: { violates_policy: 'text-red-400', policy_safe: 'text-green-400' },
+  kev: { kev: 'text-red-400', non_kev: 'text-green-400' },
+  state: { vulnerable: 'text-orange-400', infected: 'text-purple-400', not_queried: 'text-blue-400', safe: 'text-green-400' },
+  severity: { critical: 'text-red-600', high: 'text-red-400', medium: 'text-orange-400', low: 'text-blue-400' }
+};
+const CN_ROW_LABELS = { violates_policy: 'Violates policy', policy_safe: 'Policy safe', not_evaluated: 'Not evaluated', kev: 'KEV (known exploited)', non_kev: 'Not in KEV', not_queried: 'Not queried', false_positive: 'False positive' };
+
 function cnDonut(id, labels, data, colors) {
   new Chart(document.getElementById(id), { type: 'doughnut', data: { labels: labels, datasets: [{ data: data, backgroundColor: colors, borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#a3a3a3', boxWidth: 10, font: { size: 10 } } } } } });
 }
+// A count object ({ key: n }) as rows: every key (zeros too, muted), labelled and coloured by group. `raw` keeps the key as written (types, confidence).
+function cnCountRows(o, group, raw) {
+  return Object.keys(o || {}).map(function (k) {
+    const n = o[k] || 0, label = CN_ROW_LABELS[k] || (raw ? k : cnTitle(k));
+    return cnRow(label, n, n ? ((CN_ROW_COLORS[group] || {})[k] || '') : 'text-neutral-600');
+  }).join('');
+}
+// The same object as a doughnut; zero entries are left out of the chart (they stay in the rows).
+function cnCountChart(id, o, group, raw) {
+  const keys = Object.keys(o || {}).filter(function (k) { return (o[k] || 0) > 0; }), pal = CN_COUNT_COLORS[group] || {};
+  cnDonut(id, keys.map(function (k) { return CN_ROW_LABELS[k] || (raw ? k : cnTitle(k)); }), keys.map(function (k) { return o[k]; }),
+    keys.map(function (k, i) { return pal[k] || (group === 'severity' ? CN_SEV_COLORS[k] : null) || CN_PAL[i % CN_PAL.length]; }));
+}
 function cnRenderStats() {
   const st = CANON.stats || {}, fs = st.findings || {}, is = st.inventory || {};
-  const PAL = ['#ef4444', '#60a5fa', '#fb923c', '#10b981', '#a78bfa', '#facc15', '#f472b6', '#94a3b8'];
-  const rows = function (o, colorOf) { return Object.keys(o || {}).map(function (k) { return cnRow(k, o[k], colorOf ? colorOf(k) : ''); }).join(''); };
-  const f = CANON.findings;
-  const reach = { 'reachable': f.filter(function (x) { return x.status === 'reachable'; }).length, 'non reachable': f.filter(function (x) { return x.status === 'non reachable'; }).length, 'false positive': f.filter(function (x) { return x.status === 'false positive'; }).length };
-  const card = function (title, canvas, inner) { return '<div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">' + title + '</h3>' + (canvas ? '<div class="h-48"><canvas id="' + canvas + '"></canvas></div>' : '') + '<div class="space-y-2">' + inner + '</div></div>'; };
-  const sevColor = function (k) { return { critical: 'text-red-600', high: 'text-red-400', medium: 'text-orange-400', low: 'text-blue-400' }[k] || 'text-gray-400'; };
+  const card = function (title, canvas, inner, note) { return '<div class="glass p-6 rounded-xl space-y-6"><h3 class="text-sm font-semibold uppercase tracking-widest text-neutral-400">' + title + '</h3>' + (canvas ? '<div class="h-48"><canvas id="' + canvas + '"></canvas></div>' : '') + '<div class="space-y-2">' + inner + '</div>' + (note ? '<p class="text-[10px] text-neutral-500 leading-relaxed">' + note + '</p>' : '') + '</div>'; };
+  const sum = function (o) { return Object.keys(o || {}).reduce(function (n, k) { return n + (o[k] || 0); }, 0); };
+  const kevNote = sum(fs.by_kev) ? 'Advisories only: findings that are not an advisory on a third-party component have no KEV status.' : 'No advisory on a third-party component in this report, so there is no KEV status to count.';
   const sec = document.getElementById('section-stats');
-  let html = '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">'
-    + card('Finding Stats', 'cnSevChart', cnRow('Total findings', fs.total || 0) + rows(fs.by_severity, sevColor))
-    + card('Finding Types', 'cnTypeChart', rows(fs.by_type))
-    + card('Confidence', 'cnConfChart', rows(fs.by_confidence))
-    + card('Status', 'cnReachChart', rows(reach) + cnRow('Violating policy', fs.violating_policy || 0, 'text-red-400'))
-    + card('Inventory Stats', 'cnInvTypeChart', cnRow('Total size', is.total || 0) + rows(is.by_type))
-    + card('Inventory State', 'cnInvStatusChart', rows(is.by_status) + cnRow('Violating policy', is.violating_policy || 0, 'text-red-400'))
+  let html = '<h3 class="text-xs font-semibold uppercase tracking-widest text-neutral-500">Findings</h3>'
+    + '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">'
+    + card('Severity', 'cnSevChart', cnRow('Total findings', fs.total || 0) + cnCountRows(fs.by_severity, 'severity'))
+    + card('Reachability', 'cnStatusChart', cnCountRows(fs.by_status, 'status'))
+    + card('Verification', 'cnVerifChart', cnCountRows(fs.by_verification, 'verification'), 'Verified / false positive are the verdict of the verification pass (SAST, malware); unverified is every finding without one.')
+    + card('Policy', 'cnPolicyChart', cnCountRows(fs.by_policy, 'policy'))
+    + card('Known exploited (KEV)', 'cnKevChart', cnCountRows(fs.by_kev, 'kev'), kevNote)
+    + card('Confidence', 'cnConfChart', cnCountRows(fs.by_confidence, 'confidence', true))
+    + card('Finding categories', 'cnTypeChart', cnCountRows(fs.by_type, 'type', true))
+    + '</div>'
+    + '<h3 class="text-xs font-semibold uppercase tracking-widest text-neutral-500">Inventory</h3>'
+    + '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">'
+    + card('Inventory state', 'cnInvStatusChart', cnRow('Total size', is.total || 0) + cnCountRows(is.by_status, 'state'), 'Safe includes clean and compliant; not queried includes undetermined and not queryable. Other states are shown under their own names.')
+    + card('Inventory policy', 'cnInvPolicyChart', cnCountRows(is.by_policy, 'policy'))
+    + card('Inventory types', 'cnInvTypeChart', cnCountRows(is.by_type, 'type', true))
     + '</div>';
   const extra = [];
   if (st.source) extra.push(cnBlock('Scanner Statistics', st.source));
   Object.keys(st).forEach(function (k) { if (['findings', 'inventory', 'source', 'diffs', 'compliance_posture', 'findings_summary'].indexOf(k) < 0 && st[k] != null) extra.push(cnBlock(cnTitle(k), st[k])); });
   if (extra.length) html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">' + extra.join('') + '</div>';
   sec.innerHTML = html;
-  const keys = function (o) { return Object.keys(o || {}); }, vals = function (o) { return keys(o).map(function (k) { return o[k]; }); };
   cnDonut('cnSevChart', CN_SEV, CN_SEV.map(function (s) { return (fs.by_severity || {})[s] || 0; }), CN_SEV.map(function (s) { return CN_SEV_COLORS[s]; }));
-  cnDonut('cnTypeChart', keys(fs.by_type), vals(fs.by_type), PAL);
-  cnDonut('cnConfChart', keys(fs.by_confidence), vals(fs.by_confidence), PAL);
-  cnDonut('cnReachChart', keys(reach), vals(reach), ['#ef4444', '#10b981', '#facc15']);
-  cnDonut('cnInvTypeChart', keys(is.by_type), vals(is.by_type), PAL);
-  cnDonut('cnInvStatusChart', keys(is.by_status), vals(is.by_status), PAL);
+  cnCountChart('cnStatusChart', fs.by_status, 'status');
+  cnCountChart('cnVerifChart', fs.by_verification, 'verification');
+  cnCountChart('cnPolicyChart', fs.by_policy, 'policy');
+  cnCountChart('cnKevChart', fs.by_kev, 'kev');
+  cnCountChart('cnConfChart', fs.by_confidence, 'confidence', true);
+  cnCountChart('cnTypeChart', fs.by_type, 'type', true);
+  cnCountChart('cnInvStatusChart', is.by_status, 'state');
+  cnCountChart('cnInvPolicyChart', is.by_policy, 'policy');
+  cnCountChart('cnInvTypeChart', is.by_type, 'type', true);
 }
 
 // ── policy ──────────────────────────────────────────────────────────────────────────────────────────

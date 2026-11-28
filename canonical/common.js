@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getOSMetadata } from '../sca/os_metadata.js';
 import { TYPES, TYPE_QUESTIONS, isFindingType } from './types.js';
+import { STATUS, buildCounts } from './counts.js';
 
 export const SCHEMA_VERSION = '0.1.0';
 
@@ -87,12 +88,9 @@ export function makeRel(root) {
 export { TYPES, TYPE_QUESTIONS, isFindingType };
 
 // ── finding status ───────────────────────────────────────────────────────────
-// `status` (root of every finding) replaces the old `reachable` boolean. One of:
-//   "reachable"       the finding applies: the original says it is reachable / exploitable, or makes no claim either way
-//   "non reachable"   the original says it is NOT reachable / exploitable (SCA / EASM `reachability.reachable === false`,
-//                     SAST `taint.reachable === false` or `taint.exploitable === false`)
-//   "false positive"  the original says it is not a real issue (SAST / malware `is_valid === false`)
-export const STATUS = { REACHABLE: 'reachable', NON_REACHABLE: 'non reachable', FALSE_POSITIVE: 'false positive' };
+// `status` (root of every finding) replaces the old `reachable` boolean. One of "reachable" | "non reachable" | "false positive"
+// (what each means: STATUS in ./counts.js, where the counts that use it live too).
+export { STATUS };
 
 export function reachableOf(d) {
   if (!isObj(d)) return null;
@@ -284,28 +282,11 @@ export function buildMetadata({ payload, opts = {}, scan, os_meta = null, git = 
 }
 
 // ── stats ───────────────────────────────────────────────────────────────────
-const count = (items, fn) => { const o = {}; for (const i of items) { const k = fn(i) ?? 'unknown'; o[k] = (o[k] || 0) + 1; } return o; };
-
+// Every count of the canonical report comes from buildCounts() (./counts.js): severity, status, verification, policy, KEV, finding type and
+// confidence of the findings; state, policy and type of the inventory. `source` is the module's own statistics, kept as the module wrote them.
 export function buildStats(findings, inventory, source) {
-  const bySev = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unknown: 0 };
-  for (const f of findings) bySev[f.severity] = (bySev[f.severity] || 0) + 1;
-  return {
-    findings: {
-      total: findings.length,
-      by_severity: bySev,
-      by_type: count(findings, (f) => f.type),
-      by_status: count(findings, (f) => f.status),
-      by_confidence: count(findings, (f) => f.confidence),
-      violating_policy: findings.filter((f) => f.violate_policy === true).length,
-    },
-    inventory: {
-      total: inventory.length,
-      by_type: count(inventory, (i) => i.type),
-      by_status: count(inventory, (i) => i.status),
-      violating_policy: inventory.filter((i) => i.violate_policy === true).length,
-    },
-    source: source ?? null,
-  };
+  const { findings: f, inventory: i } = buildCounts(findings, inventory);
+  return { findings: f, inventory: i, source: source ?? null };
 }
 
 // Mark inventory components with the worst status of the findings that reference them.

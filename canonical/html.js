@@ -5,7 +5,7 @@
 // (sca/engine.js report template). The finding / inventory modals, executive summary, compliance and diff renderers are each
 // module's own code, copied verbatim into client/<family>.js and fed the original `details` of every entry. client/shell.js is
 // the part common to all modules (dashboard, lists with filters, scopes, stats, policy, system info). client/diffs.js is the Diffs tab's
-// severity view (cards per severity level; a searchable, paginated Title / Type table in the modal), shared by all families; the per-framework
+// severity view (cards per severity level; a searchable, paginated Title / Type table in the modal), shared by all families; every count the Dashboard and the Stats tab show comes from canonical/counts.js (stats.findings / stats.inventory); the per-framework
 // compliance diffs stay in each family's own code. The vm / k8s / runtime reports (bundle
 // posture) also carry client/scvuln.js — the SCA vulnerability modal — when they hold sc_vuln / sc_infection findings or a package list (SCA package items); so do the
 // app-scan reports (package / binary / mobile / mcp) when they hold sc_vuln / sc_infection findings: each opens on its own, not inside its dependency's modal.
@@ -17,6 +17,7 @@ import { getTailwindScript } from '../sca/tailwindcss.js';
 import { getChartJSScript } from '../sca/chartjs.js';
 import { getGoogleFontsScript } from '../sca/googlefonts.js';
 import { restore as restoreAppscan } from './adapters/appscan.js';
+import { buildCounts } from './counts.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT = path.join(HERE, 'client');
@@ -62,7 +63,12 @@ async function executiveSection(canon, family) {
   return null;
 }
 
+// A canonical file written before the unified counts (./counts.js) holds only some of them: the Dashboard and the Stats tab render
+// stats.findings / stats.inventory as they are, so such a file gets them computed here, from its own findings and inventory.
+const hasUnifiedCounts = (c) => !!(c?.stats?.findings?.by_policy && c?.stats?.findings?.by_kev && c?.stats?.inventory?.by_policy);
+
 export async function generateCanonicalHtml(canon, opts = {}) {
+  if (canon && !hasUnifiedCounts(canon)) canon = { ...canon, stats: { ...(canon.stats || {}), ...buildCounts(canon.findings, canon.inventory) } };
   const family = BUNDLE[opts.family] || familyOfCanon(canon);
   const [tailwind, chartjs, googleFonts] = await Promise.all([getTailwindScript(), getChartJSScript(), getGoogleFontsScript()]);
   const bundle = BUNDLE[family] || family;

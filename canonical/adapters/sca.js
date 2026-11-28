@@ -65,7 +65,10 @@ export function translate(p, opts, H) {
     out.inventory.push(mkInventory({
       component_id: c.id ?? `${c.name}@${c.version}`,
       component_name: depName(c.name, c.ecosystem, c.version),
-      status: 'unknown',
+      // "undetermined" is the engine's "not queried": the component was never matched against an advisory database (conda, git / tarball / local-path
+      // sources, packages without a version). It must not fall through to "clean" below, which would report an unchecked component as safe.
+      // Findings (if any) still win in applyFindingStatus.
+      status: c.state === 'undetermined' ? 'undetermined' : 'unknown',
       violate_policy: c.is_policy_violation,   // engine verdict (also covers violations inherited through the dependency graph)
       type: isPkg ? 'dependency' : 'application',
       details: R.deep(c),
