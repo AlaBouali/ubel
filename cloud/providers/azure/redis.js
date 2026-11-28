@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-08-01';
 
@@ -9,7 +10,7 @@ async function listCaches(subscriptionId, accessToken) {
   return caches.map((c) => ({
     id: c.id,
     name: c.name,
-    location: c.location,
+    location: azureRegion(c.location),
     nonSslPortEnabled: Boolean(c.properties?.enableNonSslPort),
     // '' when unset (older caches accept TLS 1.0).
     minimumTlsVersion: c.properties?.minimumTlsVersion || '',

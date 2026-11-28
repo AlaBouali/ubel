@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll, azureRequest } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2022-05-01-preview';
 
@@ -9,7 +10,7 @@ async function listSqlServers(subscriptionId, accessToken) {
   return servers.map((s) => ({
     id: s.id,
     name: s.name,
-    location: s.location,
+    location: azureRegion(s.location),
     // '' when unset (no minimum enforced); otherwise '1.0' | '1.1' | '1.2' | '1.3'.
     minimalTlsVersion: s.properties?.minimalTlsVersion || '',
   }));

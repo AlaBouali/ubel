@@ -291,6 +291,10 @@ function buildReportPayload(reporter, meta = {}) {
     stats,
     compliance_summary: complianceSummary,
     findings,
+    // Every resource the checks inspected, clean ones included (a finding only exists for a resource that has a problem). Each entry:
+    // { provider, service, resource, region, assessed, reason?, findings, hidden_findings }. `findings` counts the ones in this report,
+    // `hidden_findings` the ones --min-severity dropped; `assessed: false` is a resource whose check failed, which is not "clean".
+    resources: typeof reporter.resources === 'function' ? reporter.resources() : [],
   };
 
   // Diffs vs the previous report. Never allowed to fail the scan either.

@@ -1,5 +1,6 @@
 'use strict';
 import { gcpRequest } from './client.js';
+import { gcpRegion } from '../../lib/location.js';
 
 async function listFirewalls(project, accessToken) {
   const rules = [];
@@ -44,19 +45,26 @@ async function listInstances(project, accessToken) {
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  return instances.map((i) => ({
-    name: i.name,
-    zone: (i.zone || '').split('/').pop(),
-    hasExternalIp: (i.networkInterfaces || []).some((ni) => (ni.accessConfigs || []).length > 0),
-    shieldedVmEnabled: Boolean(i.shieldedInstanceConfig?.enableSecureBoot),
-    // Instance metadata flags (CIS GCP 4.3 / 4.5 / 4.6). GKE node VMs are managed
-    // by GKE and excluded from these checks by the benchmark itself.
-    serialPortEnabled: metadataFlag(i.metadata, 'serial-port-enable'),
-    blockProjectSshKeys: metadataFlag(i.metadata, 'block-project-ssh-keys'),
-    canIpForward: Boolean(i.canIpForward),
-    isGkeNode: Boolean(i.labels?.['goog-gke-node']) || String(i.name || '').startsWith('gke-'),
-    serviceAccounts: (i.serviceAccounts || []).map((sa) => ({ email: sa.email, scopes: sa.scopes || [] })),
-  }));
+  return instances.map((i) => {
+    const zone = (i.zone || '').split('/').pop();
+    return {
+      name: i.name,
+      zone,
+      // A zone is not a region: the region is the zone without its letter (us-central1-a -> us-central1).
+      region: gcpRegion(zone),
+      // Instance names are unique per zone, not per region: the zone in the name keeps two same-named instances of one region apart.
+      resource: `${i.name} (${zone})`,
+      hasExternalIp: (i.networkInterfaces || []).some((ni) => (ni.accessConfigs || []).length > 0),
+      shieldedVmEnabled: Boolean(i.shieldedInstanceConfig?.enableSecureBoot),
+      // Instance metadata flags (CIS GCP 4.3 / 4.5 / 4.6). GKE node VMs are managed
+      // by GKE and excluded from these checks by the benchmark itself.
+      serialPortEnabled: metadataFlag(i.metadata, 'serial-port-enable'),
+      blockProjectSshKeys: metadataFlag(i.metadata, 'block-project-ssh-keys'),
+      canIpForward: Boolean(i.canIpForward),
+      isGkeNode: Boolean(i.labels?.['goog-gke-node']) || String(i.name || '').startsWith('gke-'),
+      serviceAccounts: (i.serviceAccounts || []).map((sa) => ({ email: sa.email, scopes: sa.scopes || [] })),
+    };
+  });
 }
 
 function metadataFlag(metadata, key) {

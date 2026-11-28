@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-07-01';
 
@@ -15,7 +16,7 @@ async function listRegistries(subscriptionId, accessToken) {
   return registries.map((r) => ({
     id: r.id,
     name: r.name,
-    location: r.location,
+    location: azureRegion(r.location),
     adminUserEnabled: Boolean(r.properties?.adminUserEnabled),
     publicNetworkAccess: r.properties?.publicNetworkAccess || 'Enabled',
     anonymousPullEnabled: Boolean(r.properties?.anonymousPullEnabled),

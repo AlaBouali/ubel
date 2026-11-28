@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll, azureRequest } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-01-01';
 
@@ -9,7 +10,7 @@ async function listStorageAccounts(subscriptionId, accessToken) {
   return accounts.map((a) => ({
     id: a.id,
     name: a.name,
-    location: a.location,
+    location: azureRegion(a.location),
     allowBlobPublicAccess: a.properties?.allowBlobPublicAccess !== false, // Azure default is true
     supportsHttpsTrafficOnly: Boolean(a.properties?.supportsHttpsTrafficOnly),
     minimumTlsVersion: a.properties?.minimumTlsVersion || 'TLS1_0',

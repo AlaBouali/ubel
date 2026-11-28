@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll, azureRequest } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 // Azure Database for PostgreSQL / MySQL *flexible* servers (the current offering;
 // the older "single server" is retired). Both share the same shape for the fields
@@ -16,7 +17,7 @@ async function listFlexibleServers(kind, subscriptionId, accessToken) {
   return servers.map((s) => ({
     id: s.id,
     name: s.name,
-    location: s.location,
+    location: azureRegion(s.location),
     // Servers injected into a VNet have a delegated subnet and no public endpoint.
     privateOnly: Boolean(s.properties?.network?.delegatedSubnetResourceId) || s.properties?.network?.publicNetworkAccess === 'Disabled',
   }));

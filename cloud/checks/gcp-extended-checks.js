@@ -35,6 +35,7 @@ async function runNetworkChecks(project, accessToken, reporter, log) {
     const nets = await compute.listNetworks(project, accessToken);
     log(`  [gcp:network] ${nets.length} VPC network(s) found`);
     for (const n of nets) {
+      reporter.inspected({ provider: 'gcp', service: 'network', resource: n.name });   // VPC networks are global: no region
       if (n.isLegacy) {
         reporter.add({
           provider: 'gcp',
@@ -72,6 +73,7 @@ async function runNetworkChecks(project, accessToken, reporter, log) {
       // Only ordinary (PRIVATE) subnets can have flow logs; proxy-only, PSC and
       // load-balancer subnets can't.
       if (s.purpose !== 'PRIVATE' && s.purpose !== 'PRIVATE_RFC_1918') continue;
+      reporter.inspected({ provider: 'gcp', service: 'network', resource: `${s.network} / ${s.name}`, region: s.region });
       if (s.flowLogsEnabled) continue;
       reporter.add({
         provider: 'gcp',
@@ -219,10 +221,13 @@ async function runServiceAccountKeyChecks(project, accessToken, reporter, log) {
 
   await mapLimit(accounts, CONCURRENCY, async (sa) => {
     if (sa.disabled) return; // a disabled account's keys can't be used
+    const subject = { provider: 'gcp', service: 'iam', resource: sa.email };
+    reporter.inspected(subject);
     let keys;
     try {
       keys = await iam.listUserManagedKeys(project, sa.email, accessToken);
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [gcp:iam] ${sa.email}: list keys failed: ${err.message}`);
       return;
     }
@@ -296,6 +301,7 @@ async function runDnsChecks(project, accessToken, reporter, log) {
   }
   log(`  [gcp:dns] ${zones.length} managed zone(s) found`);
   for (const z of zones) {
+    reporter.inspected({ provider: 'gcp', service: 'dns', resource: z.name });
     if (!z.isPublic || z.dnssecState === 'on') continue;
     reporter.add({
       provider: 'gcp',
@@ -328,6 +334,8 @@ async function runPubSubChecks(project, accessToken, reporter, log) {
     }
     log(`  [gcp:pubsub] ${items.length} ${kind.label}(s) found`);
     await mapLimit(items, CONCURRENCY, async (item) => {
+      const subject = { provider: 'gcp', service: 'pubsub', resource: item.displayName };
+      reporter.inspected(subject);
       try {
         const bindings = await pubsub.getIamPolicy(item.name, accessToken);
         for (const b of bindings) {
@@ -347,6 +355,7 @@ async function runPubSubChecks(project, accessToken, reporter, log) {
           });
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [gcp:pubsub] ${item.displayName}: getIamPolicy failed: ${err.message}`);
       }
     });

@@ -135,6 +135,8 @@ async function runKmsChecks(regions, creds, reporter, log) {
       // policies aren't editable, so only customer-managed keys are in scope.
       if (!key.customerManaged) return;
       if (key.state === 'PendingDeletion' || key.state === 'PendingReplicaDeletion') return;
+      const subject = { provider: 'aws', service: 'kms', resource: key.arn || keyId, region };
+      reporter.inspected(subject);
 
       if (key.rotatable && key.state === 'Enabled') {
         try {
@@ -154,6 +156,7 @@ async function runKmsChecks(regions, creds, reporter, log) {
             });
           }
         } catch (err) {
+          reporter.inspected(subject, err);
           log(`  [kms:${region}] GetKeyRotationStatus(${keyId}) failed: ${err.message}`);
         }
       }
@@ -178,6 +181,7 @@ async function runKmsChecks(regions, creds, reporter, log) {
           match: worstConditionMatch(matches),
         });
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [kms:${region}] GetKeyPolicy(${keyId}) failed: ${err.message}`);
       }
     });
@@ -270,6 +274,10 @@ async function runLambdaChecks(regions, creds, reporter, log) {
     log(`  [lambda:${region}] ${fns.length} function(s) found`);
 
     await mapLimit(fns, CONCURRENCY, async (fn) => {
+      const subject = { provider: 'aws', service: 'lambda', resource: fn.arn || fn.name, region };
+      reporter.inspected(subject);
+      // Lambda could not decrypt the variables (no KMS access): the secrets check below saw an empty set, which is not "clean".
+      if (fn.envUnreadable) reporter.inspected(subject, 'environment variables could not be decrypted, so they were not checked for secrets');
       if (fn.runtime && DEPRECATED_LAMBDA_RUNTIMES.has(fn.runtime)) {
         reporter.add({
           provider: 'aws',
@@ -321,6 +329,7 @@ async function runLambdaChecks(regions, creds, reporter, log) {
           }
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [lambda:${region}] GetPolicy(${fn.name}) failed: ${err.message}`);
       }
 
@@ -342,6 +351,7 @@ async function runLambdaChecks(regions, creds, reporter, log) {
           });
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [lambda:${region}] ListFunctionUrlConfigs(${fn.name}) failed: ${err.message}`);
       }
     });
@@ -370,6 +380,7 @@ async function runConfigChecks(regions, creds, reporter, log) {
     anyRegionAnswered = true;
     log(`  [config:${region}] ${recorders.length} recorder(s) found`);
     for (const rec of recorders) {
+      reporter.inspected({ provider: 'aws', service: 'config', resource: rec.name, region });
       if (rec.recording) {
         anyRecording = true;
         continue;
@@ -435,6 +446,8 @@ async function runElbChecks(regions, creds, reporter, log) {
     await mapLimit(lbs, CONCURRENCY, async (lb) => {
       if (lb.type === 'gateway') return;
       const internetFacing = lb.scheme === 'internet-facing';
+      const subject = { provider: 'aws', service: 'elbv2', resource: lb.name, region };   // the listener findings name `<lb>:<port>`; the load balancer itself is `<lb>`
+      reporter.inspected(subject);
 
       try {
         const listeners = await elbv2.describeListeners(lb.arn, region, creds);
@@ -469,6 +482,7 @@ async function runElbChecks(regions, creds, reporter, log) {
           }
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [elbv2:${region}] ${lb.name}: DescribeListeners failed: ${err.message}`);
       }
 
@@ -490,6 +504,7 @@ async function runElbChecks(regions, creds, reporter, log) {
             });
           }
         } catch (err) {
+          reporter.inspected(subject, err);
           log(`  [elbv2:${region}] ${lb.name}: DescribeLoadBalancerAttributes failed: ${err.message}`);
         }
       }
@@ -510,6 +525,7 @@ async function runEfsChecks(regions, creds, reporter, log) {
     }
     log(`  [efs:${region}] ${systems.length} file system(s) found`);
     for (const fs of systems) {
+      reporter.inspected({ provider: 'aws', service: 'efs', resource: fs.id, region });
       if (fs.encrypted) continue;
       reporter.add({
         provider: 'aws',
@@ -540,6 +556,7 @@ async function runRedshiftChecks(regions, creds, reporter, log) {
     }
     log(`  [redshift:${region}] ${clusters.length} cluster(s) found`);
     for (const c of clusters) {
+      reporter.inspected({ provider: 'aws', service: 'redshift', resource: c.id, region });
       if (c.publiclyAccessible) {
         reporter.add({
           provider: 'aws',

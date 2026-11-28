@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll, azureRequest } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2022-09-01';
 
@@ -14,7 +15,7 @@ async function listSites(subscriptionId, accessToken) {
   return sites.map((s) => ({
     id: s.id,
     name: s.name,
-    location: s.location,
+    location: azureRegion(s.location),
     kind: s.kind || '',
     httpsOnly: Boolean(s.properties?.httpsOnly),
   }));

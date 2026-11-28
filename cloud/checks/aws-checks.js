@@ -53,6 +53,8 @@ function portRangeIncludesAny(fromPort, toPort, ports) {
 
 async function checkBucket(bucket, creds, reporter, log) {
   const region = await s3.getBucketRegion(bucket.name, creds);
+  const subject = { provider: 'aws', service: 's3', resource: bucket.name, region };
+  reporter.inspected(subject);
   try {
     const [acl, isPublicPolicy, pab, encrypted, versioned, logged] = await Promise.all([
       s3.getBucketAcl(bucket.name, region, creds),
@@ -205,10 +207,12 @@ async function checkBucket(bucket, creds, reporter, log) {
           });
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [s3] ${bucket.name}: object ACL sample failed: ${err.message}`);
       }
     }
   } catch (err) {
+    reporter.inspected(subject, err);
     log(`  [s3] ${bucket.name}: ${err.message}`);
   }
 }
@@ -286,7 +290,10 @@ async function runEc2ChecksForRegion(region, creds, reporter, log) {
   try {
     groups = await ec2.describeSecurityGroups(region, creds);
     log(`  [ec2:${region}] ${groups.length} security group(s) found`);
-    for (const sg of groups) checkSecurityGroupPermissions(sg, region, reporter);
+    for (const sg of groups) {
+      reporter.inspected({ provider: 'aws', service: 'ec2', resource: `${sg.groupId} (${sg.groupName})`, region });
+      checkSecurityGroupPermissions(sg, region, reporter);
+    }
   } catch (err) {
     log(`  [ec2:${region}] DescribeSecurityGroups failed: ${err.message}`);
   }
@@ -297,6 +304,8 @@ async function runEc2ChecksForRegion(region, creds, reporter, log) {
     const instances = await ec2.describeInstances(region, creds);
     const publicInstances = instances.filter((i) => i.publicIp);
     log(`  [ec2:${region}] ${instances.length} instance(s) found (${publicInstances.length} with a public IP)`);
+
+    for (const inst of instances) reporter.inspected({ provider: 'aws', service: 'ec2', resource: inst.instanceId, region });
 
     // IMDSv1 (httpTokens=optional) lets any request-forgery bug in the workload read
     // the instance role's credentials -- the classic cloud credential-theft path.
@@ -365,6 +374,7 @@ async function runEc2ChecksForRegion(region, creds, reporter, log) {
       flowLogs.filter((f) => f.flowLogStatus === 'ACTIVE').map((f) => f.resourceId)
     );
     for (const vpc of vpcs) {
+      reporter.inspected({ provider: 'aws', service: 'ec2', resource: vpc.vpcId, region });
       if (vpcsWithLogs.has(vpc.vpcId)) continue;
       reporter.add({
         provider: 'aws',
@@ -412,6 +422,7 @@ async function runEc2ChecksForRegion(region, creds, reporter, log) {
     const volumes = await ec2.describeVolumes(region, creds);
     log(`  [ec2:${region}] ${volumes.length} EBS volume(s) found`);
     for (const vol of volumes) {
+      reporter.inspected({ provider: 'aws', service: 'ec2', resource: vol.volumeId, region });
       if (!vol.encrypted) {
         reporter.add({
           provider: 'aws',
@@ -544,6 +555,7 @@ async function reviewPrincipalPolicies(kind, principalName, resourceLabel, creds
       });
     }
   } catch (err) {
+    reporter.inspected({ provider: 'aws', service: 'iam', resource: resourceLabel }, err);
     log(`  [iam] ${kind} ${principalName}: inline policy review failed: ${err.message}`);
   }
   return count;
@@ -578,6 +590,7 @@ async function reviewAttachedPolicies(kind, principalName, resourceLabel, creds,
       }
     }
   } catch (err) {
+    reporter.inspected({ provider: 'aws', service: 'iam', resource: resourceLabel }, err);
     log(`  [iam] ${kind} ${principalName}: attached policy review failed: ${err.message}`);
   }
   return count;
@@ -655,6 +668,8 @@ async function runIamChecks(creds, reporter, log) {
   log(`  [iam] ${users.length} user(s) found`);
 
   await mapLimit(users, CONCURRENCY, async (user) => {
+    const subject = { provider: 'aws', service: 'iam', resource: user.userName };
+    reporter.inspected(subject);
     try {
       const [keys, mfaDevices, consoleAccess] = await Promise.all([
         iam.listAccessKeys(user.userName, creds),
@@ -717,6 +732,7 @@ async function runIamChecks(creds, reporter, log) {
             });
           }
         } catch (err) {
+          reporter.inspected(subject, err);
           log(`  [iam] ${user.userName}: GetAccessKeyLastUsed(${key.accessKeyId}) failed: ${err.message}`);
         }
       }
@@ -739,6 +755,7 @@ async function runIamChecks(creds, reporter, log) {
         }
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [iam] ${user.userName}: ${err.message}`);
     }
 
@@ -804,6 +821,7 @@ async function runIamChecks(creds, reporter, log) {
     log(`  [iam] ${policies.length} customer-managed polic${policies.length === 1 ? 'y' : 'ies'} found`);
     for (const p of policies) {
       const doc = await iam.getPolicyDocument(p.arn, p.defaultVersionId, creds);
+      reporter.inspected({ provider: 'aws', service: 'iam', resource: p.arn });   // after the fetch: a policy that could not be read is not listed as inspected
       const matches = findFullAdminStatements(doc);
       if (matches.length === 0) continue;
       const worst = worstConditionMatch(matches);
@@ -825,6 +843,7 @@ async function runIamChecks(creds, reporter, log) {
     const groups = await iam.listGroups(creds);
     log(`  [iam] ${groups.length} group(s) found`);
     await mapLimit(groups, CONCURRENCY, async (group) => {
+      reporter.inspected({ provider: 'aws', service: 'iam', resource: group.groupName });
       await reviewPrincipalPolicies('group', group.groupName, group.groupName, creds, reporter, log);
       await reviewAttachedPolicies('group', group.groupName, group.groupName, creds, reporter, log);
     });
@@ -838,6 +857,7 @@ async function runIamChecks(creds, reporter, log) {
     const roles = await iam.listRoles(creds);
     log(`  [iam] ${roles.length} role(s) found`);
     await mapLimit(roles, CONCURRENCY, async (role) => {
+      reporter.inspected({ provider: 'aws', service: 'iam', resource: role.arn });
       await reviewPrincipalPolicies('role', role.roleName, role.arn, creds, reporter, log);
       await reviewAttachedPolicies('role', role.roleName, role.arn, creds, reporter, log);
       if (role.trustPolicy && hasWildcardTrustPrincipal(role.trustPolicy)) {
@@ -866,6 +886,7 @@ async function runRdsChecksForRegion(region, creds, reporter, log) {
     const instances = await rds.describeDBInstances(region, creds);
     log(`  [rds:${region}] ${instances.length} instance(s) found`);
     for (const inst of instances) {
+      reporter.inspected({ provider: 'aws', service: 'rds', resource: inst.id, region });
       if (inst.publiclyAccessible) {
         reporter.add({
           provider: 'aws',
@@ -965,10 +986,12 @@ async function runRdsChecksForRegion(region, creds, reporter, log) {
           });
         }
       } catch (err) {
+        reporter.inspected({ provider: 'aws', service: 'rds', resource: snap.id, region }, err);
         log(`  [rds:${region}] ${snap.id}: DescribeDBSnapshotAttributes failed: ${err.message}`);
       }
     });
     for (const snap of snapshots) {
+      reporter.inspected({ provider: 'aws', service: 'rds', resource: snap.id, region });
       if (!snap.encrypted && snap.status === 'available') {
         reporter.add({
           provider: 'aws',
@@ -1016,10 +1039,13 @@ async function runCloudTrailChecks(regions, creds, reporter, log) {
   let anyMultiRegionLogging = false;
   await mapLimit(allTrails, CONCURRENCY, async (trail) => {
     let isLogging = false;
+    const subject = { provider: 'aws', service: 'cloudtrail', resource: trail.arn, region: trail.homeRegion };
+    reporter.inspected(subject);
     try {
       const status = await cloudtrail.getTrailStatus(trail.arn, trail.region, creds);
       isLogging = status.isLogging;
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [cloudtrail:${trail.region}] GetTrailStatus(${trail.name}) failed: ${err.message}`);
     }
 
@@ -1092,7 +1118,8 @@ async function runCloudTrailChecks(regions, creds, reporter, log) {
       action: 'cloudtrail-enable-multiregion',
       title: 'No active multi-region CloudTrail trail found',
       resource: 'account',
-      region: regions.join(' , '),
+      // Account-wide: about every scanned region, so it has no region of its own (a list of regions is not a region).
+      scanned_regions: regions,
       description: allTrails.length === 0
         ? 'No CloudTrail trails were found in any scanned region.'
         : 'None of the trails found are both multi-region and actively logging, so API activity in unmonitored regions may go unrecorded.',
@@ -1125,6 +1152,8 @@ async function runGuardDutyChecks(regions, creds, reporter, log) {
     log(`  [guardduty:${region}] ${detectorIds.length} detector(s) found`);
     await mapLimit(detectorIds, CONCURRENCY, async (id) => {
       anyDetectorSeen = true;
+      const subject = { provider: 'aws', service: 'guardduty', resource: id, region };
+      reporter.inspected(subject);
       try {
         const detector = await guardduty.getDetector(id, region, creds);
         if (detector.status === 'ENABLED') {
@@ -1144,6 +1173,7 @@ async function runGuardDutyChecks(regions, creds, reporter, log) {
           });
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [guardduty:${region}] GetDetector(${id}) failed: ${err.message}`);
       }
     });
@@ -1158,7 +1188,7 @@ async function runGuardDutyChecks(regions, creds, reporter, log) {
       action: 'guardduty-enable',
       title: 'GuardDuty threat detection is not enabled in any scanned region',
       resource: 'account',
-      region: regions.join(' , '),
+      scanned_regions: regions,   // account-wide: no region of its own, see the CloudTrail finding above
       description: anyDetectorSeen
         ? 'GuardDuty detector(s) exist but none are enabled in any scanned region, so there is no automated threat detection (compromised credentials, unusual API activity, C2 traffic, etc.) currently running.'
         : 'No GuardDuty detector was found in any scanned region — threat detection has never been turned on.',
@@ -1180,6 +1210,8 @@ async function runSnsChecks(regions, creds, reporter, log) {
     }
     log(`  [sns:${region}] ${topicArns.length} topic(s) found`);
     await mapLimit(topicArns, CONCURRENCY, async (arn) => {
+      const subject = { provider: 'aws', service: 'sns', resource: arn, region };
+      reporter.inspected(subject);
       try {
         const { policy, encrypted } = await sns.getTopicDetails(arn, region, creds);
         if (!encrypted) {
@@ -1209,6 +1241,7 @@ async function runSnsChecks(regions, creds, reporter, log) {
           match: worstConditionMatch(matches),
         });
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [sns:${region}] ${arn}: GetTopicAttributes failed: ${err.message}`);
       }
     });
@@ -1228,6 +1261,7 @@ async function runSqsChecks(regions, creds, reporter, log) {
     await mapLimit(queueUrls, CONCURRENCY, async (url) => {
       try {
         const { policy, arn, encrypted } = await sqs.getQueuePolicy(url, region, creds);
+        reporter.inspected({ provider: 'aws', service: 'sqs', resource: arn || url, region });
         if (!encrypted) {
           reporter.add({
             provider: 'aws',
@@ -1255,6 +1289,7 @@ async function runSqsChecks(regions, creds, reporter, log) {
           match: worstConditionMatch(matches),
         });
       } catch (err) {
+        reporter.inspected({ provider: 'aws', service: 'sqs', resource: url, region }, err);   // the ARN was not read: the queue URL is all there is
         log(`  [sqs:${region}] ${url}: GetQueueAttributes failed: ${err.message}`);
       }
     });

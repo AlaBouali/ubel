@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-05-01';
 
@@ -9,7 +10,7 @@ async function listNsgs(subscriptionId, accessToken) {
   return nsgs.map((n) => ({
     id: n.id,
     name: n.name,
-    location: n.location,
+    location: azureRegion(n.location),
     // The standard LIST response already includes these reference arrays
     // (no $expand needed) — item 6: an NSG with wide-open rules that
     // isn't attached to any subnet or NIC can't actually expose anything,

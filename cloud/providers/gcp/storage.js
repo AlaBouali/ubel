@@ -1,5 +1,6 @@
 'use strict';
 import { gcpRequest } from './client.js';
+import { gcpRegion } from '../../lib/location.js';
 
 async function listBuckets(project, accessToken) {
   const buckets = [];
@@ -15,6 +16,8 @@ async function listBuckets(project, accessToken) {
   return buckets.map((b) => ({
     name: b.name,
     location: b.location,
+    // Cloud Storage spells regions in upper case (US-CENTRAL1) and also has multi-regions (US, EU): the finding's region is the normalised one.
+    region: gcpRegion(b.location),
     publicAccessPrevention: b.iamConfiguration?.publicAccessPrevention,
     uniformBucketLevelAccess: Boolean(b.iamConfiguration?.uniformBucketLevelAccess?.enabled),
     versioningEnabled: Boolean(b.versioning?.enabled),

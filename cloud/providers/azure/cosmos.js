@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-04-15';
 
@@ -11,7 +12,7 @@ async function listAccounts(subscriptionId, accessToken) {
     return {
       id: a.id,
       name: a.name,
-      location: a.location,
+      location: azureRegion(a.location),
       publicNetworkAccess: p.publicNetworkAccess || 'Enabled',
       vnetFilterEnabled: Boolean(p.isVirtualNetworkFilterEnabled),
       ipRuleCount: (p.ipRules || []).length,

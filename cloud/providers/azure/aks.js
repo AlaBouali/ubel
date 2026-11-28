@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-10-01';
 
@@ -12,7 +13,7 @@ async function listClusters(subscriptionId, accessToken) {
   return clusters.map((c) => ({
     id: c.id,
     name: c.name,
-    location: c.location,
+    location: azureRegion(c.location),
     localAccountsDisabled: Boolean(c.properties?.disableLocalAccounts),
     // AKS's own default (when the property is absent) is true.
     rbacEnabled: c.properties?.enableRBAC !== false,

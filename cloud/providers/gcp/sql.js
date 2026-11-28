@@ -1,5 +1,6 @@
 'use strict';
 import { gcpRequest } from './client.js';
+import { gcpRegion } from '../../lib/location.js';
 
 /**
  * Cloud SQL instances (item 5: "very common misconfiguration" that had
@@ -23,7 +24,7 @@ async function listInstances(project, accessToken) {
     return {
       name: i.name,
       databaseVersion: i.databaseVersion,
-      region: i.region,
+      region: gcpRegion(i.region),
       publicIpEnabled: Boolean(ipConfig.ipv4Enabled),
       requireSsl: Boolean(ipConfig.requireSsl) || ipConfig.sslMode === 'TRUSTED_CLIENT_CERTIFICATE_REQUIRED' || ipConfig.sslMode === 'ENCRYPTED_ONLY',
       instanceType: i.instanceType, // CLOUD_SQL_INSTANCE | READ_REPLICA_INSTANCE | ...

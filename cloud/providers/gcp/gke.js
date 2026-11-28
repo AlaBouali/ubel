@@ -1,5 +1,6 @@
 'use strict';
 import { gcpRequest } from './client.js';
+import { gcpRegion, gcpZone } from '../../lib/location.js';
 
 /**
  * GKE clusters across every zone/region in one call via the `-` location
@@ -13,7 +14,10 @@ async function listClusters(project, accessToken) {
   const data = await gcpRequest(url, { accessToken });
   return (data.clusters || []).map((c) => ({
     name: c.name,
-    location: c.location,
+    location: c.location,   // a region (regional cluster) or a zone (zonal cluster): what the gcloud --location flag takes
+    // A zonal cluster's location is a zone, which is not a region. Its name is only unique per location, so the zone goes into the resource id.
+    region: gcpRegion(c.location),
+    resource: gcpZone(c.location) ? `${c.name} (${c.location})` : c.name,
     // enablePrivateEndpoint=false (the default) means the control plane
     // has a public IP in addition to (or instead of) a private one.
     publicEndpoint: !c.privateClusterConfig?.enablePrivateEndpoint,

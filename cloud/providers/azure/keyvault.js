@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-07-01';
 
@@ -14,7 +15,7 @@ async function listVaults(subscriptionId, accessToken) {
   return vaults.map((v) => ({
     id: v.id,
     name: v.name,
-    location: v.location,
+    location: azureRegion(v.location),
     // Azure's own default (when the property is absent) is "Enabled".
     publicNetworkAccess: v.properties?.publicNetworkAccess || 'Enabled',
     networkAclsDefaultAction: v.properties?.networkAcls?.defaultAction || 'Allow',

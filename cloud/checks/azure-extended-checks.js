@@ -42,6 +42,7 @@ async function runSubscriptionChecks(subscriptionId, accessToken, reporter, log)
     log(`  [azure:security] ${plans.length} Defender for Cloud plan(s) found`);
     for (const plan of plans) {
       const info = DEFENDER_PLANS[plan.name];
+      if (info) reporter.inspected({ provider: 'azure', service: 'security', resource: `${subscriptionId} / ${plan.name}` });   // subscription-level: no region
       if (!info || plan.tier === 'Standard') continue;
       reporter.add({
         provider: 'azure',
@@ -121,6 +122,7 @@ async function runSubscriptionChecks(subscriptionId, accessToken, reporter, log)
     const roles = await authApi.listCustomRoles(subscriptionId, accessToken);
     log(`  [azure:authorization] ${roles.length} custom role(s)`);
     for (const role of roles) {
+      reporter.inspected({ provider: 'azure', service: 'authorization', resource: role.name });
       if (!role.actions.includes('*')) continue;
       reporter.add({
         provider: 'azure',
@@ -151,6 +153,7 @@ async function runDiskChecks(subscriptionId, accessToken, reporter, log) {
   }
   log(`  [azure:compute] ${disks.length} managed disk(s) found`);
   for (const d of disks) {
+    reporter.inspected({ provider: 'azure', service: 'compute', resource: d.name, region: d.location });
     if (d.attached || d.diskState !== 'Unattached') continue;
     reporter.add({
       provider: 'azure',
@@ -181,6 +184,8 @@ async function runFlexibleServerChecks(kind, subscriptionId, accessToken, report
   log(`  [azure:${kind}] ${servers.length} ${label} flexible server(s) found`);
 
   await mapLimit(servers, CONCURRENCY, async (server) => {
+    const subject = { provider: 'azure', service: kind, resource: server.name, region: server.location };
+    reporter.inspected(subject);
     if (!server.privateOnly) {
       try {
         const rules = await dbApi.listFirewallRules(kind, server.id, accessToken);
@@ -200,6 +205,7 @@ async function runFlexibleServerChecks(kind, subscriptionId, accessToken, report
           });
         }
       } catch (err) {
+        reporter.inspected(subject, err);
         log(`  [azure:${kind}] ${server.name}: firewall rules failed: ${err.message}`);
       }
     }
@@ -220,6 +226,7 @@ async function runFlexibleServerChecks(kind, subscriptionId, accessToken, report
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:${kind}] ${server.name}: require_secure_transport read failed: ${err.message}`);
     }
   });
@@ -237,6 +244,7 @@ async function runCosmosChecks(subscriptionId, accessToken, reporter, log) {
   }
   log(`  [azure:cosmosdb] ${accounts.length} account(s) found`);
   for (const a of accounts) {
+    reporter.inspected({ provider: 'azure', service: 'cosmosdb', resource: a.name, region: a.location });
     if (a.publicNetworkAccess !== 'Disabled' && !a.vnetFilterEnabled && a.ipRuleCount === 0) {
       reporter.add({
         provider: 'azure',
@@ -280,6 +288,7 @@ async function runRedisChecks(subscriptionId, accessToken, reporter, log) {
   }
   log(`  [azure:redis] ${caches.length} cache(s) found`);
   for (const c of caches) {
+    reporter.inspected({ provider: 'azure', service: 'redis', resource: c.name, region: c.location });
     if (c.nonSslPortEnabled) {
       reporter.add({
         provider: 'azure',

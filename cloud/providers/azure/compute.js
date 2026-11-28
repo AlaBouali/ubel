@@ -1,5 +1,6 @@
 'use strict';
 import { azureListAll } from './client.js';
+import { azureRegion } from '../../lib/location.js';
 
 const API_VERSION = '2023-04-02';
 
@@ -10,7 +11,7 @@ async function listDisks(subscriptionId, accessToken) {
   return disks.map((d) => ({
     id: d.id,
     name: d.name,
-    location: d.location,
+    location: azureRegion(d.location),
     sizeGb: Number(d.properties?.diskSizeGB || 0),
     attached: Boolean(d.managedBy) || (d.managedByExtended || []).length > 0,
     // 'Unattached' | 'Attached' | 'Reserved' | 'ActiveSAS' | ...

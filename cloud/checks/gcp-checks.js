@@ -63,6 +63,8 @@ async function runStorageChecks(project, accessToken, reporter, log) {
   log(`  [gcp:storage] ${buckets.length} bucket(s) found`);
 
   await mapLimit(buckets, CONCURRENCY, async (bucket) => {
+    const subject = { provider: 'gcp', service: 'storage', resource: bucket.name, region: bucket.region };
+    reporter.inspected(subject);
     try {
       const bindings = await storage.getBucketIamPolicy(bucket.name, accessToken);
       // item 4 of the later review: publicAccessPrevention was already
@@ -87,7 +89,7 @@ async function runStorageChecks(project, accessToken, reporter, log) {
           action: 'gcs-remove-public-iam',
           title: `GCS bucket IAM policy grants "${b.role}" to ${publicMembers.join(', ')}`,
           resource: bucket.name,
-          region: bucket.location,
+          region: bucket.region,
           description: `${publicMembers.join(', ')} means anyone on the internet (allUsers) or any Google account (allAuthenticatedUsers) has "${b.role}" on this bucket.${papNote}`,
           remediation: `gcloud storage buckets remove-iam-policy-binding gs://${bucket.name} --member=${publicMembers[0]} --role=${b.role}`,
         });
@@ -101,7 +103,7 @@ async function runStorageChecks(project, accessToken, reporter, log) {
           action: 'gcs-enforce-public-access-prevention',
           title: 'GCS bucket does not enforce Public Access Prevention',
           resource: bucket.name,
-          region: bucket.location,
+          region: bucket.region,
           description: `publicAccessPrevention is "${bucket.publicAccessPrevention || 'inherited'}", not "enforced" — a public IAM binding or ACL added to this bucket (now or by mistake in the future) would not be blocked outright.`,
           remediation: `gcloud storage buckets update gs://${bucket.name} --public-access-prevention`,
         });
@@ -115,7 +117,7 @@ async function runStorageChecks(project, accessToken, reporter, log) {
           action: 'gcs-enable-versioning',
           title: 'GCS bucket has object versioning disabled',
           resource: bucket.name,
-          region: bucket.location,
+          region: bucket.region,
           description: 'Without versioning, an object that is overwritten or deleted (by mistake, by a compromised credential, or by ransomware) cannot be recovered.',
           remediation: `gcloud storage buckets update gs://${bucket.name} --versioning`,
         });
@@ -129,12 +131,13 @@ async function runStorageChecks(project, accessToken, reporter, log) {
           action: 'gcs-enable-uniform-access',
           title: 'GCS bucket uses fine-grained ACLs instead of uniform bucket-level access',
           resource: bucket.name,
-          region: bucket.location,
+          region: bucket.region,
           description: 'Fine-grained (legacy ACL) mode allows per-object ACLs that are easy to lose track of and audit.',
           remediation: `gcloud storage buckets update gs://${bucket.name} --uniform-bucket-level-access`,
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [gcp:storage] ${bucket.name}: ${err.message}`);
     }
   });
@@ -151,6 +154,7 @@ async function runFirewallChecks(project, accessToken, reporter, log) {
   log(`  [gcp:compute] ${rules.length} firewall rule(s) found`);
 
   for (const rule of rules) {
+    reporter.inspected({ provider: 'gcp', service: 'compute', resource: rule.name });
     if (rule.disabled || rule.direction !== 'INGRESS') continue;
     // item 5: only 0.0.0.0/0 was ever checked — ::/0 (IPv6 "the whole
     // internet") slipped through entirely.
@@ -269,6 +273,7 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
   log(`  [gcp:compute] ${instances.length} instance(s) found`);
 
   for (const inst of instances) {
+    reporter.inspected({ provider: 'gcp', service: 'compute', resource: inst.resource, region: inst.region });
     const defaultSaFullAccess = inst.serviceAccounts.some(
       (sa) =>
         sa.email.includes('-compute@developer.gserviceaccount.com') &&
@@ -283,8 +288,8 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
           severity: 'medium',
           action: 'gcp-instance-disable-serial-port',
           title: 'Instance has interactive serial-port access enabled',
-          resource: inst.name,
-          region: inst.zone,
+          resource: inst.resource,
+          region: inst.region,
           description: `Instance "${inst.name}" has serial-port-enable=true. The serial console is reachable with IAM alone and bypasses firewall rules and network-level restrictions.`,
           remediation: `gcloud compute instances add-metadata ${inst.name} --zone=${inst.zone} --metadata=serial-port-enable=false`,
         });
@@ -297,8 +302,8 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
           severity: 'low',
           action: 'gcp-instance-block-project-ssh-keys',
           title: 'Instance accepts project-wide SSH keys',
-          resource: inst.name,
-          region: inst.zone,
+          resource: inst.resource,
+          region: inst.region,
           description: `Instance "${inst.name}" does not set block-project-ssh-keys=true, so any SSH key added to project metadata (including a stale or leaked one) also logs in to this machine.`,
           remediation: `gcloud compute instances add-metadata ${inst.name} --zone=${inst.zone} --metadata=block-project-ssh-keys=true (or enable OS Login and stop using metadata keys)`,
         });
@@ -311,8 +316,8 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
           severity: 'medium',
           action: 'gcp-instance-disable-ip-forwarding',
           title: 'Instance has IP forwarding enabled',
-          resource: inst.name,
-          region: inst.zone,
+          resource: inst.resource,
+          region: inst.region,
           description: `Instance "${inst.name}" has canIpForward=true, so it can send and receive packets for addresses that aren't its own and can be used to bypass network controls or as an unintended router. It is only needed for appliances such as NAT or firewall VMs.`,
           remediation: 'canIpForward can only be set at creation: recreate the instance without --can-ip-forward unless it is a deliberate router/appliance.',
         });
@@ -326,8 +331,8 @@ async function runComputeInstanceChecks(project, accessToken, reporter, log) {
         severity: 'medium',
         action: 'gcp-instance-scope-service-account',
         title: 'Internet-facing instance uses the default service account with full API access',
-        resource: inst.name,
-        region: inst.zone,
+        resource: inst.resource,
+        region: inst.region,
         description: 'This instance has a public IP and its default service account is scoped to cloud-platform (full API access) — a compromise of the instance compromises the whole project.',
         remediation: 'Attach a scoped, purpose-built service account instead of the default one, or narrow its OAuth scopes.',
       });
@@ -348,6 +353,7 @@ async function runCloudSqlChecks(project, accessToken, reporter, log) {
   log(`  [gcp:sql] ${instances.length} Cloud SQL instance(s) found`);
 
   for (const inst of instances) {
+    reporter.inspected({ provider: 'gcp', service: 'sql', resource: inst.name, region: inst.region });
     if (inst.hasOpenAuthorizedNetwork) {
       reporter.add({
         provider: 'gcp',
@@ -454,16 +460,18 @@ async function runCloudSqlChecks(project, accessToken, reporter, log) {
 
 /** item 5: BigQuery public datasets had no check at all before. */
 async function runBigQueryChecks(project, accessToken, reporter, log) {
-  let datasetIds;
+  let datasets;
   try {
-    datasetIds = await bigquery.listDatasetIds(project, accessToken);
+    datasets = await bigquery.listDatasets(project, accessToken);
   } catch (err) {
-    log(`  [gcp:bigquery] listDatasetIds failed: ${err.message}`);
+    log(`  [gcp:bigquery] listDatasets failed: ${err.message}`);
     return;
   }
-  log(`  [gcp:bigquery] ${datasetIds.length} dataset(s) found`);
+  log(`  [gcp:bigquery] ${datasets.length} dataset(s) found`);
 
-  await mapLimit(datasetIds, CONCURRENCY, async (datasetId) => {
+  await mapLimit(datasets, CONCURRENCY, async ({ id: datasetId, region }) => {
+    const subject = { provider: 'gcp', service: 'bigquery', resource: datasetId, region };
+    reporter.inspected(subject);
     try {
       const publicEntries = await bigquery.getDatasetAccess(project, datasetId, accessToken);
       for (const entry of publicEntries) {
@@ -475,6 +483,7 @@ async function runBigQueryChecks(project, accessToken, reporter, log) {
           action: 'bigquery-remove-public-access',
           title: `BigQuery dataset grants "${entry.role}" to ${entry.member}`,
           resource: datasetId,
+          region,
           description: `Dataset "${datasetId}" has an access entry granting "${entry.role}" to ${entry.member} — ${entry.member === 'allUsers' ? 'anyone on the internet' : 'any Google account'} can query it.`,
           remediation: `bq update --dataset --remove_all_access_for=${entry.member} ${project}:${datasetId} (or edit the dataset's access list in the console)`,
         });
@@ -499,6 +508,8 @@ async function runCloudRunChecks(project, accessToken, reporter, log) {
   log(`  [gcp:run] ${services.length} Cloud Run service(s) found`);
 
   await mapLimit(services, CONCURRENCY, async (svc) => {
+    const subject = { provider: 'gcp', service: 'run', resource: svc.displayName, region: svc.location };
+    reporter.inspected(subject);
     if (isDefaultComputeServiceAccount(svc.serviceAccount)) {
       reporter.add({
         provider: 'gcp',
@@ -537,6 +548,7 @@ async function runCloudRunChecks(project, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [gcp:run] ${svc.displayName}: getIamPolicy failed: ${err.message}`);
     }
   });
@@ -555,6 +567,8 @@ async function runCloudFunctionsChecks(project, accessToken, reporter, log) {
   log(`  [gcp:functions] ${fns.length} Cloud Function(s) found`);
 
   await mapLimit(fns, CONCURRENCY, async (fn) => {
+    const subject = { provider: 'gcp', service: 'functions', resource: fn.displayName, region: fn.location };
+    reporter.inspected(subject);
     if (isDefaultComputeServiceAccount(fn.serviceAccount)) {
       reporter.add({
         provider: 'gcp',
@@ -593,6 +607,7 @@ async function runCloudFunctionsChecks(project, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [gcp:functions] ${fn.displayName}: getIamPolicy failed: ${err.message}`);
     }
   });
@@ -613,6 +628,7 @@ async function runGkeChecks(project, accessToken, reporter, log) {
   log(`  [gcp:gke] ${clusters.length} GKE cluster(s) found`);
 
   for (const cluster of clusters) {
+    reporter.inspected({ provider: 'gcp', service: 'gke', resource: cluster.resource, region: cluster.region });
     if (cluster.publicEndpoint && !cluster.masterAuthorizedNetworksEnabled) {
       reporter.add({
         provider: 'gcp',
@@ -621,8 +637,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         severity: 'high',
         action: 'gke-restrict-control-plane-access',
         title: 'GKE control plane is public with no authorized networks restriction',
-        resource: cluster.name,
-        region: cluster.location,
+        resource: cluster.resource,
+        region: cluster.region,
         description: `Cluster "${cluster.name}" has a publicly reachable API server endpoint and no master-authorized-networks configured, so the Kubernetes API is reachable from any IP address (valid credentials are still required, but the attack surface is the entire internet).`,
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --enable-master-authorized-networks --master-authorized-networks=<cidr1,cidr2> (or --enable-private-endpoint to remove the public one entirely)`,
       });
@@ -635,8 +651,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         severity: 'high',
         action: 'gke-disable-legacy-abac',
         title: 'GKE cluster has legacy ABAC authorization enabled',
-        resource: cluster.name,
-        region: cluster.location,
+        resource: cluster.resource,
+        region: cluster.region,
         description: `Cluster "${cluster.name}" has legacy Attribute-Based Access Control enabled alongside (or instead of) RBAC — ABAC is deprecated, coarse-grained, and effectively grants broad access that RBAC is meant to replace.`,
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --no-enable-legacy-authorization`,
       });
@@ -650,8 +666,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
           severity: 'low',
           action: 'gke-enable-network-policy',
           title: 'GKE cluster does not enforce Kubernetes network policies',
-          resource: cluster.name,
-          region: cluster.location,
+          resource: cluster.resource,
+          region: cluster.region,
           description: `Cluster "${cluster.name}" has neither network policy enforcement nor Dataplane V2, so every pod can talk to every other pod and NetworkPolicy objects have no effect.`,
           remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --update-addons=NetworkPolicy=ENABLED, then --enable-network-policy (or create the cluster with --enable-dataplane-v2, which can only be chosen at creation).`,
         });
@@ -664,8 +680,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
           severity: 'medium',
           action: 'gke-enable-private-nodes',
           title: 'GKE cluster nodes have public IP addresses',
-          resource: cluster.name,
-          region: cluster.location,
+          resource: cluster.resource,
+          region: cluster.region,
           description: `Cluster "${cluster.name}" does not use private nodes, so its worker nodes are given external IPs and are directly reachable from the internet wherever firewall rules allow.`,
           remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --enable-private-nodes (older clusters may need to be recreated as private clusters).`,
         });
@@ -678,8 +694,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
           severity: 'low',
           action: 'gke-enable-shielded-nodes',
           title: 'GKE cluster does not use Shielded GKE Nodes',
-          resource: cluster.name,
-          region: cluster.location,
+          resource: cluster.resource,
+          region: cluster.region,
           description: `Cluster "${cluster.name}" has Shielded Nodes off, so node identity and boot integrity are not cryptographically verified and a node's credentials are easier to impersonate from elsewhere.`,
           remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --enable-shielded-nodes`,
         });
@@ -693,8 +709,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
             severity: 'medium',
             action: 'gke-use-dedicated-node-service-account',
             title: 'GKE node pool runs as the Compute Engine default service account',
-            resource: `${cluster.name} / ${pool.name}`,
-            region: cluster.location,
+            resource: `${cluster.resource} / ${pool.name}`,
+            region: cluster.region,
             description: `Node pool "${pool.name}" of cluster "${cluster.name}" uses the default Compute Engine service account, which commonly holds the broad Editor role; any pod that can reach the metadata server inherits it.`,
             remediation: 'Create a minimally-privileged service account (logging/monitoring writer, artifact reader) and a new node pool with --service-account=<sa>, then migrate workloads and delete the old pool (the node service account cannot be changed in place).',
           });
@@ -708,8 +724,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
             severity: 'low',
             action: 'gke-enable-node-auto-management',
             title: 'GKE node pool has automatic node upgrades or repair turned off',
-            resource: `${cluster.name} / ${pool.name}`,
-            region: cluster.location,
+            resource: `${cluster.resource} / ${pool.name}`,
+            region: cluster.region,
             description: `Node pool "${pool.name}" of cluster "${cluster.name}" has ${off} disabled, so nodes fall behind on Kubernetes and OS security patches until someone upgrades them by hand.`,
             remediation: `gcloud container node-pools update ${pool.name} --cluster=${cluster.name} --location=${cluster.location} --enable-autoupgrade --enable-autorepair`,
           });
@@ -724,8 +740,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         severity: 'low',
         action: 'gke-enable-workload-identity',
         title: 'GKE cluster does not use Workload Identity',
-        resource: cluster.name,
-        region: cluster.location,
+        resource: cluster.resource,
+        region: cluster.region,
         description: `Cluster "${cluster.name}" has no workload pool, so pods that need Google APIs must use the node's service account or exported keys instead of a per-workload identity.`,
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --workload-pool=<project-id>.svc.id.goog`,
       });
@@ -738,8 +754,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         severity: 'medium',
         action: 'gke-enable-logging',
         title: 'GKE cluster has Cloud Logging disabled',
-        resource: cluster.name,
-        region: cluster.location,
+        resource: cluster.resource,
+        region: cluster.region,
         description: `Cluster "${cluster.name}" has its logging service set to none, so there is no audit trail of workload or control-plane activity.`,
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --logging=SYSTEM,WORKLOAD`,
       });
@@ -752,8 +768,8 @@ async function runGkeChecks(project, accessToken, reporter, log) {
         severity: 'medium',
         action: 'gke-disable-basic-auth',
         title: 'GKE cluster has legacy basic authentication configured',
-        resource: cluster.name,
-        region: cluster.location,
+        resource: cluster.resource,
+        region: cluster.region,
         description: `Cluster "${cluster.name}" still has a static username/password credential configured for the API server — a long-lived, hard-to-rotate credential that bypasses normal IAM/OIDC auth and its audit trail.`,
         remediation: `gcloud container clusters update ${cluster.name} --location=${cluster.location} --no-issue-client-certificate (recreate the cluster to fully remove basic auth credentials, which can't be unset on an existing cluster).`,
       });

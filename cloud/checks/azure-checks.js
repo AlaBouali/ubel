@@ -57,6 +57,8 @@ async function runStorageChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:storage] ${accounts.length} storage account(s) found`);
 
   await mapLimit(accounts, CONCURRENCY, async (acc) => {
+    const subject = { provider: 'azure', service: 'storage', resource: acc.name, region: acc.location };
+    reporter.inspected(subject);
     if (acc.allowBlobPublicAccess) {
       reporter.add({
         provider: 'azure',
@@ -117,6 +119,7 @@ async function runStorageChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:storage] ${acc.name}: blob service properties failed: ${err.message}`);
     }
     if (acc.minimumTlsVersion !== 'TLS1_2') {
@@ -141,6 +144,7 @@ async function runStorageChecks(subscriptionId, accessToken, reporter, log) {
     try {
       const containers = await storageApi.listContainers(acc.id, accessToken);
       for (const c of containers) {
+        reporter.inspected({ provider: 'azure', service: 'storage', resource: `${acc.name} / ${c.name}`, region: acc.location });
         if (c.publicAccess === 'None') continue;
         reporter.add({
           provider: 'azure',
@@ -156,6 +160,7 @@ async function runStorageChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:storage] ${acc.name}: listContainers failed: ${err.message}`);
     }
   });
@@ -172,6 +177,7 @@ async function runNsgChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:network] ${nsgs.length} NSG(s) found`);
 
   for (const nsg of nsgs) {
+    reporter.inspected({ provider: 'azure', service: 'network', resource: nsg.name, region: nsg.location });
     // item 6: an NSG with open rules that isn't attached to any subnet or
     // NIC can't actually expose anything — flagging every rule on it as
     // high/critical was a pure false positive. Report it once, as
@@ -268,6 +274,8 @@ async function runSqlChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:sql] ${servers.length} SQL server(s) found`);
 
   await mapLimit(servers, CONCURRENCY, async (server) => {
+    const subject = { provider: 'azure', service: 'sql', resource: server.name, region: server.location };
+    reporter.inspected(subject);
     if (server.minimalTlsVersion === '' || server.minimalTlsVersion === '1.0' || server.minimalTlsVersion === '1.1') {
       reporter.add({
         provider: 'azure',
@@ -299,6 +307,7 @@ async function runSqlChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:sql] ${server.name}: auditing settings failed: ${err.message}`);
     }
     try {
@@ -318,6 +327,7 @@ async function runSqlChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:sql] ${server.name}: threat protection policy failed: ${err.message}`);
     }
     try {
@@ -363,6 +373,7 @@ async function runSqlChecks(subscriptionId, accessToken, reporter, log) {
         }
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:sql] ${server.name}: ${err.message}`);
     }
   });
@@ -382,6 +393,8 @@ async function runKeyVaultChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:keyvault] ${vaults.length} key vault(s) found`);
 
   for (const vault of vaults) {
+    const subject = { provider: 'azure', service: 'keyvault', resource: vault.name, region: vault.location };
+    reporter.inspected(subject);
     const networkRestricted = vault.publicNetworkAccess === 'Disabled' || vault.networkAclsDefaultAction === 'Deny';
     if (!networkRestricted) {
       reporter.add({
@@ -428,6 +441,7 @@ async function runKeyVaultChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:keyvault] ${vault.name}: diagnostic settings failed: ${err.message}`);
     }
     if (!vault.purgeProtectionEnabled) {
@@ -459,6 +473,8 @@ async function runAppServiceChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:appservice] ${sites.length} site(s) found`);
 
   for (const site of sites) {
+    const subject = { provider: 'azure', service: 'appservice', resource: site.name, region: site.location };
+    reporter.inspected(subject);
     try {
       const cfg = await appServiceApi.getSiteConfig(site.id, accessToken);
       const isFn = site.kind.includes('functionapp');
@@ -507,6 +523,7 @@ async function runAppServiceChecks(subscriptionId, accessToken, reporter, log) {
         });
       }
     } catch (err) {
+      reporter.inspected(subject, err);
       log(`  [azure:appservice] ${site.name}: site config failed: ${err.message}`);
     }
     if (!site.httpsOnly) {
@@ -540,6 +557,7 @@ async function runAcrChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:acr] ${registries.length} container registr${registries.length === 1 ? 'y' : 'ies'} found`);
 
   for (const reg of registries) {
+    reporter.inspected({ provider: 'azure', service: 'acr', resource: reg.name, region: reg.location });
     if (reg.adminUserEnabled) {
       reporter.add({
         provider: 'azure',
@@ -597,6 +615,7 @@ async function runAksChecks(subscriptionId, accessToken, reporter, log) {
   log(`  [azure:aks] ${clusters.length} cluster(s) found`);
 
   for (const cluster of clusters) {
+    reporter.inspected({ provider: 'azure', service: 'aks', resource: cluster.name, region: cluster.location });
     if (!cluster.rbacEnabled) {
       reporter.add({
         provider: 'azure',

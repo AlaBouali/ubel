@@ -1,10 +1,12 @@
 'use strict';
 import { gcpRequest } from './client.js';
+import { gcpRegion } from '../../lib/location.js';
 
 const PUBLIC_MEMBERS = new Set(['allUsers', 'allAuthenticatedUsers']);
 
-async function listDatasetIds(project, accessToken) {
-  const ids = [];
+/** Datasets with the location each one lives in (datasets.list reports it per dataset; BigQuery locations are regions or multi-regions). */
+async function listDatasets(project, accessToken) {
+  const datasets = [];
   let pageToken;
   do {
     const url = new URL(`https://bigquery.googleapis.com/bigquery/v2/projects/${project}/datasets`);
@@ -12,11 +14,15 @@ async function listDatasetIds(project, accessToken) {
     if (pageToken) url.searchParams.set('pageToken', pageToken);
     const data = await gcpRequest(url.toString(), { accessToken });
     for (const d of data.datasets || []) {
-      if (d.datasetReference?.datasetId) ids.push(d.datasetReference.datasetId);
+      if (d.datasetReference?.datasetId) datasets.push({ id: d.datasetReference.datasetId, region: gcpRegion(d.location) });
     }
     pageToken = data.pageToken;
   } while (pageToken);
-  return ids;
+  return datasets;
+}
+
+async function listDatasetIds(project, accessToken) {
+  return (await listDatasets(project, accessToken)).map((d) => d.id);
 }
 
 /**
@@ -37,4 +43,4 @@ async function getDatasetAccess(project, datasetId, accessToken) {
     .filter((e) => e.member && PUBLIC_MEMBERS.has(e.member));
 }
 
-export { listDatasetIds, getDatasetAccess };
+export { listDatasets, listDatasetIds, getDatasetAccess };

@@ -2,22 +2,33 @@
 // Cloud scanner (AWS / GCP / Azure) → canonical.
 // Original keys used: findings[] {check, resource, region, provider, service, severity, title, description, remediation, compliance},
 // providers[], regions{}, accounts{}, provider_status[], scan_options, stats, compliance_summary, executive_summary, diffs.
-// The original has no inventory, so it is derived from what the payload names. Only resources with a finding are known (the scanner does not
-// list the resources it found clean); providers, accounts and regions are known whether or not they have findings:
-//   cloud_resource   one per (provider, region, resource, service) a finding points at; its id IS the findings' affected_component_id, so every
-//                    finding resolves to exactly one inventory entry and the resource's state ("misconfigured") comes from its findings
+// The original has no inventory, so it is derived from what the payload names:
+//   - resources[] (written by the scanner since it records every resource a check inspects, clean ones included) is the inventory of
+//     cloud resources. An older report has no resources[]: then only resources with a finding are known (the scanner did not list the
+//     resources it found clean), and the inventory falls back to the resources the findings point at.
+//   - providers, accounts and regions are known whether or not they have findings.
+//   cloud_resource   one per (provider, region, resource, service) the scanner inspected or a finding points at; its id IS the findings'
+//                    affected_component_id, so every finding resolves to exactly one inventory entry. State: "misconfigured" when a
+//                    finding in the report is about it; otherwise "clean" (inspected, nothing found), "unassessed" (a check on it failed:
+//                    NOT clean) or "filtered" (it has findings, all of them below --min-severity, so none is in the report)
 //   cloud_provider   one per provider, status = provider_status (scanned / partial / skipped / error): the component of the coverage observations
 //   cloud_account    the account / project / subscription scanned (accounts{})
-//   cloud_region     every region scanned (regions{}, and any region a finding names)
+//   cloud_region     every region scanned (regions{}, and any region a resource or finding is in). A resource with no region (IAM, firewall
+//                    rules, project / subscription settings) is in no region: its id says "global" and it adds no cloud_region.
 import { arr, isObj, first, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
 import { sha } from '../common.js';
 export const family = 'cloud';
 
 const lastSeg = (r) => { const s = String(r ?? ''); const m = s.split(/[/:]/).filter(Boolean); return m.length ? m[m.length - 1] : s; };
 
+// The region of a finding / resource, '' when it has none. An empty value is a global resource (IAM, firewall rules, project settings).
+// A value that lists several regions is not a region either: older reports wrote the scanned regions joined with " , " on the account-wide
+// findings (CloudTrail / GuardDuty / Config), which would otherwise become a region of its own.
+const regionOf = (f) => { const r = String(f?.region ?? '').trim(); return r.includes(',') ? '' : r; };
+
 // The identity of the cloud component a finding is about: one function for the finding and for its inventory entry, so the two cannot drift apart.
 const componentOf = (f) => {
-  const provider = f.provider ?? 'unknown', region = f.region ?? 'unknown', service = f.service ?? 'unknown';
+  const provider = f.provider ?? 'unknown', region = regionOf(f) || 'global', service = f.service ?? 'unknown';
   return {
     id: `${provider}:${region}:${f.resource ?? 'unknown'}:${service}`,
     name: `${provider}: ${lastSeg(f.resource) || service} (${region}) => ${service}`,
@@ -27,6 +38,25 @@ const componentOf = (f) => {
 export function translate(p, opts, H) {
   const violates = failOnPredicate(opts.fail_on);
   const out = { findings: [], inventory: [], scopes: [] };
+
+  const accounts = isObj(p.accounts) ? p.accounts : {};
+  const accountOf = (x) => x.account ?? accounts[x.provider] ?? null;
+
+  // The inspected resources first: dedupeInventory keeps the first entry of an id, and this one knows more (it can be unassessed / filtered).
+  for (const r of arr(p.resources)) {
+    if (!isObj(r) || r.resource == null) continue;
+    const comp = componentOf(r);
+    const findings = Number(r.findings) || 0, hidden = Number(r.hidden_findings) || 0;
+    out.inventory.push(mkInventory({
+      component_id: comp.id, component_name: comp.name, type: 'cloud_resource',
+      // 'unknown' becomes "clean" below when no finding is about the resource; the other two are never overwritten by that.
+      status: r.assessed === false ? 'unassessed' : (!findings && hidden ? 'filtered' : 'unknown'),
+      details: {
+        resource: r.resource, provider: r.provider ?? null, service: r.service ?? null, region: regionOf(r) || null, account: accountOf(r),
+        assessed: r.assessed !== false, reason: r.reason ?? null, findings, hidden_findings: hidden,
+      },
+    }));
+  }
 
   for (const f of arr(p.findings)) {
     const comp = componentOf(f);
@@ -45,7 +75,7 @@ export function translate(p, opts, H) {
     }));
     out.inventory.push(mkInventory({
       component_id: comp.id, component_name: comp.name, status: 'unknown', type: 'cloud_resource',
-      details: { resource: f.resource ?? null, provider: f.provider ?? null, service: f.service ?? null, region: f.region ?? null, account: f.account ?? null },
+      details: { resource: f.resource ?? null, provider: f.provider ?? null, service: f.service ?? null, region: regionOf(f) || null, account: accountOf(f) },
     }));
   }
   const regions = isObj(p.regions) ? p.regions : {};
@@ -56,11 +86,12 @@ export function translate(p, opts, H) {
       out.scopes.push({ type: 'cloud_region', name: String(rid), provider: prov });
     }
   }
-  // A region a finding names is a scanned region even when regions{} does not list it (GCP / Azure report none). After regions{}: the first entry
-  // of an id is kept, and that one carries more.
-  for (const f of arr(p.findings)) {
-    if (!f.region) continue;
-    out.inventory.push(mkInventory({ component_id: `${f.provider ?? 'unknown'}:${f.region}`, component_name: String(f.region), status: 'scanned', type: 'cloud_region', details: { provider: f.provider ?? null, region: f.region } }));
+  // A region a resource or a finding names is a scanned region even when regions{} does not list it (GCP / Azure report none). After regions{}:
+  // the first entry of an id is kept, and that one carries more.
+  for (const f of [...arr(p.resources), ...arr(p.findings)]) {
+    const region = isObj(f) ? regionOf(f) : '';
+    if (!region) continue;
+    out.inventory.push(mkInventory({ component_id: `${f.provider ?? 'unknown'}:${region}`, component_name: region, status: 'scanned', type: 'cloud_region', details: { provider: f.provider ?? null, region } }));
   }
   // Providers and the account behind each one. The provider's component id is the one its coverage observations use (`provider:<name>`).
   const provName = (x) => (typeof x === 'string' ? x : first(x?.name, x?.provider));
