@@ -50,7 +50,7 @@ export function toCanonical(payload, opts = {}) {
   const inventory = t.inventory;
   t.metadata.scan_info.is_blocked = isBlocked(t.policy, findings);
   const stats = buildStats(findings, inventory, t.stats_extra?.source ?? null);
-  for (const [k, v] of Object.entries(t.stats_extra || {})) if (k !== 'source' && v != null) stats[k] = v;
+  for (const [k, v] of Object.entries(t.stats_extra || {})) if (k !== 'source' && v != null) stats[k] = v;   // module-specific blocks only: diffs and threat_intel are root keys
 
   const R = makeRel(opts.cwd);
   const canon = {
@@ -60,6 +60,8 @@ export function toCanonical(payload, opts = {}) {
     findings,
     inventory,
     stats,
+    diffs: t.diffs ?? null,                 // the comparison with the previous scan (was stats.diffs)
+    threat_intel: t.threat_intel ?? null,   // CISA KEV / FIRST EPSS feed status (was stats.threat_intel); null for scanners without advisories
     compliance_summary: t.compliance_summary ?? null,
     executive_summary: t.executive_summary == null ? null : R.deep(t.executive_summary),
     scopes: t.scopes,

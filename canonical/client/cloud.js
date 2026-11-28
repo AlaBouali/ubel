@@ -13,7 +13,7 @@ const reportData = (function (C) {
     findings: C.findings.filter(function (f) { return !(f.details && f.details.observation); }).map(function (f) { return f.details; }),
     compliance_summary: C.compliance_summary,
     executive_summary: C.executive_summary,
-    diffs: st.diffs || { enabled: false },
+    diffs: C.diffs || { enabled: false },
   };
 })(CANON);
 

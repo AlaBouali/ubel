@@ -126,7 +126,9 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { flags: { scan_scope: si.scan_scope ?? null, vulnerability_scan: si.vulnerability_scan ?? null, engine: p.engine ?? null }, policy: p.policy ?? null, decision: p.decision ?? null },
     ...out,
-    stats_extra: { source: p.stats ?? null, findings_summary: p.findings_summary ?? null, diffs: p.diffs ?? null, threat_intel: p.threat_intel ?? null },
+    stats_extra: { source: p.stats ?? null, findings_summary: p.findings_summary ?? null },
+    diffs: p.diffs ?? null,
+    threat_intel: p.threat_intel ?? null,
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };

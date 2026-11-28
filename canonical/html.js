@@ -67,7 +67,16 @@ async function executiveSection(canon, family) {
 // stats.findings / stats.inventory as they are, so such a file gets them computed here, from its own findings and inventory.
 const hasUnifiedCounts = (c) => !!(c?.stats?.findings?.by_policy && c?.stats?.findings?.by_kev && c?.stats?.inventory?.by_policy);
 
+// Files written before diffs and threat_intel moved to the root carry them under stats: the clients read the root only.
+function moveToRoot(c) {
+  const st = c?.stats;
+  if (!st || (!('diffs' in st) && !('threat_intel' in st))) return c;
+  const { diffs, threat_intel, ...stats } = st;
+  return { ...c, stats, diffs: c.diffs ?? diffs ?? null, threat_intel: c.threat_intel ?? threat_intel ?? null };
+}
+
 export async function generateCanonicalHtml(canon, opts = {}) {
+  canon = moveToRoot(canon);
   if (canon && !hasUnifiedCounts(canon)) canon = { ...canon, stats: { ...(canon.stats || {}), ...buildCounts(canon.findings, canon.inventory) } };
   const family = BUNDLE[opts.family] || familyOfCanon(canon);
   const [tailwind, chartjs, googleFonts] = await Promise.all([getTailwindScript(), getChartJSScript(), getGoogleFontsScript()]);

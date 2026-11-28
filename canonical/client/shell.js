@@ -360,6 +360,7 @@ function cnRenderStats() {
     + '</div>';
   const extra = [];
   if (st.source) extra.push(cnBlock('Scanner Statistics', st.source));
+  if (CANON.threat_intel) extra.push(cnBlock('Threat Intel', CANON.threat_intel));
   Object.keys(st).forEach(function (k) { if (['findings', 'inventory', 'source', 'diffs', 'compliance_posture', 'findings_summary'].indexOf(k) < 0 && st[k] != null) extra.push(cnBlock(cnTitle(k), st[k])); });
   if (extra.length) html += '<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">' + extra.join('') + '</div>';
   sec.innerHTML = html;

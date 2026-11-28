@@ -2,24 +2,40 @@
 // Cloud scanner (AWS / GCP / Azure) → canonical.
 // Original keys used: findings[] {check, resource, region, provider, service, severity, title, description, remediation, compliance},
 // providers[], regions{}, accounts{}, provider_status[], scan_options, stats, compliance_summary, executive_summary, diffs.
-// The original has no inventory: it is derived from the resources / regions the findings point at.
+// The original has no inventory, so it is derived from what the payload names. Only resources with a finding are known (the scanner does not
+// list the resources it found clean); providers, accounts and regions are known whether or not they have findings:
+//   cloud_resource   one per (provider, region, resource, service) a finding points at; its id IS the findings' affected_component_id, so every
+//                    finding resolves to exactly one inventory entry and the resource's state ("misconfigured") comes from its findings
+//   cloud_provider   one per provider, status = provider_status (scanned / partial / skipped / error): the component of the coverage observations
+//   cloud_account    the account / project / subscription scanned (accounts{})
+//   cloud_region     every region scanned (regions{}, and any region a finding names)
 import { arr, isObj, first, mkFinding, observe, mkInventory, uniq, applyFindingStatus, dedupeInventory, failOnPredicate, TYPES } from '../common.js';
 import { sha } from '../common.js';
 export const family = 'cloud';
 
 const lastSeg = (r) => { const s = String(r ?? ''); const m = s.split(/[/:]/).filter(Boolean); return m.length ? m[m.length - 1] : s; };
 
+// The identity of the cloud component a finding is about: one function for the finding and for its inventory entry, so the two cannot drift apart.
+const componentOf = (f) => {
+  const provider = f.provider ?? 'unknown', region = f.region ?? 'unknown', service = f.service ?? 'unknown';
+  return {
+    id: `${provider}:${region}:${f.resource ?? 'unknown'}:${service}`,
+    name: `${provider}: ${lastSeg(f.resource) || service} (${region}) => ${service}`,
+  };
+};
+
 export function translate(p, opts, H) {
   const violates = failOnPredicate(opts.fail_on);
   const out = { findings: [], inventory: [], scopes: [] };
 
   for (const f of arr(p.findings)) {
+    const comp = componentOf(f);
     out.findings.push(mkFinding({
       finding_id: sha(f.check, f.provider ?? '',f.region ?? '', f.resource ?? '', f.service ?? ''),
       rule_id: f.check,
       title: f.title,
-      component_id: `${f.provider ?? 'unknown'}:${f.region ?? 'unknown'}:${f.resource ?? 'unknown'}:${f.service ?? 'unknown'}`,
-      component_name: `${f.provider ?? 'unknown'}: ${lastSeg(f.resource)} (${f.region ?? 'unknown'}) => ${f.service ?? 'unknown'}`,
+      component_id: comp.id,
+      component_name: comp.name,
       component_type: 'cloud_resource',
       severity: f.severity,
       confidence: f.confidence ?? "high",
@@ -27,12 +43,10 @@ export function translate(p, opts, H) {
       type: TYPES.MISCONFIG,
       details: f,
     }));
-    if (f.resource) {
-      out.inventory.push(mkInventory({
-        component_id: f.resource, component_name: lastSeg(f.resource), status: 'unknown', type: 'cloud_resource',
-        details: { resource: f.resource, provider: f.provider ?? null, service: f.service ?? null, region: f.region ?? null, account: f.account ?? null },
-      }));
-    }
+    out.inventory.push(mkInventory({
+      component_id: comp.id, component_name: comp.name, status: 'unknown', type: 'cloud_resource',
+      details: { resource: f.resource ?? null, provider: f.provider ?? null, service: f.service ?? null, region: f.region ?? null, account: f.account ?? null },
+    }));
   }
   const regions = isObj(p.regions) ? p.regions : {};
   for (const [prov, list] of Object.entries(regions)) {
@@ -41,6 +55,25 @@ export function translate(p, opts, H) {
       out.inventory.push(mkInventory({ component_id: `${prov}:${rid}`, component_name: String(rid), status: 'scanned', type: 'cloud_region', details: { provider: prov, region: rid, ...(isObj(r) ? r : {}) } }));
       out.scopes.push({ type: 'cloud_region', name: String(rid), provider: prov });
     }
+  }
+  // A region a finding names is a scanned region even when regions{} does not list it (GCP / Azure report none). After regions{}: the first entry
+  // of an id is kept, and that one carries more.
+  for (const f of arr(p.findings)) {
+    if (!f.region) continue;
+    out.inventory.push(mkInventory({ component_id: `${f.provider ?? 'unknown'}:${f.region}`, component_name: String(f.region), status: 'scanned', type: 'cloud_region', details: { provider: f.provider ?? null, region: f.region } }));
+  }
+  // Providers and the account behind each one. The provider's component id is the one its coverage observations use (`provider:<name>`).
+  const provName = (x) => (typeof x === 'string' ? x : first(x?.name, x?.provider));
+  for (const prov of uniq([...arr(p.providers).map(provName), ...arr(p.provider_status).map((x) => x?.provider)])) {
+    const ps = arr(p.provider_status).find((x) => x && x.provider === prov) ?? null;
+    out.inventory.push(mkInventory({
+      component_id: `provider:${prov}`, component_name: String(prov), status: ps ? String(ps.status ?? (ps.ok === false ? 'error' : 'scanned')) : 'scanned', type: 'cloud_provider',
+      details: { provider: prov, account: (isObj(p.accounts) ? p.accounts[prov] : null) ?? null, status: ps?.status ?? null, reason: ps?.reason ?? null },
+    }));
+  }
+  for (const [prov, acct] of Object.entries(isObj(p.accounts) ? p.accounts : {})) {
+    if (acct == null || acct === '') continue;
+    out.inventory.push(mkInventory({ component_id: `${prov}:account:${acct}`, component_name: String(acct), status: 'scanned', type: 'cloud_account', details: { provider: prov, account: acct } }));
   }
   out.inventory = dedupeInventory(out.inventory);
   applyFindingStatus(out.inventory, out.findings, { vulnerable: 'misconfigured' });
@@ -83,7 +116,8 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { flags: { ...(p.scan_options || {}), region_source: p.region_source ?? null }, gate: opts.fail_on != null ? { fail_on: opts.fail_on } : null },
     ...out,
-    stats_extra: { source: p.stats ?? null, diffs: p.diffs ?? null },
+    stats_extra: { source: p.stats ?? null },
+    diffs: p.diffs ?? null,
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };

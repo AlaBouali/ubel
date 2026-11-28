@@ -37,7 +37,7 @@ const reportData = (function (C) {
     secrets: { enabled: true, count: secrets.length, findings: secrets },
     compliance_summary: C.compliance_summary,
     executive_summary: C.executive_summary,
-    diffs: st.diffs || { enabled: false },
+    diffs: C.diffs || { enabled: false },
   };
 })(CANON);
 

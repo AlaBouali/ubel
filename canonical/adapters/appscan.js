@@ -251,7 +251,8 @@ export function translate(p, opts, H) {
     // flags.sast: what the static source analysis of ubel-package (SAST + malware engines) ran with and covered: engines, rules, custom rule directories, limits, counts
     policy: { flags: { min_severity: p.min_severity ?? null, hidden_by_filter: p.hidden_by_filter ?? 0, ...(p.sast ? { sast: R.deep(p.sast) } : {}) }, gate: p.gate ?? null, limits: p.limits ?? null, analysis: p.analysis ?? null },
     ...out,
-    stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, diffs: dependencyDiffs(p.diffs, p), notes: p.analysis_notes ?? null },
+    stats_extra: { source: { summary: p.summary ?? null, stats: p.stats ?? null, dependency_summary: p.dependency_summary ?? null }, notes: p.analysis_notes ?? null },
+    diffs: dependencyDiffs(p.diffs, p),
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };
@@ -275,6 +276,6 @@ export function restore(c) {
     vulnerabilities: cat('vulnerability'), secrets: cat('secret'), misconfigurations: cat('misconfiguration'),
     summary: src.summary, stats: src.stats, dependency_summary: src.dependency_summary, analysis_notes: st.notes,
     limits: pol.limits, analysis: pol.analysis, gate: pol.gate, min_severity: pol.flags?.min_severity, hidden_by_filter: pol.flags?.hidden_by_filter, ...(pol.flags?.sast ? { sast: pol.flags.sast } : {}),
-    compliance_summary: c.compliance_summary, executive_summary: c.executive_summary, diffs: st.diffs,
+    compliance_summary: c.compliance_summary, executive_summary: c.executive_summary, diffs: c.diffs ?? st.diffs,
   };
 }

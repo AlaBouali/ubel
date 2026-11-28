@@ -15,7 +15,7 @@ const reportData = (function (C) {
     compliance_summary: C.compliance_summary,
     compliance_posture: st.compliance_posture || null,
     executive_summary: C.executive_summary,
-    diffs: st.diffs || { enabled: false },
+    diffs: C.diffs || { enabled: false },
   };
 })(CANON);
 

@@ -78,7 +78,8 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { profile: p.profile ?? null, flags: p.scan_options ?? {}, gate: opts.fail_on != null ? { fail_on: opts.fail_on } : null, checks: p.checks ?? [] },
     ...out,
-    stats_extra: { source: p.stats ?? null, coverage: p.coverage ?? null, compliance_posture: p.compliance_posture ?? null, diffs: p.diffs ?? null },
+    stats_extra: { source: p.stats ?? null, coverage: p.coverage ?? null, compliance_posture: p.compliance_posture ?? null },
+    diffs: p.diffs ?? null,
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };

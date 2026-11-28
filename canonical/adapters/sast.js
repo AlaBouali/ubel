@@ -121,7 +121,8 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { flags: m.scan_options ?? {}, engine: { provider: m.provider ?? null, model: m.model ?? null }, gate: { fail_on: m.scan_options?.fail_on ?? 'any' } },
     ...out,
-    stats_extra: { source: m.scan_stats ?? null, diffs: p.diffs ?? null },
+    stats_extra: { source: m.scan_stats ?? null },
+    diffs: p.diffs ?? null,
     compliance_summary: m.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };

@@ -25,7 +25,7 @@ const reportData = (function (C) {
       }),
     };
   });
-  return { chunks: chunks, meta: { compliance_summary: C.compliance_summary }, executive_summary: C.executive_summary, diffs: st.diffs || { enabled: false } };
+  return { chunks: chunks, meta: { compliance_summary: C.compliance_summary }, executive_summary: C.executive_summary, diffs: C.diffs || { enabled: false } };
 })(CANON);
 
 // ── extracted verbatim from sast/html_report_generator.js (ubel-sast, ubel-mal) ──

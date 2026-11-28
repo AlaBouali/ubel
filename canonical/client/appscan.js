@@ -22,7 +22,7 @@ const reportData = (function (C) {
     vulnerabilities: byCat('vulnerability'), secrets: byCat('secret'), misconfigurations: byCat('misconfiguration'),
     apps: C.inventory.filter(function (c) { return c.type === 'application'; }).map(function (c) { return c.details; }),
     dependencies: C.inventory.filter(function (c) { return c.type === 'dependency'; }).map(function (c) { return c.details; }),
-    compliance_summary: C.compliance_summary, diffs: st.diffs || { enabled: false },
+    compliance_summary: C.compliance_summary, diffs: C.diffs || { enabled: false },
   };
 })(CANON);
 // Same derivation as the template in mobile/lib/report.js

@@ -107,7 +107,9 @@ export function translate(p, opts, H) {
     metadata: meta,
     policy: { flags: so, targets: p.targets ?? [], allow_private: p.allow_private ?? false },
     ...out,
-    stats_extra: { source: p.stats ?? null, diffs: p.diffs ?? null, threat_intel: p.threat_intel ?? null },
+    stats_extra: { source: p.stats ?? null },
+    diffs: p.diffs ?? null,
+    threat_intel: p.threat_intel ?? null,
     compliance_summary: p.compliance_summary ?? null,
     executive_summary: p.executive_summary ?? null,
   };

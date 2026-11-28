@@ -15,7 +15,7 @@ const reportData = (function (C) {
     misconfigurations: C.findings.filter(function (f) { return f.type === 'misconfig'; }).map(function (f) { return f.details; }),
     secrets: C.findings.filter(function (f) { return f.type === 'secret'; }).map(function (f) { return f.details; }),
     scope: C.inventory.filter(function (c) { return c.type === 'ip' || c.type === 'domain'; }).map(function (c) { return c.details; }),
-    compliance_summary: C.compliance_summary, executive_summary: C.executive_summary, diffs: st.diffs || { enabled: false },
+    compliance_summary: C.compliance_summary, executive_summary: C.executive_summary, diffs: C.diffs || { enabled: false },
   };
 })(CANON);
 
